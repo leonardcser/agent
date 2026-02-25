@@ -1,0 +1,46 @@
+use crate::config;
+use crate::input::Mode;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct State {
+    #[serde(default)]
+    pub mode: String,
+}
+
+fn state_path() -> PathBuf {
+    config::state_dir().join("state.json")
+}
+
+impl State {
+    pub fn load() -> Self {
+        let path = state_path();
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        serde_json::from_str(&contents).unwrap_or_default()
+    }
+
+    pub fn save(&self) {
+        let path = state_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    pub fn mode(&self) -> Mode {
+        match self.mode.as_str() {
+            "apply" => Mode::Apply,
+            _ => Mode::Normal,
+        }
+    }
+
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode.as_str().to_string();
+        self.save();
+    }
+}
