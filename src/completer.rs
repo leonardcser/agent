@@ -2,30 +2,51 @@ use std::process::Command;
 
 const MAX_RESULTS: usize = 5;
 
-pub struct FileCompleter {
-    /// Byte offset in the buffer where the '@' starts.
-    pub anchor: usize,
-    /// Current query (text after '@').
-    pub query: String,
-    /// Filtered results.
-    pub results: Vec<String>,
-    /// Selected index in results.
-    pub selected: usize,
-    /// Full file list (cached on activation).
-    all_files: Vec<String>,
+pub struct CompletionItem {
+    pub label: String,
+    pub description: Option<String>,
 }
 
-impl FileCompleter {
-    pub fn new(anchor: usize) -> Self {
-        let all_files = git_files();
-        let results = all_files.iter().take(MAX_RESULTS).cloned().collect();
-        Self {
-            anchor,
-            query: String::new(),
-            results,
-            selected: 0,
-            all_files,
-        }
+#[derive(Clone, Copy, PartialEq)]
+pub enum CompleterKind {
+    File,
+    Command,
+}
+
+pub struct Completer {
+    /// Byte offset in the buffer where the trigger char starts.
+    pub anchor: usize,
+    pub kind: CompleterKind,
+    /// Current query (text after trigger).
+    pub query: String,
+    /// Filtered results.
+    pub results: Vec<CompletionItem>,
+    /// Selected index in results.
+    pub selected: usize,
+    /// Full item list (cached on activation).
+    all_items: Vec<CompletionItem>,
+}
+
+impl Completer {
+    pub fn files(anchor: usize) -> Self {
+        let all_items: Vec<CompletionItem> = git_files()
+            .into_iter()
+            .map(|f| CompletionItem { label: f, description: None })
+            .collect();
+        let results = all_items.iter().take(MAX_RESULTS).map(|i| i.clone()).collect();
+        Self { anchor, kind: CompleterKind::File, query: String::new(), results, selected: 0, all_items }
+    }
+
+    pub fn commands(anchor: usize) -> Self {
+        let all_items = vec![
+            CompletionItem { label: "clear".into(), description: Some("clear conversation".into()) },
+            CompletionItem { label: "new".into(), description: Some("start new conversation".into()) },
+            CompletionItem { label: "vim".into(), description: Some("toggle vim mode".into()) },
+            CompletionItem { label: "exit".into(), description: Some("exit the app".into()) },
+            CompletionItem { label: "quit".into(), description: Some("exit the app".into()) },
+        ];
+        let results = all_items.iter().take(MAX_RESULTS).map(|i| i.clone()).collect();
+        Self { anchor, kind: CompleterKind::Command, query: String::new(), results, selected: 0, all_items }
     }
 
     pub fn update_query(&mut self, query: String) {
@@ -35,15 +56,15 @@ impl FileCompleter {
 
     fn filter(&mut self) {
         if self.query.is_empty() {
-            self.results = self.all_files.iter().take(MAX_RESULTS).cloned().collect();
+            self.results = self.all_items.iter().take(MAX_RESULTS).map(|i| i.clone()).collect();
         } else {
             let q = self.query.to_lowercase();
             self.results = self
-                .all_files
+                .all_items
                 .iter()
-                .filter(|f| fuzzy_match(f, &q))
+                .filter(|item| fuzzy_match(&item.label, &q))
                 .take(MAX_RESULTS)
-                .cloned()
+                .map(|i| i.clone())
                 .collect();
         }
         if self.selected >= self.results.len() {
@@ -68,7 +89,13 @@ impl FileCompleter {
     }
 
     pub fn accept(&self) -> Option<&str> {
-        self.results.get(self.selected).map(|s| s.as_str())
+        self.results.get(self.selected).map(|i| i.label.as_str())
+    }
+}
+
+impl Clone for CompletionItem {
+    fn clone(&self) -> Self {
+        Self { label: self.label.clone(), description: self.description.clone() }
     }
 }
 

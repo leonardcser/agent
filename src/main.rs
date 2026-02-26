@@ -8,6 +8,7 @@ pub mod render;
 mod state;
 mod theme;
 mod tools;
+pub mod vim;
 
 use agent::{run_agent, AgentEvent};
 use clap::Parser;
@@ -16,7 +17,7 @@ use crossterm::{
     event::{self, EnableBracketedPaste, DisableBracketedPaste},
     terminal, ExecutableCommand,
 };
-use input::{char_pos, handle_term_event, read_input, History, Mode};
+use input::{Action, EscAction, InputState, History, Mode, read_input, resolve_agent_esc};
 use provider::{Message, Provider, Role};
 use render::{tool_arg_summary, Block, ConfirmChoice, Screen, ToolOutput, ToolStatus};
 use std::collections::HashSet;
@@ -30,13 +31,10 @@ use tokio::sync::mpsc;
 struct Args {
     #[arg(long)]
     api_base: Option<String>,
-
     #[arg(long)]
     api_key: Option<String>,
-
     #[arg(long)]
     api_key_env: Option<String>,
-
     #[arg(long)]
     model: Option<String>,
 }
@@ -51,17 +49,20 @@ struct App {
     history: Vec<Message>,
     input_history: History,
     app_state: state::State,
-    pre_buf: String,
-    pre_cursor: usize,
-    pastes: Vec<String>,
+    input: InputState,
     queued_messages: Vec<String>,
     auto_approved: HashSet<String>,
 }
 
 impl App {
-    fn new(api_base: String, api_key: String, model: String) -> Self {
+    fn new(api_base: String, api_key: String, model: String, vim_from_config: bool) -> Self {
         let app_state = state::State::load();
         let mode = app_state.mode();
+        let vim_enabled = app_state.vim_enabled() || vim_from_config;
+        let mut input = InputState::new();
+        if vim_enabled {
+            input.set_vim_enabled(true);
+        }
         Self {
             api_base,
             api_key,
@@ -72,23 +73,18 @@ impl App {
             history: Vec::new(),
             input_history: History::load(),
             app_state,
-            pre_buf: String::new(),
-            pre_cursor: 0,
-            pastes: Vec::new(),
+            input,
             queued_messages: Vec::new(),
             auto_approved: HashSet::new(),
         }
     }
 
     fn read_input(&mut self) -> Option<String> {
-        let initial = std::mem::take(&mut self.pre_buf);
-        let cursor = std::mem::replace(&mut self.pre_cursor, 0);
-        let result = read_input(&mut self.screen, &mut self.mode, &mut self.input_history, initial, cursor, &mut self.pastes);
-        self.pastes.clear();
+        let result = read_input(&mut self.screen, &mut self.mode, &mut self.input_history, &mut self.input);
+        self.input.clear();
         result
     }
 
-    /// Handle a user command. Returns false if the app should exit.
     fn handle_command(&mut self, input: &str) -> bool {
         match input {
             "/exit" | "/quit" => return false,
@@ -96,6 +92,11 @@ impl App {
                 self.history.clear();
                 self.auto_approved.clear();
                 self.screen.clear();
+            }
+            "/vim" => {
+                let enabled = !self.input.vim_enabled();
+                self.input.set_vim_enabled(enabled);
+                self.app_state.set_vim_enabled(enabled);
             }
             _ => {}
         }
@@ -134,10 +135,9 @@ impl App {
     }
 
     fn render_screen(&mut self) {
-        let cursor_char = char_pos(&self.pre_buf, self.pre_cursor);
         let mut out = io::stdout();
         let _ = out.execute(cursor::Hide);
-        self.screen.render(&self.pre_buf, cursor_char, self.mode, render::term_width(), &self.queued_messages, &self.pastes);
+        self.screen.draw_prompt_with_queued(&self.input, self.mode, render::term_width(), &self.queued_messages);
         let _ = out.execute(cursor::Show);
         let _ = out.flush();
     }
@@ -160,8 +160,8 @@ impl App {
                 let summary = tool_arg_summary(&name, &args);
                 self.screen.push(Block::ToolCall {
                     name: name.clone(),
-                    summary: summary.clone(),
-                    args: args.clone(),
+                    summary,
+                    args,
                     status: ToolStatus::Pending,
                     elapsed: None,
                     output: None,
@@ -193,7 +193,6 @@ impl App {
             return ConfirmAction::Approved;
         }
 
-        // Mark the tool as awaiting confirmation and flush.
         self.screen.set_last_tool_status(ToolStatus::Confirm);
         self.render_screen();
         self.screen.erase_prompt();
@@ -216,28 +215,10 @@ impl App {
         }
     }
 
-    fn update_tool_result(
-        &mut self,
-        pending: &PendingTool,
-        content: String,
-        is_error: bool,
-        denied: bool,
-    ) {
+    fn update_tool_result(&mut self, pending: &PendingTool, content: String, is_error: bool, denied: bool) {
         let elapsed = pending.start.elapsed();
-        let status = if denied {
-            ToolStatus::Denied
-        } else if is_error {
-            ToolStatus::Err
-        } else {
-            ToolStatus::Ok
-        };
-
-        let output = if !denied {
-            Some(ToolOutput { content, is_error })
-        } else {
-            None
-        };
-
+        let status = if denied { ToolStatus::Denied } else if is_error { ToolStatus::Err } else { ToolStatus::Ok };
+        let output = if !denied { Some(ToolOutput { content, is_error }) } else { None };
         self.screen.update_last_tool(
             status,
             output,
@@ -245,18 +226,72 @@ impl App {
         );
     }
 
-    fn handle_terminal_event(&mut self, ev: event::Event, last_esc: &mut Option<Instant>, resize_at: &mut Option<Instant>) -> TermAction {
+    fn handle_terminal_event(
+        &mut self,
+        ev: event::Event,
+        last_esc: &mut Option<Instant>,
+        vim_mode_at_esc: &mut Option<vim::ViMode>,
+        resize_at: &mut Option<Instant>,
+    ) -> TermAction {
         if matches!(ev, event::Event::Resize(..)) {
             self.screen.erase_prompt();
             *resize_at = Some(Instant::now());
         }
-        let (needs_redraw, cancel) = handle_term_event(ev, &mut self.pre_buf, &mut self.pre_cursor, &mut self.mode, last_esc, &mut self.queued_messages, &mut self.pastes);
-        if cancel {
-            self.screen.erase_prompt();
-            return TermAction::Cancel;
+
+        // Agent-mode Esc handling: vim mode switch, unqueue, or double-Esc cancel.
+        if matches!(ev, event::Event::Key(crossterm::event::KeyEvent { code: crossterm::event::KeyCode::Esc, .. })) {
+            match resolve_agent_esc(
+                self.input.vim_mode(),
+                !self.queued_messages.is_empty(),
+                last_esc,
+                vim_mode_at_esc,
+            ) {
+                EscAction::VimToNormal => {
+                    self.input.handle_event(ev, None);
+                    self.render_screen();
+                }
+                EscAction::Unqueue => {
+                    let mut combined = self.queued_messages.join("\n");
+                    if !self.input.buf.is_empty() {
+                        combined.push('\n');
+                        combined.push_str(&self.input.buf);
+                    }
+                    self.input.buf = combined;
+                    self.input.cpos = self.input.buf.len();
+                    self.queued_messages.clear();
+                    self.render_screen();
+                }
+                EscAction::Cancel { restore_vim } => {
+                    if let Some(mode) = restore_vim {
+                        self.input.set_vim_mode(mode);
+                    }
+                    self.screen.erase_prompt();
+                    return TermAction::Cancel;
+                }
+                EscAction::StartTimer => {}
+            }
+            return TermAction::None;
         }
-        if needs_redraw {
-            self.render_screen();
+
+        match self.input.handle_event(ev, None) {
+            Action::Submit(text) => {
+                if !text.is_empty() {
+                    self.queued_messages.push(text);
+                }
+                self.render_screen();
+            }
+            Action::Cancel => {
+                self.screen.erase_prompt();
+                return TermAction::Cancel;
+            }
+            Action::ToggleMode => {
+                self.mode = self.mode.toggle();
+                self.render_screen();
+            }
+            Action::Redraw => {
+                self.render_screen();
+            }
+            Action::Resize(_) | Action::Noop => {}
         }
         TermAction::None
     }
@@ -267,7 +302,7 @@ impl App {
                 self.screen.redraw_all();
                 *resize_at = None;
             } else {
-                return; // Still debouncing — don't render yet.
+                return;
             }
         }
         self.render_screen();
@@ -276,9 +311,7 @@ impl App {
     fn finish_turn(&mut self, cancelled: bool, cancel_token: CancellationToken, agent_handle: tokio::task::JoinHandle<Vec<Message>>) -> tokio::task::JoinHandle<Vec<Message>> {
         if cancelled {
             self.screen.set_throbber(render::Throbber::Interrupted);
-            self.pre_buf.clear();
-            self.pre_cursor = 0;
-            self.pastes.clear();
+            self.input.clear();
             self.queued_messages.clear();
             cancel_token.cancel();
             agent_handle.abort();
@@ -288,7 +321,6 @@ impl App {
         let _ = io::stdout().execute(DisableBracketedPaste);
         terminal::disable_raw_mode().ok();
         self.app_state.set_mode(self.mode);
-
         agent_handle
     }
 }
@@ -296,14 +328,8 @@ impl App {
 enum EventResult {
     Continue,
     ToolStarted { name: String },
-    ToolFinished {
-        content: String,
-        is_error: bool,
-    },
-    NeedsConfirm {
-        desc: String,
-        reply: tokio::sync::oneshot::Sender<bool>,
-    },
+    ToolFinished { content: String, is_error: bool },
+    NeedsConfirm { desc: String, reply: tokio::sync::oneshot::Sender<bool> },
     Done,
 }
 
@@ -339,15 +365,15 @@ async fn main() {
         .or(cfg.model)
         .expect("model must be set via --model or config file");
 
-    let mut app = App::new(api_base, api_key, model);
+    let vim_enabled = cfg.vim_mode.unwrap_or(false);
+    let mut app = App::new(api_base, api_key, model, vim_enabled);
 
     println!();
     loop {
-        // If there are queued messages from while the agent was working, auto-send them
         let input = if !app.queued_messages.is_empty() {
             let mut parts = std::mem::take(&mut app.queued_messages);
-            let buf = std::mem::take(&mut app.pre_buf);
-            app.pre_cursor = 0;
+            let buf = std::mem::take(&mut app.input.buf);
+            app.input.cpos = 0;
             if !buf.trim().is_empty() {
                 parts.push(buf);
             }
@@ -361,16 +387,10 @@ async fn main() {
         app.app_state.set_mode(app.mode);
 
         let input = input.trim().to_string();
-        if input.is_empty() {
-            continue;
-        }
+        if input.is_empty() { continue; }
         app.input_history.push(input.clone());
-        if !app.handle_command(&input) {
-            break;
-        }
-        if input.starts_with('/') {
-            continue;
-        }
+        if !app.handle_command(&input) { break; }
+        if input.starts_with('/') { continue; }
 
         app.screen.begin_turn();
         app.show_user_message(&input);
@@ -390,20 +410,16 @@ async fn main() {
         let mut resize_at: Option<Instant> = None;
         let mut cancelled = false;
         let mut last_esc: Option<Instant> = None;
+        let mut vim_mode_at_esc: Option<vim::ViMode> = None;
 
         loop {
-            // Process all pending agent events
             loop {
                 match rx.try_recv() {
                     Ok(ev) => {
                         match app.handle_agent_event(ev) {
                             EventResult::Continue => {}
                             EventResult::ToolStarted { name } => {
-                                pending = Some(PendingTool {
-                                    name,
-                                    start: Instant::now(),
-                                    denied: false,
-                                });
+                                pending = Some(PendingTool { name, start: Instant::now(), denied: false });
                             }
                             EventResult::ToolFinished { content, is_error } => {
                                 if let Some(ref p) = pending {
@@ -415,9 +431,7 @@ async fn main() {
                                 let tool_name = pending.as_ref().map(|p| p.name.as_str()).unwrap_or("");
                                 match app.handle_confirm(tool_name, &desc, reply) {
                                     ConfirmAction::Approved => {
-                                        if let Some(ref mut p) = pending {
-                                            p.start = Instant::now();
-                                        }
+                                        if let Some(ref mut p) = pending { p.start = Instant::now(); }
                                     }
                                     ConfirmAction::Denied => {
                                         cancelled = true;
@@ -426,26 +440,19 @@ async fn main() {
                                     }
                                 }
                             }
-                            EventResult::Done => {
-                                agent_done = true;
-                                break;
-                            }
+                            EventResult::Done => { agent_done = true; break; }
                         }
                     }
                     Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        agent_done = true;
-                        break;
-                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => { agent_done = true; break; }
                 }
             }
 
             if agent_done { break; }
 
-            // Process terminal events
             while event::poll(Duration::ZERO).unwrap_or(false) {
                 if let Ok(ev) = event::read() {
-                    if let TermAction::Cancel = app.handle_terminal_event(ev, &mut last_esc, &mut resize_at) {
+                    if let TermAction::Cancel = app.handle_terminal_event(ev, &mut last_esc, &mut vim_mode_at_esc, &mut resize_at) {
                         cancelled = true;
                         agent_done = true;
                         break;
@@ -459,11 +466,8 @@ async fn main() {
             tokio::time::sleep(Duration::from_millis(80)).await;
         }
 
-        // Final flush: render any remaining dirty blocks, erase prompt
         app.screen.flush_blocks();
-
         let agent_handle = app.finish_turn(cancelled, cancel_token, agent_handle);
-
         if let Ok(new_messages) = agent_handle.await {
             app.history = new_messages;
         }

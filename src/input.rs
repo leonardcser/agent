@@ -1,23 +1,23 @@
-use crate::completer::FileCompleter;
+use crate::completer::Completer;
 use crate::config;
 use crate::render::{self, Screen};
+use crate::vim::{self, ViMode, Vim};
 use crossterm::{
     cursor,
-    event::{self, EnableBracketedPaste, DisableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers},
     terminal, ExecutableCommand,
 };
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// Object Replacement Character — used as an inline placeholder for large pastes.
+/// Object Replacement Character — inline placeholder for large pastes.
 pub const PASTE_MARKER: char = '\u{FFFC}';
 
-/// Pastes with at least this many lines get collapsed into a token.
 const PASTE_LINE_THRESHOLD: usize = 4;
-
-/// Pastes with at least this many chars get collapsed into a token.
 const PASTE_CHAR_THRESHOLD: usize = 200;
+
+// ── History ──────────────────────────────────────────────────────────────────
 
 pub struct History {
     entries: Vec<String>,
@@ -42,7 +42,7 @@ impl History {
     }
 
     pub fn push(&mut self, entry: String) {
-        if !entry.is_empty() && self.entries.last().map_or(true, |last| *last != entry) {
+        if !entry.is_empty() && self.entries.last().is_none_or(|last| *last != entry) {
             self.entries.push(entry.clone());
             self.append_to_file(&entry);
         }
@@ -64,10 +64,8 @@ impl History {
         self.draft.clear();
     }
 
-    pub fn up(&mut self, current_buf: &str) -> Option<&str> {
-        if self.entries.is_empty() {
-            return None;
-        }
+    fn up(&mut self, current_buf: &str) -> Option<&str> {
+        if self.entries.is_empty() { return None; }
         if self.cursor == self.entries.len() {
             self.draft = current_buf.to_string();
         }
@@ -79,10 +77,8 @@ impl History {
         }
     }
 
-    pub fn down(&mut self, _current_buf: &str) -> Option<&str> {
-        if self.cursor >= self.entries.len() {
-            return None;
-        }
+    fn down(&mut self) -> Option<&str> {
+        if self.cursor >= self.entries.len() { return None; }
         self.cursor += 1;
         if self.cursor == self.entries.len() {
             Some(&self.draft)
@@ -91,6 +87,8 @@ impl History {
         }
     }
 }
+
+// ── Mode ─────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -114,104 +112,380 @@ impl Mode {
     }
 }
 
-/// Char count up to byte index.
-pub fn char_pos(s: &str, byte_idx: usize) -> usize {
-    s[..byte_idx].chars().count()
+// ── Shared input state ───────────────────────────────────────────────────────
+
+/// Unified input buffer with paste tokens and file completer.
+/// Used by both the prompt loop and the agent-mode type-ahead.
+pub struct InputState {
+    pub buf: String,
+    pub cpos: usize,
+    pub pastes: Vec<String>,
+    pub completer: Option<Completer>,
+    vim: Option<Vim>,
 }
 
-/// Byte index of the nth char.
-pub fn byte_of_char(s: &str, n: usize) -> usize {
-    s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())
+/// What the caller should do after `handle_event`.
+pub enum Action {
+    Redraw,
+    Submit(String),
+    Cancel,
+    ToggleMode,
+    Resize(usize),
+    Noop,
 }
 
-/// Replace every PASTE_MARKER with the corresponding stored paste content.
-pub fn expand_pastes(buf: &str, pastes: &[String]) -> String {
-    let mut result = String::new();
-    let mut idx = 0;
-    for c in buf.chars() {
-        if c == PASTE_MARKER {
-            if let Some(content) = pastes.get(idx) {
-                result.push_str(content);
+impl InputState {
+    pub fn new() -> Self {
+        Self { buf: String::new(), cpos: 0, pastes: Vec::new(), completer: None, vim: None }
+    }
+
+    pub fn vim_enabled(&self) -> bool {
+        self.vim.is_some()
+    }
+
+    pub fn vim_mode(&self) -> Option<ViMode> {
+        self.vim.as_ref().map(|v| v.mode())
+    }
+
+    /// Returns true if vim is enabled and currently in insert mode.
+    pub fn vim_in_insert_mode(&self) -> bool {
+        self.vim.as_ref().is_some_and(|v| v.mode() == ViMode::Insert)
+    }
+
+    pub fn set_vim_enabled(&mut self, enabled: bool) {
+        if enabled {
+            if self.vim.is_none() {
+                self.vim = Some(Vim::new());
             }
-            idx += 1;
         } else {
-            result.push(c);
+            self.vim = None;
         }
     }
-    result
-}
 
-/// Insert a paste into the buffer. Large pastes become a collapsed token.
-fn insert_paste(buf: &mut String, cpos: &mut usize, pastes: &mut Vec<String>, data: String) {
-    let lines = data.lines().count();
-    if lines >= PASTE_LINE_THRESHOLD || data.len() >= PASTE_CHAR_THRESHOLD {
-        // Count how many markers exist before cpos to determine insertion index.
-        let idx = buf[..*cpos].chars().filter(|&c| c == PASTE_MARKER).count();
-        pastes.insert(idx, data);
-        buf.insert(*cpos, PASTE_MARKER);
-        *cpos += PASTE_MARKER.len_utf8();
-    } else {
-        // Small paste — insert inline as regular text.
-        buf.insert_str(*cpos, &data);
-        *cpos += data.len();
+    /// Restore vim to a specific mode (used after double-Esc cancel).
+    pub fn set_vim_mode(&mut self, mode: ViMode) {
+        if let Some(ref mut vim) = self.vim {
+            vim.set_mode(mode);
+        }
     }
-}
 
-/// If the char about to be backspaced is a PASTE_MARKER, remove the corresponding paste entry.
-fn maybe_remove_paste(buf: &str, byte_pos: usize, pastes: &mut Vec<String>) {
-    let ch = buf[byte_pos..].chars().next();
-    if ch == Some(PASTE_MARKER) {
-        let idx = buf[..byte_pos].chars().filter(|&c| c == PASTE_MARKER).count();
-        if idx < pastes.len() {
-            pastes.remove(idx);
+    pub fn take_buffer(&mut self) -> (String, usize) {
+        let buf = std::mem::take(&mut self.buf);
+        let cpos = std::mem::replace(&mut self.cpos, 0);
+        (buf, cpos)
+    }
+
+    pub fn set_buffer(&mut self, buf: String, cpos: usize) {
+        self.buf = buf;
+        self.cpos = cpos.min(self.buf.len());
+    }
+
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.cpos = 0;
+        self.pastes.clear();
+        self.completer = None;
+    }
+
+    pub fn cursor_char(&self) -> usize {
+        char_pos(&self.buf, self.cpos)
+    }
+
+    /// Expand paste markers and return the final text.
+    pub fn expanded_text(&self) -> String {
+        expand_pastes(&self.buf, &self.pastes)
+    }
+
+    /// Process a terminal event. Returns what the caller should do next.
+    pub fn handle_event(&mut self, ev: Event, mut history: Option<&mut History>) -> Action {
+        // Completer intercepts navigation keys when active
+        if self.completer.is_some() {
+            if let Some(action) = self.handle_completer_event(&ev) {
+                return action;
+            }
+        }
+
+        // Vim mode intercepts key events.
+        if let Some(ref mut vim) = self.vim {
+            if let Event::Key(key_ev) = ev {
+                match vim.handle_key(key_ev, &mut self.buf, &mut self.cpos) {
+                    vim::Action::Consumed => {
+                        self.completer = None;
+                        return Action::Redraw;
+                    }
+                    vim::Action::Submit => {
+                        let text = self.expanded_text();
+                        self.buf.clear();
+                        self.cpos = 0;
+                        self.pastes.clear();
+                        self.completer = None;
+                        return Action::Submit(text);
+                    }
+                    vim::Action::HistoryPrev => {
+                        if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(&self.buf)) {
+                            self.buf = entry.to_string();
+                            self.cpos = self.buf.len();
+                            self.sync_completer();
+                        }
+                        return Action::Redraw;
+                    }
+                    vim::Action::HistoryNext => {
+                        if let Some(entry) = history.as_deref_mut().and_then(|h| h.down()) {
+                            self.buf = entry.to_string();
+                            self.cpos = self.buf.len();
+                            self.sync_completer();
+                        }
+                        return Action::Redraw;
+                    }
+                    vim::Action::Passthrough => {
+                        // Fall through to normal handling below.
+                    }
+                }
+            }
+        }
+
+        match ev {
+            Event::Paste(data) => {
+                self.insert_paste(data);
+                Action::Redraw
+            }
+            Event::Key(KeyEvent { code: KeyCode::BackTab, .. }) => Action::ToggleMode,
+            Event::Key(KeyEvent { code: KeyCode::Enter, .. }) => {
+                if self.buf.trim().is_empty() {
+                    Action::Noop
+                } else {
+                    let text = self.expanded_text();
+                    self.clear();
+                    Action::Submit(text)
+                }
+            }
+            Event::Key(KeyEvent { code: KeyCode::Char('c' | 'd'), modifiers: KeyModifiers::CONTROL, .. }) => {
+                Action::Cancel
+            }
+            Event::Key(KeyEvent { code: KeyCode::Char('j'), modifiers: KeyModifiers::CONTROL, .. }) => {
+                self.buf.insert(self.cpos, '\n');
+                self.cpos += 1;
+                self.completer = None;
+                Action::Redraw
+            }
+            Event::Key(KeyEvent { code: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, .. }) => {
+                let before = &self.buf[..self.cpos];
+                self.cpos = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+                self.completer = None;
+                Action::Redraw
+            }
+            Event::Key(KeyEvent { code: KeyCode::Char('e'), modifiers: KeyModifiers::CONTROL, .. }) => {
+                let after = &self.buf[self.cpos..];
+                self.cpos += after.find('\n').unwrap_or(after.len());
+                self.completer = None;
+                Action::Redraw
+            }
+            Event::Key(KeyEvent { code: KeyCode::Char(c), modifiers, .. })
+                if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
+            {
+                self.insert_char(c);
+                Action::Redraw
+            }
+            Event::Key(KeyEvent { code: KeyCode::Backspace, .. }) => {
+                self.backspace();
+                Action::Redraw
+            }
+            Event::Key(KeyEvent { code: KeyCode::Left, .. }) => {
+                if self.cpos > 0 {
+                    let cp = char_pos(&self.buf, self.cpos);
+                    self.cpos = byte_of_char(&self.buf, cp - 1);
+                    self.completer = None;
+                    Action::Redraw
+                } else {
+                    Action::Noop
+                }
+            }
+            Event::Key(KeyEvent { code: KeyCode::Right, .. }) => {
+                if self.cpos < self.buf.len() {
+                    let cp = char_pos(&self.buf, self.cpos);
+                    self.cpos = byte_of_char(&self.buf, cp + 1);
+                    self.completer = None;
+                    Action::Redraw
+                } else {
+                    Action::Noop
+                }
+            }
+            Event::Key(KeyEvent { code: KeyCode::Up, .. }) => {
+                if let Some(entry) = history.and_then(|h| h.up(&self.buf)) {
+                    self.buf = entry.to_string();
+                    self.cpos = self.buf.len();
+                    self.sync_completer();
+                    Action::Redraw
+                } else {
+                    Action::Noop
+                }
+            }
+            Event::Key(KeyEvent { code: KeyCode::Down, .. }) => {
+                if let Some(entry) = history.and_then(|h| h.down()) {
+                    self.buf = entry.to_string();
+                    self.cpos = self.buf.len();
+                    self.sync_completer();
+                    Action::Redraw
+                } else {
+                    Action::Noop
+                }
+            }
+            Event::Key(KeyEvent { code: KeyCode::Home, .. }) => {
+                let before = &self.buf[..self.cpos];
+                self.cpos = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+                self.completer = None;
+                Action::Redraw
+            }
+            Event::Key(KeyEvent { code: KeyCode::End, .. }) => {
+                let after = &self.buf[self.cpos..];
+                self.cpos += after.find('\n').unwrap_or(after.len());
+                self.completer = None;
+                Action::Redraw
+            }
+            Event::Resize(w, _) => Action::Resize(w as usize),
+            _ => Action::Noop,
+        }
+    }
+
+    // ── Completer ────────────────────────────────────────────────────────
+
+    /// Try to handle the event as a completer navigation. Returns Some if consumed.
+    fn handle_completer_event(&mut self, ev: &Event) -> Option<Action> {
+        match ev {
+            Event::Key(KeyEvent { code: KeyCode::Enter, .. }) => {
+                let comp = self.completer.take().unwrap();
+                self.accept_completion(&comp);
+                Some(Action::Redraw)
+            }
+            Event::Key(KeyEvent { code: KeyCode::Esc, .. }) => {
+                self.completer = None;
+                Some(Action::Redraw)
+            }
+            Event::Key(KeyEvent { code: KeyCode::Up, .. })
+            | Event::Key(KeyEvent { code: KeyCode::Char('k'), modifiers: KeyModifiers::CONTROL, .. }) => {
+                self.completer.as_mut().unwrap().move_up();
+                Some(Action::Redraw)
+            }
+            Event::Key(KeyEvent { code: KeyCode::Down, .. })
+            | Event::Key(KeyEvent { code: KeyCode::Char('j'), modifiers: KeyModifiers::CONTROL, .. }) => {
+                self.completer.as_mut().unwrap().move_down();
+                Some(Action::Redraw)
+            }
+            Event::Key(KeyEvent { code: KeyCode::Tab, .. }) => {
+                let comp = self.completer.take().unwrap();
+                self.accept_completion(&comp);
+                Some(Action::Redraw)
+            }
+            _ => None,
+        }
+    }
+
+    fn accept_completion(&mut self, comp: &Completer) {
+        if let Some(label) = comp.accept() {
+            let end = self.cpos;
+            let start = comp.anchor;
+            let trigger = &self.buf[start..start + 1];
+            let replacement = if trigger == "/" {
+                format!("/{}", label)
+            } else {
+                format!("@{} ", label)
+            };
+            self.buf.replace_range(start..end, &replacement);
+            self.cpos = start + replacement.len();
+        }
+    }
+
+    fn update_completer(&mut self) {
+        if let Some(ref comp) = self.completer {
+            let anchor = comp.anchor;
+            let trigger = self.buf.as_bytes().get(anchor).copied();
+            let valid = match trigger {
+                Some(b'@') => find_at_anchor(&self.buf, self.cpos).is_some(),
+                Some(b'/') => find_slash_anchor(&self.buf, self.cpos).is_some(),
+                _ => false,
+            };
+            if valid && self.cpos > anchor {
+                let query = self.buf[anchor + 1..self.cpos].to_string();
+                self.completer.as_mut().unwrap().update_query(query);
+            } else {
+                self.completer = None;
+            }
+        }
+    }
+
+    /// Activate completer if the buffer looks like a command or file ref.
+    fn sync_completer(&mut self) {
+        if find_slash_anchor(&self.buf, self.cpos).is_some() {
+            let mut comp = Completer::commands(0);
+            comp.update_query(self.buf[1..self.cpos].to_string());
+            self.completer = Some(comp);
+        } else {
+            self.completer = None;
+        }
+    }
+
+    // ── Editing primitives ───────────────────────────────────────────────
+
+    fn insert_char(&mut self, c: char) {
+        self.buf.insert(self.cpos, c);
+        self.cpos += c.len_utf8();
+        let anchor = self.cpos - c.len_utf8();
+        if c == '@' {
+            self.completer = Some(Completer::files(anchor));
+        } else if c == '/' && anchor == 0 {
+            self.completer = Some(Completer::commands(anchor));
+        } else {
+            self.update_completer();
+        }
+    }
+
+    fn backspace(&mut self) {
+        if self.cpos == 0 { return; }
+        let prev = self.buf[..self.cpos].char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+        self.maybe_remove_paste(prev);
+        self.buf.drain(prev..self.cpos);
+        self.cpos = prev;
+        self.update_completer();
+    }
+
+    fn insert_paste(&mut self, data: String) {
+        let lines = data.lines().count();
+        if lines >= PASTE_LINE_THRESHOLD || data.len() >= PASTE_CHAR_THRESHOLD {
+            let idx = self.buf[..self.cpos].chars().filter(|&c| c == PASTE_MARKER).count();
+            self.pastes.insert(idx, data);
+            self.buf.insert(self.cpos, PASTE_MARKER);
+            self.cpos += PASTE_MARKER.len_utf8();
+        } else {
+            self.buf.insert_str(self.cpos, &data);
+            self.cpos += data.len();
+        }
+    }
+
+    fn maybe_remove_paste(&mut self, byte_pos: usize) {
+        if self.buf[byte_pos..].chars().next() == Some(PASTE_MARKER) {
+            let idx = self.buf[..byte_pos].chars().filter(|&c| c == PASTE_MARKER).count();
+            if idx < self.pastes.len() {
+                self.pastes.remove(idx);
+            }
         }
     }
 }
 
-/// Find the `@` anchor before `cpos` on the same line (no whitespace between @ and cursor).
-/// Returns the byte offset of `@` if we're in an active @-mention context.
-fn find_at_anchor(buf: &str, cpos: usize) -> Option<usize> {
-    let before = &buf[..cpos];
-    // Walk backwards to find '@', stop at whitespace or newline
-    let at_pos = before.rfind('@')?;
-    let between = &buf[at_pos + 1..cpos];
-    // Query must not contain whitespace (it's a contiguous token)
-    if between.contains(char::is_whitespace) {
-        return None;
-    }
-    // '@' must be at start or preceded by whitespace
-    if at_pos > 0 {
-        let prev_char = buf[..at_pos].chars().next_back()?;
-        if !prev_char.is_whitespace() {
-            return None;
-        }
-    }
-    Some(at_pos)
-}
+// ── Prompt-mode entry point ──────────────────────────────────────────────────
 
-/// Accept the selected completion: replace @query with @path and dismiss completer.
-fn accept_completion(buf: &mut String, cpos: &mut usize, comp: &FileCompleter) {
-    if let Some(path) = comp.accept() {
-        let end = *cpos;
-        let start = comp.anchor; // byte offset of '@'
-        buf.replace_range(start..end, &format!("@{} ", path));
-        *cpos = start + 1 + path.len() + 1; // after "@path "
-    }
-}
-
-/// Read a line of input with the prompt box UI.
-pub fn read_input(screen: &mut Screen, mode: &mut Mode, history: &mut History, initial_buf: String, initial_cursor: usize, pastes: &mut Vec<String>) -> Option<String> {
-    let mut buf = initial_buf;
-    let mut cpos = initial_cursor.min(buf.len()); // cursor byte position
+pub fn read_input(
+    screen: &mut Screen,
+    mode: &mut Mode,
+    history: &mut History,
+    state: &mut InputState,
+) -> Option<String> {
     let mut out = io::stdout();
     let mut width = render::term_width();
-    let mut completer: Option<FileCompleter> = None;
 
     terminal::enable_raw_mode().ok()?;
     let _ = out.execute(EnableBracketedPaste);
     let _ = out.execute(cursor::Hide);
-
-    screen.render_with_completer(&buf, char_pos(&buf, cpos), *mode, width, &[], pastes, completer.as_ref());
+    screen.draw_prompt(state, *mode, width);
     let _ = out.execute(cursor::Show);
 
     let mut resize_pending = false;
@@ -227,7 +501,7 @@ pub fn read_input(screen: &mut Screen, mode: &mut Mode, history: &mut History, i
                     resize_pending = false;
                     let _ = out.execute(cursor::Hide);
                     screen.redraw_all();
-                    screen.render_with_completer(&buf, char_pos(&buf, cpos), *mode, width, &[], pastes, completer.as_ref());
+                    screen.draw_prompt(state, *mode, width);
                     let _ = out.execute(cursor::Show);
                     continue;
                 }
@@ -239,78 +513,17 @@ pub fn read_input(screen: &mut Screen, mode: &mut Mode, history: &mut History, i
             }
         };
 
-        let mut redraw = true;
-
-        // If completer is active, intercept navigation/selection keys
-        if completer.is_some() {
-            let handled = match &ev {
-                Event::Key(KeyEvent { code: KeyCode::Enter, .. }) => {
-                    let comp = completer.take().unwrap();
-                    accept_completion(&mut buf, &mut cpos, &comp);
-                    true
-                }
-                Event::Key(KeyEvent { code: KeyCode::Esc, .. }) => {
-                    completer = None;
-                    true
-                }
-                Event::Key(KeyEvent { code: KeyCode::Up, .. })
-                | Event::Key(KeyEvent { code: KeyCode::Char('k'), modifiers: KeyModifiers::CONTROL, .. }) => {
-                    completer.as_mut().unwrap().move_up();
-                    true
-                }
-                Event::Key(KeyEvent { code: KeyCode::Down, .. })
-                | Event::Key(KeyEvent { code: KeyCode::Char('j'), modifiers: KeyModifiers::CONTROL, .. }) => {
-                    completer.as_mut().unwrap().move_down();
-                    true
-                }
-                Event::Key(KeyEvent { code: KeyCode::Tab, .. }) => {
-                    completer.as_mut().unwrap().move_down();
-                    true
-                }
-                _ => false,
-            };
-            if handled {
-                if redraw {
-                    let _ = out.execute(cursor::Hide);
-                    screen.render_with_completer(&buf, char_pos(&buf, cpos), *mode, width, &[], pastes, completer.as_ref());
-                    let _ = out.execute(cursor::Show);
-                }
-                continue;
+        match state.handle_event(ev, Some(history)) {
+            Action::Submit(text) => {
+                let _ = out.execute(cursor::Hide);
+                screen.erase_prompt();
+                let _ = out.execute(cursor::Show);
+                let _ = out.flush();
+                let _ = out.execute(DisableBracketedPaste);
+                terminal::disable_raw_mode().ok();
+                return Some(text);
             }
-        }
-
-        match ev {
-            Event::Key(KeyEvent { code: KeyCode::BackTab, .. }) => {
-                *mode = mode.toggle();
-            }
-            Event::Key(KeyEvent { code: KeyCode::Enter, .. }) => {
-                if buf.trim().is_empty() {
-                    redraw = false;
-                } else {
-                    let _ = out.execute(cursor::Hide);
-                    screen.erase_prompt();
-                    let _ = out.execute(cursor::Show);
-                    let _ = out.flush();
-                    break;
-                }
-            }
-            Event::Paste(data) => {
-                insert_paste(&mut buf, &mut cpos, pastes, data);
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('j'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => {
-                buf.insert(cpos, '\n');
-                cpos += 1;
-                completer = None;
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('c' | 'd'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => {
+            Action::Cancel => {
                 let _ = out.execute(cursor::Hide);
                 screen.erase_prompt();
                 let _ = out.execute(cursor::Show);
@@ -319,264 +532,260 @@ pub fn read_input(screen: &mut Screen, mode: &mut Mode, history: &mut History, i
                 terminal::disable_raw_mode().ok();
                 return None;
             }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('a'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => {
-                let before = &buf[..cpos];
-                cpos = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-                completer = None;
+            Action::ToggleMode => {
+                *mode = mode.toggle();
+                let _ = out.execute(cursor::Hide);
+                screen.draw_prompt(state, *mode, width);
+                let _ = out.execute(cursor::Show);
             }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('e'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => {
-                let after = &buf[cpos..];
-                cpos += after.find('\n').unwrap_or(after.len());
-                completer = None;
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char(c),
-                modifiers,
-                ..
-            }) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-                buf.insert(cpos, c);
-                cpos += c.len_utf8();
-
-                // Activate completer when '@' is typed
-                if c == '@' {
-                    completer = Some(FileCompleter::new(cpos - 1));
-                } else if completer.is_some() {
-                    // Update query from buffer
-                    if let Some(anchor) = find_at_anchor(&buf, cpos) {
-                        let query = buf[anchor + 1..cpos].to_string();
-                        completer.as_mut().unwrap().update_query(query);
-                    } else {
-                        completer = None;
-                    }
-                }
-            }
-            Event::Key(KeyEvent { code: KeyCode::Backspace, .. }) => {
-                if cpos > 0 {
-                    let prev = buf[..cpos].char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
-                    maybe_remove_paste(&buf, prev, pastes);
-                    buf.drain(prev..cpos);
-                    cpos = prev;
-
-                    // Update or dismiss completer after backspace
-                    if completer.is_some() {
-                        if let Some(anchor) = find_at_anchor(&buf, cpos) {
-                            let query = buf[anchor + 1..cpos].to_string();
-                            completer.as_mut().unwrap().update_query(query);
-                        } else {
-                            completer = None;
-                        }
-                    }
-                }
-            }
-            Event::Key(KeyEvent { code: KeyCode::Left, .. }) => {
-                if cpos > 0 {
-                    let cp = char_pos(&buf, cpos);
-                    cpos = byte_of_char(&buf, cp - 1);
-                }
-                completer = None;
-            }
-            Event::Key(KeyEvent { code: KeyCode::Right, .. }) => {
-                if cpos < buf.len() {
-                    let cp = char_pos(&buf, cpos);
-                    cpos = byte_of_char(&buf, cp + 1);
-                }
-                completer = None;
-            }
-            Event::Key(KeyEvent { code: KeyCode::Up, .. }) => {
-                if let Some(entry) = history.up(&buf) {
-                    buf = entry.to_string();
-                    cpos = buf.len();
-                } else {
-                    redraw = false;
-                }
-                completer = None;
-            }
-            Event::Key(KeyEvent { code: KeyCode::Down, .. }) => {
-                if let Some(entry) = history.down(&buf) {
-                    buf = entry.to_string();
-                    cpos = buf.len();
-                } else {
-                    redraw = false;
-                }
-                completer = None;
-            }
-            Event::Key(KeyEvent { code: KeyCode::Home, .. }) => {
-                let before = &buf[..cpos];
-                cpos = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-                completer = None;
-            }
-            Event::Key(KeyEvent { code: KeyCode::End, .. }) => {
-                let after = &buf[cpos..];
-                cpos += after.find('\n').unwrap_or(after.len());
-                completer = None;
-            }
-            Event::Resize(w, _) => {
-                width = w as usize;
+            Action::Resize(w) => {
+                width = w;
                 screen.erase_prompt();
                 resize_pending = true;
-                redraw = false;
             }
-            _ => {
-                redraw = false;
+            Action::Redraw => {
+                let _ = out.execute(cursor::Hide);
+                screen.draw_prompt(state, *mode, width);
+                let _ = out.execute(cursor::Show);
             }
+            Action::Noop => {}
         }
+    }
+}
 
-        if redraw {
-            let _ = out.execute(cursor::Hide);
-            screen.render_with_completer(&buf, char_pos(&buf, cpos), *mode, width, &[], pastes, completer.as_ref());
-            let _ = out.execute(cursor::Show);
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+pub fn char_pos(s: &str, byte_idx: usize) -> usize {
+    s[..byte_idx].chars().count()
+}
+
+pub fn byte_of_char(s: &str, n: usize) -> usize {
+    s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())
+}
+
+fn expand_pastes(buf: &str, pastes: &[String]) -> String {
+    let mut result = String::new();
+    let mut idx = 0;
+    for c in buf.chars() {
+        if c == PASTE_MARKER {
+            if let Some(content) = pastes.get(idx) {
+                result.push_str(content);
+            }
+            idx += 1;
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+fn find_at_anchor(buf: &str, cpos: usize) -> Option<usize> {
+    let before = &buf[..cpos];
+    let at_pos = before.rfind('@')?;
+    if buf[at_pos + 1..cpos].contains(char::is_whitespace) {
+        return None;
+    }
+    if at_pos > 0 && !buf[..at_pos].ends_with(char::is_whitespace) {
+        return None;
+    }
+    Some(at_pos)
+}
+
+fn find_slash_anchor(buf: &str, cpos: usize) -> Option<usize> {
+    // Only valid when `/` is at position 0 and no whitespace in the query.
+    if !buf.starts_with('/') { return None; }
+    if buf[1..cpos].contains(char::is_whitespace) { return None; }
+    Some(0)
+}
+
+// ── Agent-mode Esc resolution ────────────────────────────────────────────────
+
+/// Result of pressing Esc during agent processing.
+#[derive(Debug, PartialEq)]
+pub enum EscAction {
+    /// Vim was in insert mode — switch to normal, double-Esc timer started.
+    VimToNormal,
+    /// Unqueue messages back into the input buffer.
+    Unqueue,
+    /// Double-Esc cancel. Contains the vim mode to restore (if vim enabled).
+    Cancel { restore_vim: Option<ViMode> },
+    /// First Esc in normal/no-vim mode — timer started.
+    StartTimer,
+}
+
+/// Pure logic for Esc key handling during agent processing.
+///
+/// `vim_mode_at_first_esc` tracks the vim mode before the Esc sequence started,
+/// so that a double-Esc cancel can restore it (the first Esc may have switched
+/// vim from insert → normal).
+pub fn resolve_agent_esc(
+    vim_mode: Option<ViMode>,
+    has_queued: bool,
+    last_esc: &mut Option<std::time::Instant>,
+    vim_mode_at_first_esc: &mut Option<ViMode>,
+) -> EscAction {
+    use std::time::{Duration, Instant};
+
+    // Vim insert mode: switch to normal AND start the double-Esc timer so that
+    // a second Esc within 500ms cancels (only two presses total, not three).
+    if vim_mode == Some(ViMode::Insert) {
+        *vim_mode_at_first_esc = Some(ViMode::Insert);
+        *last_esc = Some(Instant::now());
+        return EscAction::VimToNormal;
+    }
+
+    // Unqueue if there are queued messages.
+    if has_queued {
+        *last_esc = None;
+        *vim_mode_at_first_esc = None;
+        return EscAction::Unqueue;
+    }
+
+    // Double-Esc: cancel agent, return mode to restore.
+    if let Some(prev) = *last_esc {
+        if prev.elapsed() < Duration::from_millis(500) {
+            let restore = vim_mode_at_first_esc.take();
+            *last_esc = None;
+            return EscAction::Cancel { restore_vim: restore };
         }
     }
 
-    let _ = out.execute(DisableBracketedPaste);
-    terminal::disable_raw_mode().ok();
-    Some(expand_pastes(&buf, pastes))
+    // First Esc (vim normal or vim disabled) — start timer.
+    *vim_mode_at_first_esc = vim_mode;
+    *last_esc = Some(Instant::now());
+    EscAction::StartTimer
 }
 
-/// Handle a terminal key event during agent processing.
-/// Returns (needs_redraw, cancel).
-pub fn handle_term_event(
-    ev: Event,
-    pre_buf: &mut String,
-    pre_cursor: &mut usize,
-    mode: &mut Mode,
-    last_esc: &mut Option<Instant>,
-    queued: &mut Vec<String>,
-    pastes: &mut Vec<String>,
-) -> (bool, bool) {
-    match ev {
-        Event::Paste(data) => {
-            insert_paste(pre_buf, pre_cursor, pastes, data);
-            (true, false)
-        }
-        Event::Key(KeyEvent { code: KeyCode::Esc, .. }) => {
-            // If there are queued messages, single Escape unqueues them back into pre_buf
-            if !queued.is_empty() {
-                let mut combined = queued.join("\n");
-                if !pre_buf.is_empty() {
-                    combined.push('\n');
-                    combined.push_str(pre_buf);
-                }
-                *pre_buf = combined;
-                *pre_cursor = pre_buf.len();
-                queued.clear();
-                *last_esc = None;
-                return (true, false);
-            }
-            // Otherwise, double Escape cancels
-            if let Some(prev) = *last_esc {
-                if prev.elapsed() < Duration::from_millis(500) {
-                    return (false, true);
-                }
-            }
-            *last_esc = Some(Instant::now());
-            (false, false)
-        }
-        Event::Key(KeyEvent { code: KeyCode::Enter, .. }) => {
-            let text = expand_pastes(pre_buf.trim(), pastes);
-            if !text.is_empty() {
-                queued.push(text);
-                pre_buf.clear();
-                *pre_cursor = 0;
-                pastes.clear();
-                (true, false)
-            } else {
-                (false, false)
-            }
-        }
-        Event::Key(KeyEvent { code: KeyCode::BackTab, .. }) => {
-            *mode = mode.toggle();
-            (true, false)
-        }
-        Event::Key(KeyEvent {
-            code: KeyCode::Char('c' | 'd'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        }) => (false, true),
-        Event::Key(KeyEvent {
-            code: KeyCode::Char('j'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        }) => {
-            pre_buf.insert(*pre_cursor, '\n');
-            *pre_cursor += 1;
-            (true, false)
-        }
-        Event::Key(KeyEvent {
-            code: KeyCode::Char('a'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        }) => {
-            let before = &pre_buf[..*pre_cursor];
-            *pre_cursor = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-            (true, false)
-        }
-        Event::Key(KeyEvent {
-            code: KeyCode::Char('e'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        }) => {
-            let after = &pre_buf[*pre_cursor..];
-            *pre_cursor += after.find('\n').unwrap_or(after.len());
-            (true, false)
-        }
-        Event::Key(KeyEvent { code: KeyCode::Char(c), modifiers, .. })
-            if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
-        {
-            pre_buf.insert(*pre_cursor, c);
-            *pre_cursor += c.len_utf8();
-            (true, false)
-        }
-        Event::Key(KeyEvent { code: KeyCode::Backspace, .. }) => {
-            if *pre_cursor > 0 {
-                let prev = pre_buf[..*pre_cursor]
-                    .char_indices()
-                    .next_back()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                maybe_remove_paste(pre_buf, prev, pastes);
-                pre_buf.drain(prev..*pre_cursor);
-                *pre_cursor = prev;
-            }
-            (true, false)
-        }
-        Event::Key(KeyEvent { code: KeyCode::Left, .. }) => {
-            if *pre_cursor > 0 {
-                let cp = char_pos(pre_buf, *pre_cursor);
-                *pre_cursor = byte_of_char(pre_buf, cp - 1);
-                (true, false)
-            } else {
-                (false, false)
-            }
-        }
-        Event::Key(KeyEvent { code: KeyCode::Right, .. }) => {
-            if *pre_cursor < pre_buf.len() {
-                let cp = char_pos(pre_buf, *pre_cursor);
-                *pre_cursor = byte_of_char(pre_buf, cp + 1);
-                (true, false)
-            } else {
-                (false, false)
-            }
-        }
-        Event::Key(KeyEvent { code: KeyCode::Home, .. }) => {
-            let before = &pre_buf[..*pre_cursor];
-            *pre_cursor = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-            (true, false)
-        }
-        Event::Key(KeyEvent { code: KeyCode::End, .. }) => {
-            let after = &pre_buf[*pre_cursor..];
-            *pre_cursor += after.find('\n').unwrap_or(after.len());
-            (true, false)
-        }
-        Event::Resize(_, _) => (true, false),
-        _ => (false, false),
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Vim-mode Esc behavior ───────────────────────────────────────────
+
+    #[test]
+    fn vim_esc_in_insert_switches_to_normal() {
+        // Single Esc while vim is in insert mode → VimToNormal.
+        let mut last_esc = None;
+        let mut saved_mode = None;
+        let action = resolve_agent_esc(
+            Some(ViMode::Insert),
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+        );
+        assert_eq!(action, EscAction::VimToNormal);
+        // Timer should be started so a second Esc can cancel.
+        assert!(last_esc.is_some());
+        // The insert mode should be saved for restoration on cancel.
+        assert_eq!(saved_mode, Some(ViMode::Insert));
+    }
+
+    #[test]
+    fn vim_esc_in_normal_unqueues_if_queued() {
+        // Esc in vim normal mode with queued messages → Unqueue.
+        let mut last_esc = None;
+        let mut saved_mode = None;
+        let action = resolve_agent_esc(
+            Some(ViMode::Normal),
+            true,
+            &mut last_esc,
+            &mut saved_mode,
+        );
+        assert_eq!(action, EscAction::Unqueue);
+    }
+
+    #[test]
+    fn vim_double_esc_from_insert_cancels_and_restores_insert() {
+        // First Esc: vim insert → normal, timer starts.
+        let mut last_esc = None;
+        let mut saved_mode = None;
+        let action1 = resolve_agent_esc(
+            Some(ViMode::Insert),
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+        );
+        assert_eq!(action1, EscAction::VimToNormal);
+
+        // Second Esc: now in normal mode (vim switched), timer active → Cancel.
+        // Restore mode should be Insert (the mode before the sequence started).
+        let action2 = resolve_agent_esc(
+            Some(ViMode::Normal),
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+        );
+        assert_eq!(
+            action2,
+            EscAction::Cancel { restore_vim: Some(ViMode::Insert) }
+        );
+    }
+
+    #[test]
+    fn vim_double_esc_from_normal_cancels_and_stays_normal() {
+        // First Esc: vim already in normal, no queue → StartTimer.
+        let mut last_esc = None;
+        let mut saved_mode = None;
+        let action1 = resolve_agent_esc(
+            Some(ViMode::Normal),
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+        );
+        assert_eq!(action1, EscAction::StartTimer);
+        assert_eq!(saved_mode, Some(ViMode::Normal));
+
+        // Second Esc within 500ms → Cancel, restore to Normal.
+        let action2 = resolve_agent_esc(
+            Some(ViMode::Normal),
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+        );
+        assert_eq!(
+            action2,
+            EscAction::Cancel { restore_vim: Some(ViMode::Normal) }
+        );
+    }
+
+    // ── No-vim Esc behavior ─────────────────────────────────────────────
+
+    #[test]
+    fn no_vim_esc_unqueues_if_queued() {
+        let mut last_esc = None;
+        let mut saved_mode = None;
+        let action = resolve_agent_esc(
+            None,  // vim disabled
+            true,
+            &mut last_esc,
+            &mut saved_mode,
+        );
+        assert_eq!(action, EscAction::Unqueue);
+    }
+
+    #[test]
+    fn no_vim_double_esc_cancels() {
+        let mut last_esc = None;
+        let mut saved_mode = None;
+
+        // First Esc → StartTimer.
+        let action1 = resolve_agent_esc(
+            None,
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+        );
+        assert_eq!(action1, EscAction::StartTimer);
+
+        // Second Esc within 500ms → Cancel with no vim mode to restore.
+        let action2 = resolve_agent_esc(
+            None,
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+        );
+        assert_eq!(action2, EscAction::Cancel { restore_vim: None });
     }
 }

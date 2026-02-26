@@ -1,4 +1,4 @@
-use crate::completer::FileCompleter;
+use crate::input::{InputState, PASTE_MARKER};
 use crate::theme;
 use comfy_table::{presets::UTF8_BORDERS_ONLY, ContentArrangement, Table};
 use crossterm::{
@@ -82,19 +82,13 @@ pub enum Throbber {
 
 pub struct Screen {
     blocks: Vec<Block>,
-    /// Blocks rendered to terminal and stable (next index to render).
     flushed: usize,
-    /// Rows occupied by the last rendered block (for erase on mutation).
     last_block_rows: u16,
-    /// A previously-rendered block was mutated and needs re-rendering.
     rerender: bool,
-    /// Whether a prompt is currently drawn on screen.
     prompt_drawn: bool,
     prompt_top_row: u16,
     working_since: Option<Instant>,
-    /// Snapshot of elapsed time when the throbber leaves Working state.
     final_elapsed: Option<Duration>,
-    /// Latest context token count from the LLM.
     context_tokens: Option<u32>,
     throbber: Option<Throbber>,
 }
@@ -115,41 +109,23 @@ impl Screen {
         }
     }
 
-    /// Mark the start of a new turn. Previous blocks are kept for resize redraw.
     pub fn begin_turn(&mut self) {
         self.last_block_rows = 0;
         self.rerender = false;
     }
 
-    /// Add a block. Rendering is deferred until render().
     pub fn push(&mut self, block: Block) {
         self.blocks.push(block);
     }
 
-    /// Update the most recent ToolCall block's status, elapsed, and output.
-    pub fn update_last_tool(
-        &mut self,
-        status: ToolStatus,
-        output: Option<ToolOutput>,
-        elapsed: Option<Duration>,
-    ) {
-        let tool_idx = self
-            .blocks
-            .iter()
-            .rposition(|b| matches!(b, Block::ToolCall { .. }));
-        if let Some(idx) = tool_idx {
-            if let Block::ToolCall {
-                status: ref mut s,
-                elapsed: ref mut e,
-                output: ref mut o,
-                ..
-            } = self.blocks[idx]
-            {
+    pub fn update_last_tool(&mut self, status: ToolStatus, output: Option<ToolOutput>, elapsed: Option<Duration>) {
+        let idx = self.blocks.iter().rposition(|b| matches!(b, Block::ToolCall { .. }));
+        if let Some(idx) = idx {
+            if let Block::ToolCall { status: ref mut s, elapsed: ref mut e, output: ref mut o, .. } = self.blocks[idx] {
                 *s = status;
                 *e = elapsed;
                 *o = output;
             }
-            // Back up flushed so this block gets re-rendered.
             if idx < self.flushed {
                 self.flushed = idx;
                 self.rerender = true;
@@ -158,24 +134,16 @@ impl Screen {
     }
 
     pub fn append_tool_output(&mut self, chunk: &str) {
-        let tool_idx = self
-            .blocks
-            .iter()
-            .rposition(|b| matches!(b, Block::ToolCall { .. }));
-        if let Some(idx) = tool_idx {
+        let idx = self.blocks.iter().rposition(|b| matches!(b, Block::ToolCall { .. }));
+        if let Some(idx) = idx {
             if let Block::ToolCall { output: ref mut o, .. } = self.blocks[idx] {
                 match o {
                     Some(ref mut out) => {
-                        if !out.content.is_empty() {
-                            out.content.push('\n');
-                        }
+                        if !out.content.is_empty() { out.content.push('\n'); }
                         out.content.push_str(chunk);
                     }
                     None => {
-                        *o = Some(ToolOutput {
-                            content: chunk.to_string(),
-                            is_error: false,
-                        });
+                        *o = Some(ToolOutput { content: chunk.to_string(), is_error: false });
                     }
                 }
             }
@@ -187,11 +155,8 @@ impl Screen {
     }
 
     pub fn set_last_tool_status(&mut self, status: ToolStatus) {
-        let tool_idx = self
-            .blocks
-            .iter()
-            .rposition(|b| matches!(b, Block::ToolCall { .. }));
-        if let Some(idx) = tool_idx {
+        let idx = self.blocks.iter().rposition(|b| matches!(b, Block::ToolCall { .. }));
+        if let Some(idx) = idx {
             if let Block::ToolCall { status: ref mut s, .. } = self.blocks[idx] {
                 *s = status;
             }
@@ -224,115 +189,6 @@ impl Screen {
         self.final_elapsed = None;
     }
 
-    /// Render blocks incrementally. New blocks are appended without erasing.
-    /// Mutated blocks (via update_last_tool) erase only the affected tail.
-    fn render_blocks(&mut self) {
-        let has_new = self.flushed < self.blocks.len();
-        if !has_new && !self.rerender {
-            // Nothing changed — just erase prompt for redraw.
-            if self.prompt_drawn {
-                erase_prompt_at(self.prompt_top_row);
-            }
-            self.prompt_drawn = false;
-            return;
-        }
-
-        let mut out = io::stdout();
-
-        if self.rerender {
-            // A rendered block was mutated — erase from its start.
-            let erase_from = if self.prompt_drawn {
-                self.prompt_top_row.saturating_sub(self.last_block_rows)
-            } else {
-                let _ = out.flush();
-                cursor::position()
-                    .map(|(_, y)| y)
-                    .unwrap_or(0)
-                    .saturating_sub(self.last_block_rows)
-            };
-            let _ = out.execute(cursor::MoveTo(0, erase_from));
-            let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
-            let _ = out.flush();
-            self.rerender = false;
-        } else if self.prompt_drawn {
-            // Append mode — just erase prompt to make room for new blocks.
-            erase_prompt_at(self.prompt_top_row);
-        } else {
-            // First render of this turn — clear from cursor down.
-            let _ = out.flush();
-            let pos = cursor::position().map(|(_, y)| y).unwrap_or(0);
-            let _ = out.execute(cursor::MoveTo(0, pos));
-            let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
-            let _ = out.flush();
-        }
-
-        // Render blocks from flushed onwards. Track the last block's row count
-        // so we can erase just that block if it gets mutated later.
-        let w = term_width();
-        let render_end = self.blocks.len();
-        let last_idx = render_end.saturating_sub(1);
-
-        for i in self.flushed..render_end {
-            let gap = if i > 0 {
-                gap_between(&Element::Block(&self.blocks[i - 1]), &Element::Block(&self.blocks[i]))
-            } else {
-                0
-            };
-            for _ in 0..gap {
-                let _ = out.execute(Print("\r\n"));
-            }
-            let rows = render_block(&self.blocks[i], w);
-            if i == last_idx {
-                self.last_block_rows = rows + gap as u16;
-            }
-        }
-
-        self.flushed = self.blocks.len();
-        self.prompt_drawn = false;
-    }
-
-    /// Single render entry point. Re-renders blocks if dirty, then always redraws the prompt.
-    pub fn render(
-        &mut self,
-        buf: &str,
-        cursor_char: usize,
-        mode: super::input::Mode,
-        width: usize,
-        queued: &[String],
-        pastes: &[String],
-    ) {
-        self.render_with_completer(buf, cursor_char, mode, width, queued, pastes, None);
-    }
-
-    pub fn render_with_completer(
-        &mut self,
-        buf: &str,
-        cursor_char: usize,
-        mode: super::input::Mode,
-        width: usize,
-        queued: &[String],
-        pastes: &[String],
-        completer: Option<&FileCompleter>,
-    ) {
-        self.render_blocks();
-
-        let throbber_info = self.throbber.map(|t| (t, self.working_since, self.final_elapsed));
-
-        let gap = self.blocks.last().map_or(0, |last| {
-            gap_between(&Element::Block(last), &Element::Throbber)
-        });
-        for _ in 0..gap {
-            let _ = io::stdout().execute(Print("\r\n"));
-        }
-        self.prompt_top_row =
-            draw_prompt_box(buf, cursor_char, mode, width, queued, throbber_info, self.context_tokens, pastes, completer);
-        if gap > 0 {
-            self.prompt_top_row = self.prompt_top_row.saturating_sub(gap as u16);
-        }
-        self.prompt_drawn = true;
-    }
-
-    /// Flush dirty blocks to the terminal without drawing a prompt.
     pub fn flush_blocks(&mut self) {
         self.render_blocks();
     }
@@ -344,7 +200,6 @@ impl Screen {
         }
     }
 
-    /// Terminal resized — clear everything and re-render all blocks.
     pub fn redraw_all(&mut self) {
         let mut out = io::stdout();
         let _ = out.execute(cursor::MoveTo(0, 0));
@@ -377,6 +232,202 @@ impl Screen {
     pub fn has_history(&self) -> bool {
         !self.blocks.is_empty()
     }
+
+    // ── Block rendering ──────────────────────────────────────────────────
+
+    fn render_blocks(&mut self) {
+        let has_new = self.flushed < self.blocks.len();
+        if !has_new && !self.rerender {
+            if self.prompt_drawn {
+                erase_prompt_at(self.prompt_top_row);
+            }
+            self.prompt_drawn = false;
+            return;
+        }
+
+        let mut out = io::stdout();
+        if self.rerender {
+            let erase_from = if self.prompt_drawn {
+                self.prompt_top_row.saturating_sub(self.last_block_rows)
+            } else {
+                let _ = out.flush();
+                cursor::position().map(|(_, y)| y).unwrap_or(0).saturating_sub(self.last_block_rows)
+            };
+            let _ = out.execute(cursor::MoveTo(0, erase_from));
+            let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
+            let _ = out.flush();
+            self.rerender = false;
+        } else if self.prompt_drawn {
+            erase_prompt_at(self.prompt_top_row);
+        } else {
+            let _ = out.flush();
+            let pos = cursor::position().map(|(_, y)| y).unwrap_or(0);
+            let _ = out.execute(cursor::MoveTo(0, pos));
+            let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
+            let _ = out.flush();
+        }
+
+        let w = term_width();
+        let last_idx = self.blocks.len().saturating_sub(1);
+        for i in self.flushed..self.blocks.len() {
+            let gap = if i > 0 {
+                gap_between(&Element::Block(&self.blocks[i - 1]), &Element::Block(&self.blocks[i]))
+            } else {
+                0
+            };
+            for _ in 0..gap { let _ = out.execute(Print("\r\n")); }
+            let rows = render_block(&self.blocks[i], w);
+            if i == last_idx {
+                self.last_block_rows = rows + gap;
+            }
+        }
+        self.flushed = self.blocks.len();
+        self.prompt_drawn = false;
+    }
+
+    // ── Prompt drawing (broken into sections) ────────────────────────────
+
+    /// Main entry point: flush blocks, then draw the full prompt box.
+    pub fn draw_prompt(&mut self, state: &InputState, mode: super::input::Mode, width: usize) {
+        self.draw_prompt_with_queued(state, mode, width, &[]);
+    }
+
+    pub fn draw_prompt_with_queued(&mut self, state: &InputState, mode: super::input::Mode, width: usize, queued: &[String]) {
+        self.render_blocks();
+
+        let gap = self.blocks.last().map_or(0, |last| {
+            gap_between(&Element::Block(last), &Element::Throbber)
+        });
+        for _ in 0..gap { let _ = io::stdout().execute(Print("\r\n")); }
+
+        self.prompt_top_row = self.draw_prompt_sections(state, mode, width, queued);
+        if gap > 0 {
+            self.prompt_top_row = self.prompt_top_row.saturating_sub(gap);
+        }
+        self.prompt_drawn = true;
+    }
+
+    fn draw_prompt_sections(
+        &self,
+        state: &InputState,
+        mode: super::input::Mode,
+        width: usize,
+        queued: &[String],
+    ) -> u16 {
+        let mut out = io::stdout();
+        let usable = width.saturating_sub(1);
+        let mut extra_rows: u16 = 0;
+
+        // 1. Throbber
+        extra_rows += self.draw_throbber();
+
+        // 2. Queued messages
+        for msg in queued {
+            let display: String = msg.chars().take(usable).collect();
+            let _ = out.execute(SetBackgroundColor(theme::USER_BG));
+            let _ = out.execute(SetAttribute(Attribute::Bold));
+            let _ = out.execute(Print(format!(" {} ", display)));
+            let _ = out.execute(SetAttribute(Attribute::Reset));
+            let _ = out.execute(ResetColor);
+            let _ = out.execute(Print("\r\n"));
+            extra_rows += 1;
+        }
+
+        // Vim normal mode colors both bars with accent.
+        let vi_normal = state.vim_mode() == Some(crate::vim::ViMode::Normal);
+        let bar_color = if vi_normal { theme::ACCENT } else { theme::BAR };
+
+        // 3. Top bar
+        let tokens_label = self.context_tokens.map(format_tokens);
+        draw_bar(width, tokens_label.as_deref().map(|l| (l, bar_color)), bar_color);
+        let _ = out.execute(Print("\r\n"));
+
+        // 4. Content with structured spans
+        let spans = build_display_spans(&state.buf, &state.pastes);
+        let display_buf = spans_to_string(&spans);
+        let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
+        let (visual_lines, cursor_line, cursor_col) = wrap_and_locate_cursor(&display_buf, display_cursor, usable);
+        let is_command = matches!(state.buf.trim(), "/clear" | "/new" | "/exit" | "/quit" | "/vim");
+        for line in &visual_lines {
+            let _ = out.execute(Print(" "));
+            if is_command {
+                let _ = out.execute(SetForegroundColor(theme::ACCENT));
+                let _ = out.execute(Print(line));
+                let _ = out.execute(ResetColor);
+            } else {
+                render_line_spans(line);
+            }
+            let _ = out.execute(Print("\r\n"));
+        }
+
+        // 5. Bottom bar
+        if mode == super::input::Mode::Apply {
+            draw_bar(width, Some(("apply", theme::APPLY)), bar_color);
+        } else {
+            draw_bar(width, None, bar_color);
+        }
+
+        // 6. Completion list (below the bar)
+        let has_comp = state.completer.as_ref().is_some_and(|c| !c.results.is_empty());
+        if has_comp {
+            let _ = out.execute(Print("\r\n"));
+        }
+        let comp_rows = draw_completions(state.completer.as_ref());
+
+        let _ = out.flush();
+
+        // Position cursor.
+        // Rows from top_row to final_row (inclusive):
+        //   top_bar, content lines, bottom_bar, [completion lines if any]
+        let total_rows = extra_rows as usize + 1 + visual_lines.len() + 1 + comp_rows;
+        let final_row = cursor::position().map(|(_, y)| y).unwrap_or(0);
+        let top_row = final_row.saturating_sub(total_rows as u16 - 1);
+        let text_row = top_row + 1 + extra_rows + cursor_line as u16;
+        let text_col = 1 + cursor_col as u16;
+        let _ = out.execute(cursor::MoveTo(text_col, text_row));
+        let _ = out.flush();
+
+        top_row
+    }
+
+    fn draw_throbber(&self) -> u16 {
+        let Some(state) = self.throbber else { return 0 };
+        let mut out = io::stdout();
+        let _ = out.execute(Print(" "));
+        match state {
+            Throbber::Working => {
+                if let Some(start) = self.working_since {
+                    let elapsed = start.elapsed();
+                    let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
+                    let _ = out.execute(SetForegroundColor(theme::PRIMARY));
+                    let _ = out.execute(Print(format!("{} working...", SPINNER_FRAMES[idx])));
+                    let _ = out.execute(ResetColor);
+                    let _ = out.execute(SetAttribute(Attribute::Dim));
+                    let _ = out.execute(Print(format!(" ({})", format_elapsed(elapsed))));
+                    let _ = out.execute(SetAttribute(Attribute::Reset));
+                }
+            }
+            Throbber::Done => {
+                let _ = out.execute(SetAttribute(Attribute::Dim));
+                let _ = out.execute(Print("done"));
+                if let Some(d) = self.final_elapsed {
+                    let _ = out.execute(Print(format!(" ({})", format_elapsed(d))));
+                }
+                let _ = out.execute(SetAttribute(Attribute::Reset));
+            }
+            Throbber::Interrupted => {
+                let _ = out.execute(SetAttribute(Attribute::Dim));
+                let _ = out.execute(Print("interrupted"));
+                if let Some(d) = self.final_elapsed {
+                    let _ = out.execute(Print(format!(" ({})", format_elapsed(d))));
+                }
+                let _ = out.execute(SetAttribute(Attribute::Reset));
+            }
+        }
+        let _ = out.execute(Print("\r\n"));
+        1
+    }
+
 }
 
 /// Element types for spacing calculation. Throbber represents the
@@ -1182,60 +1233,142 @@ fn wrap_and_locate_cursor(buf: &str, cursor_char: usize, usable: usize) -> (Vec<
 }
 
 /// Draw a horizontal bar, optionally with a right-aligned label.
-fn draw_bar(width: usize, label: Option<(&str, Color)>) {
+/// `bar_color` controls the color of the `─` line segments.
+fn draw_bar(width: usize, label: Option<(&str, Color)>, bar_color: Color) {
     let mut out = io::stdout();
     if let Some((text, color)) = label {
         let tail = format!(" {} \u{2500}", text);
         let bar_len = width.saturating_sub(tail.chars().count());
-        let _ = out.execute(SetForegroundColor(theme::BAR));
+        let _ = out.execute(SetForegroundColor(bar_color));
         let _ = out.execute(Print("\u{2500}".repeat(bar_len)));
         let _ = out.execute(ResetColor);
         let _ = out.execute(SetForegroundColor(color));
         let _ = out.execute(Print(format!(" {} ", text)));
         let _ = out.execute(ResetColor);
-        let _ = out.execute(SetForegroundColor(theme::BAR));
+        let _ = out.execute(SetForegroundColor(bar_color));
         let _ = out.execute(Print("\u{2500}"));
         let _ = out.execute(ResetColor);
     } else {
-        let _ = out.execute(SetForegroundColor(theme::BAR));
+        let _ = out.execute(SetForegroundColor(bar_color));
         let _ = out.execute(Print("\u{2500}".repeat(width)));
         let _ = out.execute(ResetColor);
     }
 }
 
-/// Build a display string where each PASTE_MARKER is replaced with a label.
-/// Returns (display_string, display_cursor_char).
-fn paste_display(buf: &str, cursor_char: usize, pastes: &[String]) -> (String, usize) {
-    use super::input::PASTE_MARKER;
-    let mut display = String::new();
-    let mut display_cursor = 0;
-    let mut paste_idx = 0;
-    for (i, c) in buf.chars().enumerate() {
-        if i == cursor_char {
-            display_cursor = display.chars().count();
-        }
-        if c == PASTE_MARKER {
-            let lines = pastes.get(paste_idx).map(|p| p.lines().count().max(1)).unwrap_or(1);
-            let label = format!("[pasted {} lines]", lines);
-            display.push_str(&label);
-            paste_idx += 1;
-        } else {
-            display.push(c);
-        }
-    }
-    if cursor_char >= buf.chars().count() {
-        display_cursor = display.chars().count();
-    }
-    (display, display_cursor)
+// ── Structured spans for prompt content ──────────────────────────────────────
+
+enum Span {
+    Plain(String),
+    Paste(String),  // "[pasted N lines]"
+    AtRef(String),  // "@path"
 }
 
-/// Print a line, highlighting `[pasted N lines]` labels and `@path` tokens.
-fn print_styled_line(line: &str, has_pastes: bool) {
+/// Build display spans from the raw buffer + paste storage.
+fn build_display_spans(buf: &str, pastes: &[String]) -> Vec<Span> {
+    let mut spans = Vec::new();
+    let mut plain = String::new();
+    let mut paste_idx = 0;
+
+    let chars: Vec<char> = buf.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == PASTE_MARKER {
+            if !plain.is_empty() {
+                spans.push(Span::Plain(std::mem::take(&mut plain)));
+            }
+            let lines = pastes.get(paste_idx).map(|p| p.lines().count().max(1)).unwrap_or(1);
+            spans.push(Span::Paste(format!("[pasted {} lines]", lines)));
+            paste_idx += 1;
+            i += 1;
+        } else if chars[i] == '@' {
+            // Check: preceded by whitespace or start of string
+            let at_start = i == 0 || chars[i - 1].is_whitespace();
+            if at_start {
+                if !plain.is_empty() {
+                    spans.push(Span::Plain(std::mem::take(&mut plain)));
+                }
+                let mut end = i + 1;
+                while end < chars.len() && !chars[end].is_whitespace() {
+                    end += 1;
+                }
+                if end > i + 1 {
+                    let token: String = chars[i..end].iter().collect();
+                    spans.push(Span::AtRef(token));
+                    i = end;
+                } else {
+                    // Bare '@'
+                    spans.push(Span::AtRef("@".to_string()));
+                    i += 1;
+                }
+            } else {
+                plain.push(chars[i]);
+                i += 1;
+            }
+        } else {
+            plain.push(chars[i]);
+            i += 1;
+        }
+    }
+    if !plain.is_empty() {
+        spans.push(Span::Plain(plain));
+    }
+    spans
+}
+
+fn spans_to_string(spans: &[Span]) -> String {
+    let mut s = String::new();
+    for span in spans {
+        match span {
+            Span::Plain(t) | Span::Paste(t) | Span::AtRef(t) => s.push_str(t),
+        }
+    }
+    s
+}
+
+/// Map a cursor position from raw-buffer char space to display-string char space.
+fn map_cursor(raw_cursor: usize, raw_buf: &str, spans: &[Span]) -> usize {
+    let mut raw_pos = 0;
+    let mut display_pos = 0;
+    for span in spans {
+        match span {
+            Span::Plain(t) => {
+                let chars = t.chars().count();
+                if raw_cursor >= raw_pos && raw_cursor < raw_pos + chars {
+                    return display_pos + (raw_cursor - raw_pos);
+                }
+                raw_pos += chars;
+                display_pos += chars;
+            }
+            Span::Paste(label) => {
+                // A paste marker is 1 char in the raw buffer
+                if raw_cursor == raw_pos {
+                    return display_pos;
+                }
+                raw_pos += 1;
+                display_pos += label.chars().count();
+            }
+            Span::AtRef(token) => {
+                let chars = token.chars().count();
+                if raw_cursor >= raw_pos && raw_cursor < raw_pos + chars {
+                    return display_pos + (raw_cursor - raw_pos);
+                }
+                raw_pos += chars;
+                display_pos += chars;
+            }
+        }
+    }
+    // Cursor at end
+    let _ = raw_buf;
+    display_pos
+}
+
+/// Render a visual line with span-aware highlighting.
+/// We re-parse the wrapped line to find @ tokens and paste labels.
+fn render_line_spans(line: &str) {
     let mut out = io::stdout();
     let mut rest = line;
     while !rest.is_empty() {
-        // Find the next special token
-        let paste_pos = if has_pastes { rest.find("[pasted ") } else { None };
+        let paste_pos = rest.find("[pasted ");
         let at_pos = rest.find('@');
 
         let next = match (paste_pos, at_pos) {
@@ -1250,44 +1383,31 @@ fn print_styled_line(line: &str, has_pastes: bool) {
             break;
         };
 
-        // Print text before the token
-        if pos > 0 {
-            let _ = out.execute(Print(&rest[..pos]));
-        }
+        if pos > 0 { let _ = out.execute(Print(&rest[..pos])); }
 
-        // Check what we found
-        if has_pastes && paste_pos == Some(pos) {
-            if let Some(rel_end) = rest[pos..].find(']') {
-                let label = &rest[pos..pos + rel_end + 1];
+        if paste_pos == Some(pos) {
+            if let Some(end) = rest[pos..].find(']') {
+                let label = &rest[pos..pos + end + 1];
                 if label.ends_with(" lines]") {
                     let _ = out.execute(SetForegroundColor(theme::ACCENT));
                     let _ = out.execute(SetAttribute(Attribute::Dim));
                     let _ = out.execute(Print(label));
                     let _ = out.execute(SetAttribute(Attribute::Reset));
                     let _ = out.execute(ResetColor);
-                    rest = &rest[pos + rel_end + 1..];
+                    rest = &rest[pos + end + 1..];
                     continue;
                 }
             }
             let _ = out.execute(Print(&rest[pos..pos + 1]));
             rest = &rest[pos + 1..];
         } else if at_pos == Some(pos) {
-            // @ token: find the end (next whitespace or end of string)
-            let after_at = &rest[pos + 1..];
-            let token_end = after_at.find(char::is_whitespace).unwrap_or(after_at.len());
-            if token_end > 0 {
-                let token = &rest[pos..pos + 1 + token_end];
-                let _ = out.execute(SetForegroundColor(theme::ACCENT));
-                let _ = out.execute(Print(token));
-                let _ = out.execute(ResetColor);
-                rest = &rest[pos + 1 + token_end..];
-            } else {
-                // Bare '@' with nothing after it
-                let _ = out.execute(SetForegroundColor(theme::ACCENT));
-                let _ = out.execute(Print("@"));
-                let _ = out.execute(ResetColor);
-                rest = &rest[pos + 1..];
-            }
+            let after = &rest[pos + 1..];
+            let tok_end = after.find(char::is_whitespace).unwrap_or(after.len());
+            let token = &rest[pos..pos + 1 + tok_end];
+            let _ = out.execute(SetForegroundColor(theme::ACCENT));
+            let _ = out.execute(Print(token));
+            let _ = out.execute(ResetColor);
+            rest = &rest[pos + 1 + tok_end..];
         } else {
             let _ = out.execute(Print(&rest[pos..pos + 1]));
             rest = &rest[pos + 1..];
@@ -1295,143 +1415,45 @@ fn print_styled_line(line: &str, has_pastes: bool) {
     }
 }
 
-pub fn draw_prompt_box(
-    buf: &str,
-    cursor_char: usize,
-    mode: super::input::Mode,
-    width: usize,
-    queued: &[String],
-    throbber: Option<(Throbber, Option<Instant>, Option<Duration>)>,
-    context_tokens: Option<u32>,
-    pastes: &[String],
-    completer: Option<&FileCompleter>,
-) -> u16 {
+fn draw_completions(completer: Option<&crate::completer::Completer>) -> usize {
+    let Some(comp) = completer else { return 0 };
+    if comp.results.is_empty() { return 0; }
     let mut out = io::stdout();
-    let usable = width.saturating_sub(1);
-    let has_pastes = !pastes.is_empty();
-
-    // Throbber line: directly above the prompt, no gap between them.
-    let throbber_count: usize = if throbber.is_some() { 1 } else { 0 };
-    if let Some((state, working_since, final_elapsed)) = throbber {
-        let _ = out.execute(Print(" "));
-        match state {
-            Throbber::Working => {
-                if let Some(start) = working_since {
-                    let elapsed = start.elapsed();
-                    let frame_idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
-                    let spinner = SPINNER_FRAMES[frame_idx];
-                    let time_str = format_elapsed(elapsed);
-
-                    let _ = out.execute(SetForegroundColor(theme::PRIMARY));
-                    let _ = out.execute(Print(format!("{} working...", spinner)));
-                    let _ = out.execute(ResetColor);
-                    let _ = out.execute(SetAttribute(Attribute::Dim));
-                    let _ = out.execute(Print(format!(" ({})", time_str)));
-                    let _ = out.execute(SetAttribute(Attribute::Reset));
-                }
-            }
-            Throbber::Done => {
-                let _ = out.execute(SetAttribute(Attribute::Dim));
-                let _ = out.execute(Print("done"));
-                if let Some(d) = final_elapsed {
-                    let _ = out.execute(Print(format!(" ({})", format_elapsed(d))));
-                }
-                let _ = out.execute(SetAttribute(Attribute::Reset));
-            }
-            Throbber::Interrupted => {
-                let _ = out.execute(SetAttribute(Attribute::Dim));
-                let _ = out.execute(Print("interrupted"));
-                if let Some(d) = final_elapsed {
-                    let _ = out.execute(Print(format!(" ({})", format_elapsed(d))));
-                }
-                let _ = out.execute(SetAttribute(Attribute::Reset));
-            }
-        }
-        let _ = out.execute(Print("\r\n"));
-    }
-
-    // Queued messages above the prompt
-    let queued_count = queued.len();
-    for msg in queued {
-        let display: String = msg.chars().take(usable).collect();
-        let _ = out.execute(SetBackgroundColor(theme::USER_BG));
-        let _ = out.execute(SetAttribute(Attribute::Bold));
-        let _ = out.execute(Print(format!(" {} ", display)));
-        let _ = out.execute(SetAttribute(Attribute::Reset));
-        let _ = out.execute(ResetColor);
-        let _ = out.execute(Print("\r\n"));
-    }
-
-    // Top bar with token count in the right
-    let tokens_label = context_tokens.map(format_tokens);
-    if let Some(ref label) = tokens_label {
-        draw_bar(width, Some((label, theme::BAR)));
-    } else {
-        draw_bar(width, None);
-    }
-    let _ = out.execute(Print("\r\n"));
-
-    // Content lines
-    let (display_buf, display_cursor) = if has_pastes {
-        paste_display(buf, cursor_char, pastes)
-    } else {
-        (buf.to_string(), cursor_char)
+    let last = comp.results.len() - 1;
+    let prefix = match comp.kind {
+        crate::completer::CompleterKind::Command => "/",
+        crate::completer::CompleterKind::File => "./",
     };
-    let (visual_lines, cursor_line, cursor_col) = wrap_and_locate_cursor(&display_buf, display_cursor, usable);
-    let is_command = matches!(buf.trim(), "/clear" | "/new" | "/exit" | "/quit");
-    for line in &visual_lines {
-        let _ = out.execute(Print(" "));
-        if is_command {
+    // Find the longest label to align descriptions.
+    let max_label = comp.results.iter().map(|i| prefix.len() + i.label.len()).max().unwrap_or(0);
+    for (i, item) in comp.results.iter().enumerate() {
+        let _ = out.execute(Print("  "));
+        let label = format!("{}{}", prefix, item.label);
+        if i == comp.selected {
             let _ = out.execute(SetForegroundColor(theme::ACCENT));
-            let _ = out.execute(Print(line));
+            let _ = out.execute(Print(&label));
+            if let Some(ref desc) = item.description {
+                let pad = max_label - label.len() + 2;
+                let _ = out.execute(ResetColor);
+                let _ = out.execute(SetAttribute(Attribute::Dim));
+                let _ = out.execute(Print(format!("{:>width$}{}", "", desc, width = pad)));
+                let _ = out.execute(SetAttribute(Attribute::Reset));
+            }
             let _ = out.execute(ResetColor);
         } else {
-            print_styled_line(line, has_pastes);
-        }
-        let _ = out.execute(Print("\r\n"));
-    }
-
-    // Completion list (between content and bottom bar)
-    let comp_count = if let Some(comp) = completer {
-        let results = &comp.results;
-        let sel = comp.selected;
-        for (i, path) in results.iter().enumerate() {
-            let _ = out.execute(Print("  "));
-            if i == sel {
-                let _ = out.execute(SetForegroundColor(theme::ACCENT));
-                let _ = out.execute(Print(format!("  {}", path)));
-                let _ = out.execute(ResetColor);
-            } else {
-                let _ = out.execute(SetAttribute(Attribute::Dim));
-                let _ = out.execute(Print(format!("  {}", path)));
-                let _ = out.execute(SetAttribute(Attribute::Reset));
+            let _ = out.execute(SetAttribute(Attribute::Dim));
+            let _ = out.execute(Print(&label));
+            if let Some(ref desc) = item.description {
+                let pad = max_label - label.len() + 2;
+                let _ = out.execute(Print(format!("{:>width$}{}", "", desc, width = pad)));
             }
+            let _ = out.execute(SetAttribute(Attribute::Reset));
+        }
+        if i < last {
             let _ = out.execute(Print("\r\n"));
         }
-        results.len()
-    } else {
-        0
-    };
-
-    // Bottom bar
-    if mode == super::input::Mode::Apply {
-        draw_bar(width, Some(("apply", theme::APPLY)));
-    } else {
-        draw_bar(width, None);
     }
-
-    let _ = out.flush();
-
-    let total_content = throbber_count + queued_count + visual_lines.len() + comp_count;
-    let final_row = cursor::position().map(|(_, y)| y).unwrap_or(0);
-    let top_row = final_row.saturating_sub(total_content as u16 + 1);
-
-    let text_row = top_row + 1 + throbber_count as u16 + queued_count as u16 + cursor_line as u16;
-    let text_col = 1 + cursor_col as u16;
-    let _ = out.execute(cursor::MoveTo(text_col, text_row));
-    let _ = out.flush();
-
-    top_row
+    comp.results.len()
 }
 
 pub fn erase_prompt_at(top_row: u16) {
@@ -1441,16 +1463,30 @@ pub fn erase_prompt_at(top_row: u16) {
     let _ = out.flush();
 }
 
-/// Show confirm prompt inline (tool line already visible above). Returns the user's choice.
-pub fn show_confirm(_: &str, _: &str) -> ConfirmChoice {
+/// Show confirm prompt as a bottom bar overlay. Returns the user's choice.
+pub fn show_confirm(tool_name: &str, desc: &str) -> ConfirmChoice {
     let mut out = io::stdout();
+    let (width, height) = terminal::size().unwrap_or((80, 24));
+    let w = width as usize;
+    let bar_row = height.saturating_sub(2);
 
-    // Record row so we can erase after
+    // Save cursor position
     let _ = out.flush();
-    let confirm_row = cursor::position().map(|(_, y)| y).unwrap_or(0);
+    let saved_pos = cursor::position().unwrap_or((0, 0));
 
+    // Draw bar + content at absolute bottom
+    let _ = out.execute(cursor::MoveTo(0, bar_row));
+    let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
+    draw_bar(w, Some(("allow? (y)es (n)o (a)lways", theme::ACCENT)), theme::ACCENT);
+    let _ = out.execute(Print("\r\n"));
+
+    // Content line: " tool_name: desc"
+    let _ = out.execute(Print(" "));
+    let _ = out.execute(SetForegroundColor(theme::ACCENT));
+    let _ = out.execute(Print(tool_name));
+    let _ = out.execute(ResetColor);
     let _ = out.execute(SetAttribute(Attribute::Dim));
-    let _ = out.execute(Print("   \u{2192} allow? (y/n/a)"));
+    let _ = out.execute(Print(format!(": {}", desc)));
     let _ = out.execute(SetAttribute(Attribute::Reset));
 
     let _ = out.execute(cursor::Show);
@@ -1459,10 +1495,7 @@ pub fn show_confirm(_: &str, _: &str) -> ConfirmChoice {
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
     let choice = loop {
-        if let Ok(Event::Key(KeyEvent {
-            code, modifiers, ..
-        })) = event::read()
-        {
+        if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = event::read() {
             match (code, modifiers) {
                 (KeyCode::Enter, _) | (KeyCode::Char('y' | 'Y'), _) => {
                     break ConfirmChoice::Yes;
@@ -1481,11 +1514,12 @@ pub fn show_confirm(_: &str, _: &str) -> ConfirmChoice {
         }
     };
 
+    // Erase the overlay
     let _ = out.execute(cursor::Hide);
-
-    // Erase the confirm line
-    let _ = out.execute(cursor::MoveTo(0, confirm_row));
-    let _ = out.execute(terminal::Clear(terminal::ClearType::CurrentLine));
+    let _ = out.execute(cursor::MoveTo(0, bar_row));
+    let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
+    let _ = out.execute(cursor::MoveTo(saved_pos.0, saved_pos.1));
+    let _ = out.flush();
 
     choice
 }

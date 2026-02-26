@@ -8,7 +8,7 @@ pub struct State {
     #[serde(default)]
     pub mode: String,
     #[serde(default)]
-    pub vim_mode: bool,
+    pub vim_enabled: bool,
 }
 
 fn state_path() -> PathBuf {
@@ -43,6 +43,15 @@ impl State {
 
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode.as_str().to_string();
+        self.save();
+    }
+
+    pub fn vim_enabled(&self) -> bool {
+        self.vim_enabled
+    }
+
+    pub fn set_vim_enabled(&mut self, enabled: bool) {
+        self.vim_enabled = enabled;
         self.save();
     }
 }
