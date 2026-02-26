@@ -1,3 +1,4 @@
+use crate::completer::FileCompleter;
 use crate::theme;
 use comfy_table::{presets::UTF8_BORDERS_ONLY, ContentArrangement, Table};
 use crossterm::{
@@ -265,41 +266,24 @@ impl Screen {
             let _ = out.flush();
         }
 
-        // Render blocks from flushed onwards. Track where the last block starts
+        // Render blocks from flushed onwards. Track the last block's row count
         // so we can erase just that block if it gets mutated later.
         let w = term_width();
         let render_end = self.blocks.len();
         let last_idx = render_end.saturating_sub(1);
 
-        // Render all blocks before the last one (these become fully stable).
         for i in self.flushed..render_end {
             let gap = if i > 0 {
                 gap_between(&Element::Block(&self.blocks[i - 1]), &Element::Block(&self.blocks[i]))
             } else {
                 0
             };
-            // Record position before spacing so re-render erases the gap too.
-            let last_start = if i == last_idx {
-                let _ = out.flush();
-                Some(cursor::position().map(|(_, y)| y).unwrap_or(0))
-            } else {
-                None
-            };
             for _ in 0..gap {
                 let _ = out.execute(Print("\r\n"));
             }
-            if let Some(last_start) = last_start {
-                render_block(&self.blocks[i], w);
-                let _ = out.flush();
-                let end_row = cursor::position().map(|(_, y)| y).unwrap_or(0);
-                let term_h = terminal::size().map(|(_, h)| h).unwrap_or(50);
-                self.last_block_rows = if end_row >= term_h.saturating_sub(1) {
-                    term_h.saturating_sub(1)
-                } else {
-                    end_row.saturating_sub(last_start)
-                };
-            } else {
-                render_block(&self.blocks[i], w);
+            let rows = render_block(&self.blocks[i], w);
+            if i == last_idx {
+                self.last_block_rows = rows + gap as u16;
             }
         }
 
@@ -315,12 +299,25 @@ impl Screen {
         mode: super::input::Mode,
         width: usize,
         queued: &[String],
+        pastes: &[String],
+    ) {
+        self.render_with_completer(buf, cursor_char, mode, width, queued, pastes, None);
+    }
+
+    pub fn render_with_completer(
+        &mut self,
+        buf: &str,
+        cursor_char: usize,
+        mode: super::input::Mode,
+        width: usize,
+        queued: &[String],
+        pastes: &[String],
+        completer: Option<&FileCompleter>,
     ) {
         self.render_blocks();
 
         let throbber_info = self.throbber.map(|t| (t, self.working_since, self.final_elapsed));
 
-        // Gap between last block and throbber/prompt, via centralized spacing.
         let gap = self.blocks.last().map_or(0, |last| {
             gap_between(&Element::Block(last), &Element::Throbber)
         });
@@ -328,9 +325,7 @@ impl Screen {
             let _ = io::stdout().execute(Print("\r\n"));
         }
         self.prompt_top_row =
-            draw_prompt_box(buf, cursor_char, mode, width, queued, throbber_info, self.context_tokens);
-        // prompt_top_row from draw_prompt_box already includes the throbber.
-        // Adjust for the gap lines printed above (not part of draw_prompt_box).
+            draw_prompt_box(buf, cursor_char, mode, width, queued, throbber_info, self.context_tokens, pastes, completer);
         if gap > 0 {
             self.prompt_top_row = self.prompt_top_row.saturating_sub(gap as u16);
         }
@@ -442,22 +437,33 @@ fn truncate_str(s: &str, max: usize) -> String {
     truncated
 }
 
-fn render_block(block: &Block, _width: usize) {
+fn render_block(block: &Block, _width: usize) -> u16 {
     match block {
         Block::User { text } => {
             let mut out = io::stdout();
-            let _ = out
-                .execute(SetBackgroundColor(theme::USER_BG))
-                .and_then(|o| o.execute(SetAttribute(Attribute::Bold)))
-                .and_then(|o| o.execute(Print(format!(" {} ", text))))
-                .and_then(|o| o.execute(SetAttribute(Attribute::Reset)))
-                .and_then(|o| o.execute(ResetColor));
-            let _ = out.execute(Print("\r\n"));
+            let lines: Vec<&str> = text.lines().collect();
+            let max_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+            let pad_width = max_len + 2; // 1 space padding on each side
+            for line in &lines {
+                let char_len = line.chars().count();
+                let trailing = pad_width - char_len - 1;
+                let _ = out
+                    .execute(SetBackgroundColor(theme::USER_BG))
+                    .and_then(|o| o.execute(SetAttribute(Attribute::Bold)))
+                    .and_then(|o| {
+                        o.execute(Print(format!(" {}{}", line, " ".repeat(trailing))))
+                    })
+                    .and_then(|o| o.execute(SetAttribute(Attribute::Reset)))
+                    .and_then(|o| o.execute(ResetColor));
+                let _ = out.execute(Print("\r\n"));
+            }
+            lines.len() as u16
         }
         Block::Text { content } => {
             let mut out = io::stdout();
             let lines: Vec<&str> = content.lines().collect();
             let mut i = 0;
+            let mut rows = 0u16;
             while i < lines.len() {
                 if lines[i].trim_start().starts_with("```") {
                     let lang = lines[i].trim_start().trim_start_matches('`').trim();
@@ -470,13 +476,13 @@ fn render_block(block: &Block, _width: usize) {
                     if i < lines.len() {
                         i += 1;
                     } // skip closing ```
-                    render_code_block(code_lines, lang);
+                    rows += render_code_block(code_lines, lang);
                 } else if lines[i].trim_start().starts_with('|') {
                     let table_start = i;
                     while i < lines.len() && lines[i].trim_start().starts_with('|') {
                         i += 1;
                     }
-                    render_markdown_table(&lines[table_start..i]);
+                    rows += render_markdown_table(&lines[table_start..i]);
                 } else if lines[i].trim() == "---" {
                     let w = term_width();
                     let bar_len = w.saturating_sub(2);
@@ -484,13 +490,16 @@ fn render_block(block: &Block, _width: usize) {
                     let _ = out.execute(Print(format!(" {}\r\n", "\u{00B7}".repeat(bar_len))));
                     let _ = out.execute(ResetColor);
                     i += 1;
+                    rows += 1;
                 } else {
                     let _ = out.execute(Print(" "));
                     print_styled(lines[i]);
                     let _ = out.execute(Print("\r\n"));
                     i += 1;
+                    rows += 1;
                 }
             }
+            rows
         }
         Block::ToolCall {
             name,
@@ -513,24 +522,28 @@ fn render_block(block: &Block, _width: usize) {
             };
             let tl = tool_timeout_label(args);
             print_tool_line(name, summary, color, time, tl.as_deref());
+            let mut rows = 1u16;
 
             if *status != ToolStatus::Denied {
                 if let Some(ref out_data) = output {
-                    print_tool_output(name, &out_data.content, out_data.is_error, args);
+                    rows += print_tool_output(name, &out_data.content, out_data.is_error, args);
                 }
             }
+            rows
         }
         Block::Confirm { tool, desc, choice } => {
-            render_confirm_result(tool, desc, *choice);
+            render_confirm_result(tool, desc, *choice)
         }
         Block::Error { message } => {
             print_error(message);
+            1
         }
     }
 }
 
-fn render_confirm_result(tool: &str, desc: &str, choice: Option<ConfirmChoice>) {
+fn render_confirm_result(tool: &str, desc: &str, choice: Option<ConfirmChoice>) -> u16 {
     let mut out = io::stdout();
+    let mut rows = 2u16; // allow line + desc line
 
     let _ = out
         .execute(SetForegroundColor(theme::APPLY))
@@ -549,6 +562,7 @@ fn render_confirm_result(tool: &str, desc: &str, choice: Option<ConfirmChoice>) 
         .and_then(|o| o.execute(Print("\r\n")));
 
     if let Some(c) = choice {
+        rows += 1;
         let _ = out.execute(Print("   "));
         match c {
             ConfirmChoice::Yes => {
@@ -571,6 +585,7 @@ fn render_confirm_result(tool: &str, desc: &str, choice: Option<ConfirmChoice>) 
             }
         }
     }
+    rows
 }
 
 fn print_styled(text: &str) {
@@ -722,7 +737,7 @@ fn print_tool_output(
     content: &str,
     is_error: bool,
     args: &HashMap<String, serde_json::Value>,
-) {
+) -> u16 {
     let mut out = io::stdout();
     match name {
         "read_file" if !is_error => {
@@ -731,20 +746,22 @@ fn print_tool_output(
                 .execute(SetAttribute(Attribute::Dim))
                 .and_then(|o| o.execute(Print(format!("   {} lines\r\n", line_count))))
                 .and_then(|o| o.execute(SetAttribute(Attribute::Reset)));
+            1
         }
         "edit_file" if !is_error => {
             let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
             let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            print_syntax_diff(old, new, path);
+            print_syntax_diff(old, new, path)
         }
         "write_file" if !is_error => {
             let file_content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            print_syntax_file(file_content, path);
+            print_syntax_file(file_content, path)
         }
-        "bash" if content.is_empty() => {}
+        "bash" if content.is_empty() => 0,
         "bash" => {
+            let count = content.lines().count();
             for line in content.lines() {
                 if is_error {
                     let _ = out.execute(SetForegroundColor(theme::TOOL_ERR));
@@ -756,6 +773,7 @@ fn print_tool_output(
                     let _ = out.execute(SetAttribute(Attribute::Reset));
                 }
             }
+            count as u16
         }
         _ => {
             let preview = result_preview(content, 3);
@@ -770,11 +788,12 @@ fn print_tool_output(
                     .and_then(|o| o.execute(Print(format!("   {}\r\n", preview))))
                     .and_then(|o| o.execute(SetAttribute(Attribute::Reset)));
             }
+            preview.lines().count() as u16
         }
     }
 }
 
-fn print_syntax_diff(old: &str, new: &str, path: &str) {
+fn print_syntax_diff(old: &str, new: &str, path: &str) -> u16 {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -833,9 +852,9 @@ fn print_syntax_diff(old: &str, new: &str, path: &str) {
     }
 
     // Context before
-    print_diff_lines(&mut h, &file_lines[ctx_start..start_line], ctx_start, None, None, &layout);
+    let mut rows = print_diff_lines(&mut h, &file_lines[ctx_start..start_line], ctx_start, None, None, &layout);
     // Deleted lines
-    print_diff_lines(&mut h, &old_lines, start_line, Some(('-', Color::Red)), Some(bg_del), &layout);
+    rows += print_diff_lines(&mut h, &old_lines, start_line, Some(('-', Color::Red)), Some(bg_del), &layout);
     // Re-highlight from start_line for added lines + context after
     let mut h2 = HighlightLines::new(syntax, theme);
     for i in 0..start_line {
@@ -844,11 +863,12 @@ fn print_syntax_diff(old: &str, new: &str, path: &str) {
         }
     }
     // Added lines
-    print_diff_lines(&mut h2, &new_lines, start_line, Some(('+', Color::Green)), Some(bg_add), &layout);
+    rows += print_diff_lines(&mut h2, &new_lines, start_line, Some(('+', Color::Green)), Some(bg_add), &layout);
     // Context after
     let after_start = start_line + new_lines.len();
     let after_end = (after_start + ctx).min(file_lines.len());
-    print_diff_lines(&mut h2, &file_lines[after_start..after_end], after_start, None, None, &layout);
+    rows += print_diff_lines(&mut h2, &file_lines[after_start..after_end], after_start, None, None, &layout);
+    rows
 }
 
 struct DiffLayout {
@@ -864,7 +884,7 @@ fn print_diff_lines(
     sign: Option<(char, Color)>,
     bg: Option<Color>,
     layout: &DiffLayout,
-) {
+) -> u16 {
     let DiffLayout { indent, gutter_width, max_content } = *layout;
     let mut out = io::stdout();
     for (i, line) in lines.iter().enumerate() {
@@ -881,8 +901,12 @@ fn print_diff_lines(
             let _ = out.execute(SetForegroundColor(color));
             let _ = out.execute(Print(format!("{} ", ch)));
             print_syntect_regions(&regions, max_content, bg);
-            let pad = max_content.saturating_sub(visible_len(&regions));
+            let used = indent.len() + 1 + gutter_width + 3 + visible_len(&regions);
+            let pad = term_width().saturating_sub(used);
             if pad > 0 {
+                if let Some(bg_color) = bg {
+                    let _ = out.execute(SetBackgroundColor(bg_color));
+                }
                 let _ = out.execute(Print(" ".repeat(pad)));
             }
             let _ = out.execute(ResetColor);
@@ -895,9 +919,10 @@ fn print_diff_lines(
         }
         let _ = out.execute(Print("\r\n"));
     }
+    lines.len() as u16
 }
 
-fn print_syntax_file(content: &str, path: &str) {
+fn print_syntax_file(content: &str, path: &str) -> u16 {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -906,7 +931,7 @@ fn print_syntax_file(content: &str, path: &str) {
         .find_syntax_by_extension(ext)
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
     let lines: Vec<&str> = content.lines().collect();
-    render_highlighted(&lines, syntax);
+    render_highlighted(&lines, syntax)
 }
 
 fn visible_len(regions: &[(Style, &str)]) -> usize {
@@ -944,7 +969,7 @@ fn print_syntect_regions(regions: &[(Style, &str)], max_width: usize, bg: Option
     let _ = out.execute(ResetColor);
 }
 
-fn render_code_block(lines: &[&str], lang: &str) {
+fn render_code_block(lines: &[&str], lang: &str) -> u16 {
     let ext = match lang {
         "" => "txt",
         "js" | "javascript" => "js",
@@ -960,10 +985,10 @@ fn render_code_block(lines: &[&str], lang: &str) {
         .find_syntax_by_extension(ext)
         .or_else(|| SYNTAX_SET.find_syntax_by_name(lang))
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    render_highlighted(lines, syntax);
+    render_highlighted(lines, syntax)
 }
 
-fn render_highlighted(lines: &[&str], syntax: &syntect::parsing::SyntaxReference) {
+fn render_highlighted(lines: &[&str], syntax: &syntect::parsing::SyntaxReference) -> u16 {
     let mut out = io::stdout();
     let indent = "   ";
     let theme = &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended];
@@ -985,9 +1010,10 @@ fn render_highlighted(lines: &[&str], syntax: &syntect::parsing::SyntaxReference
         print_syntect_regions(&regions, max_content, None);
         let _ = out.execute(Print("\r\n"));
     }
+    lines.len() as u16
 }
 
-fn render_markdown_table(lines: &[&str]) {
+fn render_markdown_table(lines: &[&str]) -> u16 {
     let mut out = io::stdout();
 
     // Parse markdown table: skip separator rows (containing ---)
@@ -1006,7 +1032,7 @@ fn render_markdown_table(lines: &[&str]) {
     }
 
     if rows.is_empty() {
-        return;
+        return 0;
     }
 
     let mut table = Table::new();
@@ -1045,6 +1071,7 @@ fn render_markdown_table(lines: &[&str]) {
         }
         let _ = out.execute(Print("\r\n"));
     }
+    rendered.lines().count() as u16
 }
 
 fn print_error(msg: &str) {
@@ -1176,6 +1203,98 @@ fn draw_bar(width: usize, label: Option<(&str, Color)>) {
     }
 }
 
+/// Build a display string where each PASTE_MARKER is replaced with a label.
+/// Returns (display_string, display_cursor_char).
+fn paste_display(buf: &str, cursor_char: usize, pastes: &[String]) -> (String, usize) {
+    use super::input::PASTE_MARKER;
+    let mut display = String::new();
+    let mut display_cursor = 0;
+    let mut paste_idx = 0;
+    for (i, c) in buf.chars().enumerate() {
+        if i == cursor_char {
+            display_cursor = display.chars().count();
+        }
+        if c == PASTE_MARKER {
+            let lines = pastes.get(paste_idx).map(|p| p.lines().count().max(1)).unwrap_or(1);
+            let label = format!("[pasted {} lines]", lines);
+            display.push_str(&label);
+            paste_idx += 1;
+        } else {
+            display.push(c);
+        }
+    }
+    if cursor_char >= buf.chars().count() {
+        display_cursor = display.chars().count();
+    }
+    (display, display_cursor)
+}
+
+/// Print a line, highlighting `[pasted N lines]` labels and `@path` tokens.
+fn print_styled_line(line: &str, has_pastes: bool) {
+    let mut out = io::stdout();
+    let mut rest = line;
+    while !rest.is_empty() {
+        // Find the next special token
+        let paste_pos = if has_pastes { rest.find("[pasted ") } else { None };
+        let at_pos = rest.find('@');
+
+        let next = match (paste_pos, at_pos) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+
+        let Some(pos) = next else {
+            let _ = out.execute(Print(rest));
+            break;
+        };
+
+        // Print text before the token
+        if pos > 0 {
+            let _ = out.execute(Print(&rest[..pos]));
+        }
+
+        // Check what we found
+        if has_pastes && paste_pos == Some(pos) {
+            if let Some(rel_end) = rest[pos..].find(']') {
+                let label = &rest[pos..pos + rel_end + 1];
+                if label.ends_with(" lines]") {
+                    let _ = out.execute(SetForegroundColor(theme::ACCENT));
+                    let _ = out.execute(SetAttribute(Attribute::Dim));
+                    let _ = out.execute(Print(label));
+                    let _ = out.execute(SetAttribute(Attribute::Reset));
+                    let _ = out.execute(ResetColor);
+                    rest = &rest[pos + rel_end + 1..];
+                    continue;
+                }
+            }
+            let _ = out.execute(Print(&rest[pos..pos + 1]));
+            rest = &rest[pos + 1..];
+        } else if at_pos == Some(pos) {
+            // @ token: find the end (next whitespace or end of string)
+            let after_at = &rest[pos + 1..];
+            let token_end = after_at.find(char::is_whitespace).unwrap_or(after_at.len());
+            if token_end > 0 {
+                let token = &rest[pos..pos + 1 + token_end];
+                let _ = out.execute(SetForegroundColor(theme::ACCENT));
+                let _ = out.execute(Print(token));
+                let _ = out.execute(ResetColor);
+                rest = &rest[pos + 1 + token_end..];
+            } else {
+                // Bare '@' with nothing after it
+                let _ = out.execute(SetForegroundColor(theme::ACCENT));
+                let _ = out.execute(Print("@"));
+                let _ = out.execute(ResetColor);
+                rest = &rest[pos + 1..];
+            }
+        } else {
+            let _ = out.execute(Print(&rest[pos..pos + 1]));
+            rest = &rest[pos + 1..];
+        }
+    }
+}
+
 pub fn draw_prompt_box(
     buf: &str,
     cursor_char: usize,
@@ -1184,9 +1303,12 @@ pub fn draw_prompt_box(
     queued: &[String],
     throbber: Option<(Throbber, Option<Instant>, Option<Duration>)>,
     context_tokens: Option<u32>,
+    pastes: &[String],
+    completer: Option<&FileCompleter>,
 ) -> u16 {
     let mut out = io::stdout();
     let usable = width.saturating_sub(1);
+    let has_pastes = !pastes.is_empty();
 
     // Throbber line: directly above the prompt, no gap between them.
     let throbber_count: usize = if throbber.is_some() { 1 } else { 0 };
@@ -1250,7 +1372,12 @@ pub fn draw_prompt_box(
     let _ = out.execute(Print("\r\n"));
 
     // Content lines
-    let (visual_lines, cursor_line, cursor_col) = wrap_and_locate_cursor(buf, cursor_char, usable);
+    let (display_buf, display_cursor) = if has_pastes {
+        paste_display(buf, cursor_char, pastes)
+    } else {
+        (buf.to_string(), cursor_char)
+    };
+    let (visual_lines, cursor_line, cursor_col) = wrap_and_locate_cursor(&display_buf, display_cursor, usable);
     let is_command = matches!(buf.trim(), "/clear" | "/new" | "/exit" | "/quit");
     for line in &visual_lines {
         let _ = out.execute(Print(" "));
@@ -1259,10 +1386,32 @@ pub fn draw_prompt_box(
             let _ = out.execute(Print(line));
             let _ = out.execute(ResetColor);
         } else {
-            let _ = out.execute(Print(line));
+            print_styled_line(line, has_pastes);
         }
         let _ = out.execute(Print("\r\n"));
     }
+
+    // Completion list (between content and bottom bar)
+    let comp_count = if let Some(comp) = completer {
+        let results = &comp.results;
+        let sel = comp.selected;
+        for (i, path) in results.iter().enumerate() {
+            let _ = out.execute(Print("  "));
+            if i == sel {
+                let _ = out.execute(SetForegroundColor(theme::ACCENT));
+                let _ = out.execute(Print(format!("  {}", path)));
+                let _ = out.execute(ResetColor);
+            } else {
+                let _ = out.execute(SetAttribute(Attribute::Dim));
+                let _ = out.execute(Print(format!("  {}", path)));
+                let _ = out.execute(SetAttribute(Attribute::Reset));
+            }
+            let _ = out.execute(Print("\r\n"));
+        }
+        results.len()
+    } else {
+        0
+    };
 
     // Bottom bar
     if mode == super::input::Mode::Apply {
@@ -1273,7 +1422,7 @@ pub fn draw_prompt_box(
 
     let _ = out.flush();
 
-    let total_content = throbber_count + queued_count + visual_lines.len();
+    let total_content = throbber_count + queued_count + visual_lines.len() + comp_count;
     let final_row = cursor::position().map(|(_, y)| y).unwrap_or(0);
     let top_row = final_row.saturating_sub(total_content as u16 + 1);
 

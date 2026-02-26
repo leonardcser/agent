@@ -1,4 +1,5 @@
 mod agent;
+pub mod completer;
 mod config;
 pub mod input;
 mod permissions;
@@ -12,7 +13,7 @@ use agent::{run_agent, AgentEvent};
 use clap::Parser;
 use crossterm::{
     cursor,
-    event,
+    event::{self, EnableBracketedPaste, DisableBracketedPaste},
     terminal, ExecutableCommand,
 };
 use input::{char_pos, handle_term_event, read_input, History, Mode};
@@ -52,6 +53,7 @@ struct App {
     app_state: state::State,
     pre_buf: String,
     pre_cursor: usize,
+    pastes: Vec<String>,
     queued_messages: Vec<String>,
     auto_approved: HashSet<String>,
 }
@@ -72,6 +74,7 @@ impl App {
             app_state,
             pre_buf: String::new(),
             pre_cursor: 0,
+            pastes: Vec::new(),
             queued_messages: Vec::new(),
             auto_approved: HashSet::new(),
         }
@@ -80,7 +83,9 @@ impl App {
     fn read_input(&mut self) -> Option<String> {
         let initial = std::mem::take(&mut self.pre_buf);
         let cursor = std::mem::replace(&mut self.pre_cursor, 0);
-        read_input(&mut self.screen, &mut self.mode, &mut self.input_history, initial, cursor)
+        let result = read_input(&mut self.screen, &mut self.mode, &mut self.input_history, initial, cursor, &mut self.pastes);
+        self.pastes.clear();
+        result
     }
 
     /// Handle a user command. Returns false if the app should exit.
@@ -132,7 +137,7 @@ impl App {
         let cursor_char = char_pos(&self.pre_buf, self.pre_cursor);
         let mut out = io::stdout();
         let _ = out.execute(cursor::Hide);
-        self.screen.render(&self.pre_buf, cursor_char, self.mode, render::term_width(), &self.queued_messages);
+        self.screen.render(&self.pre_buf, cursor_char, self.mode, render::term_width(), &self.queued_messages, &self.pastes);
         let _ = out.execute(cursor::Show);
         let _ = out.flush();
     }
@@ -245,7 +250,7 @@ impl App {
             self.screen.erase_prompt();
             *resize_at = Some(Instant::now());
         }
-        let (needs_redraw, cancel) = handle_term_event(ev, &mut self.pre_buf, &mut self.pre_cursor, &mut self.mode, last_esc, &mut self.queued_messages);
+        let (needs_redraw, cancel) = handle_term_event(ev, &mut self.pre_buf, &mut self.pre_cursor, &mut self.mode, last_esc, &mut self.queued_messages, &mut self.pastes);
         if cancel {
             self.screen.erase_prompt();
             return TermAction::Cancel;
@@ -273,12 +278,14 @@ impl App {
             self.screen.set_throbber(render::Throbber::Interrupted);
             self.pre_buf.clear();
             self.pre_cursor = 0;
+            self.pastes.clear();
             self.queued_messages.clear();
             cancel_token.cancel();
             agent_handle.abort();
         } else {
             self.screen.set_throbber(render::Throbber::Done);
         }
+        let _ = io::stdout().execute(DisableBracketedPaste);
         terminal::disable_raw_mode().ok();
         self.app_state.set_mode(self.mode);
 
@@ -370,6 +377,7 @@ async fn main() {
         app.push_user_message(input);
 
         terminal::enable_raw_mode().ok();
+        let _ = io::stdout().execute(EnableBracketedPaste);
         app.screen.set_throbber(render::Throbber::Working);
         app.render_screen();
 

@@ -7,6 +7,8 @@ use std::path::PathBuf;
 pub struct State {
     #[serde(default)]
     pub mode: String,
+    #[serde(default)]
+    pub vim_mode: bool,
 }
 
 fn state_path() -> PathBuf {
