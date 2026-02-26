@@ -76,6 +76,7 @@ pub enum ConfirmChoice {
 pub enum Throbber {
     /// Agent is running. Stores the start instant for elapsed time.
     Working,
+    Retrying(Duration),
     Done,
     Interrupted,
 }
@@ -118,10 +119,24 @@ impl Screen {
         self.blocks.push(block);
     }
 
-    pub fn update_last_tool(&mut self, status: ToolStatus, output: Option<ToolOutput>, elapsed: Option<Duration>) {
-        let idx = self.blocks.iter().rposition(|b| matches!(b, Block::ToolCall { .. }));
+    pub fn update_last_tool(
+        &mut self,
+        status: ToolStatus,
+        output: Option<ToolOutput>,
+        elapsed: Option<Duration>,
+    ) {
+        let idx = self
+            .blocks
+            .iter()
+            .rposition(|b| matches!(b, Block::ToolCall { .. }));
         if let Some(idx) = idx {
-            if let Block::ToolCall { status: ref mut s, elapsed: ref mut e, output: ref mut o, .. } = self.blocks[idx] {
+            if let Block::ToolCall {
+                status: ref mut s,
+                elapsed: ref mut e,
+                output: ref mut o,
+                ..
+            } = self.blocks[idx]
+            {
                 *s = status;
                 *e = elapsed;
                 *o = output;
@@ -134,16 +149,27 @@ impl Screen {
     }
 
     pub fn append_tool_output(&mut self, chunk: &str) {
-        let idx = self.blocks.iter().rposition(|b| matches!(b, Block::ToolCall { .. }));
+        let idx = self
+            .blocks
+            .iter()
+            .rposition(|b| matches!(b, Block::ToolCall { .. }));
         if let Some(idx) = idx {
-            if let Block::ToolCall { output: ref mut o, .. } = self.blocks[idx] {
+            if let Block::ToolCall {
+                output: ref mut o, ..
+            } = self.blocks[idx]
+            {
                 match o {
                     Some(ref mut out) => {
-                        if !out.content.is_empty() { out.content.push('\n'); }
+                        if !out.content.is_empty() {
+                            out.content.push('\n');
+                        }
                         out.content.push_str(chunk);
                     }
                     None => {
-                        *o = Some(ToolOutput { content: chunk.to_string(), is_error: false });
+                        *o = Some(ToolOutput {
+                            content: chunk.to_string(),
+                            is_error: false,
+                        });
                     }
                 }
             }
@@ -155,9 +181,15 @@ impl Screen {
     }
 
     pub fn set_last_tool_status(&mut self, status: ToolStatus) {
-        let idx = self.blocks.iter().rposition(|b| matches!(b, Block::ToolCall { .. }));
+        let idx = self
+            .blocks
+            .iter()
+            .rposition(|b| matches!(b, Block::ToolCall { .. }));
         if let Some(idx) = idx {
-            if let Block::ToolCall { status: ref mut s, .. } = self.blocks[idx] {
+            if let Block::ToolCall {
+                status: ref mut s, ..
+            } = self.blocks[idx]
+            {
                 *s = status;
             }
             if idx < self.flushed {
@@ -172,11 +204,12 @@ impl Screen {
     }
 
     pub fn set_throbber(&mut self, state: Throbber) {
-        if state == Throbber::Working && self.working_since.is_none() {
+        let is_active = matches!(state, Throbber::Working | Throbber::Retrying(_));
+        if is_active && self.working_since.is_none() {
             self.working_since = Some(Instant::now());
             self.final_elapsed = None;
         }
-        if state != Throbber::Working {
+        if !is_active {
             self.final_elapsed = self.working_since.map(|s| s.elapsed());
             self.working_since = None;
         }
@@ -251,7 +284,10 @@ impl Screen {
                 self.prompt_top_row.saturating_sub(self.last_block_rows)
             } else {
                 let _ = out.flush();
-                cursor::position().map(|(_, y)| y).unwrap_or(0).saturating_sub(self.last_block_rows)
+                cursor::position()
+                    .map(|(_, y)| y)
+                    .unwrap_or(0)
+                    .saturating_sub(self.last_block_rows)
             };
             let _ = out.execute(cursor::MoveTo(0, erase_from));
             let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
@@ -271,11 +307,16 @@ impl Screen {
         let last_idx = self.blocks.len().saturating_sub(1);
         for i in self.flushed..self.blocks.len() {
             let gap = if i > 0 {
-                gap_between(&Element::Block(&self.blocks[i - 1]), &Element::Block(&self.blocks[i]))
+                gap_between(
+                    &Element::Block(&self.blocks[i - 1]),
+                    &Element::Block(&self.blocks[i]),
+                )
             } else {
                 0
             };
-            for _ in 0..gap { let _ = out.execute(Print("\r\n")); }
+            for _ in 0..gap {
+                let _ = out.execute(Print("\r\n"));
+            }
             let rows = render_block(&self.blocks[i], w);
             if i == last_idx {
                 self.last_block_rows = rows + gap;
@@ -292,13 +333,21 @@ impl Screen {
         self.draw_prompt_with_queued(state, mode, width, &[]);
     }
 
-    pub fn draw_prompt_with_queued(&mut self, state: &InputState, mode: super::input::Mode, width: usize, queued: &[String]) {
+    pub fn draw_prompt_with_queued(
+        &mut self,
+        state: &InputState,
+        mode: super::input::Mode,
+        width: usize,
+        queued: &[String],
+    ) {
         self.render_blocks();
 
         let gap = self.blocks.last().map_or(0, |last| {
             gap_between(&Element::Block(last), &Element::Throbber)
         });
-        for _ in 0..gap { let _ = io::stdout().execute(Print("\r\n")); }
+        for _ in 0..gap {
+            let _ = io::stdout().execute(Print("\r\n"));
+        }
 
         self.prompt_top_row = self.draw_prompt_sections(state, mode, width, queued);
         if gap > 0 {
@@ -339,15 +388,24 @@ impl Screen {
 
         // 3. Top bar
         let tokens_label = self.context_tokens.map(format_tokens);
-        draw_bar(width, tokens_label.as_deref().map(|l| (l, bar_color)), bar_color);
+        // Token count text should always be MUTED, bar segments use bar_color
+        draw_bar(
+            width,
+            tokens_label.as_deref().map(|l| (l, theme::MUTED)),
+            bar_color,
+        );
         let _ = out.execute(Print("\r\n"));
 
         // 4. Content with structured spans
         let spans = build_display_spans(&state.buf, &state.pastes);
         let display_buf = spans_to_string(&spans);
         let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
-        let (visual_lines, cursor_line, cursor_col) = wrap_and_locate_cursor(&display_buf, display_cursor, usable);
-        let is_command = matches!(state.buf.trim(), "/clear" | "/new" | "/exit" | "/quit" | "/vim");
+        let (visual_lines, cursor_line, cursor_col) =
+            wrap_and_locate_cursor(&display_buf, display_cursor, usable);
+        let is_command = matches!(
+            state.buf.trim(),
+            "/clear" | "/new" | "/exit" | "/quit" | "/vim"
+        );
         for line in &visual_lines {
             let _ = out.execute(Print(" "));
             if is_command {
@@ -368,7 +426,10 @@ impl Screen {
         }
 
         // 6. Completion list (below the bar)
-        let has_comp = state.completer.as_ref().is_some_and(|c| !c.results.is_empty());
+        let has_comp = state
+            .completer
+            .as_ref()
+            .is_some_and(|c| !c.results.is_empty());
         if has_comp {
             let _ = out.execute(Print("\r\n"));
         }
@@ -395,7 +456,7 @@ impl Screen {
         let mut out = io::stdout();
         let _ = out.execute(Print(" "));
         match state {
-            Throbber::Working => {
+            Throbber::Working | Throbber::Retrying(_) => {
                 if let Some(start) = self.working_since {
                     let elapsed = start.elapsed();
                     let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
@@ -403,7 +464,15 @@ impl Screen {
                     let _ = out.execute(Print(format!("{} working...", SPINNER_FRAMES[idx])));
                     let _ = out.execute(ResetColor);
                     let _ = out.execute(SetAttribute(Attribute::Dim));
-                    let _ = out.execute(Print(format!(" ({})", format_elapsed(elapsed))));
+                    if let Throbber::Retrying(delay) = state {
+                        let _ = out.execute(Print(format!(
+                            " ({}, retrying in {})",
+                            format_elapsed(elapsed),
+                            format_elapsed(delay)
+                        )));
+                    } else {
+                        let _ = out.execute(Print(format!(" ({})", format_elapsed(elapsed))));
+                    }
                     let _ = out.execute(SetAttribute(Attribute::Reset));
                 }
             }
@@ -427,7 +496,6 @@ impl Screen {
         let _ = out.execute(Print("\r\n"));
         1
     }
-
 }
 
 /// Element types for spacing calculation. Throbber represents the
@@ -501,9 +569,7 @@ fn render_block(block: &Block, _width: usize) -> u16 {
                 let _ = out
                     .execute(SetBackgroundColor(theme::USER_BG))
                     .and_then(|o| o.execute(SetAttribute(Attribute::Bold)))
-                    .and_then(|o| {
-                        o.execute(Print(format!(" {}{}", line, " ".repeat(trailing))))
-                    })
+                    .and_then(|o| o.execute(Print(format!(" {}{}", line, " ".repeat(trailing)))))
                     .and_then(|o| o.execute(SetAttribute(Attribute::Reset)))
                     .and_then(|o| o.execute(ResetColor));
                 let _ = out.execute(Print("\r\n"));
@@ -566,11 +632,12 @@ fn render_block(block: &Block, _width: usize) -> u16 {
                 ToolStatus::Confirm => theme::ACCENT,
                 ToolStatus::Pending => theme::TOOL_PENDING,
             };
-            let time = if name == "bash" && !matches!(status, ToolStatus::Pending | ToolStatus::Confirm) {
-                *elapsed
-            } else {
-                None
-            };
+            let time =
+                if name == "bash" && !matches!(status, ToolStatus::Pending | ToolStatus::Confirm) {
+                    *elapsed
+                } else {
+                    None
+                };
             let tl = tool_timeout_label(args);
             print_tool_line(name, summary, color, time, tl.as_deref());
             let mut rows = 1u16;
@@ -582,9 +649,7 @@ fn render_block(block: &Block, _width: usize) -> u16 {
             }
             rows
         }
-        Block::Confirm { tool, desc, choice } => {
-            render_confirm_result(tool, desc, *choice)
-        }
+        Block::Confirm { tool, desc, choice } => render_confirm_result(tool, desc, *choice),
         Block::Error { message } => {
             print_error(message);
             1
@@ -795,13 +860,22 @@ fn print_tool_output(
             let line_count = content.lines().count();
             let _ = out
                 .execute(SetAttribute(Attribute::Dim))
-                .and_then(|o| o.execute(Print(format!("   {} lines\r\n", line_count))))
+                .and_then(|o| o.execute(Print(format!(
+                    "   {}\r\n",
+                    pluralize(line_count, "line", "lines")
+                ))))
                 .and_then(|o| o.execute(SetAttribute(Attribute::Reset)));
             1
         }
         "edit_file" if !is_error => {
-            let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-            let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            let old = args
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new = args
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
             print_syntax_diff(old, new, path)
         }
@@ -826,6 +900,28 @@ fn print_tool_output(
             }
             count as u16
         }
+        "grep" if !is_error => {
+            let count = content.lines().count();
+            let _ = out
+                .execute(SetAttribute(Attribute::Dim))
+                .and_then(|o| o.execute(Print(format!(
+                    "   {}\r\n",
+                    pluralize(count, "match", "matches")
+                ))))
+                .and_then(|o| o.execute(SetAttribute(Attribute::Reset)));
+            1
+        }
+        "glob" if !is_error => {
+            let count = content.lines().count();
+            let _ = out
+                .execute(SetAttribute(Attribute::Dim))
+                .and_then(|o| o.execute(Print(format!(
+                    "   {}\r\n",
+                    pluralize(count, "file", "files")
+                ))))
+                .and_then(|o| o.execute(SetAttribute(Attribute::Reset)));
+            1
+        }
         _ => {
             let preview = result_preview(content, 3);
             if is_error {
@@ -841,6 +937,14 @@ fn print_tool_output(
             }
             preview.lines().count() as u16
         }
+    }
+}
+
+fn pluralize(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {}", singular)
+    } else {
+        format!("{} {}", count, plural)
     }
 }
 
@@ -892,7 +996,11 @@ fn print_syntax_diff(old: &str, new: &str, path: &str) -> u16 {
         b: 20,
     };
 
-    let layout = DiffLayout { indent, gutter_width, max_content };
+    let layout = DiffLayout {
+        indent,
+        gutter_width,
+        max_content,
+    };
 
     let mut h = HighlightLines::new(syntax, theme);
     // Prime highlighter up to context start
@@ -903,9 +1011,23 @@ fn print_syntax_diff(old: &str, new: &str, path: &str) -> u16 {
     }
 
     // Context before
-    let mut rows = print_diff_lines(&mut h, &file_lines[ctx_start..start_line], ctx_start, None, None, &layout);
+    let mut rows = print_diff_lines(
+        &mut h,
+        &file_lines[ctx_start..start_line],
+        ctx_start,
+        None,
+        None,
+        &layout,
+    );
     // Deleted lines
-    rows += print_diff_lines(&mut h, &old_lines, start_line, Some(('-', Color::Red)), Some(bg_del), &layout);
+    rows += print_diff_lines(
+        &mut h,
+        &old_lines,
+        start_line,
+        Some(('-', Color::Red)),
+        Some(bg_del),
+        &layout,
+    );
     // Re-highlight from start_line for added lines + context after
     let mut h2 = HighlightLines::new(syntax, theme);
     for i in 0..start_line {
@@ -914,11 +1036,25 @@ fn print_syntax_diff(old: &str, new: &str, path: &str) -> u16 {
         }
     }
     // Added lines
-    rows += print_diff_lines(&mut h2, &new_lines, start_line, Some(('+', Color::Green)), Some(bg_add), &layout);
+    rows += print_diff_lines(
+        &mut h2,
+        &new_lines,
+        start_line,
+        Some(('+', Color::Green)),
+        Some(bg_add),
+        &layout,
+    );
     // Context after
     let after_start = start_line + new_lines.len();
     let after_end = (after_start + ctx).min(file_lines.len());
-    rows += print_diff_lines(&mut h2, &file_lines[after_start..after_end], after_start, None, None, &layout);
+    rows += print_diff_lines(
+        &mut h2,
+        &file_lines[after_start..after_end],
+        after_start,
+        None,
+        None,
+        &layout,
+    );
     rows
 }
 
@@ -936,7 +1072,11 @@ fn print_diff_lines(
     bg: Option<Color>,
     layout: &DiffLayout,
 ) -> u16 {
-    let DiffLayout { indent, gutter_width, max_content } = *layout;
+    let DiffLayout {
+        indent,
+        gutter_width,
+        max_content,
+    } = *layout;
     let mut out = io::stdout();
     for (i, line) in lines.iter().enumerate() {
         let lineno = start_line + i + 1;
@@ -1190,7 +1330,11 @@ pub fn tool_timeout_label(args: &HashMap<String, serde_json::Value>) -> Option<S
 
 /// Word-wrap text and locate cursor position in visual-line space.
 /// Returns (visual_lines, cursor_line, cursor_col).
-fn wrap_and_locate_cursor(buf: &str, cursor_char: usize, usable: usize) -> (Vec<String>, usize, usize) {
+fn wrap_and_locate_cursor(
+    buf: &str,
+    cursor_char: usize,
+    usable: usize,
+) -> (Vec<String>, usize, usize) {
     let mut visual_lines: Vec<String> = Vec::new();
     let mut cursor_line = 0;
     let mut cursor_col = 0;
@@ -1259,8 +1403,8 @@ fn draw_bar(width: usize, label: Option<(&str, Color)>, bar_color: Color) {
 
 enum Span {
     Plain(String),
-    Paste(String),  // "[pasted N lines]"
-    AtRef(String),  // "@path"
+    Paste(String), // "[pasted N lines]"
+    AtRef(String), // "@path"
 }
 
 /// Build display spans from the raw buffer + paste storage.
@@ -1276,7 +1420,10 @@ fn build_display_spans(buf: &str, pastes: &[String]) -> Vec<Span> {
             if !plain.is_empty() {
                 spans.push(Span::Plain(std::mem::take(&mut plain)));
             }
-            let lines = pastes.get(paste_idx).map(|p| p.lines().count().max(1)).unwrap_or(1);
+            let lines = pastes
+                .get(paste_idx)
+                .map(|p| p.lines().count().max(1))
+                .unwrap_or(1);
             spans.push(Span::Paste(format!("[pasted {} lines]", lines)));
             paste_idx += 1;
             i += 1;
@@ -1383,16 +1530,16 @@ fn render_line_spans(line: &str) {
             break;
         };
 
-        if pos > 0 { let _ = out.execute(Print(&rest[..pos])); }
+        if pos > 0 {
+            let _ = out.execute(Print(&rest[..pos]));
+        }
 
         if paste_pos == Some(pos) {
             if let Some(end) = rest[pos..].find(']') {
                 let label = &rest[pos..pos + end + 1];
                 if label.ends_with(" lines]") {
                     let _ = out.execute(SetForegroundColor(theme::ACCENT));
-                    let _ = out.execute(SetAttribute(Attribute::Dim));
                     let _ = out.execute(Print(label));
-                    let _ = out.execute(SetAttribute(Attribute::Reset));
                     let _ = out.execute(ResetColor);
                     rest = &rest[pos + end + 1..];
                     continue;
@@ -1417,7 +1564,9 @@ fn render_line_spans(line: &str) {
 
 fn draw_completions(completer: Option<&crate::completer::Completer>) -> usize {
     let Some(comp) = completer else { return 0 };
-    if comp.results.is_empty() { return 0; }
+    if comp.results.is_empty() {
+        return 0;
+    }
     let mut out = io::stdout();
     let last = comp.results.len() - 1;
     let prefix = match comp.kind {
@@ -1425,7 +1574,12 @@ fn draw_completions(completer: Option<&crate::completer::Completer>) -> usize {
         crate::completer::CompleterKind::File => "./",
     };
     // Find the longest label to align descriptions.
-    let max_label = comp.results.iter().map(|i| prefix.len() + i.label.len()).max().unwrap_or(0);
+    let max_label = comp
+        .results
+        .iter()
+        .map(|i| prefix.len() + i.label.len())
+        .max()
+        .unwrap_or(0);
     for (i, item) in comp.results.iter().enumerate() {
         let _ = out.execute(Print("  "));
         let label = format!("{}{}", prefix, item.label);
@@ -1468,46 +1622,92 @@ pub fn show_confirm(tool_name: &str, desc: &str) -> ConfirmChoice {
     let mut out = io::stdout();
     let (width, height) = terminal::size().unwrap_or((80, 24));
     let w = width as usize;
-    let bar_row = height.saturating_sub(2);
+    let options: &[(&str, ConfirmChoice)] = &[
+        ("yes", ConfirmChoice::Yes),
+        ("no", ConfirmChoice::No),
+        ("always allow", ConfirmChoice::Always),
+    ];
+    // Rows: bar, command, blank, "Allow?", 3 options, blank = 8
+    let bar_row = height.saturating_sub(options.len() as u16 + 5);
+    let mut selected: usize = 0;
 
-    // Save cursor position
     let _ = out.flush();
     let saved_pos = cursor::position().unwrap_or((0, 0));
+    let _ = out.execute(cursor::Hide);
 
-    // Draw bar + content at absolute bottom
-    let _ = out.execute(cursor::MoveTo(0, bar_row));
-    let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
-    draw_bar(w, Some(("allow? (y)es (n)o (a)lways", theme::ACCENT)), theme::ACCENT);
-    let _ = out.execute(Print("\r\n"));
+    let draw = |selected: usize| {
+        let mut out = io::stdout();
+        let _ = out.execute(cursor::MoveTo(0, bar_row));
+        let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
 
-    // Content line: " tool_name: desc"
-    let _ = out.execute(Print(" "));
-    let _ = out.execute(SetForegroundColor(theme::ACCENT));
-    let _ = out.execute(Print(tool_name));
-    let _ = out.execute(ResetColor);
-    let _ = out.execute(SetAttribute(Attribute::Dim));
-    let _ = out.execute(Print(format!(": {}", desc)));
-    let _ = out.execute(SetAttribute(Attribute::Reset));
+        // Bar
+        draw_bar(w, None, theme::ACCENT);
+        let _ = out.execute(Print("\r\n"));
 
-    let _ = out.execute(cursor::Show);
-    let _ = out.flush();
+        // Command line
+        let _ = out.execute(Print(" "));
+        let _ = out.execute(SetForegroundColor(theme::ACCENT));
+        let _ = out.execute(Print(tool_name));
+        let _ = out.execute(ResetColor);
+        let _ = out.execute(Print(format!(": {}", desc)));
+        let _ = out.execute(Print("\r\n\r\n"));
+
+        // Allow header
+        let _ = out.execute(SetAttribute(Attribute::Dim));
+        let _ = out.execute(Print(" Allow?\r\n"));
+
+        // Options
+        for (i, (label, _)) in options.iter().enumerate() {
+            let _ = out.execute(Print("  "));
+            if i == selected {
+                let _ = out.execute(SetAttribute(Attribute::Dim));
+                let _ = out.execute(Print(format!("{}.", i + 1)));
+                let _ = out.execute(SetAttribute(Attribute::Reset));
+                let _ = out.execute(Print(" "));
+                let _ = out.execute(SetForegroundColor(theme::ACCENT));
+                let _ = out.execute(Print(label));
+                let _ = out.execute(ResetColor);
+            } else {
+                let _ = out.execute(SetAttribute(Attribute::Dim));
+                let _ = out.execute(Print(format!("{}. ", i + 1)));
+                let _ = out.execute(SetAttribute(Attribute::Reset));
+                let _ = out.execute(Print(format!("{}", label)));
+            }
+            let _ = out.execute(Print("\r\n"));
+        }
+
+        let _ = out.flush();
+    };
+
+    draw(selected);
 
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
     let choice = loop {
-        if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = event::read() {
+        if let Ok(Event::Key(KeyEvent {
+            code, modifiers, ..
+        })) = event::read()
+        {
             match (code, modifiers) {
-                (KeyCode::Enter, _) | (KeyCode::Char('y' | 'Y'), _) => {
-                    break ConfirmChoice::Yes;
-                }
+                (KeyCode::Enter, _) => break options[selected].1,
+                (KeyCode::Char('1'), _) => break ConfirmChoice::Yes,
+                (KeyCode::Char('2'), _) => break ConfirmChoice::No,
+                (KeyCode::Char('3'), _) => break ConfirmChoice::Always,
                 (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                    break ConfirmChoice::No;
+                    break ConfirmChoice::No
                 }
-                (KeyCode::Esc, _) | (KeyCode::Char('n' | 'N'), _) => {
-                    break ConfirmChoice::No;
+                (KeyCode::Esc, _) => break ConfirmChoice::No,
+                (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                    selected = if selected == 0 {
+                        options.len() - 1
+                    } else {
+                        selected - 1
+                    };
+                    draw(selected);
                 }
-                (KeyCode::Char('a' | 'A'), _) => {
-                    break ConfirmChoice::Always;
+                (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                    selected = (selected + 1) % options.len();
+                    draw(selected);
                 }
                 _ => {}
             }
@@ -1515,7 +1715,6 @@ pub fn show_confirm(tool_name: &str, desc: &str) -> ConfirmChoice {
     };
 
     // Erase the overlay
-    let _ = out.execute(cursor::Hide);
     let _ = out.execute(cursor::MoveTo(0, bar_row));
     let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
     let _ = out.execute(cursor::MoveTo(saved_pos.0, saved_pos.1));

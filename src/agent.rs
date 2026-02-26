@@ -15,6 +15,7 @@ pub enum AgentEvent {
     ToolResult { content: String, is_error: bool },
     Confirm { desc: String, reply: tokio::sync::oneshot::Sender<bool> },
     TokenUsage { prompt_tokens: u32 },
+    Retrying(std::time::Duration),
     Done,
     Error(String),
 }
@@ -54,7 +55,8 @@ pub async fn run_agent(
     let tool_defs: Vec<ToolDefinition> = registry.definitions(permissions, mode);
 
     loop {
-        let resp = match provider.chat(&messages, &tool_defs, model, &cancel).await {
+        let on_retry = |delay: std::time::Duration| { let _ = tx.send(AgentEvent::Retrying(delay)); };
+        let resp = match provider.chat(&messages, &tool_defs, model, &cancel, Some(&on_retry)).await {
             Ok(r) => r,
             Err(e) => {
                 let _ = tx.send(AgentEvent::Error(e));
@@ -185,9 +187,14 @@ pub async fn run_agent(
             } else {
                 tool.execute(&args)
             };
+            let model_content = match tc.function.name.as_str() {
+                "grep" => trim_tool_output_for_model(&content, 200),
+                "glob" => trim_tool_output_for_model(&content, 200),
+                _ => content.clone(),
+            };
             messages.push(Message {
                 role: Role::Tool,
-                content: Some(content.clone()),
+                content: Some(model_content),
                 tool_calls: None,
                 tool_call_id: Some(tc.id.clone()),
             });
@@ -197,6 +204,26 @@ pub async fn run_agent(
             });
         }
     }
+}
+
+fn trim_tool_output_for_model(content: &str, max_lines: usize) -> String {
+    if content == "no matches found" {
+        return content.to_string();
+    }
+    let mut lines = content.lines();
+    let total = content.lines().count();
+    if total <= max_lines {
+        return content.to_string();
+    }
+    let mut out = String::new();
+    for (i, line) in lines.by_ref().take(max_lines).enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    out.push_str(&format!("\n... (trimmed, {} lines total)", total));
+    out
 }
 
 async fn execute_bash_streaming(

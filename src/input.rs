@@ -1,4 +1,4 @@
-use crate::completer::Completer;
+use crate::completer::{Completer, CompleterKind};
 use crate::config;
 use crate::render::{self, Screen};
 use crate::vim::{self, ViMode, Vim};
@@ -354,8 +354,17 @@ impl InputState {
         match ev {
             Event::Key(KeyEvent { code: KeyCode::Enter, .. }) => {
                 let comp = self.completer.take().unwrap();
+                let is_command = comp.kind == CompleterKind::Command;
                 self.accept_completion(&comp);
-                Some(Action::Redraw)
+                if is_command {
+                    let text = self.expanded_text();
+                    self.buf.clear();
+                    self.cpos = 0;
+                    self.pastes.clear();
+                    Some(Action::Submit(text))
+                } else {
+                    Some(Action::Redraw)
+                }
             }
             Event::Key(KeyEvent { code: KeyCode::Esc, .. }) => {
                 self.completer = None;

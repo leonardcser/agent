@@ -1,6 +1,6 @@
-use crate::provider::{FunctionSchema, ToolDefinition};
-use crate::permissions::{Decision, Permissions};
 use crate::input::Mode;
+use crate::permissions::{Decision, Permissions};
+use crate::provider::{FunctionSchema, ToolDefinition};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -36,18 +36,23 @@ impl ToolRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
+        self.tools
+            .iter()
+            .find(|t| t.name() == name)
+            .map(|t| t.as_ref())
     }
 
     pub fn definitions(&self, permissions: &Permissions, mode: Mode) -> Vec<ToolDefinition> {
         self.tools
             .iter()
             .filter(|t| permissions.check_tool(mode, t.name()) != Decision::Deny)
-            .map(|t| ToolDefinition::new(FunctionSchema {
-                name: t.name().into(),
-                description: t.description().into(),
-                parameters: t.parameters(),
-            }))
+            .map(|t| {
+                ToolDefinition::new(FunctionSchema {
+                    name: t.name().into(),
+                    description: t.description().into(),
+                    parameters: t.parameters(),
+                })
+            })
             .collect()
     }
 }
@@ -60,19 +65,16 @@ pub fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
 }
 
 fn int_arg(args: &HashMap<String, Value>, key: &str) -> usize {
-    args.get(key)
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize
+    args.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize
 }
 
 fn bool_arg(args: &HashMap<String, Value>, key: &str) -> bool {
-    args.get(key)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    args.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 pub fn timeout_arg(args: &HashMap<String, Value>, default_secs: u64) -> Duration {
-    let ms = args.get("timeout_ms")
+    let ms = args
+        .get("timeout_ms")
         .and_then(|v| v.as_u64())
         .unwrap_or(default_secs * 1000);
     Duration::from_millis(ms)
@@ -83,17 +85,19 @@ fn run_command_with_timeout(mut child: std::process::Child, timeout: Duration) -
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out = child.wait_with_output().unwrap_or_else(|e| {
-                    std::process::Output {
+                let out = child
+                    .wait_with_output()
+                    .unwrap_or_else(|e| std::process::Output {
                         status,
                         stdout: Vec::new(),
                         stderr: e.to_string().into_bytes(),
-                    }
-                });
+                    });
                 let mut result = String::from_utf8_lossy(&out.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 if !stderr.is_empty() {
-                    if !result.is_empty() { result.push('\n'); }
+                    if !result.is_empty() {
+                        result.push('\n');
+                    }
                     result.push_str(&stderr);
                 }
                 return ToolResult {
@@ -113,7 +117,10 @@ fn run_command_with_timeout(mut child: std::process::Child, timeout: Duration) -
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
-                return ToolResult { content: e.to_string(), is_error: true };
+                return ToolResult {
+                    content: e.to_string(),
+                    is_error: true,
+                };
             }
         }
     }
@@ -141,7 +148,9 @@ pub struct ReadFileTool {
 }
 
 impl Tool for ReadFileTool {
-    fn name(&self) -> &str { "read_file" }
+    fn name(&self) -> &str {
+        "read_file"
+    }
 
     fn description(&self) -> &str {
         "Reads a file from the local filesystem. You can access any file directly by using this tool."
@@ -172,7 +181,12 @@ impl Tool for ReadFileTool {
         let path = str_arg(args, "file_path");
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(e) => return ToolResult { content: e.to_string(), is_error: true },
+            Err(e) => {
+                return ToolResult {
+                    content: e.to_string(),
+                    is_error: true,
+                }
+            }
         };
 
         // Store hash for staleness detection
@@ -184,12 +198,19 @@ impl Tool for ReadFileTool {
         let offset = int_arg(args, "offset").max(1);
         let limit = {
             let l = int_arg(args, "limit");
-            if l > 0 { l } else { 2000 }
+            if l > 0 {
+                l
+            } else {
+                2000
+            }
         };
 
         let start = offset - 1;
         if start >= lines.len() {
-            return ToolResult { content: "offset beyond end of file".into(), is_error: false };
+            return ToolResult {
+                content: "offset beyond end of file".into(),
+                is_error: false,
+            };
         }
 
         let end = (start + limit).min(lines.len());
@@ -197,13 +218,20 @@ impl Tool for ReadFileTool {
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let truncated = if line.len() > 2000 { &line[..2000] } else { line };
+                let truncated = if line.len() > 2000 {
+                    &line[..2000]
+                } else {
+                    line
+                };
                 format!("{:4}\t{}", start + i + 1, truncated)
             })
             .collect::<Vec<_>>()
             .join("\n");
 
-        ToolResult { content: result, is_error: false }
+        ToolResult {
+            content: result,
+            is_error: false,
+        }
     }
 }
 
@@ -212,7 +240,9 @@ impl Tool for ReadFileTool {
 pub struct WriteFileTool;
 
 impl Tool for WriteFileTool {
-    fn name(&self) -> &str { "write_file" }
+    fn name(&self) -> &str {
+        "write_file"
+    }
 
     fn description(&self) -> &str {
         "Writes a file to the local filesystem. This tool will overwrite the existing file if there is one at the provided path."
@@ -245,7 +275,10 @@ impl Tool for WriteFileTool {
 
         if let Some(parent) = Path::new(&path).parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                return ToolResult { content: e.to_string(), is_error: true };
+                return ToolResult {
+                    content: e.to_string(),
+                    is_error: true,
+                };
             }
         }
 
@@ -254,7 +287,10 @@ impl Tool for WriteFileTool {
                 content: format!("wrote {} bytes to {}", content.len(), path),
                 is_error: false,
             },
-            Err(e) => ToolResult { content: e.to_string(), is_error: true },
+            Err(e) => ToolResult {
+                content: e.to_string(),
+                is_error: true,
+            },
         }
     }
 }
@@ -266,7 +302,9 @@ pub struct EditFileTool {
 }
 
 impl Tool for EditFileTool {
-    fn name(&self) -> &str { "edit_file" }
+    fn name(&self) -> &str {
+        "edit_file"
+    }
 
     fn description(&self) -> &str {
         "Performs exact string replacements in files. The old_string must be unique in the file unless replace_all is true."
@@ -309,7 +347,12 @@ impl Tool for EditFileTool {
 
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(e) => return ToolResult { content: e.to_string(), is_error: true },
+            Err(e) => {
+                return ToolResult {
+                    content: e.to_string(),
+                    is_error: true,
+                }
+            }
         };
 
         // Check staleness: if we have a stored hash and it doesn't match, the file changed
@@ -361,9 +404,15 @@ impl Tool for EditFileTool {
                 if let Ok(mut map) = self.hashes.lock() {
                     map.insert(path.clone(), hash_content(&new_content));
                 }
-                ToolResult { content: format!("edited {}", path), is_error: false }
+                ToolResult {
+                    content: format!("edited {}", path),
+                    is_error: false,
+                }
             }
-            Err(e) => ToolResult { content: e.to_string(), is_error: true },
+            Err(e) => ToolResult {
+                content: e.to_string(),
+                is_error: true,
+            },
         }
     }
 }
@@ -373,8 +422,12 @@ impl Tool for EditFileTool {
 pub struct BashTool;
 
 impl Tool for BashTool {
-    fn name(&self) -> &str { "bash" }
-    fn description(&self) -> &str { "Execute a shell command" }
+    fn name(&self) -> &str {
+        "bash"
+    }
+    fn description(&self) -> &str {
+        "Execute a shell command"
+    }
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -403,7 +456,10 @@ impl Tool for BashTool {
 
         match child {
             Ok(child) => run_command_with_timeout(child, timeout),
-            Err(e) => ToolResult { content: e.to_string(), is_error: true },
+            Err(e) => ToolResult {
+                content: e.to_string(),
+                is_error: true,
+            },
         }
     }
 }
@@ -413,7 +469,9 @@ impl Tool for BashTool {
 pub struct GlobTool;
 
 impl Tool for GlobTool {
-    fn name(&self) -> &str { "glob" }
+    fn name(&self) -> &str {
+        "glob"
+    }
 
     fn description(&self) -> &str {
         "Fast file pattern matching tool that works with any codebase size. Returns matching file paths sorted by modification time."
@@ -463,12 +521,21 @@ impl Tool for GlobTool {
                 let matches: Vec<String> = entries.into_iter().map(|(_, path)| path).collect();
 
                 if matches.is_empty() {
-                    ToolResult { content: "no matches found".into(), is_error: false }
+                    ToolResult {
+                        content: "no matches found".into(),
+                        is_error: false,
+                    }
                 } else {
-                    ToolResult { content: matches.join("\n"), is_error: false }
+                    ToolResult {
+                        content: matches.join("\n"),
+                        is_error: false,
+                    }
                 }
             }
-            Err(e) => ToolResult { content: e.to_string(), is_error: true },
+            Err(e) => ToolResult {
+                content: e.to_string(),
+                is_error: true,
+            },
         }
     }
 }
@@ -478,7 +545,9 @@ impl Tool for GlobTool {
 pub struct GrepTool;
 
 impl Tool for GrepTool {
-    fn name(&self) -> &str { "grep" }
+    fn name(&self) -> &str {
+        "grep"
+    }
 
     fn description(&self) -> &str {
         "A powerful search tool built on ripgrep. Supports full regex syntax, file type filtering, glob filtering, and multiple output modes."
@@ -561,9 +630,8 @@ impl Tool for GrepTool {
         let after_ctx = int_arg(args, "after_context");
         let before_ctx = int_arg(args, "before_context");
         let context = int_arg(args, "context");
-        let head_limit = int_arg(args, "head_limit");
-        let offset = int_arg(args, "offset");
-        let line_numbers = args.get("line_numbers")
+        let line_numbers = args
+            .get("line_numbers")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
         let timeout = timeout_arg(args, 30);
@@ -627,22 +695,28 @@ impl Tool for GrepTool {
                 if result.is_error {
                     // rg exits 1 for no matches — treat as not-error
                     if result.content.is_empty() {
-                        return ToolResult { content: "no matches found".into(), is_error: false };
+                        return ToolResult {
+                            content: "no matches found".into(),
+                            is_error: false,
+                        };
                     }
                     return result;
                 }
 
-                let content = if result.content.is_empty() {
-                    "no matches found".into()
-                } else {
-                    apply_offset_and_limit(&result.content, offset, head_limit)
-                };
-
-                ToolResult { content, is_error: false }
+                ToolResult {
+                    content: result.content,
+                    is_error: false,
+                }
             }
             Err(_) => {
                 // rg not found — fall back to system grep
-                grep_fallback(&pattern, &search_path, &glob_filter, case_insensitive, timeout, offset, head_limit)
+                grep_fallback(
+                    &pattern,
+                    &search_path,
+                    &glob_filter,
+                    case_insensitive,
+                    timeout,
+                )
             }
         }
     }
@@ -654,8 +728,6 @@ fn grep_fallback(
     glob_filter: &str,
     case_insensitive: bool,
     timeout: Duration,
-    offset: usize,
-    head_limit: usize,
 ) -> ToolResult {
     let mut cmd_args = vec!["-rn".to_string(), "--max-count=200".to_string()];
     if case_insensitive {
@@ -678,30 +750,22 @@ fn grep_fallback(
         Ok(child) => {
             let result = run_command_with_timeout(child, timeout);
             if !result.is_error && result.content.is_empty() {
-                ToolResult { content: "no matches found".into(), is_error: false }
+                ToolResult {
+                    content: "no matches found".into(),
+                    is_error: false,
+                }
             } else {
-                let content = apply_offset_and_limit(&result.content, offset, head_limit);
-                ToolResult { content, is_error: result.is_error }
+                ToolResult {
+                    content: result.content,
+                    is_error: result.is_error,
+                }
             }
         }
-        Err(e) => ToolResult { content: e.to_string(), is_error: true },
+        Err(e) => ToolResult {
+            content: e.to_string(),
+            is_error: true,
+        },
     }
-}
-
-fn apply_offset_and_limit(content: &str, offset: usize, head_limit: usize) -> String {
-    if offset == 0 && head_limit == 0 {
-        return content.to_string();
-    }
-
-    let lines: Vec<&str> = content.lines().collect();
-    let start = offset.min(lines.len());
-    let end = if head_limit > 0 {
-        (start + head_limit).min(lines.len())
-    } else {
-        lines.len()
-    };
-
-    lines[start..end].join("\n")
 }
 
 // --- Registry builders ---
@@ -709,7 +773,9 @@ fn apply_offset_and_limit(content: &str, offset: usize, head_limit: usize) -> St
 pub fn normal_tools() -> ToolRegistry {
     let hashes = new_file_hashes();
     let mut r = ToolRegistry::new();
-    r.register(Box::new(ReadFileTool { hashes: hashes.clone() }));
+    r.register(Box::new(ReadFileTool {
+        hashes: hashes.clone(),
+    }));
     r.register(Box::new(BashTool));
     r.register(Box::new(GlobTool));
     r.register(Box::new(GrepTool));
@@ -719,9 +785,13 @@ pub fn normal_tools() -> ToolRegistry {
 pub fn apply_tools() -> ToolRegistry {
     let hashes = new_file_hashes();
     let mut r = ToolRegistry::new();
-    r.register(Box::new(ReadFileTool { hashes: hashes.clone() }));
+    r.register(Box::new(ReadFileTool {
+        hashes: hashes.clone(),
+    }));
     r.register(Box::new(WriteFileTool));
-    r.register(Box::new(EditFileTool { hashes: hashes.clone() }));
+    r.register(Box::new(EditFileTool {
+        hashes: hashes.clone(),
+    }));
     r.register(Box::new(BashTool));
     r.register(Box::new(GlobTool));
     r.register(Box::new(GrepTool));

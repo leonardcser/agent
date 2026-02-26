@@ -174,6 +174,10 @@ impl App {
             AgentEvent::Confirm { desc, reply } => {
                 EventResult::NeedsConfirm { desc, reply }
             }
+            AgentEvent::Retrying(delay) => {
+                self.screen.set_throbber(render::Throbber::Retrying(delay));
+                EventResult::Continue
+            }
             AgentEvent::Done => EventResult::Done,
             AgentEvent::Error(e) => {
                 self.screen.push(Block::Error { message: e });

@@ -84,9 +84,19 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
     // read_file: allow in both modes by default
     tools.entry("read_file".to_string()).or_insert(Decision::Allow);
     
-    // edit_file: allow in apply mode, deny in normal mode
-    let default_edit_file = if mode == Mode::Apply { Decision::Allow } else { Decision::Deny };
+    // edit_file: ask in normal mode, allow in apply mode
+    let default_edit_file = if mode == Mode::Apply { Decision::Allow } else { Decision::Ask };
     tools.entry("edit_file".to_string()).or_insert(default_edit_file);
+    
+    // write_file: ask in normal mode, allow in apply mode
+    let default_write_file = if mode == Mode::Apply { Decision::Allow } else { Decision::Ask };
+    tools.entry("write_file".to_string()).or_insert(default_write_file);
+    
+    // glob: always allow by default in both modes
+    tools.entry("glob".to_string()).or_insert(Decision::Allow);
+    
+    // grep: always allow by default in both modes
+    tools.entry("grep".to_string()).or_insert(Decision::Allow);
     
     ModePerms {
         tools,

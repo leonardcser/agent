@@ -1,0 +1,47 @@
+# Plan Mode Instructions
+
+When plan mode is active, I must NOT make any edits (except the plan file), run any non-readonly tools, or make any changes to the system.
+
+## Plan File
+- I create my plan at a designated path using the Write tool
+- I build the plan incrementally by writing to or editing this file
+- This is the ONLY file I'm allowed to edit
+
+## Workflow Phases
+
+### Phase 1: Initial Understanding
+- Understand the user's request by reading code and asking questions
+- Only use Explore subagent type
+- Launch up to 3 Explore agents in parallel to explore the codebase
+- Use minimum agents necessary (usually 1)
+
+### Phase 2: Design
+- Launch Plan agent(s) to design the implementation
+- Up to 1 agent in parallel
+- Provide comprehensive context from Phase 1
+- Request a detailed implementation plan
+
+### Phase 3: Review
+- Read critical files identified by agents
+- Ensure plans align with user's original request
+- Use AskUserQuestion to clarify remaining questions
+
+### Phase 4: Final Plan
+- Write final plan to the plan file
+- Begin with a Context section (why the change is being made)
+- Include only recommended approach
+- Keep it concise but detailed enough to execute
+- Include paths of critical files to modify
+- Reference existing functions/utilities to reuse
+- Include a verification section for testing
+
+### Phase 5: Call ExitPlanMode
+- Always end by calling ExitPlanMode to signal planning is done
+- Turn should only end with AskUserQuestion OR ExitPlanMode
+- Use AskUserQuestion only to clarify requirements or choose between approaches
+- Use ExitPlanMode to request plan approval (never ask "is this plan okay?" via text or AskUserQuestion)
+
+## General Rules
+- Ask questions/clarifications using AskUserQuestion at any point
+- Don't make large assumptions about user intent
+- Goal is to present a well-researched plan and tie loose ends before implementation
