@@ -259,8 +259,9 @@ impl InputState {
                     Action::Submit(text)
                 }
             }
+            // Ctrl+C / Ctrl+D handled in the input loop (double-tap logic).
             Event::Key(KeyEvent { code: KeyCode::Char('c' | 'd'), modifiers: KeyModifiers::CONTROL, .. }) => {
-                Action::Cancel
+                Action::Noop
             }
             Event::Key(KeyEvent { code: KeyCode::Char('j'), modifiers: KeyModifiers::CONTROL, .. }) => {
                 self.buf.insert(self.cpos, '\n');
@@ -372,12 +373,20 @@ impl InputState {
             }
             Event::Key(KeyEvent { code: KeyCode::Up, .. })
             | Event::Key(KeyEvent { code: KeyCode::Char('k'), modifiers: KeyModifiers::CONTROL, .. }) => {
-                self.completer.as_mut().unwrap().move_up();
+                let comp = self.completer.as_mut().unwrap();
+                if comp.results.len() <= 1 {
+                    return None; // let history handle it
+                }
+                comp.move_up();
                 Some(Action::Redraw)
             }
             Event::Key(KeyEvent { code: KeyCode::Down, .. })
             | Event::Key(KeyEvent { code: KeyCode::Char('j'), modifiers: KeyModifiers::CONTROL, .. }) => {
-                self.completer.as_mut().unwrap().move_down();
+                let comp = self.completer.as_mut().unwrap();
+                if comp.results.len() <= 1 {
+                    return None; // let history handle it
+                }
+                comp.move_down();
                 Some(Action::Redraw)
             }
             Event::Key(KeyEvent { code: KeyCode::Tab, .. }) => {
@@ -523,8 +532,8 @@ pub fn read_input(
             }
         };
 
-        // Ctrl+C: if empty or double-tap, quit; otherwise clear input.
-        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL, .. })) {
+        // Ctrl+C / Ctrl+D: if empty or double-tap, quit; otherwise clear input.
+        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Char('c' | 'd'), modifiers: KeyModifiers::CONTROL, .. })) {
             let double_tap = last_ctrlc.map_or(false, |prev| prev.elapsed() < Duration::from_millis(500));
             if state.buf.is_empty() || double_tap {
                 let _ = out.execute(cursor::Hide);

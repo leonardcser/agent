@@ -40,6 +40,14 @@ pub struct ToolOutput {
     pub is_error: bool,
 }
 
+pub struct ActiveTool {
+    pub name: String,
+    pub summary: String,
+    pub args: HashMap<String, serde_json::Value>,
+    pub status: ToolStatus,
+    pub output: Option<ToolOutput>,
+}
+
 #[derive(Clone)]
 pub enum Block {
     User {
@@ -64,6 +72,10 @@ pub enum Block {
     Error {
         message: String,
     },
+    Exec {
+        command: String,
+        output: String,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -86,7 +98,7 @@ pub struct Screen {
     blocks: Vec<Block>,
     flushed: usize,
     last_block_rows: u16,
-    rerender: bool,
+    active_tool: Option<ActiveTool>,
     prompt_drawn: bool,
     prompt_dirty: bool,
     prompt_top_row: u16,
@@ -104,7 +116,7 @@ impl Screen {
             blocks: Vec::new(),
             flushed: 0,
             last_block_rows: 0,
-            rerender: false,
+            active_tool: None,
             prompt_drawn: false,
             prompt_dirty: true,
             prompt_top_row: 0,
@@ -119,7 +131,7 @@ impl Screen {
 
     pub fn begin_turn(&mut self) {
         self.last_block_rows = 0;
-        self.rerender = false;
+        self.active_tool = None;
     }
 
     pub fn push(&mut self, block: Block) {
@@ -127,83 +139,65 @@ impl Screen {
         self.prompt_dirty = true;
     }
 
-    pub fn update_last_tool(
+    pub fn start_tool(
+        &mut self,
+        name: String,
+        summary: String,
+        args: HashMap<String, serde_json::Value>,
+    ) {
+        self.active_tool = Some(ActiveTool {
+            name,
+            summary,
+            args,
+            status: ToolStatus::Pending,
+            output: None,
+        });
+        self.prompt_dirty = true;
+    }
+
+    pub fn append_active_output(&mut self, chunk: &str) {
+        if let Some(ref mut tool) = self.active_tool {
+            match tool.output {
+                Some(ref mut out) => {
+                    if !out.content.is_empty() {
+                        out.content.push('\n');
+                    }
+                    out.content.push_str(chunk);
+                }
+                None => {
+                    tool.output = Some(ToolOutput {
+                        content: chunk.to_string(),
+                        is_error: false,
+                    });
+                }
+            }
+            self.prompt_dirty = true;
+        }
+    }
+
+    pub fn set_active_status(&mut self, status: ToolStatus) {
+        if let Some(ref mut tool) = self.active_tool {
+            tool.status = status;
+            self.prompt_dirty = true;
+        }
+    }
+
+    pub fn finish_tool(
         &mut self,
         status: ToolStatus,
         output: Option<ToolOutput>,
         elapsed: Option<Duration>,
     ) {
-        let idx = self
-            .blocks
-            .iter()
-            .rposition(|b| matches!(b, Block::ToolCall { .. }));
-        if let Some(idx) = idx {
-            if let Block::ToolCall {
-                status: ref mut s,
-                elapsed: ref mut e,
-                output: ref mut o,
-                ..
-            } = self.blocks[idx]
-            {
-                *s = status;
-                *e = elapsed;
-                *o = output;
-            }
-            if idx < self.flushed {
-                self.flushed = idx;
-                self.rerender = true;
-            }
-        }
-    }
-
-    pub fn append_tool_output(&mut self, chunk: &str) {
-        let idx = self
-            .blocks
-            .iter()
-            .rposition(|b| matches!(b, Block::ToolCall { .. }));
-        if let Some(idx) = idx {
-            if let Block::ToolCall {
-                output: ref mut o, ..
-            } = self.blocks[idx]
-            {
-                match o {
-                    Some(ref mut out) => {
-                        if !out.content.is_empty() {
-                            out.content.push('\n');
-                        }
-                        out.content.push_str(chunk);
-                    }
-                    None => {
-                        *o = Some(ToolOutput {
-                            content: chunk.to_string(),
-                            is_error: false,
-                        });
-                    }
-                }
-            }
-            if idx < self.flushed {
-                self.flushed = idx;
-                self.rerender = true;
-            }
-        }
-    }
-
-    pub fn set_last_tool_status(&mut self, status: ToolStatus) {
-        let idx = self
-            .blocks
-            .iter()
-            .rposition(|b| matches!(b, Block::ToolCall { .. }));
-        if let Some(idx) = idx {
-            if let Block::ToolCall {
-                status: ref mut s, ..
-            } = self.blocks[idx]
-            {
-                *s = status;
-            }
-            if idx < self.flushed {
-                self.flushed = idx;
-                self.rerender = true;
-            }
+        if let Some(tool) = self.active_tool.take() {
+            self.blocks.push(Block::ToolCall {
+                name: tool.name,
+                summary: tool.summary,
+                args: tool.args,
+                status,
+                elapsed,
+                output,
+            });
+            self.prompt_dirty = true;
         }
     }
 
@@ -238,6 +232,16 @@ impl Screen {
     }
 
     pub fn flush_blocks(&mut self) {
+        if let Some(tool) = self.active_tool.take() {
+            self.blocks.push(Block::ToolCall {
+                name: tool.name,
+                summary: tool.summary,
+                args: tool.args,
+                status: tool.status,
+                elapsed: None,
+                output: tool.output,
+            });
+        }
         if self.prompt_drawn {
             erase_prompt_at(self.prompt_top_row);
             self.prompt_drawn = false;
@@ -261,7 +265,6 @@ impl Screen {
         let _ = out.flush();
         self.flushed = 0;
         self.last_block_rows = 0;
-        self.rerender = false;
         self.prompt_drawn = false;
         self.prompt_dirty = true;
         self.prev_prompt_rows = 0;
@@ -271,7 +274,7 @@ impl Screen {
         self.blocks.clear();
         self.flushed = 0;
         self.last_block_rows = 0;
-        self.rerender = false;
+        self.active_tool = None;
         self.prompt_drawn = false;
         self.prompt_dirty = true;
         self.prev_prompt_rows = 0;
@@ -294,26 +297,12 @@ impl Screen {
 
     fn render_blocks(&mut self) {
         let has_new = self.flushed < self.blocks.len();
-        if !has_new && !self.rerender {
+        if !has_new {
             return;
         }
 
         let mut out = io::stdout();
-        if self.rerender {
-            let erase_from = if self.prompt_drawn {
-                self.prompt_top_row.saturating_sub(self.last_block_rows)
-            } else {
-                let _ = out.flush();
-                cursor::position()
-                    .map(|(_, y)| y)
-                    .unwrap_or(0)
-                    .saturating_sub(self.last_block_rows)
-            };
-            let _ = out.queue(cursor::MoveTo(0, erase_from));
-            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-            let _ = out.flush();
-            self.rerender = false;
-        } else if self.prompt_drawn {
+        if self.prompt_drawn {
             erase_prompt_at(self.prompt_top_row);
         } else {
             let _ = out.flush();
@@ -371,7 +360,7 @@ impl Screen {
             }
         }
 
-        let has_new_blocks = self.flushed < self.blocks.len() || self.rerender;
+        let has_new_blocks = self.flushed < self.blocks.len();
         if !has_new_blocks && !self.prompt_dirty {
             return;
         }
@@ -388,18 +377,43 @@ impl Screen {
             let _ = out.queue(cursor::MoveTo(0, self.prompt_top_row));
         }
 
-        let gap = self.blocks.last().map_or(0, |last| {
-            gap_between(&Element::Block(last), &Element::Throbber)
-        });
+        // Render active tool (part of the dynamic/prompt area)
+        let mut active_rows: u16 = 0;
+        if let Some(ref tool) = self.active_tool {
+            let tool_gap = if let Some(last) = self.blocks.last() {
+                gap_between(&Element::Block(last), &Element::ActiveTool)
+            } else {
+                0
+            };
+            for _ in 0..tool_gap {
+                let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+                let _ = out.queue(Print("\r\n"));
+            }
+            let rows = render_tool(
+                &tool.name, &tool.summary, &tool.args,
+                tool.status, None, tool.output.as_ref(),
+            );
+            active_rows = tool_gap + rows;
+        }
+
+        // Gap between active tool (or last block) and throbber
+        let gap = if self.active_tool.is_some() {
+            gap_between(&Element::ActiveTool, &Element::Prompt)
+        } else {
+            self.blocks.last().map_or(0, |last| {
+                gap_between(&Element::Block(last), &Element::Prompt)
+            })
+        };
         for _ in 0..gap {
             let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
             let _ = out.queue(Print("\r\n"));
         }
 
-        let (top_row, new_rows) = self.draw_prompt_sections(state, mode, width, queued, self.prev_prompt_rows.saturating_sub(gap));
-        self.prev_prompt_rows = gap + new_rows;
+        let pre_prompt = active_rows + gap;
+        let (top_row, new_rows) = self.draw_prompt_sections(state, mode, width, queued, self.prev_prompt_rows.saturating_sub(pre_prompt));
+        self.prev_prompt_rows = pre_prompt + new_rows;
 
-        self.prompt_top_row = if gap > 0 { top_row.saturating_sub(gap) } else { top_row };
+        self.prompt_top_row = top_row.saturating_sub(pre_prompt);
         self.prompt_drawn = true;
         self.prompt_dirty = false;
 
@@ -421,10 +435,7 @@ impl Screen {
         let usable = width.saturating_sub(1);
         let mut extra_rows: u16 = 0;
 
-        // 1. Throbber
-        extra_rows += self.draw_throbber();
-
-        // 2. Queued messages
+        // 1. Queued messages
         for msg in queued {
             let display: String = msg.chars().take(usable).collect();
             let _ = out.queue(SetBackgroundColor(theme::USER_BG));
@@ -443,8 +454,10 @@ impl Screen {
 
         // 3. Top bar (full width, no clearing needed)
         let tokens_label = self.context_tokens.map(format_tokens);
+        let throbber_spans = self.throbber_spans();
         draw_bar(
             width,
+            if throbber_spans.is_empty() { None } else { Some(&throbber_spans) },
             tokens_label.as_deref().map(|l| (l, theme::MUTED)),
             bar_color,
         );
@@ -460,12 +473,20 @@ impl Screen {
             state.buf.trim(),
             "/clear" | "/new" | "/exit" | "/quit" | "/vim"
         );
-        for line in &visual_lines {
+        let is_exec = state.buf.starts_with('!');
+        for (li, line) in visual_lines.iter().enumerate() {
             let _ = out.queue(Print(" "));
             if is_command {
                 let _ = out.queue(SetForegroundColor(theme::ACCENT));
                 let _ = out.queue(Print(line));
                 let _ = out.queue(ResetColor);
+            } else if is_exec && li == 0 && line.starts_with('!') {
+                let _ = out.queue(SetForegroundColor(theme::EXEC));
+                let _ = out.queue(SetAttribute(Attribute::Bold));
+                let _ = out.queue(Print("!"));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                let _ = out.queue(ResetColor);
+                render_line_spans(&line[1..]);
             } else {
                 render_line_spans(line);
             }
@@ -475,9 +496,9 @@ impl Screen {
 
         // 5. Bottom bar (full width, no clearing needed)
         if mode == super::input::Mode::Apply {
-            draw_bar(width, Some(("apply", theme::APPLY)), bar_color);
+            draw_bar(width, None, Some(("apply", theme::APPLY)), bar_color);
         } else {
-            draw_bar(width, None, bar_color);
+            draw_bar(width, None, None, bar_color);
         }
 
         // 6. Completion list (below the bar)
@@ -515,76 +536,60 @@ impl Screen {
         (top_row, total_rows as u16)
     }
 
-    fn draw_throbber(&self) -> u16 {
-        let Some(state) = self.throbber else { return 0 };
-        let mut out = io::stdout();
-        let _ = out.queue(Print(" "));
+    fn throbber_spans(&self) -> Vec<BarSpan> {
+        let Some(state) = self.throbber else { return vec![] };
         match state {
             Throbber::Working | Throbber::Retrying(_) => {
-                if let Some(start) = self.working_since {
-                    let elapsed = start.elapsed();
-                    let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
-                    let _ = out.queue(SetForegroundColor(theme::PRIMARY));
-                    let _ = out.queue(Print(format!("{} working...", SPINNER_FRAMES[idx])));
-                    let _ = out.queue(ResetColor);
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
-                    if let Throbber::Retrying(delay) = state {
-                        let _ = out.queue(Print(format!(
-                            " ({}, retrying in {})",
-                            format_elapsed(elapsed),
-                            format_elapsed(delay)
-                        )));
-                    } else {
-                        let _ = out.queue(Print(format!(" ({})", format_elapsed(elapsed))));
-                    }
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
-                }
+                let Some(start) = self.working_since else { return vec![] };
+                let elapsed = start.elapsed();
+                let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
+                let mut spans = vec![
+                    BarSpan { text: format!("{} working", SPINNER_FRAMES[idx]), color: theme::PRIMARY, attr: None },
+                ];
+                let time_text = if let Throbber::Retrying(delay) = state {
+                    format!("({}s, retrying in {}s)", elapsed.as_secs(), delay.as_secs())
+                } else {
+                    format!("({})", format_elapsed(elapsed))
+                };
+                spans.push(BarSpan { text: format!(" {}", time_text), color: theme::MUTED, attr: Some(Attribute::Dim) });
+                spans
             }
             Throbber::Done => {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print("done"));
-                if let Some(d) = self.final_elapsed {
-                    let _ = out.queue(Print(format!(" ({})", format_elapsed(d))));
-                }
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                let time = self.final_elapsed.map(|d| format!(" ({})", format_elapsed(d))).unwrap_or_default();
+                vec![BarSpan { text: format!("done{}", time), color: theme::MUTED, attr: Some(Attribute::Dim) }]
             }
             Throbber::Interrupted => {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print("interrupted"));
-                if let Some(d) = self.final_elapsed {
-                    let _ = out.queue(Print(format!(" ({})", format_elapsed(d))));
-                }
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                let time = self.final_elapsed.map(|d| format!(" ({})", format_elapsed(d))).unwrap_or_default();
+                vec![BarSpan { text: format!("interrupted{}", time), color: theme::MUTED, attr: Some(Attribute::Dim) }]
             }
         }
-        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-        let _ = out.queue(Print("\r\n"));
-        1
     }
 }
 
-/// Element types for spacing calculation. Throbber represents the
-/// spinner/prompt area below all blocks.
+/// Element types for spacing calculation.
 enum Element<'a> {
     Block(&'a Block),
-    Throbber,
+    ActiveTool,
+    Prompt,
 }
 
 /// Number of blank lines to insert between two adjacent elements.
-/// Single source of truth for all vertical spacing.
 fn gap_between(above: &Element, below: &Element) -> u16 {
     match (above, below) {
-        // 1 blank line between user message and anything below
         (Element::Block(Block::User { .. }), _) => 1,
-        // 1 blank line before a user message (new turn)
         (_, Element::Block(Block::User { .. })) => 1,
-        // 1 blank line between tools
+        (Element::Block(Block::Exec { .. }), _) => 1,
+        (_, Element::Block(Block::Exec { .. })) => 1,
+        // Tool-to-tool (committed or active)
         (Element::Block(Block::ToolCall { .. }), Element::Block(Block::ToolCall { .. })) => 1,
-        // 1 blank line between text and tool
+        (Element::Block(Block::ToolCall { .. }), Element::ActiveTool) => 1,
+        // Text-to-tool
         (Element::Block(Block::Text { .. }), Element::Block(Block::ToolCall { .. })) => 1,
+        (Element::Block(Block::Text { .. }), Element::ActiveTool) => 1,
         (Element::Block(Block::ToolCall { .. }), Element::Block(Block::Text { .. })) => 1,
-        // 1 blank line between last block and throbber/prompt
-        (Element::Block(_), Element::Throbber) => 1,
+        // Gap before throbber/prompt
+        (Element::Block(_), Element::Prompt) => 1,
+        (Element::ActiveTool, Element::Prompt) => 1,
         _ => 0,
     }
 }
@@ -674,61 +679,88 @@ fn render_block(block: &Block, _width: usize) -> u16 {
                         i += 1;
                     }
                     rows += render_markdown_table(&lines[table_start..i]);
-                } else if lines[i].trim() == "---" {
-                    let w = term_width();
-                    let bar_len = w.saturating_sub(2);
-                    let _ = out.queue(SetForegroundColor(theme::BAR));
-                    let _ = out.queue(Print(format!(" {}\r\n", "\u{00B7}".repeat(bar_len))));
-                    let _ = out.queue(ResetColor);
-                    i += 1;
-                    rows += 1;
                 } else {
-                    let _ = out.queue(Print(" "));
-                    print_styled(lines[i]);
-                    let _ = out.queue(Print("\r\n"));
+                    let max_cols = term_width().saturating_sub(1); // 1 for left pad
+                    let segments = wrap_line(lines[i], max_cols);
+                    for seg in &segments {
+                        let _ = out.queue(Print(" "));
+                        print_styled(seg);
+                        let _ = out.queue(Print("\r\n"));
+                    }
                     i += 1;
-                    rows += 1;
+                    rows += segments.len() as u16;
                 }
             }
             rows
         }
-        Block::ToolCall {
-            name,
-            summary,
-            status,
-            elapsed,
-            output,
-            args,
-        } => {
-            let color = match status {
-                ToolStatus::Ok => theme::TOOL_OK,
-                ToolStatus::Err | ToolStatus::Denied => theme::TOOL_ERR,
-                ToolStatus::Confirm => theme::ACCENT,
-                ToolStatus::Pending => theme::TOOL_PENDING,
-            };
-            let time =
-                if name == "bash" && !matches!(status, ToolStatus::Pending | ToolStatus::Confirm) {
-                    *elapsed
-                } else {
-                    None
-                };
-            let tl = tool_timeout_label(args);
-            print_tool_line(name, summary, color, time, tl.as_deref());
-            let mut rows = 1u16;
-
-            if *status != ToolStatus::Denied {
-                if let Some(ref out_data) = output {
-                    rows += print_tool_output(name, &out_data.content, out_data.is_error, args);
-                }
-            }
-            rows
+        Block::ToolCall { name, summary, status, elapsed, output, args } => {
+            render_tool(name, summary, args, *status, *elapsed, output.as_ref())
         }
         Block::Confirm { tool, desc, choice } => render_confirm_result(tool, desc, *choice),
         Block::Error { message } => {
             print_error(message);
             1
         }
+        Block::Exec { command, output } => {
+            let mut out = io::stdout();
+            let w = term_width();
+            let display = format!("!{}", command);
+            let char_len = display.chars().count();
+            let pad_width = (char_len + 2).min(w);
+            let trailing = pad_width.saturating_sub(char_len + 1);
+            // Render "!" in exec color, rest in normal bold, all on user bg
+            let _ = out.queue(SetBackgroundColor(theme::USER_BG));
+            let _ = out.queue(SetForegroundColor(theme::EXEC));
+            let _ = out.queue(SetAttribute(Attribute::Bold));
+            let _ = out.queue(Print(" !"));
+            let _ = out.queue(SetForegroundColor(Color::Reset));
+            let _ = out.queue(Print(format!("{}{}", command, " ".repeat(trailing))));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+            let _ = out.queue(ResetColor);
+            let _ = out.queue(Print("\r\n"));
+            let mut rows = 1u16;
+            if !output.is_empty() {
+                for line in output.lines() {
+                    let _ = out
+                        .queue(SetForegroundColor(theme::MUTED))
+                        .and_then(|o| o.queue(Print(format!("  {}\r\n", line))))
+                        .and_then(|o| o.queue(ResetColor));
+                    rows += 1;
+                }
+            }
+            rows
+        }
     }
+}
+
+fn render_tool(
+    name: &str,
+    summary: &str,
+    args: &HashMap<String, serde_json::Value>,
+    status: ToolStatus,
+    elapsed: Option<Duration>,
+    output: Option<&ToolOutput>,
+) -> u16 {
+    let color = match status {
+        ToolStatus::Ok => theme::TOOL_OK,
+        ToolStatus::Err | ToolStatus::Denied => theme::TOOL_ERR,
+        ToolStatus::Confirm => theme::ACCENT,
+        ToolStatus::Pending => theme::TOOL_PENDING,
+    };
+    let time = if name == "bash" && !matches!(status, ToolStatus::Pending | ToolStatus::Confirm) {
+        elapsed
+    } else {
+        None
+    };
+    let tl = tool_timeout_label(args);
+    print_tool_line(name, summary, color, time, tl.as_deref());
+    let mut rows = 1u16;
+    if status != ToolStatus::Denied {
+        if let Some(out_data) = output {
+            rows += print_tool_output(name, &out_data.content, out_data.is_error, args);
+        }
+    }
+    rows
 }
 
 fn render_confirm_result(tool: &str, desc: &str, choice: Option<ConfirmChoice>) -> u16 {
@@ -776,6 +808,43 @@ fn render_confirm_result(tool: &str, desc: &str, choice: Option<ConfirmChoice>) 
         }
     }
     rows
+}
+
+/// Wrap a line to fit within `max_cols` display columns, breaking at word boundaries.
+/// Returns at least one segment (even if empty).
+fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
+    if max_cols == 0 {
+        return vec![line.to_string()];
+    }
+    let mut segments: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut col = 0;
+
+    for word in line.split_inclusive(' ') {
+        let wlen = word.chars().count();
+        if col + wlen > max_cols && col > 0 {
+            segments.push(current);
+            current = String::new();
+            col = 0;
+        }
+        // Word itself is longer than max_cols — hard break
+        if wlen > max_cols {
+            for ch in word.chars() {
+                if col >= max_cols {
+                    segments.push(current);
+                    current = String::new();
+                    col = 0;
+                }
+                current.push(ch);
+                col += 1;
+            }
+        } else {
+            current.push_str(word);
+            col += wlen;
+        }
+    }
+    segments.push(current);
+    segments
 }
 
 fn print_styled(text: &str) {
@@ -1055,7 +1124,8 @@ fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, max_rows: u
     let max_lineno = ctx_end;
     let gutter_width = format!("{}", max_lineno).len().max(2);
     let prefix_len = indent.len() + 1 + gutter_width + 3;
-    let max_content = term_width().saturating_sub(prefix_len + 1);
+    let right_margin = indent.len();
+    let max_content = term_width().saturating_sub(prefix_len + right_margin);
 
     let bg_del = Color::Rgb { r: 60, g: 20, b: 20 };
     let bg_add = Color::Rgb { r: 20, g: 50, b: 20 };
@@ -1229,7 +1299,8 @@ fn print_diff_lines(
             let _ = out.queue(Print(format!("{} ", ch)));
             let content_cols = print_syntect_regions(&regions, max_content, bg);
             let prefix_cols = indent.len() + 1 + gutter_width + 3;
-            let pad = term_width().saturating_sub(prefix_cols + content_cols);
+            let right_margin = indent.len();
+            let pad = term_width().saturating_sub(prefix_cols + content_cols + right_margin);
             if pad > 0 {
                 if let Some(bg_color) = bg {
                     let _ = out.queue(SetBackgroundColor(bg_color));
@@ -1518,27 +1589,68 @@ fn wrap_and_locate_cursor(
     (visual_lines, cursor_line, cursor_col)
 }
 
-/// Draw a horizontal bar, optionally with a right-aligned label.
+/// Draw a horizontal bar with optional left and right labels.
 /// `bar_color` controls the color of the `─` line segments.
-fn draw_bar(width: usize, label: Option<(&str, Color)>, bar_color: Color) {
+fn draw_bar(
+    width: usize,
+    left: Option<&[BarSpan]>,
+    right: Option<(&str, Color)>,
+    bar_color: Color,
+) {
     let mut out = io::stdout();
-    if let Some((text, color)) = label {
-        let tail = format!(" {} \u{2500}", text);
-        let bar_len = width.saturating_sub(tail.chars().count());
+    let dash = "\u{2500}";
+
+    let left_len: usize = left
+        .map(|spans| {
+            // "─ " + content + " "
+            1 + 1 + spans.iter().map(|s| s.text.chars().count()).sum::<usize>() + 1
+        })
+        .unwrap_or(0);
+    let right_len: usize = right
+        .map(|(text, _)| 1 + text.chars().count() + 1 + 1) // " text ─"
+        .unwrap_or(0);
+    let bar_len = width.saturating_sub(left_len + right_len);
+
+    // Left label
+    if let Some(spans) = left {
         let _ = out.queue(SetForegroundColor(bar_color));
-        let _ = out.queue(Print("\u{2500}".repeat(bar_len)));
+        let _ = out.queue(Print(dash));
         let _ = out.queue(ResetColor);
+        let _ = out.queue(Print(" "));
+        for span in spans {
+            if let Some(attr) = span.attr {
+                let _ = out.queue(SetAttribute(attr));
+            }
+            let _ = out.queue(SetForegroundColor(span.color));
+            let _ = out.queue(Print(&span.text));
+            let _ = out.queue(ResetColor);
+            if span.attr.is_some() {
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+            }
+        }
+        let _ = out.queue(Print(" "));
+    }
+
+    // Middle fill
+    let _ = out.queue(SetForegroundColor(bar_color));
+    let _ = out.queue(Print(dash.repeat(bar_len)));
+    let _ = out.queue(ResetColor);
+
+    // Right label
+    if let Some((text, color)) = right {
         let _ = out.queue(SetForegroundColor(color));
         let _ = out.queue(Print(format!(" {} ", text)));
         let _ = out.queue(ResetColor);
         let _ = out.queue(SetForegroundColor(bar_color));
-        let _ = out.queue(Print("\u{2500}"));
-        let _ = out.queue(ResetColor);
-    } else {
-        let _ = out.queue(SetForegroundColor(bar_color));
-        let _ = out.queue(Print("\u{2500}".repeat(width)));
+        let _ = out.queue(Print(dash));
         let _ = out.queue(ResetColor);
     }
+}
+
+struct BarSpan {
+    text: String,
+    color: Color,
+    attr: Option<Attribute>,
 }
 
 // ── Structured spans for prompt content ──────────────────────────────────────
@@ -1850,7 +1962,7 @@ pub fn show_confirm(
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
         // Bar
-        draw_bar(w, None, theme::ACCENT);
+        draw_bar(w, None, None, theme::ACCENT);
         let _ = out.queue(Print("\r\n"));
 
         // Command line

@@ -33,7 +33,7 @@ impl Completer {
             .into_iter()
             .map(|f| CompletionItem { label: f, description: None })
             .collect();
-        let results = all_items.iter().take(MAX_RESULTS).map(|i| i.clone()).collect();
+        let results = all_items.iter().take(MAX_RESULTS).cloned().collect();
         Self { anchor, kind: CompleterKind::File, query: String::new(), results, selected: 0, all_items }
     }
 
@@ -45,7 +45,7 @@ impl Completer {
             CompletionItem { label: "exit".into(), description: Some("exit the app".into()) },
             CompletionItem { label: "quit".into(), description: Some("exit the app".into()) },
         ];
-        let results = all_items.iter().take(MAX_RESULTS).map(|i| i.clone()).collect();
+        let results = all_items.iter().take(MAX_RESULTS).cloned().collect();
         Self { anchor, kind: CompleterKind::Command, query: String::new(), results, selected: 0, all_items }
     }
 
@@ -56,7 +56,7 @@ impl Completer {
 
     fn filter(&mut self) {
         if self.query.is_empty() {
-            self.results = self.all_items.iter().take(MAX_RESULTS).map(|i| i.clone()).collect();
+            self.results = self.all_items.iter().take(MAX_RESULTS).cloned().collect();
         } else {
             let q = self.query.to_lowercase();
             self.results = self
@@ -64,7 +64,7 @@ impl Completer {
                 .iter()
                 .filter(|item| fuzzy_match(&item.label, &q))
                 .take(MAX_RESULTS)
-                .map(|i| i.clone())
+                .cloned()
                 .collect();
         }
         if self.selected >= self.results.len() {

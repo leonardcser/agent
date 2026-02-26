@@ -110,9 +110,10 @@ impl App {
     }
 
     fn push_user_message(&mut self, input: String) {
+        let expanded = expand_at_refs(&input);
         self.history.push(Message {
             role: Role::User,
-            content: Some(input),
+            content: Some(expanded),
             tool_calls: None,
             tool_call_id: None,
         });
@@ -128,10 +129,7 @@ impl App {
 
         tokio::spawn(async move {
             let provider = Provider::new(&api_base, &api_key);
-            let registry = match mode {
-                Mode::Apply => tools::apply_tools(),
-                Mode::Normal => tools::normal_tools(),
-            };
+            let registry = tools::build_tools();
             run_agent(&provider, &model, &history, &registry, mode, &permissions, &tx, cancel).await
         })
     }
@@ -144,48 +142,52 @@ impl App {
         let _ = out.flush();
     }
 
-    fn handle_agent_event(&mut self, ev: AgentEvent) -> EventResult {
+    fn handle_agent_event(&mut self, ev: AgentEvent, pending: &mut Option<PendingTool>) -> SessionControl {
         match ev {
             AgentEvent::TokenUsage { prompt_tokens } => {
                 self.screen.set_context_tokens(prompt_tokens);
-                // A successful response clears any "retrying" throbber state
                 self.screen.set_throbber(render::Throbber::Working);
-                EventResult::Continue
+                SessionControl::Continue
             }
             AgentEvent::ToolOutputChunk(chunk) => {
-                self.screen.append_tool_output(&chunk);
-                EventResult::Continue
+                self.screen.append_active_output(&chunk);
+                SessionControl::Continue
             }
             AgentEvent::Text(content) => {
                 self.screen.push(Block::Text { content });
-                EventResult::Continue
+                SessionControl::Continue
             }
             AgentEvent::ToolCall { name, args } => {
                 let summary = tool_arg_summary(&name, &args);
-                self.screen.push(Block::ToolCall {
-                    name: name.clone(),
-                    summary,
-                    args,
-                    status: ToolStatus::Pending,
-                    elapsed: None,
-                    output: None,
-                });
-                EventResult::ToolStarted { name }
+                self.screen.start_tool(name.clone(), summary, args);
+                *pending = Some(PendingTool { name, start: Instant::now() });
+                SessionControl::Continue
             }
             AgentEvent::ToolResult { content, is_error } => {
-                EventResult::ToolFinished { content, is_error }
+                if let Some(ref p) = pending {
+                    let elapsed = p.start.elapsed();
+                    let status = if is_error { ToolStatus::Err } else { ToolStatus::Ok };
+                    let output = Some(ToolOutput { content, is_error });
+                    self.screen.finish_tool(
+                        status,
+                        output,
+                        if p.name == "bash" { Some(elapsed) } else { None },
+                    );
+                }
+                *pending = None;
+                SessionControl::Continue
             }
             AgentEvent::Confirm { desc, args, reply } => {
-                EventResult::NeedsConfirm { desc, args, reply }
+                SessionControl::NeedsConfirm { desc, args, reply }
             }
             AgentEvent::Retrying(delay) => {
                 self.screen.set_throbber(render::Throbber::Retrying(delay));
-                EventResult::Continue
+                SessionControl::Continue
             }
-            AgentEvent::Done => EventResult::Done,
+            AgentEvent::Done => SessionControl::Done,
             AgentEvent::Error(e) => {
                 self.screen.push(Block::Error { message: e });
-                EventResult::Done
+                SessionControl::Done
             }
         }
     }
@@ -202,7 +204,7 @@ impl App {
             return ConfirmAction::Approved;
         }
 
-        self.screen.set_last_tool_status(ToolStatus::Confirm);
+        self.screen.set_active_status(ToolStatus::Confirm);
         self.render_screen();
         self.screen.erase_prompt();
         let choice = render::show_confirm(tool_name, desc, args);
@@ -226,17 +228,6 @@ impl App {
         }
     }
 
-    fn update_tool_result(&mut self, pending: &PendingTool, content: String, is_error: bool, denied: bool) {
-        let elapsed = pending.start.elapsed();
-        let status = if denied { ToolStatus::Denied } else if is_error { ToolStatus::Err } else { ToolStatus::Ok };
-        let output = if !denied { Some(ToolOutput { content, is_error }) } else { None };
-        self.screen.update_last_tool(
-            status,
-            output,
-            if pending.name == "bash" { Some(elapsed) } else { None },
-        );
-    }
-
     fn handle_terminal_event(
         &mut self,
         ev: event::Event,
@@ -250,7 +241,6 @@ impl App {
             *resize_at = Some(Instant::now());
         }
 
-        // Ctrl+C: if empty or double-tap, cancel; otherwise clear prompt.
         if matches!(ev, event::Event::Key(crossterm::event::KeyEvent { code: crossterm::event::KeyCode::Char('c'), modifiers: crossterm::event::KeyModifiers::CONTROL, .. })) {
             let double_tap = last_ctrlc.map_or(false, |prev| prev.elapsed() < Duration::from_millis(500));
             if self.input.buf.is_empty() || double_tap {
@@ -265,7 +255,6 @@ impl App {
             return TermAction::None;
         }
 
-        // Agent-mode Esc handling: vim mode switch, unqueue, or double-Esc cancel.
         if matches!(ev, event::Event::Key(crossterm::event::KeyEvent { code: crossterm::event::KeyCode::Esc, .. })) {
             match resolve_agent_esc(
                 self.input.vim_mode(),
@@ -340,7 +329,74 @@ impl App {
         self.render_screen();
     }
 
-    fn finish_turn(&mut self, cancelled: bool, cancel_token: CancellationToken, agent_handle: tokio::task::JoinHandle<Vec<Message>>) -> tokio::task::JoinHandle<Vec<Message>> {
+    async fn run_session(&mut self) {
+        terminal::enable_raw_mode().ok();
+        let _ = io::stdout().execute(EnableBracketedPaste);
+        self.screen.set_throbber(render::Throbber::Working);
+        self.render_screen();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let cancel_token = CancellationToken::new();
+        let agent_handle = self.spawn_agent(tx, cancel_token.clone());
+
+        let mut pending: Option<PendingTool> = None;
+        let mut agent_done = false;
+        let mut resize_at: Option<Instant> = None;
+        let mut cancelled = false;
+        let mut last_esc: Option<Instant> = None;
+        let mut vim_mode_at_esc: Option<vim::ViMode> = None;
+        let mut last_ctrlc: Option<Instant> = None;
+
+        loop {
+            // Drain agent events
+            loop {
+                match rx.try_recv() {
+                    Ok(ev) => match self.handle_agent_event(ev, &mut pending) {
+                        SessionControl::Continue => {}
+                        SessionControl::NeedsConfirm { desc, args, reply } => {
+                            let tool_name = pending.as_ref().map(|p| p.name.as_str()).unwrap_or("");
+                            match self.handle_confirm(tool_name, &desc, &args, reply) {
+                                ConfirmAction::Approved => {
+                                    if let Some(ref mut p) = pending { p.start = Instant::now(); }
+                                }
+                                ConfirmAction::Denied => {
+                                    self.screen.finish_tool(ToolStatus::Denied, None, None);
+                                    pending = None;
+                                    cancelled = true;
+                                    agent_done = true;
+                                    break;
+                                }
+                            }
+                        }
+                        SessionControl::Done => { agent_done = true; break; }
+                    },
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => { agent_done = true; break; }
+                }
+            }
+
+            if agent_done { break; }
+
+            // Drain terminal events
+            while event::poll(Duration::ZERO).unwrap_or(false) {
+                if let Ok(ev) = event::read() {
+                    if let TermAction::Cancel = self.handle_terminal_event(
+                        ev, &mut last_esc, &mut vim_mode_at_esc, &mut last_ctrlc, &mut resize_at,
+                    ) {
+                        cancelled = true;
+                        agent_done = true;
+                        break;
+                    }
+                }
+            }
+
+            if agent_done { break; }
+
+            self.tick(&mut resize_at);
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+
+        self.screen.flush_blocks();
         if cancelled {
             self.screen.set_throbber(render::Throbber::Interrupted);
             self.input.clear();
@@ -349,18 +405,18 @@ impl App {
             agent_handle.abort();
         } else {
             self.screen.set_throbber(render::Throbber::Done);
+            if let Ok(new_messages) = agent_handle.await {
+                self.history = new_messages;
+            }
         }
         let _ = io::stdout().execute(DisableBracketedPaste);
         terminal::disable_raw_mode().ok();
         self.app_state.set_mode(self.mode);
-        agent_handle
     }
 }
 
-enum EventResult {
+enum SessionControl {
     Continue,
-    ToolStarted { name: String },
-    ToolFinished { content: String, is_error: bool },
     NeedsConfirm { desc: String, args: HashMap<String, serde_json::Value>, reply: tokio::sync::oneshot::Sender<bool> },
     Done,
 }
@@ -378,7 +434,6 @@ enum TermAction {
 struct PendingTool {
     name: String,
     start: Instant,
-    denied: bool,
 }
 
 #[tokio::main]
@@ -425,89 +480,71 @@ async fn main() {
         if !app.handle_command(&input) { break; }
         if input.starts_with('/') { continue; }
 
+        if let Some(cmd) = input.strip_prefix('!') {
+            let cmd = cmd.trim();
+            if !cmd.is_empty() {
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .output()
+                    .map(|o| {
+                        let mut s = String::from_utf8_lossy(&o.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        if !stderr.is_empty() {
+                            if !s.is_empty() { s.push('\n'); }
+                            s.push_str(&stderr);
+                        }
+                        s.truncate(s.trim_end().len());
+                        s
+                    })
+                    .unwrap_or_else(|e| format!("error: {}", e));
+                app.screen.push(Block::Exec { command: cmd.to_string(), output });
+            }
+            continue;
+        }
+
         app.screen.begin_turn();
         app.show_user_message(&input);
         app.push_user_message(input);
+        app.run_session().await;
+    }
+}
 
-        terminal::enable_raw_mode().ok();
-        let _ = io::stdout().execute(EnableBracketedPaste);
-        app.screen.set_throbber(render::Throbber::Working);
-        app.render_screen();
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let cancel_token = CancellationToken::new();
-        let agent_handle = app.spawn_agent(tx, cancel_token.clone());
-
-        let mut pending: Option<PendingTool> = None;
-        let mut agent_done = false;
-        let mut resize_at: Option<Instant> = None;
-        let mut cancelled = false;
-        let mut last_esc: Option<Instant> = None;
-        let mut vim_mode_at_esc: Option<vim::ViMode> = None;
-        let mut last_ctrlc: Option<Instant> = None;
-
-        loop {
-            loop {
-                match rx.try_recv() {
-                    Ok(ev) => {
-                        match app.handle_agent_event(ev) {
-                            EventResult::Continue => {}
-                            EventResult::ToolStarted { name } => {
-                                pending = Some(PendingTool { name, start: Instant::now(), denied: false });
-                            }
-                            EventResult::ToolFinished { content, is_error } => {
-                                if let Some(ref p) = pending {
-                                    app.update_tool_result(p, content, is_error, p.denied);
-                                }
-                                pending = None;
-                            }
-                            EventResult::NeedsConfirm { desc, args, reply } => {
-                                let tool_name = pending.as_ref().map(|p| p.name.as_str()).unwrap_or("");
-                                match app.handle_confirm(tool_name, &desc, &args, reply) {
-                                    ConfirmAction::Approved => {
-                                        if let Some(ref mut p) = pending { p.start = Instant::now(); }
-                                    }
-                                    ConfirmAction::Denied => {
-                                        if let Some(ref p) = pending {
-                                            app.update_tool_result(p, "denied by user".into(), false, true);
-                                        }
-                                        pending = None;
-                                        cancelled = true;
-                                        agent_done = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            EventResult::Done => { agent_done = true; break; }
-                        }
-                    }
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => { agent_done = true; break; }
-                }
-            }
-
-            if agent_done { break; }
-
-            while event::poll(Duration::ZERO).unwrap_or(false) {
-                if let Ok(ev) = event::read() {
-                    if let TermAction::Cancel = app.handle_terminal_event(ev, &mut last_esc, &mut vim_mode_at_esc, &mut last_ctrlc, &mut resize_at) {
-                        cancelled = true;
-                        agent_done = true;
-                        break;
-                    }
-                }
-            }
-
-            if agent_done { break; }
-
-            app.tick(&mut resize_at);
-            tokio::time::sleep(Duration::from_millis(80)).await;
+/// Expand `@path` references in user input by appending file contents.
+fn expand_at_refs(input: &str) -> String {
+    let mut refs: Vec<String> = Vec::new();
+    let mut chars = input.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c != '@' {
+            continue;
         }
-
-        app.screen.flush_blocks();
-        let agent_handle = app.finish_turn(cancelled, cancel_token, agent_handle);
-        if let Ok(new_messages) = agent_handle.await {
-            app.history = new_messages;
+        // Collect non-whitespace chars after @
+        let start = i + 1;
+        let mut end = start;
+        while let Some(&(j, nc)) = chars.peek() {
+            if nc.is_whitespace() {
+                break;
+            }
+            end = j + nc.len_utf8();
+            chars.next();
+        }
+        if end > start {
+            let path = &input[start..end];
+            if std::path::Path::new(path).exists() {
+                refs.push(path.to_string());
+            }
         }
     }
+
+    if refs.is_empty() {
+        return input.to_string();
+    }
+
+    let mut result = input.to_string();
+    for path in &refs {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            result.push_str(&format!("\n\nContents of {}:\n```\n{}\n```", path, contents));
+        }
+    }
+    result
 }

@@ -576,7 +576,7 @@ impl Tool for GrepTool {
                 "output_mode": {
                     "type": "string",
                     "enum": ["content", "files_with_matches", "count"],
-                    "description": "Output mode: \"content\" shows matching lines, \"files_with_matches\" shows file paths (default), \"count\" shows match counts."
+                    "description": "Output mode: \"content\" shows matching lines (default), \"files_with_matches\" shows file paths, \"count\" shows match counts."
                 },
                 "-i": {
                     "type": "boolean",
@@ -651,9 +651,9 @@ impl Tool for GrepTool {
 
         // Output mode
         match output_mode.as_str() {
-            "files_with_matches" | "" => cmd_args.push("--files-with-matches".into()),
+            "files_with_matches" => cmd_args.push("--files-with-matches".into()),
             "count" => cmd_args.push("--count".into()),
-            "content" => {
+            "content" | "" => {
                 if line_numbers {
                     cmd_args.push("--line-number".into());
                 }
@@ -806,32 +806,12 @@ fn grep_fallback(
 
 // --- Registry builders ---
 
-pub fn normal_tools() -> ToolRegistry {
+pub fn build_tools() -> ToolRegistry {
     let hashes = new_file_hashes();
     let mut r = ToolRegistry::new();
-    r.register(Box::new(ReadFileTool {
-        hashes: hashes.clone(),
-    }));
+    r.register(Box::new(ReadFileTool { hashes: hashes.clone() }));
     r.register(Box::new(WriteFileTool));
-    r.register(Box::new(EditFileTool {
-        hashes: hashes.clone(),
-    }));
-    r.register(Box::new(BashTool));
-    r.register(Box::new(GlobTool));
-    r.register(Box::new(GrepTool));
-    r
-}
-
-pub fn apply_tools() -> ToolRegistry {
-    let hashes = new_file_hashes();
-    let mut r = ToolRegistry::new();
-    r.register(Box::new(ReadFileTool {
-        hashes: hashes.clone(),
-    }));
-    r.register(Box::new(WriteFileTool));
-    r.register(Box::new(EditFileTool {
-        hashes: hashes.clone(),
-    }));
+    r.register(Box::new(EditFileTool { hashes: hashes.clone() }));
     r.register(Box::new(BashTool));
     r.register(Box::new(GlobTool));
     r.register(Box::new(GrepTool));
