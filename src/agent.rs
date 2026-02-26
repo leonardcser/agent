@@ -24,20 +24,12 @@ fn system_prompt(mode: Mode) -> String {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".into());
 
-    let mut prompt = String::new();
-    prompt.push_str("You are a coding assistant working in the user's terminal.\n");
-    prompt.push_str("You help with software engineering tasks: reading code, finding bugs, explaining patterns, and implementing changes.\n\n");
-    prompt.push_str(&format!("Working directory: {}\n\n", cwd));
-    prompt.push_str("Guidelines:\n");
-    prompt.push_str("- Read relevant files before making suggestions\n");
-    prompt.push_str("- Be concise and direct\n");
-    prompt.push_str("- Use grep and glob to search the codebase efficiently\n");
-    if mode == Mode::Apply {
-        prompt.push_str("- You have write access: use write_file and edit_file to implement changes\n");
-        prompt.push_str("- Always read a file with read_file before editing it — edit_file will reject stale edits\n");
-        prompt.push_str("- When modifying files, explain what you're changing and why\n");
-    }
-    prompt
+    let template = match mode {
+        Mode::Apply => include_str!("prompts/system_apply.txt"),
+        _ => include_str!("prompts/system.txt"),
+    };
+
+    template.replace("{cwd}", &cwd)
 }
 
 pub async fn run_agent(
