@@ -16,7 +16,7 @@ pub enum AgentEvent {
     ToolResult { content: String, is_error: bool },
     Confirm { desc: String, args: HashMap<String, Value>, reply: tokio::sync::oneshot::Sender<bool> },
     TokenUsage { prompt_tokens: u32 },
-    Retrying(std::time::Duration),
+    Retrying { delay: std::time::Duration, attempt: u32 },
     Done,
     Error(String),
 }
@@ -56,7 +56,9 @@ pub async fn run_agent(
     let tool_defs: Vec<ToolDefinition> = registry.definitions(permissions, mode);
 
     loop {
-        let on_retry = |delay: std::time::Duration| { let _ = tx.send(AgentEvent::Retrying(delay)); };
+        let on_retry = |delay: std::time::Duration, attempt: u32| {
+            let _ = tx.send(AgentEvent::Retrying { delay, attempt });
+        };
         let resp = match provider.chat(&messages, &tool_defs, model, &cancel, Some(&on_retry)).await {
             Ok(r) => r,
             Err(e) => {

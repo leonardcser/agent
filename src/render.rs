@@ -89,7 +89,7 @@ pub enum ConfirmChoice {
 pub enum Throbber {
     /// Agent is running. Stores the start instant for elapsed time.
     Working,
-    Retrying(Duration),
+    Retrying { delay: Duration, attempt: u32 },
     Done,
     Interrupted,
 }
@@ -108,6 +108,7 @@ pub struct Screen {
     throbber: Option<Throbber>,
     last_spinner_frame: usize,
     prev_prompt_rows: u16,
+    retry_deadline: Option<Instant>,
 }
 
 impl Screen {
@@ -126,6 +127,7 @@ impl Screen {
             throbber: None,
             last_spinner_frame: usize::MAX,
             prev_prompt_rows: 0,
+            retry_deadline: None,
         }
     }
 
@@ -212,7 +214,7 @@ impl Screen {
     }
 
     pub fn set_throbber(&mut self, state: Throbber) {
-        let is_active = matches!(state, Throbber::Working | Throbber::Retrying(_));
+        let is_active = matches!(state, Throbber::Working | Throbber::Retrying { .. });
         if is_active && self.working_since.is_none() {
             self.working_since = Some(Instant::now());
             self.final_elapsed = None;
@@ -221,6 +223,10 @@ impl Screen {
             self.final_elapsed = self.working_since.map(|s| s.elapsed());
             self.working_since = None;
         }
+        self.retry_deadline = match state {
+            Throbber::Retrying { delay, .. } => Some(Instant::now() + delay),
+            _ => None,
+        };
         self.throbber = Some(state);
         self.prompt_dirty = true;
     }
@@ -266,7 +272,6 @@ impl Screen {
         let _ = out.queue(cursor::MoveTo(0, 0));
         let _ = out.queue(terminal::Clear(terminal::ClearType::All));
         let _ = out.queue(terminal::Clear(terminal::ClearType::Purge));
-        let _ = out.queue(Print("\r\n"));
         let _ = out.flush();
         self.flushed = 0;
         self.last_block_rows = 0;
@@ -287,6 +292,7 @@ impl Screen {
         self.working_since = None;
         self.final_elapsed = None;
         self.context_tokens = None;
+        self.retry_deadline = None;
         let mut out = io::stdout();
         let _ = out.queue(cursor::MoveTo(0, 0));
         let _ = out.queue(terminal::Clear(terminal::ClearType::All));
@@ -419,8 +425,12 @@ impl Screen {
                 let _ = out.queue(Print("\r\n"));
             }
             let rows = render_tool(
-                &tool.name, &tool.summary, &tool.args,
-                tool.status, None, tool.output.as_ref(),
+                &tool.name,
+                &tool.summary,
+                &tool.args,
+                tool.status,
+                None,
+                tool.output.as_ref(),
             );
             active_rows = tool_gap + rows;
         }
@@ -439,7 +449,13 @@ impl Screen {
         }
 
         let pre_prompt = active_rows + gap;
-        let (top_row, new_rows) = self.draw_prompt_sections(state, mode, width, queued, self.prev_prompt_rows.saturating_sub(pre_prompt));
+        let (top_row, new_rows) = self.draw_prompt_sections(
+            state,
+            mode,
+            width,
+            queued,
+            self.prev_prompt_rows.saturating_sub(pre_prompt),
+        );
         self.prev_prompt_rows = pre_prompt + new_rows;
 
         self.prompt_top_row = top_row.saturating_sub(pre_prompt);
@@ -486,7 +502,11 @@ impl Screen {
         let throbber_spans = self.throbber_spans();
         draw_bar(
             width,
-            if throbber_spans.is_empty() { None } else { Some(&throbber_spans) },
+            if throbber_spans.is_empty() {
+                None
+            } else {
+                Some(&throbber_spans)
+            },
             tokens_label.as_deref().map(|l| (l, theme::MUTED)),
             bar_color,
         );
@@ -566,30 +586,68 @@ impl Screen {
     }
 
     fn throbber_spans(&self) -> Vec<BarSpan> {
-        let Some(state) = self.throbber else { return vec![] };
+        let Some(state) = self.throbber else {
+            return vec![];
+        };
         match state {
-            Throbber::Working | Throbber::Retrying(_) => {
-                let Some(start) = self.working_since else { return vec![] };
+            Throbber::Working | Throbber::Retrying { .. } => {
+                let Some(start) = self.working_since else {
+                    return vec![];
+                };
                 let elapsed = start.elapsed();
                 let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
-                let mut spans = vec![
-                    BarSpan { text: format!("{} working", SPINNER_FRAMES[idx]), color: theme::PRIMARY, attr: None },
-                ];
-                let time_text = if let Throbber::Retrying(delay) = state {
-                    format!("({}s, retrying in {}s)", elapsed.as_secs(), delay.as_secs())
+                let spinner_color = if matches!(state, Throbber::Retrying { .. }) {
+                    theme::MUTED
+                } else {
+                    Color::Reset
+                };
+                let mut spans = vec![BarSpan {
+                    text: format!("{} working", SPINNER_FRAMES[idx]),
+                    color: spinner_color,
+                    attr: Some(Attribute::Bold),
+                }];
+                let time_text = if let Throbber::Retrying { delay, attempt } = state {
+                    let remaining = self
+                        .retry_deadline
+                        .map(|t| t.saturating_duration_since(Instant::now()))
+                        .unwrap_or(delay);
+                    format!(
+                        "({}s, retrying in {}s #{})",
+                        elapsed.as_secs(),
+                        remaining.as_secs(),
+                        attempt
+                    )
                 } else {
                     format!("({})", format_elapsed(elapsed))
                 };
-                spans.push(BarSpan { text: format!(" {}", time_text), color: theme::MUTED, attr: Some(Attribute::Dim) });
+                spans.push(BarSpan {
+                    text: format!(" {}", time_text),
+                    color: theme::MUTED,
+                    attr: Some(Attribute::Dim),
+                });
                 spans
             }
             Throbber::Done => {
-                let time = self.final_elapsed.map(|d| format!(" ({})", format_elapsed(d))).unwrap_or_default();
-                vec![BarSpan { text: format!("done{}", time), color: theme::MUTED, attr: Some(Attribute::Dim) }]
+                let time = self
+                    .final_elapsed
+                    .map(|d| format!(" ({})", format_elapsed(d)))
+                    .unwrap_or_default();
+                vec![BarSpan {
+                    text: format!("done{}", time),
+                    color: theme::MUTED,
+                    attr: Some(Attribute::Dim),
+                }]
             }
             Throbber::Interrupted => {
-                let time = self.final_elapsed.map(|d| format!(" ({})", format_elapsed(d))).unwrap_or_default();
-                vec![BarSpan { text: format!("interrupted{}", time), color: theme::MUTED, attr: Some(Attribute::Dim) }]
+                let time = self
+                    .final_elapsed
+                    .map(|d| format!(" ({})", format_elapsed(d)))
+                    .unwrap_or_default();
+                vec![BarSpan {
+                    text: format!("interrupted{}", time),
+                    color: theme::MUTED,
+                    attr: Some(Attribute::Dim),
+                }]
             }
         }
     }
@@ -722,9 +780,14 @@ fn render_block(block: &Block, _width: usize) -> u16 {
             }
             rows
         }
-        Block::ToolCall { name, summary, status, elapsed, output, args } => {
-            render_tool(name, summary, args, *status, *elapsed, output.as_ref())
-        }
+        Block::ToolCall {
+            name,
+            summary,
+            status,
+            elapsed,
+            output,
+            args,
+        } => render_tool(name, summary, args, *status, *elapsed, output.as_ref()),
         Block::Confirm { tool, desc, choice } => render_confirm_result(tool, desc, *choice),
         Block::Error { message } => {
             print_error(message);
@@ -1032,10 +1095,12 @@ fn print_tool_output(
             let line_count = content.lines().count();
             let _ = out
                 .queue(SetAttribute(Attribute::Dim))
-                .and_then(|o| o.queue(Print(format!(
-                    "   {}\r\n",
-                    pluralize(line_count, "line", "lines")
-                ))))
+                .and_then(|o| {
+                    o.queue(Print(format!(
+                        "   {}\r\n",
+                        pluralize(line_count, "line", "lines")
+                    )))
+                })
                 .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
             1
         }
@@ -1049,7 +1114,22 @@ fn print_tool_output(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            print_inline_diff(old, new, path, new, 0)
+            if new.is_empty() {
+                // Deletion: can't anchor in file, show summary
+                let n = old.lines().count();
+                let _ = out
+                    .queue(SetAttribute(Attribute::Dim))
+                    .and_then(|o| {
+                        o.queue(Print(format!(
+                            "   {}\r\n",
+                            pluralize(n, "line deleted", "lines deleted")
+                        )))
+                    })
+                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
+                1
+            } else {
+                print_inline_diff(old, new, path, new, 0)
+            }
         }
         "write_file" if !is_error => {
             let file_content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -1076,10 +1156,12 @@ fn print_tool_output(
             let count = content.lines().count();
             let _ = out
                 .queue(SetAttribute(Attribute::Dim))
-                .and_then(|o| o.queue(Print(format!(
-                    "   {}\r\n",
-                    pluralize(count, "match", "matches")
-                ))))
+                .and_then(|o| {
+                    o.queue(Print(format!(
+                        "   {}\r\n",
+                        pluralize(count, "match", "matches")
+                    )))
+                })
                 .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
             1
         }
@@ -1087,10 +1169,12 @@ fn print_tool_output(
             let count = content.lines().count();
             let _ = out
                 .queue(SetAttribute(Attribute::Dim))
-                .and_then(|o| o.queue(Print(format!(
-                    "   {}\r\n",
-                    pluralize(count, "file", "files")
-                ))))
+                .and_then(|o| {
+                    o.queue(Print(format!(
+                        "   {}\r\n",
+                        pluralize(count, "file", "files")
+                    )))
+                })
                 .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
             1
         }
@@ -1138,26 +1222,76 @@ fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, max_rows: u
 
     let file_content = std::fs::read_to_string(path).unwrap_or_default();
     let file_lines: Vec<&str> = file_content.lines().collect();
-    let start_line = file_content
-        .find(anchor)
-        .map(|pos| file_content[..pos].lines().count())
-        .unwrap_or(0);
+    let lookup = if !anchor.is_empty() {
+        anchor
+    } else if !old.is_empty() {
+        old
+    } else {
+        new
+    };
+    let start_line = if lookup.is_empty() {
+        0
+    } else {
+        file_content
+            .find(lookup)
+            .map(|pos| file_content[..pos].lines().count())
+            .unwrap_or(0)
+    };
 
     let diff = TextDiff::from_lines(old, new);
     let changes: Vec<_> = diff.iter_all_changes().collect();
 
-    let ctx = 3;
-    let anchor_lines = anchor.lines().count();
-    let ctx_start = start_line.saturating_sub(ctx);
-    let ctx_end = (start_line + anchor_lines + ctx).min(file_lines.len());
-    let max_lineno = ctx_end;
+    let ctx = 3usize;
+
+    // Walk changes to find the file line numbers of the first and last modification.
+    let mut first_mod: Option<usize> = None;
+    let mut last_mod: Option<usize> = None;
+    {
+        let mut line = start_line;
+        for change in &changes {
+            match change.tag() {
+                ChangeTag::Equal => {
+                    line += 1;
+                }
+                ChangeTag::Delete => {
+                    if first_mod.is_none() {
+                        first_mod = Some(line);
+                    }
+                    last_mod = Some(line);
+                    line += 1;
+                }
+                ChangeTag::Insert => {
+                    if first_mod.is_none() {
+                        first_mod = Some(line);
+                    }
+                    last_mod = Some(line);
+                }
+            }
+        }
+    }
+    let first_mod = first_mod.unwrap_or(start_line);
+    let last_mod = last_mod.unwrap_or(start_line);
+
+    // View window: 3 lines before first change, 3 lines after last change.
+    let view_start = first_mod.saturating_sub(ctx);
+    let view_end = (last_mod + 1 + ctx).min(file_lines.len());
+
+    let max_lineno = view_end;
     let gutter_width = format!("{}", max_lineno).len().max(2);
     let prefix_len = indent.len() + 1 + gutter_width + 3;
     let right_margin = indent.len();
     let max_content = term_width().saturating_sub(prefix_len + right_margin);
 
-    let bg_del = Color::Rgb { r: 60, g: 20, b: 20 };
-    let bg_add = Color::Rgb { r: 20, g: 50, b: 20 };
+    let bg_del = Color::Rgb {
+        r: 60,
+        g: 20,
+        b: 20,
+    };
+    let bg_add = Color::Rgb {
+        r: 20,
+        g: 50,
+        b: 20,
+    };
 
     let layout = DiffLayout {
         indent,
@@ -1167,10 +1301,10 @@ fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, max_rows: u
 
     let limit = if max_rows == 0 { u16::MAX } else { max_rows };
 
-    // Prime highlighter up to context start
+    // Prime highlighters up to view_start
     let mut h_old = HighlightLines::new(syntax, theme);
     let mut h_new = HighlightLines::new(syntax, theme);
-    for i in 0..ctx_start {
+    for i in 0..view_start {
         if i < file_lines.len() {
             let line = format!("{}\n", file_lines[i]);
             let _ = h_old.highlight_line(&line, &SYNTAX_SET);
@@ -1178,16 +1312,18 @@ fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, max_rows: u
         }
     }
 
-    // Context before
+    // Context before (file lines from view_start to start of diff region)
+    let ctx_before_end = start_line.min(first_mod);
+    let ctx_before_start = view_start.min(ctx_before_end);
     let mut rows = print_diff_lines(
         &mut h_new,
-        &file_lines[ctx_start..start_line],
-        ctx_start,
+        &file_lines[ctx_before_start..ctx_before_end],
+        ctx_before_start,
         None,
         None,
         &layout,
     );
-    for line in &file_lines[ctx_start..start_line] {
+    for line in &file_lines[ctx_before_start..ctx_before_end] {
         let _ = h_old.highlight_line(&format!("{}\n", line), &SYNTAX_SET);
     }
 
@@ -1196,7 +1332,7 @@ fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, max_rows: u
         return limit;
     }
 
-    // Render the actual diff
+    // Render the diff, but only Equal lines within the view window.
     let mut old_lineno = start_line;
     let mut new_lineno = start_line;
     for change in &changes {
@@ -1207,11 +1343,12 @@ fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, max_rows: u
         let text = change.value().trim_end_matches('\n');
         match change.tag() {
             ChangeTag::Equal => {
-                print_diff_lines(&mut h_new, &[text], new_lineno, None, None, &layout);
+                if new_lineno >= view_start && new_lineno < view_end {
+                    print_diff_lines(&mut h_new, &[text], new_lineno, None, None, &layout);
+                    rows += 1;
+                }
                 let _ = h_old.highlight_line(&format!("{}\n", text), &SYNTAX_SET);
-                old_lineno += 1;
                 new_lineno += 1;
-                rows += 1;
             }
             ChangeTag::Delete => {
                 print_diff_lines(
@@ -1245,20 +1382,20 @@ fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, max_rows: u
         return limit;
     }
 
-    // Context after
+    // Context after (file lines after the diff region up to view_end)
+    let anchor_lines = anchor.lines().count();
     let after_start = start_line + anchor_lines;
-    let after_end = (after_start + ctx).min(file_lines.len());
-    let remaining = (limit - rows) as usize;
-    let ctx_slice = &file_lines[after_start..after_end];
-    let ctx_slice = if ctx_slice.len() > remaining { &ctx_slice[..remaining] } else { ctx_slice };
-    rows += print_diff_lines(
-        &mut h_new,
-        ctx_slice,
-        after_start,
-        None,
-        None,
-        &layout,
-    );
+    let after_end = view_end.min(file_lines.len());
+    if after_start < after_end {
+        let remaining = (limit - rows) as usize;
+        let ctx_slice = &file_lines[after_start..after_end];
+        let ctx_slice = if ctx_slice.len() > remaining {
+            &ctx_slice[..remaining]
+        } else {
+            ctx_slice
+        };
+        rows += print_diff_lines(&mut h_new, ctx_slice, after_start, None, None, &layout);
+    }
     rows
 }
 
@@ -1273,24 +1410,87 @@ fn print_truncation(_rows: u16, _limit: u16) {
 fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &str) -> u16 {
     let file_content = std::fs::read_to_string(path).unwrap_or_default();
     let file_lines_count = file_content.lines().count();
-    let start_line = file_content
-        .find(anchor)
-        .map(|pos| file_content[..pos].lines().count())
-        .unwrap_or(0);
-
-    let ctx = 3;
-    let anchor_lines = anchor.lines().count();
-    let ctx_start = start_line.saturating_sub(ctx);
-    let ctx_before = start_line - ctx_start;
+    let lookup = if !anchor.is_empty() {
+        anchor
+    } else if !old.is_empty() {
+        old
+    } else {
+        new
+    };
+    let start_line = if lookup.is_empty() {
+        0
+    } else {
+        file_content
+            .find(lookup)
+            .map(|pos| file_content[..pos].lines().count())
+            .unwrap_or(0)
+    };
 
     let diff = TextDiff::from_lines(old, new);
-    let change_count = diff.iter_all_changes().count();
+    let changes: Vec<_> = diff.iter_all_changes().collect();
 
+    let ctx = 3usize;
+    let mut first_mod: Option<usize> = None;
+    let mut last_mod: Option<usize> = None;
+    {
+        let mut line = start_line;
+        for change in &changes {
+            match change.tag() {
+                ChangeTag::Equal => {
+                    line += 1;
+                }
+                ChangeTag::Delete => {
+                    if first_mod.is_none() {
+                        first_mod = Some(line);
+                    }
+                    last_mod = Some(line);
+                    line += 1;
+                }
+                ChangeTag::Insert => {
+                    if first_mod.is_none() {
+                        first_mod = Some(line);
+                    }
+                    last_mod = Some(line);
+                }
+            }
+        }
+    }
+    let first_mod = first_mod.unwrap_or(start_line);
+    let last_mod = last_mod.unwrap_or(start_line);
+
+    let view_start = first_mod.saturating_sub(ctx);
+    let view_end = (last_mod + 1 + ctx).min(file_lines_count);
+
+    let mut rows: usize = 0;
+    let ctx_before_end = start_line.min(first_mod);
+    let ctx_before_start = view_start.min(ctx_before_end);
+    rows += ctx_before_end.saturating_sub(ctx_before_start);
+    let mut new_lineno = start_line;
+    for change in &changes {
+        match change.tag() {
+            ChangeTag::Equal => {
+                if new_lineno >= view_start && new_lineno < view_end {
+                    rows += 1;
+                }
+                new_lineno += 1;
+            }
+            ChangeTag::Delete => {
+                rows += 1;
+            }
+            ChangeTag::Insert => {
+                rows += 1;
+                new_lineno += 1;
+            }
+        }
+    }
+
+    let anchor_lines = anchor.lines().count();
     let after_start = start_line + anchor_lines;
-    let after_end = (after_start + ctx).min(file_lines_count);
-    let ctx_after = after_end - after_start;
+    if after_start < view_end {
+        rows += view_end - after_start;
+    }
 
-    (ctx_before + change_count + ctx_after) as u16
+    rows as u16
 }
 
 struct DiffLayout {
@@ -1417,14 +1617,22 @@ fn render_code_block(lines: &[&str], lang: &str) -> u16 {
     render_highlighted(lines, syntax, 0)
 }
 
-fn render_highlighted(lines: &[&str], syntax: &syntect::parsing::SyntaxReference, max_rows: u16) -> u16 {
+fn render_highlighted(
+    lines: &[&str],
+    syntax: &syntect::parsing::SyntaxReference,
+    max_rows: u16,
+) -> u16 {
     let mut out = io::stdout();
     let indent = "   ";
     let theme = &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended];
     let gutter_width = format!("{}", lines.len()).len().max(2);
     let prefix_len = indent.len() + 1 + gutter_width + 3;
     let max_content = term_width().saturating_sub(prefix_len + 1);
-    let limit = if max_rows == 0 { lines.len() } else { (max_rows as usize).min(lines.len()) };
+    let limit = if max_rows == 0 {
+        lines.len()
+    } else {
+        (max_rows as usize).min(lines.len())
+    };
 
     let mut h = HighlightLines::new(syntax, theme);
     for (i, line) in lines[..limit].iter().enumerate() {
@@ -1902,14 +2110,17 @@ pub fn erase_prompt_at(top_row: u16) {
 }
 
 /// Compute preview row count for the confirm dialog.
-fn confirm_preview_row_count(
-    tool_name: &str,
-    args: &HashMap<String, serde_json::Value>,
-) -> u16 {
+fn confirm_preview_row_count(tool_name: &str, args: &HashMap<String, serde_json::Value>) -> u16 {
     match tool_name {
         "edit_file" => {
-            let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-            let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            let old = args
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new = args
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
             count_inline_diff_rows(old, new, path, old)
         }
@@ -1929,8 +2140,14 @@ fn render_confirm_preview(
 ) {
     match tool_name {
         "edit_file" => {
-            let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-            let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            let old = args
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new = args
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
             print_inline_diff(old, new, path, old, max_rows);
         }
@@ -1951,7 +2168,8 @@ pub fn show_confirm(
 ) -> ConfirmChoice {
     let mut out = io::stdout();
     let (width, height) = terminal::size().unwrap_or((80, 24));
-    let w = width as usize;
+    // Reserve the last column to avoid auto-wrap when drawing full-width lines.
+    let w = width.saturating_sub(1) as usize;
     let options: &[(&str, ConfirmChoice)] = &[
         ("yes", ConfirmChoice::Yes),
         ("no", ConfirmChoice::No),
@@ -1974,14 +2192,7 @@ pub fn show_confirm(
     let bar_row = height.saturating_sub(total_rows);
     let mut selected: usize = 0;
 
-    let _ = out.flush();
-    let mut saved_pos = cursor::position().unwrap_or((0, 0));
-    if bar_row < saved_pos.1 {
-        let shift = saved_pos.1 - bar_row;
-        let _ = out.queue(terminal::ScrollUp(shift));
-        let _ = out.flush();
-        saved_pos = cursor::position().unwrap_or(saved_pos);
-    }
+    let saved_pos = cursor::position().unwrap_or((0, 0));
     let _ = out.queue(cursor::Hide);
     let _ = out.flush();
 
@@ -2033,7 +2244,8 @@ pub fn show_confirm(
             }
             let _ = out.queue(Print("\r\n"));
         }
-        let _ = out.queue(Print("\r\n\r\n\r\n"));
+        // Avoid a trailing newline that can scroll the terminal and desync prompt positioning.
+        let _ = out.queue(Print("\r\n\r\n"));
 
         let _ = out.flush();
     };
@@ -2091,7 +2303,8 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
 
     let mut out = io::stdout();
     let (width, height) = terminal::size().unwrap_or((80, 24));
-    let w = width as usize;
+    // Reserve the last column to avoid auto-wrap when drawing full-width lines.
+    let w = width.saturating_sub(1) as usize;
 
     // Show at most `max_visible` turns to fit on screen
     let max_visible = (height as usize).saturating_sub(6).min(turns.len());
@@ -2100,6 +2313,7 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
     let mut selected: usize = turns.len() - 1; // start at most recent
     let mut scroll_offset: usize = turns.len().saturating_sub(max_visible);
 
+    let _ = out.flush();
     let saved_pos = cursor::position().unwrap_or((0, 0));
     let _ = out.queue(cursor::Hide);
     let _ = out.flush();
@@ -2109,13 +2323,23 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
         let _ = out.queue(cursor::MoveTo(0, bar_row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
+        let mut row = bar_row;
+
+        // Bar line
+        let _ = out.queue(cursor::MoveTo(0, row));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         draw_bar(w, None, None, theme::ACCENT);
-        let _ = out.queue(Print("\r\n"));
+        row = row.saturating_add(1);
 
+        // Header
+        let _ = out.queue(cursor::MoveTo(0, row));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(" Rewind to:\r\n"));
+        let _ = out.queue(Print(" Rewind to:"));
         let _ = out.queue(SetAttribute(Attribute::Reset));
+        row = row.saturating_add(1);
 
+        // Options
         let end = (scroll_offset + max_visible).min(turns.len());
         for i in scroll_offset..end {
             let (_, ref full_text) = turns[i];
@@ -2123,11 +2347,20 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
             let num = i + 1;
             let max_label = w.saturating_sub(8);
             let truncated = if label.chars().count() > max_label {
-                format!("{}…", &label[..label.char_indices().nth(max_label).map(|(j,_)|j).unwrap_or(label.len())])
+                format!(
+                    "{}…",
+                    &label[..label
+                        .char_indices()
+                        .nth(max_label)
+                        .map(|(j, _)| j)
+                        .unwrap_or(label.len())]
+                )
             } else {
                 label.to_string()
             };
 
+            let _ = out.queue(cursor::MoveTo(0, row));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
             let _ = out.queue(Print("  "));
             if i == selected {
                 let _ = out.queue(SetAttribute(Attribute::Dim));
@@ -2143,9 +2376,15 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
                 let _ = out.queue(SetAttribute(Attribute::Reset));
                 let _ = out.queue(Print(&truncated));
             }
-            let _ = out.queue(Print("\r\n"));
+            row = row.saturating_add(1);
         }
-        let _ = out.queue(Print("\r\n\r\n\r\n"));
+
+        // Blank padding (3 rows)
+        for _ in 0..3 {
+            let _ = out.queue(cursor::MoveTo(0, row));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+            row = row.saturating_add(1);
+        }
 
         let _ = out.flush();
     };
@@ -2155,7 +2394,10 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
     let result = loop {
-        if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = event::read() {
+        if let Ok(Event::Key(KeyEvent {
+            code, modifiers, ..
+        })) = event::read()
+        {
             match (code, modifiers) {
                 (KeyCode::Enter, _) => break Some(turns[selected].0),
                 (KeyCode::Esc, _) => break None,

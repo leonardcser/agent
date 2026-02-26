@@ -8,6 +8,5 @@ pub const ACCENT: Color = Color::AnsiValue(147); // bright lavender for `code` a
 pub const USER_BG: Color = Color::AnsiValue(236);
 pub const BAR: Color = Color::AnsiValue(237);
 pub const HEADING: Color = Color::AnsiValue(214); // orange for markdown headings
-pub const PRIMARY: Color = Color::AnsiValue(74); // steel blue for spinner and primary accents
 pub const MUTED: Color = Color::AnsiValue(244); // light gray for token count and other muted elements
 pub const EXEC: Color = Color::AnsiValue(197); // red-pink for exec mode

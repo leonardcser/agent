@@ -107,7 +107,7 @@ impl Provider {
         tools: &[ToolDefinition],
         model: &str,
         cancel: &CancellationToken,
-        on_retry: Option<&(dyn Fn(Duration) + Send + Sync)>,
+        on_retry: Option<&(dyn Fn(Duration, u32) + Send + Sync)>,
     ) -> Result<LLMResponse, String> {
         let mut body: HashMap<&str, serde_json::Value> = HashMap::new();
         body.insert("model", serde_json::json!(model));
@@ -123,7 +123,7 @@ impl Provider {
         }));
 
         let url = format!("{}/chat/completions", self.api_base);
-        let max_retries = 5;
+        let max_retries = 9;
 
         for attempt in 0..=max_retries {
             let mut req = self.client.post(&url).json(&body);
@@ -142,7 +142,7 @@ impl Provider {
                             let delay = Duration::from_millis(500 * 2u64.pow(attempt as u32));
                             // Only show retrying after at least one retry has occurred
                             if attempt > 0 {
-                                if let Some(f) = on_retry { f(delay); }
+                                if let Some(f) = on_retry { f(delay, attempt as u32); }
                             }
                             tokio::time::sleep(delay).await;
                             continue;
@@ -160,7 +160,7 @@ impl Provider {
                     let delay = Duration::from_millis(500 * 2u64.pow(attempt as u32));
                     // Only show retrying after at least one retry has occurred
                     if attempt > 0 {
-                        if let Some(f) = on_retry { f(delay); }
+                        if let Some(f) = on_retry { f(delay, attempt as u32); }
                     }
                     tokio::time::sleep(delay).await;
                     continue;

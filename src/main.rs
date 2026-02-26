@@ -213,8 +213,9 @@ impl App {
             AgentEvent::Confirm { desc, args, reply } => {
                 SessionControl::NeedsConfirm { desc, args, reply }
             }
-            AgentEvent::Retrying(delay) => {
-                self.screen.set_throbber(render::Throbber::Retrying(delay));
+            AgentEvent::Retrying { delay, attempt } => {
+                self.screen
+                    .set_throbber(render::Throbber::Retrying { delay, attempt });
                 SessionControl::Continue
             }
             AgentEvent::Done => SessionControl::Done,
