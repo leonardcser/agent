@@ -105,6 +105,39 @@ impl App {
         true
     }
 
+    /// Rewind conversation to the turn starting at `block_idx`.
+    /// Removes all blocks from `block_idx` onward, truncates history,
+    /// and returns the user message text from the rewound turn.
+    fn rewind_to(&mut self, block_idx: usize) -> Option<String> {
+        let turns = self.screen.user_turns();
+
+        // Find the turn at block_idx and get its text
+        let turn_text = turns.iter().find(|(i, _)| *i == block_idx).map(|(_, t)| t.clone());
+
+        // Count how many User blocks exist before block_idx
+        let user_turns_to_keep = turns.iter().filter(|(i, _)| *i < block_idx).count();
+
+        // Truncate history: find the Nth user message and cut there
+        let mut user_count = 0;
+        let mut hist_idx = 0;
+        for (i, msg) in self.history.iter().enumerate() {
+            if matches!(msg.role, Role::User) {
+                user_count += 1;
+                if user_count > user_turns_to_keep {
+                    hist_idx = i;
+                    break;
+                }
+            }
+            hist_idx = i + 1;
+        }
+        self.history.truncate(hist_idx);
+        self.screen.truncate_to(block_idx);
+        self.screen.clear_context_tokens();
+        self.auto_approved.clear();
+
+        turn_text
+    }
+
     fn show_user_message(&mut self, input: &str) {
         self.screen.push(Block::User { text: input.to_string() });
     }
@@ -476,6 +509,18 @@ async fn main() {
 
         let input = input.trim().to_string();
         if input.is_empty() { continue; }
+
+        // Handle rewind signal from double-Esc menu
+        if let Some(idx_str) = input.strip_prefix("\x00rewind:") {
+            if let Ok(block_idx) = idx_str.parse::<usize>() {
+                if let Some(text) = app.rewind_to(block_idx) {
+                    app.input.buf = text;
+                    app.input.cpos = app.input.buf.len();
+                }
+            }
+            continue;
+        }
+
         app.input_history.push(input.clone());
         if !app.handle_command(&input) { break; }
         if input.starts_with('/') { continue; }

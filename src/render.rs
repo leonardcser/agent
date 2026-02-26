@@ -206,6 +206,11 @@ impl Screen {
         self.prompt_dirty = true;
     }
 
+    pub fn clear_context_tokens(&mut self) {
+        self.context_tokens = None;
+        self.prompt_dirty = true;
+    }
+
     pub fn set_throbber(&mut self, state: Throbber) {
         let is_active = matches!(state, Throbber::Working | Throbber::Retrying(_));
         if is_active && self.working_since.is_none() {
@@ -291,6 +296,30 @@ impl Screen {
 
     pub fn has_history(&self) -> bool {
         !self.blocks.is_empty()
+    }
+
+    /// Returns (block_index, full_text) for each User block.
+    pub fn user_turns(&self) -> Vec<(usize, String)> {
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| {
+                if let Block::User { text } = b {
+                    Some((i, text.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Truncate blocks so that only blocks before `block_idx` remain.
+    pub fn truncate_to(&mut self, block_idx: usize) {
+        self.blocks.truncate(block_idx);
+        self.flushed = self.flushed.min(block_idx);
+        self.active_tool = None;
+        self.prompt_dirty = true;
+        self.redraw_all();
     }
 
     // ── Block rendering ──────────────────────────────────────────────────
@@ -1930,8 +1959,8 @@ pub fn show_confirm(
     ];
 
     let total_preview = confirm_preview_row_count(tool_name, args);
-    // Fixed rows: bar + command + blank + "Allow?" + 3 options = 7
-    let fixed_rows: u16 = 7;
+    // Fixed rows: bar + command + blank + "Allow?" + 3 options + 3 blank = 10
+    let fixed_rows: u16 = 10;
     let max_preview = (height as u16).saturating_sub(fixed_rows + 2);
     let preview_rows = total_preview.min(max_preview);
     let has_preview = preview_rows > 0;
@@ -2004,6 +2033,7 @@ pub fn show_confirm(
             }
             let _ = out.queue(Print("\r\n"));
         }
+        let _ = out.queue(Print("\r\n\r\n\r\n"));
 
         let _ = out.flush();
     };
@@ -2050,4 +2080,115 @@ pub fn show_confirm(
     let _ = out.flush();
 
     choice
+}
+
+/// Show a rewind menu listing user turns. Returns the block index to rewind to,
+/// or `None` if cancelled.
+pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
+    if turns.is_empty() {
+        return None;
+    }
+
+    let mut out = io::stdout();
+    let (width, height) = terminal::size().unwrap_or((80, 24));
+    let w = width as usize;
+
+    // Show at most `max_visible` turns to fit on screen
+    let max_visible = (height as usize).saturating_sub(6).min(turns.len());
+    let total_rows = (max_visible + 5) as u16; // bar + header + options + 3 blank
+    let bar_row = height.saturating_sub(total_rows);
+    let mut selected: usize = turns.len() - 1; // start at most recent
+    let mut scroll_offset: usize = turns.len().saturating_sub(max_visible);
+
+    let saved_pos = cursor::position().unwrap_or((0, 0));
+    let _ = out.queue(cursor::Hide);
+    let _ = out.flush();
+
+    let draw = |selected: usize, scroll_offset: usize| {
+        let mut out = io::stdout();
+        let _ = out.queue(cursor::MoveTo(0, bar_row));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+
+        draw_bar(w, None, None, theme::ACCENT);
+        let _ = out.queue(Print("\r\n"));
+
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(" Rewind to:\r\n"));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+
+        let end = (scroll_offset + max_visible).min(turns.len());
+        for i in scroll_offset..end {
+            let (_, ref full_text) = turns[i];
+            let label = full_text.lines().next().unwrap_or("");
+            let num = i + 1;
+            let max_label = w.saturating_sub(8);
+            let truncated = if label.chars().count() > max_label {
+                format!("{}…", &label[..label.char_indices().nth(max_label).map(|(j,_)|j).unwrap_or(label.len())])
+            } else {
+                label.to_string()
+            };
+
+            let _ = out.queue(Print("  "));
+            if i == selected {
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(format!("{}.", num)));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                let _ = out.queue(Print(" "));
+                let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                let _ = out.queue(Print(&truncated));
+                let _ = out.queue(ResetColor);
+            } else {
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(format!("{}. ", num)));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                let _ = out.queue(Print(&truncated));
+            }
+            let _ = out.queue(Print("\r\n"));
+        }
+        let _ = out.queue(Print("\r\n\r\n\r\n"));
+
+        let _ = out.flush();
+    };
+
+    draw(selected, scroll_offset);
+
+    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+
+    let result = loop {
+        if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = event::read() {
+            match (code, modifiers) {
+                (KeyCode::Enter, _) => break Some(turns[selected].0),
+                (KeyCode::Esc, _) => break None,
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break None,
+                (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                    if selected > 0 {
+                        selected -= 1;
+                        if selected < scroll_offset {
+                            scroll_offset = selected;
+                        }
+                        draw(selected, scroll_offset);
+                    }
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                    if selected + 1 < turns.len() {
+                        selected += 1;
+                        if selected >= scroll_offset + max_visible {
+                            scroll_offset = selected + 1 - max_visible;
+                        }
+                        draw(selected, scroll_offset);
+                    }
+                }
+                _ => {}
+            }
+        }
+    };
+
+    // Erase the overlay
+    let _ = out.queue(cursor::MoveTo(0, bar_row));
+    let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+    let _ = out.queue(cursor::MoveTo(saved_pos.0, saved_pos.1));
+    let _ = out.queue(cursor::Show);
+    let _ = out.flush();
+
+    result
 }
