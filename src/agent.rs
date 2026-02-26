@@ -1,4 +1,5 @@
 use crate::input::Mode;
+use crate::log;
 use crate::permissions::{Decision, Permissions};
 use crate::provider::{Message, Provider, Role, ToolDefinition};
 use crate::tools::{self, ToolRegistry, ToolResult};
@@ -13,7 +14,7 @@ pub enum AgentEvent {
     ToolCall { name: String, args: HashMap<String, Value> },
     ToolOutputChunk(String),
     ToolResult { content: String, is_error: bool },
-    Confirm { desc: String, reply: tokio::sync::oneshot::Sender<bool> },
+    Confirm { desc: String, args: HashMap<String, Value>, reply: tokio::sync::oneshot::Sender<bool> },
     TokenUsage { prompt_tokens: u32 },
     Retrying(std::time::Duration),
     Done,
@@ -161,6 +162,7 @@ pub async fn run_agent(
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = tx.send(AgentEvent::Confirm {
                         desc,
+                        args: args.clone(),
                         reply: reply_tx,
                     });
                     let confirmed = reply_rx.await.unwrap_or(false);
@@ -187,6 +189,13 @@ pub async fn run_agent(
             } else {
                 tool.execute(&args)
             };
+            log::entry("tool_result", &serde_json::json!({
+                "tool": tc.function.name,
+                "id": tc.id,
+                "is_error": is_error,
+                "content_len": content.len(),
+                "content_preview": &content[..content.len().min(500)],
+            }));
             let model_content = match tc.function.name.as_str() {
                 "grep" => trim_tool_output_for_model(&content, 200),
                 "glob" => trim_tool_output_for_model(&content, 200),

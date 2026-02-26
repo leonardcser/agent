@@ -578,21 +578,25 @@ impl Tool for GrepTool {
                     "enum": ["content", "files_with_matches", "count"],
                     "description": "Output mode: \"content\" shows matching lines, \"files_with_matches\" shows file paths (default), \"count\" shows match counts."
                 },
-                "case_insensitive": {
+                "-i": {
                     "type": "boolean",
-                    "description": "Case insensitive search"
+                    "description": "Case insensitive search (rg -i)"
                 },
-                "line_numbers": {
+                "-n": {
                     "type": "boolean",
-                    "description": "Show line numbers in output (default true). Only applies to output_mode \"content\"."
+                    "description": "Show line numbers in output (rg -n). Requires output_mode: \"content\", ignored otherwise. Defaults to true."
                 },
-                "after_context": {
+                "-A": {
                     "type": "integer",
-                    "description": "Number of lines to show after each match. Only applies to output_mode \"content\"."
+                    "description": "Number of lines to show after each match (rg -A). Requires output_mode: \"content\", ignored otherwise."
                 },
-                "before_context": {
+                "-B": {
                     "type": "integer",
-                    "description": "Number of lines to show before each match. Only applies to output_mode \"content\"."
+                    "description": "Number of lines to show before each match (rg -B). Requires output_mode: \"content\", ignored otherwise."
+                },
+                "-C": {
+                    "type": "integer",
+                    "description": "Alias for context."
                 },
                 "context": {
                     "type": "integer",
@@ -625,13 +629,18 @@ impl Tool for GrepTool {
         let glob_filter = str_arg(args, "glob");
         let file_type = str_arg(args, "type");
         let output_mode = str_arg(args, "output_mode");
-        let case_insensitive = bool_arg(args, "case_insensitive");
+        let case_insensitive = bool_arg(args, "-i");
         let multiline = bool_arg(args, "multiline");
-        let after_ctx = int_arg(args, "after_context");
-        let before_ctx = int_arg(args, "before_context");
-        let context = int_arg(args, "context");
+        let after_ctx = int_arg(args, "-A");
+        let before_ctx = int_arg(args, "-B");
+        let context = {
+            let c = int_arg(args, "context");
+            if c > 0 { c } else { int_arg(args, "-C") }
+        };
+        let head_limit = int_arg(args, "head_limit");
+        let offset = int_arg(args, "offset");
         let line_numbers = args
-            .get("line_numbers")
+            .get("-n")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
         let timeout = timeout_arg(args, 30);
@@ -703,8 +712,14 @@ impl Tool for GrepTool {
                     return result;
                 }
 
+                let content = if result.content.is_empty() {
+                    "no matches found".into()
+                } else {
+                    apply_offset_and_limit(&result.content, offset, head_limit)
+                };
+
                 ToolResult {
-                    content: result.content,
+                    content,
                     is_error: false,
                 }
             }
@@ -716,10 +731,28 @@ impl Tool for GrepTool {
                     &glob_filter,
                     case_insensitive,
                     timeout,
+                    offset,
+                    head_limit,
                 )
             }
         }
     }
+}
+
+fn apply_offset_and_limit(content: &str, offset: usize, head_limit: usize) -> String {
+    if offset == 0 && head_limit == 0 {
+        return content.to_string();
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    let start = offset.min(lines.len());
+    let end = if head_limit > 0 {
+        (start + head_limit).min(lines.len())
+    } else {
+        lines.len()
+    };
+
+    lines[start..end].join("\n")
 }
 
 fn grep_fallback(
@@ -728,6 +761,8 @@ fn grep_fallback(
     glob_filter: &str,
     case_insensitive: bool,
     timeout: Duration,
+    offset: usize,
+    head_limit: usize,
 ) -> ToolResult {
     let mut cmd_args = vec!["-rn".to_string(), "--max-count=200".to_string()];
     if case_insensitive {
@@ -755,8 +790,9 @@ fn grep_fallback(
                     is_error: false,
                 }
             } else {
+                let content = apply_offset_and_limit(&result.content, offset, head_limit);
                 ToolResult {
-                    content: result.content,
+                    content,
                     is_error: result.is_error,
                 }
             }
@@ -774,6 +810,10 @@ pub fn normal_tools() -> ToolRegistry {
     let hashes = new_file_hashes();
     let mut r = ToolRegistry::new();
     r.register(Box::new(ReadFileTool {
+        hashes: hashes.clone(),
+    }));
+    r.register(Box::new(WriteFileTool));
+    r.register(Box::new(EditFileTool {
         hashes: hashes.clone(),
     }));
     r.register(Box::new(BashTool));

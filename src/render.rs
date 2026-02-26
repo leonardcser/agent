@@ -6,7 +6,7 @@ use crossterm::{
     style::{
         Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     },
-    terminal, ExecutableCommand,
+    terminal, QueueableCommand,
 };
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
@@ -88,11 +88,14 @@ pub struct Screen {
     last_block_rows: u16,
     rerender: bool,
     prompt_drawn: bool,
+    prompt_dirty: bool,
     prompt_top_row: u16,
     working_since: Option<Instant>,
     final_elapsed: Option<Duration>,
     context_tokens: Option<u32>,
     throbber: Option<Throbber>,
+    last_spinner_frame: usize,
+    prev_prompt_rows: u16,
 }
 
 impl Screen {
@@ -103,11 +106,14 @@ impl Screen {
             last_block_rows: 0,
             rerender: false,
             prompt_drawn: false,
+            prompt_dirty: true,
             prompt_top_row: 0,
             working_since: None,
             final_elapsed: None,
             context_tokens: None,
             throbber: None,
+            last_spinner_frame: usize::MAX,
+            prev_prompt_rows: 0,
         }
     }
 
@@ -118,6 +124,7 @@ impl Screen {
 
     pub fn push(&mut self, block: Block) {
         self.blocks.push(block);
+        self.prompt_dirty = true;
     }
 
     pub fn update_last_tool(
@@ -202,6 +209,7 @@ impl Screen {
 
     pub fn set_context_tokens(&mut self, tokens: u32) {
         self.context_tokens = Some(tokens);
+        self.prompt_dirty = true;
     }
 
     pub fn set_throbber(&mut self, state: Throbber) {
@@ -215,15 +223,25 @@ impl Screen {
             self.working_since = None;
         }
         self.throbber = Some(state);
+        self.prompt_dirty = true;
     }
 
     pub fn clear_throbber(&mut self) {
         self.throbber = None;
         self.working_since = None;
         self.final_elapsed = None;
+        self.prompt_dirty = true;
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.prompt_dirty = true;
     }
 
     pub fn flush_blocks(&mut self) {
+        if self.prompt_drawn {
+            erase_prompt_at(self.prompt_top_row);
+            self.prompt_drawn = false;
+        }
         self.render_blocks();
     }
 
@@ -236,15 +254,17 @@ impl Screen {
 
     pub fn redraw_all(&mut self) {
         let mut out = io::stdout();
-        let _ = out.execute(cursor::MoveTo(0, 0));
-        let _ = out.execute(terminal::Clear(terminal::ClearType::All));
-        let _ = out.execute(terminal::Clear(terminal::ClearType::Purge));
-        let _ = out.execute(Print("\r\n"));
+        let _ = out.queue(cursor::MoveTo(0, 0));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::All));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::Purge));
+        let _ = out.queue(Print("\r\n"));
         let _ = out.flush();
         self.flushed = 0;
         self.last_block_rows = 0;
         self.rerender = false;
         self.prompt_drawn = false;
+        self.prompt_dirty = true;
+        self.prev_prompt_rows = 0;
     }
 
     pub fn clear(&mut self) {
@@ -253,13 +273,16 @@ impl Screen {
         self.last_block_rows = 0;
         self.rerender = false;
         self.prompt_drawn = false;
+        self.prompt_dirty = true;
+        self.prev_prompt_rows = 0;
         self.throbber = None;
         self.working_since = None;
         self.final_elapsed = None;
+        self.context_tokens = None;
         let mut out = io::stdout();
-        let _ = out.execute(cursor::MoveTo(0, 0));
-        let _ = out.execute(terminal::Clear(terminal::ClearType::All));
-        let _ = out.execute(terminal::Clear(terminal::ClearType::Purge));
+        let _ = out.queue(cursor::MoveTo(0, 0));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::All));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::Purge));
         let _ = out.flush();
     }
 
@@ -272,10 +295,6 @@ impl Screen {
     fn render_blocks(&mut self) {
         let has_new = self.flushed < self.blocks.len();
         if !has_new && !self.rerender {
-            if self.prompt_drawn {
-                erase_prompt_at(self.prompt_top_row);
-            }
-            self.prompt_drawn = false;
             return;
         }
 
@@ -290,8 +309,8 @@ impl Screen {
                     .unwrap_or(0)
                     .saturating_sub(self.last_block_rows)
             };
-            let _ = out.execute(cursor::MoveTo(0, erase_from));
-            let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
+            let _ = out.queue(cursor::MoveTo(0, erase_from));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
             let _ = out.flush();
             self.rerender = false;
         } else if self.prompt_drawn {
@@ -299,8 +318,8 @@ impl Screen {
         } else {
             let _ = out.flush();
             let pos = cursor::position().map(|(_, y)| y).unwrap_or(0);
-            let _ = out.execute(cursor::MoveTo(0, pos));
-            let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
+            let _ = out.queue(cursor::MoveTo(0, pos));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
             let _ = out.flush();
         }
 
@@ -316,7 +335,7 @@ impl Screen {
                 0
             };
             for _ in 0..gap {
-                let _ = out.execute(Print("\r\n"));
+                let _ = out.queue(Print("\r\n"));
             }
             let rows = render_block(&self.blocks[i], w);
             if i == last_idx {
@@ -325,12 +344,14 @@ impl Screen {
         }
         self.flushed = self.blocks.len();
         self.prompt_drawn = false;
+        let _ = out.flush();
     }
 
     // ── Prompt drawing (broken into sections) ────────────────────────────
 
     /// Main entry point: flush blocks, then draw the full prompt box.
     pub fn draw_prompt(&mut self, state: &InputState, mode: super::input::Mode, width: usize) {
+        self.prompt_dirty = true;
         self.draw_prompt_with_queued(state, mode, width, &[]);
     }
 
@@ -341,29 +362,61 @@ impl Screen {
         width: usize,
         queued: &[String],
     ) {
+        // Check if the spinner frame advanced (sets dirty if so)
+        if let Some(start) = self.working_since {
+            let frame = (start.elapsed().as_millis() / 150) as usize % SPINNER_FRAMES.len();
+            if frame != self.last_spinner_frame {
+                self.last_spinner_frame = frame;
+                self.prompt_dirty = true;
+            }
+        }
+
+        let has_new_blocks = self.flushed < self.blocks.len() || self.rerender;
+        if !has_new_blocks && !self.prompt_dirty {
+            return;
+        }
+
         self.render_blocks();
+
+        let mut out = io::stdout();
+
+        // Begin synchronized update — terminal buffers until end sequence
+        let _ = out.queue(Print("\x1b[?2026h"));
+
+        // Position for overwrite (or append if first draw)
+        if self.prompt_drawn {
+            let _ = out.queue(cursor::MoveTo(0, self.prompt_top_row));
+        }
 
         let gap = self.blocks.last().map_or(0, |last| {
             gap_between(&Element::Block(last), &Element::Throbber)
         });
         for _ in 0..gap {
-            let _ = io::stdout().execute(Print("\r\n"));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+            let _ = out.queue(Print("\r\n"));
         }
 
-        self.prompt_top_row = self.draw_prompt_sections(state, mode, width, queued);
-        if gap > 0 {
-            self.prompt_top_row = self.prompt_top_row.saturating_sub(gap);
-        }
+        let (top_row, new_rows) = self.draw_prompt_sections(state, mode, width, queued, self.prev_prompt_rows.saturating_sub(gap));
+        self.prev_prompt_rows = gap + new_rows;
+
+        self.prompt_top_row = if gap > 0 { top_row.saturating_sub(gap) } else { top_row };
         self.prompt_drawn = true;
+        self.prompt_dirty = false;
+
+        // End synchronized update
+        let _ = out.queue(Print("\x1b[?2026l"));
+        let _ = out.flush();
     }
 
+    /// Returns (top_row, total_prompt_rows).
     fn draw_prompt_sections(
         &self,
         state: &InputState,
         mode: super::input::Mode,
         width: usize,
         queued: &[String],
-    ) -> u16 {
+        prev_rows: u16,
+    ) -> (u16, u16) {
         let mut out = io::stdout();
         let usable = width.saturating_sub(1);
         let mut extra_rows: u16 = 0;
@@ -374,12 +427,13 @@ impl Screen {
         // 2. Queued messages
         for msg in queued {
             let display: String = msg.chars().take(usable).collect();
-            let _ = out.execute(SetBackgroundColor(theme::USER_BG));
-            let _ = out.execute(SetAttribute(Attribute::Bold));
-            let _ = out.execute(Print(format!(" {} ", display)));
-            let _ = out.execute(SetAttribute(Attribute::Reset));
-            let _ = out.execute(ResetColor);
-            let _ = out.execute(Print("\r\n"));
+            let _ = out.queue(SetBackgroundColor(theme::USER_BG));
+            let _ = out.queue(SetAttribute(Attribute::Bold));
+            let _ = out.queue(Print(format!(" {} ", display)));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+            let _ = out.queue(ResetColor);
+            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            let _ = out.queue(Print("\r\n"));
             extra_rows += 1;
         }
 
@@ -387,15 +441,14 @@ impl Screen {
         let vi_normal = state.vim_mode() == Some(crate::vim::ViMode::Normal);
         let bar_color = if vi_normal { theme::ACCENT } else { theme::BAR };
 
-        // 3. Top bar
+        // 3. Top bar (full width, no clearing needed)
         let tokens_label = self.context_tokens.map(format_tokens);
-        // Token count text should always be MUTED, bar segments use bar_color
         draw_bar(
             width,
             tokens_label.as_deref().map(|l| (l, theme::MUTED)),
             bar_color,
         );
-        let _ = out.execute(Print("\r\n"));
+        let _ = out.queue(Print("\r\n"));
 
         // 4. Content with structured spans
         let spans = build_display_spans(&state.buf, &state.pastes);
@@ -408,18 +461,19 @@ impl Screen {
             "/clear" | "/new" | "/exit" | "/quit" | "/vim"
         );
         for line in &visual_lines {
-            let _ = out.execute(Print(" "));
+            let _ = out.queue(Print(" "));
             if is_command {
-                let _ = out.execute(SetForegroundColor(theme::ACCENT));
-                let _ = out.execute(Print(line));
-                let _ = out.execute(ResetColor);
+                let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                let _ = out.queue(Print(line));
+                let _ = out.queue(ResetColor);
             } else {
                 render_line_spans(line);
             }
-            let _ = out.execute(Print("\r\n"));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            let _ = out.queue(Print("\r\n"));
         }
 
-        // 5. Bottom bar
+        // 5. Bottom bar (full width, no clearing needed)
         if mode == super::input::Mode::Apply {
             draw_bar(width, Some(("apply", theme::APPLY)), bar_color);
         } else {
@@ -432,69 +486,79 @@ impl Screen {
             .as_ref()
             .is_some_and(|c| !c.results.is_empty());
         if has_comp {
-            let _ = out.execute(Print("\r\n"));
+            let _ = out.queue(Print("\r\n"));
         }
-        let comp_rows = draw_completions(state.completer.as_ref());
+        let comp_rows = draw_completions(state.completer.as_ref(), width);
 
-        let _ = out.flush();
-
-        // Position cursor.
-        // Rows from top_row to final_row (inclusive):
-        //   top_bar, content lines, bottom_bar, [completion lines if any]
+        // Clear leftover rows from previous (taller) prompt
         let total_rows = extra_rows as usize + 1 + visual_lines.len() + 1 + comp_rows;
+        let new_rows = total_rows as u16;
+        let cleared = if prev_rows > new_rows {
+            let n = prev_rows - new_rows;
+            for _ in 0..n {
+                let _ = out.queue(Print("\r\n"));
+                let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+            }
+            n
+        } else {
+            0
+        };
+
+        // Flush queued commands so cursor::position() reflects actual state
+        let _ = out.flush();
         let final_row = cursor::position().map(|(_, y)| y).unwrap_or(0);
-        let top_row = final_row.saturating_sub(total_rows as u16 - 1);
+        let top_row = final_row.saturating_sub(new_rows + cleared - 1);
         let text_row = top_row + 1 + extra_rows + cursor_line as u16;
         let text_col = 1 + cursor_col as u16;
-        let _ = out.execute(cursor::MoveTo(text_col, text_row));
-        let _ = out.flush();
+        let _ = out.queue(cursor::MoveTo(text_col, text_row));
 
-        top_row
+        (top_row, total_rows as u16)
     }
 
     fn draw_throbber(&self) -> u16 {
         let Some(state) = self.throbber else { return 0 };
         let mut out = io::stdout();
-        let _ = out.execute(Print(" "));
+        let _ = out.queue(Print(" "));
         match state {
             Throbber::Working | Throbber::Retrying(_) => {
                 if let Some(start) = self.working_since {
                     let elapsed = start.elapsed();
                     let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
-                    let _ = out.execute(SetForegroundColor(theme::PRIMARY));
-                    let _ = out.execute(Print(format!("{} working...", SPINNER_FRAMES[idx])));
-                    let _ = out.execute(ResetColor);
-                    let _ = out.execute(SetAttribute(Attribute::Dim));
+                    let _ = out.queue(SetForegroundColor(theme::PRIMARY));
+                    let _ = out.queue(Print(format!("{} working...", SPINNER_FRAMES[idx])));
+                    let _ = out.queue(ResetColor);
+                    let _ = out.queue(SetAttribute(Attribute::Dim));
                     if let Throbber::Retrying(delay) = state {
-                        let _ = out.execute(Print(format!(
+                        let _ = out.queue(Print(format!(
                             " ({}, retrying in {})",
                             format_elapsed(elapsed),
                             format_elapsed(delay)
                         )));
                     } else {
-                        let _ = out.execute(Print(format!(" ({})", format_elapsed(elapsed))));
+                        let _ = out.queue(Print(format!(" ({})", format_elapsed(elapsed))));
                     }
-                    let _ = out.execute(SetAttribute(Attribute::Reset));
+                    let _ = out.queue(SetAttribute(Attribute::Reset));
                 }
             }
             Throbber::Done => {
-                let _ = out.execute(SetAttribute(Attribute::Dim));
-                let _ = out.execute(Print("done"));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print("done"));
                 if let Some(d) = self.final_elapsed {
-                    let _ = out.execute(Print(format!(" ({})", format_elapsed(d))));
+                    let _ = out.queue(Print(format!(" ({})", format_elapsed(d))));
                 }
-                let _ = out.execute(SetAttribute(Attribute::Reset));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
             }
             Throbber::Interrupted => {
-                let _ = out.execute(SetAttribute(Attribute::Dim));
-                let _ = out.execute(Print("interrupted"));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print("interrupted"));
                 if let Some(d) = self.final_elapsed {
-                    let _ = out.execute(Print(format!(" ({})", format_elapsed(d))));
+                    let _ = out.queue(Print(format!(" ({})", format_elapsed(d))));
                 }
-                let _ = out.execute(SetAttribute(Attribute::Reset));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
             }
         }
-        let _ = out.execute(Print("\r\n"));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+        let _ = out.queue(Print("\r\n"));
         1
     }
 }
@@ -562,18 +626,27 @@ fn render_block(block: &Block, _width: usize) -> u16 {
         Block::User { text } => {
             let mut out = io::stdout();
             let lines: Vec<&str> = text.lines().collect();
+            let w = term_width();
             let max_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-            let pad_width = max_len + 2; // 1 space padding on each side
+            // Cap box width to terminal width so lines never wrap
+            let pad_width = (max_len + 2).min(w);
             for line in &lines {
                 let char_len = line.chars().count();
-                let trailing = pad_width - char_len - 1;
+                // Truncate line if it exceeds available space (pad_width - 1 for leading space)
+                let display: String = if char_len + 1 > pad_width {
+                    line.chars().take(pad_width.saturating_sub(1)).collect()
+                } else {
+                    line.to_string()
+                };
+                let display_len = display.chars().count();
+                let trailing = pad_width.saturating_sub(display_len + 1);
                 let _ = out
-                    .execute(SetBackgroundColor(theme::USER_BG))
-                    .and_then(|o| o.execute(SetAttribute(Attribute::Bold)))
-                    .and_then(|o| o.execute(Print(format!(" {}{}", line, " ".repeat(trailing)))))
-                    .and_then(|o| o.execute(SetAttribute(Attribute::Reset)))
-                    .and_then(|o| o.execute(ResetColor));
-                let _ = out.execute(Print("\r\n"));
+                    .queue(SetBackgroundColor(theme::USER_BG))
+                    .and_then(|o| o.queue(SetAttribute(Attribute::Bold)))
+                    .and_then(|o| o.queue(Print(format!(" {}{}", display, " ".repeat(trailing)))))
+                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
+                    .and_then(|o| o.queue(ResetColor));
+                let _ = out.queue(Print("\r\n"));
             }
             lines.len() as u16
         }
@@ -604,15 +677,15 @@ fn render_block(block: &Block, _width: usize) -> u16 {
                 } else if lines[i].trim() == "---" {
                     let w = term_width();
                     let bar_len = w.saturating_sub(2);
-                    let _ = out.execute(SetForegroundColor(theme::BAR));
-                    let _ = out.execute(Print(format!(" {}\r\n", "\u{00B7}".repeat(bar_len))));
-                    let _ = out.execute(ResetColor);
+                    let _ = out.queue(SetForegroundColor(theme::BAR));
+                    let _ = out.queue(Print(format!(" {}\r\n", "\u{00B7}".repeat(bar_len))));
+                    let _ = out.queue(ResetColor);
                     i += 1;
                     rows += 1;
                 } else {
-                    let _ = out.execute(Print(" "));
+                    let _ = out.queue(Print(" "));
                     print_styled(lines[i]);
-                    let _ = out.execute(Print("\r\n"));
+                    let _ = out.queue(Print("\r\n"));
                     i += 1;
                     rows += 1;
                 }
@@ -663,42 +736,42 @@ fn render_confirm_result(tool: &str, desc: &str, choice: Option<ConfirmChoice>) 
     let mut rows = 2u16; // allow line + desc line
 
     let _ = out
-        .execute(SetForegroundColor(theme::APPLY))
-        .and_then(|o| o.execute(Print("   allow? ")))
-        .and_then(|o| o.execute(ResetColor))
-        .and_then(|o| o.execute(SetAttribute(Attribute::Dim)))
-        .and_then(|o| o.execute(Print(tool)))
-        .and_then(|o| o.execute(SetAttribute(Attribute::Reset)))
-        .and_then(|o| o.execute(Print("\r\n")));
+        .queue(SetForegroundColor(theme::APPLY))
+        .and_then(|o| o.queue(Print("   allow? ")))
+        .and_then(|o| o.queue(ResetColor))
+        .and_then(|o| o.queue(SetAttribute(Attribute::Dim)))
+        .and_then(|o| o.queue(Print(tool)))
+        .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
+        .and_then(|o| o.queue(Print("\r\n")));
 
     let _ = out
-        .execute(SetAttribute(Attribute::Dim))
-        .and_then(|o| o.execute(Print("   \u{2502} ")))
-        .and_then(|o| o.execute(SetAttribute(Attribute::Reset)))
-        .and_then(|o| o.execute(Print(desc)))
-        .and_then(|o| o.execute(Print("\r\n")));
+        .queue(SetAttribute(Attribute::Dim))
+        .and_then(|o| o.queue(Print("   \u{2502} ")))
+        .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
+        .and_then(|o| o.queue(Print(desc)))
+        .and_then(|o| o.queue(Print("\r\n")));
 
     if let Some(c) = choice {
         rows += 1;
-        let _ = out.execute(Print("   "));
+        let _ = out.queue(Print("   "));
         match c {
             ConfirmChoice::Yes => {
                 let _ = out
-                    .execute(SetAttribute(Attribute::Dim))
-                    .and_then(|o| o.execute(Print("approved\r\n")))
-                    .and_then(|o| o.execute(SetAttribute(Attribute::Reset)));
+                    .queue(SetAttribute(Attribute::Dim))
+                    .and_then(|o| o.queue(Print("approved\r\n")))
+                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
             }
             ConfirmChoice::Always => {
                 let _ = out
-                    .execute(SetAttribute(Attribute::Dim))
-                    .and_then(|o| o.execute(Print("always\r\n")))
-                    .and_then(|o| o.execute(SetAttribute(Attribute::Reset)));
+                    .queue(SetAttribute(Attribute::Dim))
+                    .and_then(|o| o.queue(Print("always\r\n")))
+                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
             }
             ConfirmChoice::No => {
                 let _ = out
-                    .execute(SetForegroundColor(theme::TOOL_ERR))
-                    .and_then(|o| o.execute(Print("denied\r\n")))
-                    .and_then(|o| o.execute(ResetColor));
+                    .queue(SetForegroundColor(theme::TOOL_ERR))
+                    .and_then(|o| o.queue(Print("denied\r\n")))
+                    .and_then(|o| o.queue(ResetColor));
             }
         }
     }
@@ -711,21 +784,21 @@ fn print_styled(text: &str) {
     // Markdown headings: lines starting with #
     let trimmed = text.trim_start();
     if trimmed.starts_with('#') {
-        let _ = out.execute(SetForegroundColor(theme::HEADING));
-        let _ = out.execute(SetAttribute(Attribute::Bold));
-        let _ = out.execute(Print(trimmed));
-        let _ = out.execute(SetAttribute(Attribute::Reset));
-        let _ = out.execute(ResetColor);
+        let _ = out.queue(SetForegroundColor(theme::HEADING));
+        let _ = out.queue(SetAttribute(Attribute::Bold));
+        let _ = out.queue(Print(trimmed));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(ResetColor);
         return;
     }
 
     // Quote blocks: lines starting with >
     if trimmed.starts_with('>') {
         let content = trimmed.strip_prefix('>').unwrap().trim_start();
-        let _ = out.execute(SetAttribute(Attribute::Dim));
-        let _ = out.execute(SetAttribute(Attribute::Italic));
-        let _ = out.execute(Print(content));
-        let _ = out.execute(SetAttribute(Attribute::Reset));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(SetAttribute(Attribute::Italic));
+        let _ = out.queue(Print(content));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
         return;
     }
 
@@ -738,7 +811,7 @@ fn print_styled(text: &str) {
         // **bold** — rendered bold + dim
         if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
             if !plain.is_empty() {
-                let _ = out.execute(Print(&plain));
+                let _ = out.queue(Print(&plain));
                 plain.clear();
             }
             i += 2;
@@ -747,10 +820,10 @@ fn print_styled(text: &str) {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
-            let _ = out.execute(SetAttribute(Attribute::Bold));
-            let _ = out.execute(SetAttribute(Attribute::Dim));
-            let _ = out.execute(Print(&word));
-            let _ = out.execute(SetAttribute(Attribute::Reset));
+            let _ = out.queue(SetAttribute(Attribute::Bold));
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print(&word));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
             if i + 1 < len {
                 i += 2;
             }
@@ -760,7 +833,7 @@ fn print_styled(text: &str) {
         // *italic* — rendered italic + dim
         if chars[i] == '*' && i + 1 < len && chars[i + 1] != '*' {
             if !plain.is_empty() {
-                let _ = out.execute(Print(&plain));
+                let _ = out.queue(Print(&plain));
                 plain.clear();
             }
             i += 1;
@@ -769,10 +842,10 @@ fn print_styled(text: &str) {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
-            let _ = out.execute(SetAttribute(Attribute::Italic));
-            let _ = out.execute(SetAttribute(Attribute::Dim));
-            let _ = out.execute(Print(&word));
-            let _ = out.execute(SetAttribute(Attribute::Reset));
+            let _ = out.queue(SetAttribute(Attribute::Italic));
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print(&word));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
             if i < len {
                 i += 1;
             }
@@ -781,7 +854,7 @@ fn print_styled(text: &str) {
 
         if chars[i] == '`' {
             if !plain.is_empty() {
-                let _ = out.execute(Print(&plain));
+                let _ = out.queue(Print(&plain));
                 plain.clear();
             }
             i += 1;
@@ -790,9 +863,9 @@ fn print_styled(text: &str) {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
-            let _ = out.execute(SetForegroundColor(theme::ACCENT));
-            let _ = out.execute(Print(&word));
-            let _ = out.execute(ResetColor);
+            let _ = out.queue(SetForegroundColor(theme::ACCENT));
+            let _ = out.queue(Print(&word));
+            let _ = out.queue(ResetColor);
             if i < len {
                 i += 1;
             }
@@ -803,7 +876,7 @@ fn print_styled(text: &str) {
         i += 1;
     }
     if !plain.is_empty() {
-        let _ = out.execute(Print(&plain));
+        let _ = out.queue(Print(&plain));
     }
 }
 
@@ -816,10 +889,10 @@ fn print_tool_line(
 ) {
     let mut out = io::stdout();
     let width = term_width();
-    let _ = out.execute(Print(" "));
-    let _ = out.execute(SetForegroundColor(pill_color));
-    let _ = out.execute(Print("\u{23fa}"));
-    let _ = out.execute(ResetColor);
+    let _ = out.queue(Print(" "));
+    let _ = out.queue(SetForegroundColor(pill_color));
+    let _ = out.queue(Print("\u{23fa}"));
+    let _ = out.queue(ResetColor);
     // Truncate summary to fit on one line: " ⏺ name summary  1.2s  (timeout: 30s)"
     let time_str = elapsed
         .filter(|d| d.as_secs_f64() >= 0.1)
@@ -832,21 +905,21 @@ fn print_tool_line(
     let prefix_len = 3 + name.len() + 1; // " ⏺ " + name + " "
     let max_summary = width.saturating_sub(prefix_len + suffix_len + 1);
     let truncated = truncate_str(summary, max_summary);
-    let _ = out.execute(SetAttribute(Attribute::Dim));
-    let _ = out.execute(Print(format!(" {}", name)));
-    let _ = out.execute(SetAttribute(Attribute::Reset));
-    let _ = out.execute(Print(format!(" {}", truncated)));
+    let _ = out.queue(SetAttribute(Attribute::Dim));
+    let _ = out.queue(Print(format!(" {}", name)));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    let _ = out.queue(Print(format!(" {}", truncated)));
     if !time_str.is_empty() {
-        let _ = out.execute(SetAttribute(Attribute::Dim));
-        let _ = out.execute(Print(&time_str));
-        let _ = out.execute(SetAttribute(Attribute::Reset));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(&time_str));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
     }
     if !timeout_str.is_empty() {
-        let _ = out.execute(SetAttribute(Attribute::Dim));
-        let _ = out.execute(Print(&timeout_str));
-        let _ = out.execute(SetAttribute(Attribute::Reset));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(&timeout_str));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
     }
-    let _ = out.execute(Print("\r\n"));
+    let _ = out.queue(Print("\r\n"));
 }
 
 fn print_tool_output(
@@ -860,12 +933,12 @@ fn print_tool_output(
         "read_file" if !is_error => {
             let line_count = content.lines().count();
             let _ = out
-                .execute(SetAttribute(Attribute::Dim))
-                .and_then(|o| o.execute(Print(format!(
+                .queue(SetAttribute(Attribute::Dim))
+                .and_then(|o| o.queue(Print(format!(
                     "   {}\r\n",
                     pluralize(line_count, "line", "lines")
                 ))))
-                .and_then(|o| o.execute(SetAttribute(Attribute::Reset)));
+                .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
             1
         }
         "edit_file" if !is_error => {
@@ -878,25 +951,25 @@ fn print_tool_output(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            print_syntax_diff(old, new, path)
+            print_inline_diff(old, new, path, new, 0)
         }
         "write_file" if !is_error => {
             let file_content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            print_syntax_file(file_content, path)
+            print_syntax_file(file_content, path, 0)
         }
         "bash" if content.is_empty() => 0,
         "bash" => {
             let count = content.lines().count();
             for line in content.lines() {
                 if is_error {
-                    let _ = out.execute(SetForegroundColor(theme::TOOL_ERR));
-                    let _ = out.execute(Print(format!("   {}\r\n", line)));
-                    let _ = out.execute(ResetColor);
+                    let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
+                    let _ = out.queue(Print(format!("   {}\r\n", line)));
+                    let _ = out.queue(ResetColor);
                 } else {
-                    let _ = out.execute(SetAttribute(Attribute::Dim));
-                    let _ = out.execute(Print(format!("   {}\r\n", line)));
-                    let _ = out.execute(SetAttribute(Attribute::Reset));
+                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    let _ = out.queue(Print(format!("   {}\r\n", line)));
+                    let _ = out.queue(SetAttribute(Attribute::Reset));
                 }
             }
             count as u16
@@ -904,37 +977,37 @@ fn print_tool_output(
         "grep" if !is_error => {
             let count = content.lines().count();
             let _ = out
-                .execute(SetAttribute(Attribute::Dim))
-                .and_then(|o| o.execute(Print(format!(
+                .queue(SetAttribute(Attribute::Dim))
+                .and_then(|o| o.queue(Print(format!(
                     "   {}\r\n",
                     pluralize(count, "match", "matches")
                 ))))
-                .and_then(|o| o.execute(SetAttribute(Attribute::Reset)));
+                .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
             1
         }
         "glob" if !is_error => {
             let count = content.lines().count();
             let _ = out
-                .execute(SetAttribute(Attribute::Dim))
-                .and_then(|o| o.execute(Print(format!(
+                .queue(SetAttribute(Attribute::Dim))
+                .and_then(|o| o.queue(Print(format!(
                     "   {}\r\n",
                     pluralize(count, "file", "files")
                 ))))
-                .and_then(|o| o.execute(SetAttribute(Attribute::Reset)));
+                .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
             1
         }
         _ => {
             let preview = result_preview(content, 3);
             if is_error {
                 let _ = out
-                    .execute(SetForegroundColor(theme::TOOL_ERR))
-                    .and_then(|o| o.execute(Print(format!("   {}\r\n", preview))))
-                    .and_then(|o| o.execute(ResetColor));
+                    .queue(SetForegroundColor(theme::TOOL_ERR))
+                    .and_then(|o| o.queue(Print(format!("   {}\r\n", preview))))
+                    .and_then(|o| o.queue(ResetColor));
             } else {
                 let _ = out
-                    .execute(SetAttribute(Attribute::Dim))
-                    .and_then(|o| o.execute(Print(format!("   {}\r\n", preview))))
-                    .and_then(|o| o.execute(SetAttribute(Attribute::Reset)));
+                    .queue(SetAttribute(Attribute::Dim))
+                    .and_then(|o| o.queue(Print(format!("   {}\r\n", preview))))
+                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
             }
             preview.lines().count() as u16
         }
@@ -949,7 +1022,11 @@ fn pluralize(count: usize, singular: &str, plural: &str) -> String {
     }
 }
 
-fn print_syntax_diff(old: &str, new: &str, path: &str) -> u16 {
+/// Render a syntax-highlighted inline diff.
+/// `anchor` is the text to search for in the file to determine position.
+/// For pre-edit (confirmation), use `old`. For post-edit (tool result), use `new`.
+/// `max_rows` limits the output height (0 = unlimited).
+fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, max_rows: u16) -> u16 {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -961,24 +1038,20 @@ fn print_syntax_diff(old: &str, new: &str, path: &str) -> u16 {
 
     let indent = "   ";
 
-    // The file on disk already contains new_text (edit already applied).
-    // Find the position of new_text to determine starting line number.
     let file_content = std::fs::read_to_string(path).unwrap_or_default();
     let file_lines: Vec<&str> = file_content.lines().collect();
     let start_line = file_content
-        .find(new)
+        .find(anchor)
         .map(|pos| file_content[..pos].lines().count())
         .unwrap_or(0);
 
-    // Compute line-by-line diff between old and new text
     let diff = TextDiff::from_lines(old, new);
     let changes: Vec<_> = diff.iter_all_changes().collect();
 
-    // Determine line number range for gutter width (context + changes)
     let ctx = 3;
-    let new_lines_count = new.lines().count();
+    let anchor_lines = anchor.lines().count();
     let ctx_start = start_line.saturating_sub(ctx);
-    let ctx_end = (start_line + new_lines_count + ctx).min(file_lines.len());
+    let ctx_end = (start_line + anchor_lines + ctx).min(file_lines.len());
     let max_lineno = ctx_end;
     let gutter_width = format!("{}", max_lineno).len().max(2);
     let prefix_len = indent.len() + 1 + gutter_width + 3;
@@ -992,6 +1065,8 @@ fn print_syntax_diff(old: &str, new: &str, path: &str) -> u16 {
         gutter_width,
         max_content,
     };
+
+    let limit = if max_rows == 0 { u16::MAX } else { max_rows };
 
     // Prime highlighter up to context start
     let mut h_old = HighlightLines::new(syntax, theme);
@@ -1013,15 +1088,23 @@ fn print_syntax_diff(old: &str, new: &str, path: &str) -> u16 {
         None,
         &layout,
     );
-    // Also advance h_old through context lines
     for line in &file_lines[ctx_start..start_line] {
         let _ = h_old.highlight_line(&format!("{}\n", line), &SYNTAX_SET);
     }
 
-    // Render the actual diff using computed changes
-    let mut old_lineno = start_line; // 0-indexed file line for deleted lines
-    let mut new_lineno = start_line; // 0-indexed file line for added/equal lines
+    if rows >= limit {
+        print_truncation(rows, limit);
+        return limit;
+    }
+
+    // Render the actual diff
+    let mut old_lineno = start_line;
+    let mut new_lineno = start_line;
     for change in &changes {
+        if rows >= limit {
+            print_truncation(rows, limit);
+            return limit;
+        }
         let text = change.value().trim_end_matches('\n');
         match change.tag() {
             ChangeTag::Equal => {
@@ -1058,18 +1141,57 @@ fn print_syntax_diff(old: &str, new: &str, path: &str) -> u16 {
         }
     }
 
+    if rows >= limit {
+        print_truncation(rows, limit);
+        return limit;
+    }
+
     // Context after
-    let after_start = start_line + new_lines_count;
+    let after_start = start_line + anchor_lines;
     let after_end = (after_start + ctx).min(file_lines.len());
+    let remaining = (limit - rows) as usize;
+    let ctx_slice = &file_lines[after_start..after_end];
+    let ctx_slice = if ctx_slice.len() > remaining { &ctx_slice[..remaining] } else { ctx_slice };
     rows += print_diff_lines(
         &mut h_new,
-        &file_lines[after_start..after_end],
+        ctx_slice,
         after_start,
         None,
         None,
         &layout,
     );
     rows
+}
+
+fn print_truncation(_rows: u16, _limit: u16) {
+    let mut out = io::stdout();
+    let _ = out.queue(SetAttribute(Attribute::Dim));
+    let _ = out.queue(Print("   ...\r\n"));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+}
+
+/// Count rows an inline diff would take without rendering.
+fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &str) -> u16 {
+    let file_content = std::fs::read_to_string(path).unwrap_or_default();
+    let file_lines_count = file_content.lines().count();
+    let start_line = file_content
+        .find(anchor)
+        .map(|pos| file_content[..pos].lines().count())
+        .unwrap_or(0);
+
+    let ctx = 3;
+    let anchor_lines = anchor.lines().count();
+    let ctx_start = start_line.saturating_sub(ctx);
+    let ctx_before = start_line - ctx_start;
+
+    let diff = TextDiff::from_lines(old, new);
+    let change_count = diff.iter_all_changes().count();
+
+    let after_start = start_line + anchor_lines;
+    let after_end = (after_start + ctx).min(file_lines_count);
+    let ctx_after = after_end - after_start;
+
+    (ctx_before + change_count + ctx_after) as u16
 }
 
 struct DiffLayout {
@@ -1098,36 +1220,36 @@ fn print_diff_lines(
         let regions = h
             .highlight_line(&line_with_nl, &SYNTAX_SET)
             .unwrap_or_default();
-        let _ = out.execute(Print(indent));
+        let _ = out.queue(Print(indent));
         if let Some((ch, color)) = sign {
-            let _ = out.execute(SetBackgroundColor(bg.unwrap()));
-            let _ = out.execute(SetForegroundColor(Color::DarkGrey));
-            let _ = out.execute(Print(format!(" {:>w$} ", lineno, w = gutter_width)));
-            let _ = out.execute(SetForegroundColor(color));
-            let _ = out.execute(Print(format!("{} ", ch)));
-            print_syntect_regions(&regions, max_content, bg);
-            let used = indent.len() + 1 + gutter_width + 3 + visible_len(&regions);
-            let pad = term_width().saturating_sub(used);
+            let _ = out.queue(SetBackgroundColor(bg.unwrap()));
+            let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+            let _ = out.queue(Print(format!(" {:>w$} ", lineno, w = gutter_width)));
+            let _ = out.queue(SetForegroundColor(color));
+            let _ = out.queue(Print(format!("{} ", ch)));
+            let content_cols = print_syntect_regions(&regions, max_content, bg);
+            let prefix_cols = indent.len() + 1 + gutter_width + 3;
+            let pad = term_width().saturating_sub(prefix_cols + content_cols);
             if pad > 0 {
                 if let Some(bg_color) = bg {
-                    let _ = out.execute(SetBackgroundColor(bg_color));
+                    let _ = out.queue(SetBackgroundColor(bg_color));
                 }
-                let _ = out.execute(Print(" ".repeat(pad)));
+                let _ = out.queue(Print(" ".repeat(pad)));
             }
-            let _ = out.execute(ResetColor);
+            let _ = out.queue(ResetColor);
         } else {
-            let _ = out.execute(SetForegroundColor(Color::DarkGrey));
-            let _ = out.execute(Print(format!(" {:>w$}", lineno, w = gutter_width)));
-            let _ = out.execute(ResetColor);
-            let _ = out.execute(Print("   "));
+            let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+            let _ = out.queue(Print(format!(" {:>w$}", lineno, w = gutter_width)));
+            let _ = out.queue(ResetColor);
+            let _ = out.queue(Print("   "));
             print_syntect_regions(&regions, max_content, None);
         }
-        let _ = out.execute(Print("\r\n"));
+        let _ = out.queue(Print("\r\n"));
     }
     lines.len() as u16
 }
 
-fn print_syntax_file(content: &str, path: &str) -> u16 {
+fn print_syntax_file(content: &str, path: &str, max_rows: u16) -> u16 {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -1136,17 +1258,12 @@ fn print_syntax_file(content: &str, path: &str) -> u16 {
         .find_syntax_by_extension(ext)
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
     let lines: Vec<&str> = content.lines().collect();
-    render_highlighted(&lines, syntax)
+    render_highlighted(&lines, syntax, max_rows)
 }
 
-fn visible_len(regions: &[(Style, &str)]) -> usize {
-    regions
-        .iter()
-        .map(|(_, t)| t.trim_end_matches('\n').trim_end_matches('\r').len())
-        .sum()
-}
-
-fn print_syntect_regions(regions: &[(Style, &str)], max_width: usize, bg: Option<Color>) {
+/// Print syntax-highlighted regions, respecting max_width in display columns.
+/// Returns the number of display columns actually printed.
+fn print_syntect_regions(regions: &[(Style, &str)], max_width: usize, bg: Option<Color>) -> usize {
     let mut out = io::stdout();
     let mut col = 0;
     for (style, text) in regions {
@@ -1158,20 +1275,27 @@ fn print_syntect_regions(regions: &[(Style, &str)], max_width: usize, bg: Option
         if remaining == 0 {
             break;
         }
-        let display = truncate_str(text, remaining);
+        let char_count = text.chars().count();
+        let display: String = if char_count <= remaining {
+            text.to_string()
+        } else {
+            text.chars().take(remaining).collect()
+        };
+        let display_cols = display.chars().count();
         if let Some(bg_color) = bg {
-            let _ = out.execute(SetBackgroundColor(bg_color));
+            let _ = out.queue(SetBackgroundColor(bg_color));
         }
         let fg = Color::Rgb {
             r: style.foreground.r,
             g: style.foreground.g,
             b: style.foreground.b,
         };
-        let _ = out.execute(SetForegroundColor(fg));
-        let _ = out.execute(Print(&display));
-        col += display.len();
+        let _ = out.queue(SetForegroundColor(fg));
+        let _ = out.queue(Print(&display));
+        col += display_cols;
     }
-    let _ = out.execute(ResetColor);
+    let _ = out.queue(ResetColor);
+    col
 }
 
 fn render_code_block(lines: &[&str], lang: &str) -> u16 {
@@ -1190,32 +1314,36 @@ fn render_code_block(lines: &[&str], lang: &str) -> u16 {
         .find_syntax_by_extension(ext)
         .or_else(|| SYNTAX_SET.find_syntax_by_name(lang))
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    render_highlighted(lines, syntax)
+    render_highlighted(lines, syntax, 0)
 }
 
-fn render_highlighted(lines: &[&str], syntax: &syntect::parsing::SyntaxReference) -> u16 {
+fn render_highlighted(lines: &[&str], syntax: &syntect::parsing::SyntaxReference, max_rows: u16) -> u16 {
     let mut out = io::stdout();
     let indent = "   ";
     let theme = &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended];
     let gutter_width = format!("{}", lines.len()).len().max(2);
     let prefix_len = indent.len() + 1 + gutter_width + 3;
     let max_content = term_width().saturating_sub(prefix_len + 1);
+    let limit = if max_rows == 0 { lines.len() } else { (max_rows as usize).min(lines.len()) };
 
     let mut h = HighlightLines::new(syntax, theme);
-    for (i, line) in lines.iter().enumerate() {
+    for (i, line) in lines[..limit].iter().enumerate() {
         let line_with_nl = format!("{}\n", line);
         let regions = h
             .highlight_line(&line_with_nl, &SYNTAX_SET)
             .unwrap_or_default();
-        let _ = out.execute(Print(indent));
-        let _ = out.execute(SetForegroundColor(Color::DarkGrey));
-        let _ = out.execute(Print(format!(" {:>w$}", i + 1, w = gutter_width)));
-        let _ = out.execute(ResetColor);
-        let _ = out.execute(Print("   "));
+        let _ = out.queue(Print(indent));
+        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+        let _ = out.queue(Print(format!(" {:>w$}", i + 1, w = gutter_width)));
+        let _ = out.queue(ResetColor);
+        let _ = out.queue(Print("   "));
         print_syntect_regions(&regions, max_content, None);
-        let _ = out.execute(Print("\r\n"));
+        let _ = out.queue(Print("\r\n"));
     }
-    lines.len() as u16
+    if limit < lines.len() {
+        print_truncation(limit as u16, max_rows);
+    }
+    limit as u16
 }
 
 fn render_markdown_table(lines: &[&str]) -> u16 {
@@ -1256,25 +1384,25 @@ fn render_markdown_table(lines: &[&str]) -> u16 {
 
     let rendered = table.to_string();
     for line in rendered.lines() {
-        let _ = out.execute(Print(" "));
+        let _ = out.queue(Print(" "));
         // Render border chars gray, content normal
         let mut in_border = false;
         for ch in line.chars() {
             let is_border =
                 ('\u{2500}'..='\u{257F}').contains(&ch) || ('\u{2580}'..='\u{259F}').contains(&ch);
             if is_border && !in_border {
-                let _ = out.execute(SetForegroundColor(theme::BAR));
+                let _ = out.queue(SetForegroundColor(theme::BAR));
                 in_border = true;
             } else if !is_border && in_border {
-                let _ = out.execute(ResetColor);
+                let _ = out.queue(ResetColor);
                 in_border = false;
             }
-            let _ = out.execute(Print(ch.to_string()));
+            let _ = out.queue(Print(ch.to_string()));
         }
         if in_border {
-            let _ = out.execute(ResetColor);
+            let _ = out.queue(ResetColor);
         }
-        let _ = out.execute(Print("\r\n"));
+        let _ = out.queue(Print("\r\n"));
     }
     rendered.lines().count() as u16
 }
@@ -1282,9 +1410,9 @@ fn render_markdown_table(lines: &[&str]) -> u16 {
 fn print_error(msg: &str) {
     let mut out = io::stdout();
     let _ = out
-        .execute(SetForegroundColor(theme::TOOL_ERR))
-        .and_then(|o| o.execute(Print(format!(" error: {}\r\n", msg))))
-        .and_then(|o| o.execute(ResetColor));
+        .queue(SetForegroundColor(theme::TOOL_ERR))
+        .and_then(|o| o.queue(Print(format!(" error: {}\r\n", msg))))
+        .and_then(|o| o.queue(ResetColor));
 }
 
 fn result_preview(content: &str, max_lines: usize) -> String {
@@ -1397,19 +1525,19 @@ fn draw_bar(width: usize, label: Option<(&str, Color)>, bar_color: Color) {
     if let Some((text, color)) = label {
         let tail = format!(" {} \u{2500}", text);
         let bar_len = width.saturating_sub(tail.chars().count());
-        let _ = out.execute(SetForegroundColor(bar_color));
-        let _ = out.execute(Print("\u{2500}".repeat(bar_len)));
-        let _ = out.execute(ResetColor);
-        let _ = out.execute(SetForegroundColor(color));
-        let _ = out.execute(Print(format!(" {} ", text)));
-        let _ = out.execute(ResetColor);
-        let _ = out.execute(SetForegroundColor(bar_color));
-        let _ = out.execute(Print("\u{2500}"));
-        let _ = out.execute(ResetColor);
+        let _ = out.queue(SetForegroundColor(bar_color));
+        let _ = out.queue(Print("\u{2500}".repeat(bar_len)));
+        let _ = out.queue(ResetColor);
+        let _ = out.queue(SetForegroundColor(color));
+        let _ = out.queue(Print(format!(" {} ", text)));
+        let _ = out.queue(ResetColor);
+        let _ = out.queue(SetForegroundColor(bar_color));
+        let _ = out.queue(Print("\u{2500}"));
+        let _ = out.queue(ResetColor);
     } else {
-        let _ = out.execute(SetForegroundColor(bar_color));
-        let _ = out.execute(Print("\u{2500}".repeat(width)));
-        let _ = out.execute(ResetColor);
+        let _ = out.queue(SetForegroundColor(bar_color));
+        let _ = out.queue(Print("\u{2500}".repeat(width)));
+        let _ = out.queue(ResetColor);
     }
 }
 
@@ -1540,43 +1668,43 @@ fn render_line_spans(line: &str) {
         };
 
         let Some(pos) = next else {
-            let _ = out.execute(Print(rest));
+            let _ = out.queue(Print(rest));
             break;
         };
 
         if pos > 0 {
-            let _ = out.execute(Print(&rest[..pos]));
+            let _ = out.queue(Print(&rest[..pos]));
         }
 
         if paste_pos == Some(pos) {
             if let Some(end) = rest[pos..].find(']') {
                 let label = &rest[pos..pos + end + 1];
                 if label.ends_with(" lines]") {
-                    let _ = out.execute(SetForegroundColor(theme::ACCENT));
-                    let _ = out.execute(Print(label));
-                    let _ = out.execute(ResetColor);
+                    let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                    let _ = out.queue(Print(label));
+                    let _ = out.queue(ResetColor);
                     rest = &rest[pos + end + 1..];
                     continue;
                 }
             }
-            let _ = out.execute(Print(&rest[pos..pos + 1]));
+            let _ = out.queue(Print(&rest[pos..pos + 1]));
             rest = &rest[pos + 1..];
         } else if at_pos == Some(pos) {
             let after = &rest[pos + 1..];
             let tok_end = after.find(char::is_whitespace).unwrap_or(after.len());
             let token = &rest[pos..pos + 1 + tok_end];
-            let _ = out.execute(SetForegroundColor(theme::ACCENT));
-            let _ = out.execute(Print(token));
-            let _ = out.execute(ResetColor);
+            let _ = out.queue(SetForegroundColor(theme::ACCENT));
+            let _ = out.queue(Print(token));
+            let _ = out.queue(ResetColor);
             rest = &rest[pos + 1 + tok_end..];
         } else {
-            let _ = out.execute(Print(&rest[pos..pos + 1]));
+            let _ = out.queue(Print(&rest[pos..pos + 1]));
             rest = &rest[pos + 1..];
         }
     }
 }
 
-fn draw_completions(completer: Option<&crate::completer::Completer>) -> usize {
+fn draw_completions(completer: Option<&crate::completer::Completer>, _width: usize) -> usize {
     let Some(comp) = completer else { return 0 };
     if comp.results.is_empty() {
         return 0;
@@ -1595,30 +1723,31 @@ fn draw_completions(completer: Option<&crate::completer::Completer>) -> usize {
         .max()
         .unwrap_or(0);
     for (i, item) in comp.results.iter().enumerate() {
-        let _ = out.execute(Print("  "));
+        let _ = out.queue(Print("  "));
         let label = format!("{}{}", prefix, item.label);
         if i == comp.selected {
-            let _ = out.execute(SetForegroundColor(theme::ACCENT));
-            let _ = out.execute(Print(&label));
+            let _ = out.queue(SetForegroundColor(theme::ACCENT));
+            let _ = out.queue(Print(&label));
             if let Some(ref desc) = item.description {
                 let pad = max_label - label.len() + 2;
-                let _ = out.execute(ResetColor);
-                let _ = out.execute(SetAttribute(Attribute::Dim));
-                let _ = out.execute(Print(format!("{:>width$}{}", "", desc, width = pad)));
-                let _ = out.execute(SetAttribute(Attribute::Reset));
+                let _ = out.queue(ResetColor);
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(format!("{:>width$}{}", "", desc, width = pad)));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
             }
-            let _ = out.execute(ResetColor);
+            let _ = out.queue(ResetColor);
         } else {
-            let _ = out.execute(SetAttribute(Attribute::Dim));
-            let _ = out.execute(Print(&label));
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print(&label));
             if let Some(ref desc) = item.description {
                 let pad = max_label - label.len() + 2;
-                let _ = out.execute(Print(format!("{:>width$}{}", "", desc, width = pad)));
+                let _ = out.queue(Print(format!("{:>width$}{}", "", desc, width = pad)));
             }
-            let _ = out.execute(SetAttribute(Attribute::Reset));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
         }
+        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
         if i < last {
-            let _ = out.execute(Print("\r\n"));
+            let _ = out.queue(Print("\r\n"));
         }
     }
     comp.results.len()
@@ -1626,13 +1755,59 @@ fn draw_completions(completer: Option<&crate::completer::Completer>) -> usize {
 
 pub fn erase_prompt_at(top_row: u16) {
     let mut out = io::stdout();
-    let _ = out.execute(cursor::MoveTo(0, top_row));
-    let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
+    let _ = out.queue(cursor::MoveTo(0, top_row));
+    let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
     let _ = out.flush();
 }
 
+/// Compute preview row count for the confirm dialog.
+fn confirm_preview_row_count(
+    tool_name: &str,
+    args: &HashMap<String, serde_json::Value>,
+) -> u16 {
+    match tool_name {
+        "edit_file" => {
+            let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+            let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            count_inline_diff_rows(old, new, path, old)
+        }
+        "write_file" => {
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            content.lines().count() as u16
+        }
+        _ => 0,
+    }
+}
+
+/// Render the syntax-highlighted preview for the confirm dialog.
+fn render_confirm_preview(
+    tool_name: &str,
+    args: &HashMap<String, serde_json::Value>,
+    max_rows: u16,
+) {
+    match tool_name {
+        "edit_file" => {
+            let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+            let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            print_inline_diff(old, new, path, old, max_rows);
+        }
+        "write_file" => {
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            print_syntax_file(content, path, max_rows);
+        }
+        _ => {}
+    }
+}
+
 /// Show confirm prompt as a bottom bar overlay. Returns the user's choice.
-pub fn show_confirm(tool_name: &str, desc: &str) -> ConfirmChoice {
+pub fn show_confirm(
+    tool_name: &str,
+    desc: &str,
+    args: &HashMap<String, serde_json::Value>,
+) -> ConfirmChoice {
     let mut out = io::stdout();
     let (width, height) = terminal::size().unwrap_or((80, 24));
     let w = width as usize;
@@ -1641,53 +1816,81 @@ pub fn show_confirm(tool_name: &str, desc: &str) -> ConfirmChoice {
         ("no", ConfirmChoice::No),
         ("always allow", ConfirmChoice::Always),
     ];
-    // Rows: bar, command, blank, "Allow?", 3 options, blank = 8
-    let bar_row = height.saturating_sub(options.len() as u16 + 5);
+
+    let total_preview = confirm_preview_row_count(tool_name, args);
+    // Fixed rows: bar + command + blank + "Allow?" + 3 options = 7
+    let fixed_rows: u16 = 7;
+    let max_preview = (height as u16).saturating_sub(fixed_rows + 2);
+    let preview_rows = total_preview.min(max_preview);
+    let has_preview = preview_rows > 0;
+    // +1 for truncation indicator if capped, +1 for blank line after preview
+    let extra = if has_preview {
+        preview_rows + if total_preview > max_preview { 1 } else { 0 } + 1
+    } else {
+        0
+    };
+    let total_rows = fixed_rows + extra;
+    let bar_row = height.saturating_sub(total_rows);
     let mut selected: usize = 0;
 
     let _ = out.flush();
-    let saved_pos = cursor::position().unwrap_or((0, 0));
-    let _ = out.execute(cursor::Hide);
+    let mut saved_pos = cursor::position().unwrap_or((0, 0));
+    if bar_row < saved_pos.1 {
+        let shift = saved_pos.1 - bar_row;
+        let _ = out.queue(terminal::ScrollUp(shift));
+        let _ = out.flush();
+        saved_pos = cursor::position().unwrap_or(saved_pos);
+    }
+    let _ = out.queue(cursor::Hide);
+    let _ = out.flush();
 
     let draw = |selected: usize| {
         let mut out = io::stdout();
-        let _ = out.execute(cursor::MoveTo(0, bar_row));
-        let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
+        let _ = out.queue(cursor::MoveTo(0, bar_row));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
         // Bar
         draw_bar(w, None, theme::ACCENT);
-        let _ = out.execute(Print("\r\n"));
+        let _ = out.queue(Print("\r\n"));
 
         // Command line
-        let _ = out.execute(Print(" "));
-        let _ = out.execute(SetForegroundColor(theme::ACCENT));
-        let _ = out.execute(Print(tool_name));
-        let _ = out.execute(ResetColor);
-        let _ = out.execute(Print(format!(": {}", desc)));
-        let _ = out.execute(Print("\r\n\r\n"));
+        let _ = out.queue(Print(" "));
+        let _ = out.queue(SetForegroundColor(theme::ACCENT));
+        let _ = out.queue(Print(tool_name));
+        let _ = out.queue(ResetColor);
+        let _ = out.queue(Print(format!(": {}", desc)));
+        let _ = out.queue(Print("\r\n"));
+
+        // Preview
+        if has_preview {
+            let _ = out.queue(Print("\r\n"));
+            render_confirm_preview(tool_name, args, max_preview);
+        }
+
+        let _ = out.queue(Print("\r\n"));
 
         // Allow header
-        let _ = out.execute(SetAttribute(Attribute::Dim));
-        let _ = out.execute(Print(" Allow?\r\n"));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(" Allow?\r\n"));
 
         // Options
         for (i, (label, _)) in options.iter().enumerate() {
-            let _ = out.execute(Print("  "));
+            let _ = out.queue(Print("  "));
             if i == selected {
-                let _ = out.execute(SetAttribute(Attribute::Dim));
-                let _ = out.execute(Print(format!("{}.", i + 1)));
-                let _ = out.execute(SetAttribute(Attribute::Reset));
-                let _ = out.execute(Print(" "));
-                let _ = out.execute(SetForegroundColor(theme::ACCENT));
-                let _ = out.execute(Print(label));
-                let _ = out.execute(ResetColor);
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(format!("{}.", i + 1)));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                let _ = out.queue(Print(" "));
+                let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                let _ = out.queue(Print(label));
+                let _ = out.queue(ResetColor);
             } else {
-                let _ = out.execute(SetAttribute(Attribute::Dim));
-                let _ = out.execute(Print(format!("{}. ", i + 1)));
-                let _ = out.execute(SetAttribute(Attribute::Reset));
-                let _ = out.execute(Print(format!("{}", label)));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(format!("{}. ", i + 1)));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                let _ = out.queue(Print(format!("{}", label)));
             }
-            let _ = out.execute(Print("\r\n"));
+            let _ = out.queue(Print("\r\n"));
         }
 
         let _ = out.flush();
@@ -1729,9 +1932,9 @@ pub fn show_confirm(tool_name: &str, desc: &str) -> ConfirmChoice {
     };
 
     // Erase the overlay
-    let _ = out.execute(cursor::MoveTo(0, bar_row));
-    let _ = out.execute(terminal::Clear(terminal::ClearType::FromCursorDown));
-    let _ = out.execute(cursor::MoveTo(saved_pos.0, saved_pos.1));
+    let _ = out.queue(cursor::MoveTo(0, bar_row));
+    let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+    let _ = out.queue(cursor::MoveTo(saved_pos.0, saved_pos.1));
     let _ = out.flush();
 
     choice

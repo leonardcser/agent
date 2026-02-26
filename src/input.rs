@@ -498,6 +498,7 @@ pub fn read_input(
     let _ = out.execute(cursor::Show);
 
     let mut resize_pending = false;
+    let mut last_ctrlc: Option<std::time::Instant> = None;
 
     loop {
         let ev = if resize_pending {
@@ -521,6 +522,28 @@ pub fn read_input(
                 Err(_) => continue,
             }
         };
+
+        // Ctrl+C: if empty or double-tap, quit; otherwise clear input.
+        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL, .. })) {
+            let double_tap = last_ctrlc.map_or(false, |prev| prev.elapsed() < Duration::from_millis(500));
+            if state.buf.is_empty() || double_tap {
+                let _ = out.execute(cursor::Hide);
+                screen.erase_prompt();
+                let _ = out.execute(cursor::Show);
+                let _ = out.flush();
+                let _ = out.execute(DisableBracketedPaste);
+                terminal::disable_raw_mode().ok();
+                return None;
+            }
+            last_ctrlc = Some(std::time::Instant::now());
+            state.buf.clear();
+            state.cpos = 0;
+            state.pastes.clear();
+            let _ = out.execute(cursor::Hide);
+            screen.draw_prompt(state, *mode, width);
+            let _ = out.execute(cursor::Show);
+            continue;
+        }
 
         match state.handle_event(ev, Some(history)) {
             Action::Submit(text) => {

@@ -1,3 +1,4 @@
+use crate::log;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -115,6 +116,12 @@ impl Provider {
             body.insert("tools", serde_json::to_value(tools).unwrap());
         }
 
+        log::entry("request", &serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "tool_count": tools.len(),
+        }));
+
         let url = format!("{}/chat/completions", self.api_base);
         let max_retries = 5;
 
@@ -177,6 +184,12 @@ impl Provider {
             };
 
             let prompt_tokens = data["usage"]["prompt_tokens"].as_u64().map(|n| n as u32);
+
+            log::entry("response", &serde_json::json!({
+                "content": content,
+                "tool_calls": tool_calls,
+                "prompt_tokens": prompt_tokens,
+            }));
 
             return Ok(LLMResponse {
                 content,

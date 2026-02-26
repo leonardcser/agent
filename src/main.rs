@@ -2,6 +2,7 @@ mod agent;
 pub mod completer;
 mod config;
 pub mod input;
+mod log;
 mod permissions;
 mod provider;
 pub mod render;
@@ -11,6 +12,7 @@ mod tools;
 pub mod vim;
 
 use agent::{run_agent, AgentEvent};
+use std::collections::HashMap;
 use clap::Parser;
 use crossterm::{
     cursor,
@@ -146,6 +148,8 @@ impl App {
         match ev {
             AgentEvent::TokenUsage { prompt_tokens } => {
                 self.screen.set_context_tokens(prompt_tokens);
+                // A successful response clears any "retrying" throbber state
+                self.screen.set_throbber(render::Throbber::Working);
                 EventResult::Continue
             }
             AgentEvent::ToolOutputChunk(chunk) => {
@@ -171,8 +175,8 @@ impl App {
             AgentEvent::ToolResult { content, is_error } => {
                 EventResult::ToolFinished { content, is_error }
             }
-            AgentEvent::Confirm { desc, reply } => {
-                EventResult::NeedsConfirm { desc, reply }
+            AgentEvent::Confirm { desc, args, reply } => {
+                EventResult::NeedsConfirm { desc, args, reply }
             }
             AgentEvent::Retrying(delay) => {
                 self.screen.set_throbber(render::Throbber::Retrying(delay));
@@ -190,6 +194,7 @@ impl App {
         &mut self,
         tool_name: &str,
         desc: &str,
+        args: &HashMap<String, serde_json::Value>,
         reply: tokio::sync::oneshot::Sender<bool>,
     ) -> ConfirmAction {
         if self.auto_approved.contains(tool_name) {
@@ -200,7 +205,9 @@ impl App {
         self.screen.set_last_tool_status(ToolStatus::Confirm);
         self.render_screen();
         self.screen.erase_prompt();
-        let choice = render::show_confirm(tool_name, desc);
+        let choice = render::show_confirm(tool_name, desc, args);
+        self.screen.redraw_all();
+        self.render_screen();
 
         match choice {
             ConfirmChoice::Yes => {
@@ -235,11 +242,27 @@ impl App {
         ev: event::Event,
         last_esc: &mut Option<Instant>,
         vim_mode_at_esc: &mut Option<vim::ViMode>,
+        last_ctrlc: &mut Option<Instant>,
         resize_at: &mut Option<Instant>,
     ) -> TermAction {
         if matches!(ev, event::Event::Resize(..)) {
             self.screen.erase_prompt();
             *resize_at = Some(Instant::now());
+        }
+
+        // Ctrl+C: if empty or double-tap, cancel; otherwise clear prompt.
+        if matches!(ev, event::Event::Key(crossterm::event::KeyEvent { code: crossterm::event::KeyCode::Char('c'), modifiers: crossterm::event::KeyModifiers::CONTROL, .. })) {
+            let double_tap = last_ctrlc.map_or(false, |prev| prev.elapsed() < Duration::from_millis(500));
+            if self.input.buf.is_empty() || double_tap {
+                *last_ctrlc = None;
+                self.screen.erase_prompt();
+                return TermAction::Cancel;
+            }
+            *last_ctrlc = Some(Instant::now());
+            self.input.clear();
+            self.queued_messages.clear();
+            self.render_screen();
+            return TermAction::None;
         }
 
         // Agent-mode Esc handling: vim mode switch, unqueue, or double-Esc cancel.
@@ -252,6 +275,7 @@ impl App {
             ) {
                 EscAction::VimToNormal => {
                     self.input.handle_event(ev, None);
+                    self.screen.mark_dirty();
                     self.render_screen();
                 }
                 EscAction::Unqueue => {
@@ -263,6 +287,7 @@ impl App {
                     self.input.buf = combined;
                     self.input.cpos = self.input.buf.len();
                     self.queued_messages.clear();
+                    self.screen.mark_dirty();
                     self.render_screen();
                 }
                 EscAction::Cancel { restore_vim } => {
@@ -282,6 +307,7 @@ impl App {
                 if !text.is_empty() {
                     self.queued_messages.push(text);
                 }
+                self.screen.mark_dirty();
                 self.render_screen();
             }
             Action::Cancel => {
@@ -290,9 +316,11 @@ impl App {
             }
             Action::ToggleMode => {
                 self.mode = self.mode.toggle();
+                self.screen.mark_dirty();
                 self.render_screen();
             }
             Action::Redraw => {
+                self.screen.mark_dirty();
                 self.render_screen();
             }
             Action::Resize(_) | Action::Noop => {}
@@ -333,7 +361,7 @@ enum EventResult {
     Continue,
     ToolStarted { name: String },
     ToolFinished { content: String, is_error: bool },
-    NeedsConfirm { desc: String, reply: tokio::sync::oneshot::Sender<bool> },
+    NeedsConfirm { desc: String, args: HashMap<String, serde_json::Value>, reply: tokio::sync::oneshot::Sender<bool> },
     Done,
 }
 
@@ -372,6 +400,7 @@ async fn main() {
     let vim_enabled = cfg.vim_mode.unwrap_or(false);
     let mut app = App::new(api_base, api_key, model, vim_enabled);
 
+    eprintln!("log: {}", log::path().display());
     println!();
     loop {
         let input = if !app.queued_messages.is_empty() {
@@ -415,6 +444,7 @@ async fn main() {
         let mut cancelled = false;
         let mut last_esc: Option<Instant> = None;
         let mut vim_mode_at_esc: Option<vim::ViMode> = None;
+        let mut last_ctrlc: Option<Instant> = None;
 
         loop {
             loop {
@@ -431,13 +461,17 @@ async fn main() {
                                 }
                                 pending = None;
                             }
-                            EventResult::NeedsConfirm { desc, reply } => {
+                            EventResult::NeedsConfirm { desc, args, reply } => {
                                 let tool_name = pending.as_ref().map(|p| p.name.as_str()).unwrap_or("");
-                                match app.handle_confirm(tool_name, &desc, reply) {
+                                match app.handle_confirm(tool_name, &desc, &args, reply) {
                                     ConfirmAction::Approved => {
                                         if let Some(ref mut p) = pending { p.start = Instant::now(); }
                                     }
                                     ConfirmAction::Denied => {
+                                        if let Some(ref p) = pending {
+                                            app.update_tool_result(p, "denied by user".into(), false, true);
+                                        }
+                                        pending = None;
                                         cancelled = true;
                                         agent_done = true;
                                         break;
@@ -456,7 +490,7 @@ async fn main() {
 
             while event::poll(Duration::ZERO).unwrap_or(false) {
                 if let Ok(ev) = event::read() {
-                    if let TermAction::Cancel = app.handle_terminal_event(ev, &mut last_esc, &mut vim_mode_at_esc, &mut resize_at) {
+                    if let TermAction::Cancel = app.handle_terminal_event(ev, &mut last_esc, &mut vim_mode_at_esc, &mut last_ctrlc, &mut resize_at) {
                         cancelled = true;
                         agent_done = true;
                         break;
