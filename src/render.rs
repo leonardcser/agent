@@ -8,6 +8,7 @@ use crossterm::{
     },
     terminal, ExecutableCommand,
 };
+use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::Path;
@@ -958,11 +959,10 @@ fn print_syntax_diff(old: &str, new: &str, path: &str) -> u16 {
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
     let theme = &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended];
 
-    let indent = "   "; // align with tool output level
+    let indent = "   ";
 
     // The file on disk already contains new_text (edit already applied).
-    // Find the position of new_text to determine line numbers, then use
-    // the surrounding (unchanged) lines as context.
+    // Find the position of new_text to determine starting line number.
     let file_content = std::fs::read_to_string(path).unwrap_or_default();
     let file_lines: Vec<&str> = file_content.lines().collect();
     let start_line = file_content
@@ -970,31 +970,22 @@ fn print_syntax_diff(old: &str, new: &str, path: &str) -> u16 {
         .map(|pos| file_content[..pos].lines().count())
         .unwrap_or(0);
 
-    let old_lines: Vec<&str> = old.lines().collect();
-    let new_lines: Vec<&str> = new.lines().collect();
+    // Compute line-by-line diff between old and new text
+    let diff = TextDiff::from_lines(old, new);
+    let changes: Vec<_> = diff.iter_all_changes().collect();
 
-    // Context: 3 lines before and after
+    // Determine line number range for gutter width (context + changes)
     let ctx = 3;
+    let new_lines_count = new.lines().count();
     let ctx_start = start_line.saturating_sub(ctx);
-    let ctx_end = (start_line + new_lines.len() + ctx).min(file_lines.len());
+    let ctx_end = (start_line + new_lines_count + ctx).min(file_lines.len());
     let max_lineno = ctx_end;
     let gutter_width = format!("{}", max_lineno).len().max(2);
-    // Layout: indent + " " + lineno + " " + sign + " " + code
-    // Context: indent + " " + lineno + "   " + code  (sign replaced by space)
-    // Diff:    indent + " " + lineno + " " + "-" + " " + code
-    let prefix_len = indent.len() + 1 + gutter_width + 3; // " " + gutter + " - "
+    let prefix_len = indent.len() + 1 + gutter_width + 3;
     let max_content = term_width().saturating_sub(prefix_len + 1);
 
-    let bg_del = Color::Rgb {
-        r: 60,
-        g: 20,
-        b: 20,
-    };
-    let bg_add = Color::Rgb {
-        r: 20,
-        g: 50,
-        b: 20,
-    };
+    let bg_del = Color::Rgb { r: 60, g: 20, b: 20 };
+    let bg_add = Color::Rgb { r: 20, g: 50, b: 20 };
 
     let layout = DiffLayout {
         indent,
@@ -1002,53 +993,76 @@ fn print_syntax_diff(old: &str, new: &str, path: &str) -> u16 {
         max_content,
     };
 
-    let mut h = HighlightLines::new(syntax, theme);
     // Prime highlighter up to context start
+    let mut h_old = HighlightLines::new(syntax, theme);
+    let mut h_new = HighlightLines::new(syntax, theme);
     for i in 0..ctx_start {
         if i < file_lines.len() {
-            let _ = h.highlight_line(&format!("{}\n", file_lines[i]), &SYNTAX_SET);
+            let line = format!("{}\n", file_lines[i]);
+            let _ = h_old.highlight_line(&line, &SYNTAX_SET);
+            let _ = h_new.highlight_line(&line, &SYNTAX_SET);
         }
     }
 
     // Context before
     let mut rows = print_diff_lines(
-        &mut h,
+        &mut h_new,
         &file_lines[ctx_start..start_line],
         ctx_start,
         None,
         None,
         &layout,
     );
-    // Deleted lines
-    rows += print_diff_lines(
-        &mut h,
-        &old_lines,
-        start_line,
-        Some(('-', Color::Red)),
-        Some(bg_del),
-        &layout,
-    );
-    // Re-highlight from start_line for added lines + context after
-    let mut h2 = HighlightLines::new(syntax, theme);
-    for i in 0..start_line {
-        if i < file_lines.len() {
-            let _ = h2.highlight_line(&format!("{}\n", file_lines[i]), &SYNTAX_SET);
+    // Also advance h_old through context lines
+    for line in &file_lines[ctx_start..start_line] {
+        let _ = h_old.highlight_line(&format!("{}\n", line), &SYNTAX_SET);
+    }
+
+    // Render the actual diff using computed changes
+    let mut old_lineno = start_line; // 0-indexed file line for deleted lines
+    let mut new_lineno = start_line; // 0-indexed file line for added/equal lines
+    for change in &changes {
+        let text = change.value().trim_end_matches('\n');
+        match change.tag() {
+            ChangeTag::Equal => {
+                print_diff_lines(&mut h_new, &[text], new_lineno, None, None, &layout);
+                let _ = h_old.highlight_line(&format!("{}\n", text), &SYNTAX_SET);
+                old_lineno += 1;
+                new_lineno += 1;
+                rows += 1;
+            }
+            ChangeTag::Delete => {
+                print_diff_lines(
+                    &mut h_old,
+                    &[text],
+                    old_lineno,
+                    Some(('-', Color::Red)),
+                    Some(bg_del),
+                    &layout,
+                );
+                old_lineno += 1;
+                rows += 1;
+            }
+            ChangeTag::Insert => {
+                print_diff_lines(
+                    &mut h_new,
+                    &[text],
+                    new_lineno,
+                    Some(('+', Color::Green)),
+                    Some(bg_add),
+                    &layout,
+                );
+                new_lineno += 1;
+                rows += 1;
+            }
         }
     }
-    // Added lines
-    rows += print_diff_lines(
-        &mut h2,
-        &new_lines,
-        start_line,
-        Some(('+', Color::Green)),
-        Some(bg_add),
-        &layout,
-    );
+
     // Context after
-    let after_start = start_line + new_lines.len();
+    let after_start = start_line + new_lines_count;
     let after_end = (after_start + ctx).min(file_lines.len());
     rows += print_diff_lines(
-        &mut h2,
+        &mut h_new,
         &file_lines[after_start..after_end],
         after_start,
         None,
