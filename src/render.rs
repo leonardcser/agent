@@ -478,7 +478,9 @@ impl Screen {
     ) -> (u16, u16) {
         let mut out = io::stdout();
         let usable = width.saturating_sub(1);
+        let height = terminal::size().map(|(_, h)| h as usize).unwrap_or(24);
         let mut extra_rows: u16 = 0;
+        let queued_rows = queued.len();
 
         // 1. Queued messages
         for msg in queued {
@@ -523,13 +525,63 @@ impl Screen {
             "/clear" | "/new" | "/exit" | "/quit" | "/vim"
         );
         let is_exec = state.buf.starts_with('!');
-        for (li, line) in visual_lines.iter().enumerate() {
+        let total_content_rows = visual_lines.len();
+        let comp_total = state
+            .completer
+            .as_ref()
+            .map(|c| c.results.len())
+            .unwrap_or(0);
+        let mut comp_rows = comp_total;
+        let mut comp_gap = if comp_rows > 0 { 1 } else { 0 };
+
+        // Ensure the prompt never exceeds terminal height by shrinking the content window.
+        let fixed_base = queued_rows + 2; // queued + top bar + bottom bar
+        let mut fixed = fixed_base + comp_gap + comp_rows;
+        let mut max_content_rows = height.saturating_sub(fixed);
+        if max_content_rows == 0 {
+            // Make room for at least one content row by trimming completions.
+            let available_for_comp = height.saturating_sub(fixed_base + 1);
+            if available_for_comp == 0 {
+                comp_rows = 0;
+                comp_gap = 0;
+            } else {
+                comp_rows = comp_rows.min(available_for_comp);
+                comp_gap = if comp_rows > 0 { 1 } else { 0 };
+            }
+            fixed = fixed_base + comp_gap + comp_rows;
+            max_content_rows = height.saturating_sub(fixed);
+            if max_content_rows == 0 {
+                max_content_rows = 1;
+            }
+        }
+
+        let content_rows = total_content_rows.min(max_content_rows);
+        let mut scroll_offset = 0usize;
+        if total_content_rows > content_rows {
+            if cursor_line + 1 > content_rows {
+                scroll_offset = cursor_line + 1 - content_rows;
+            }
+            if scroll_offset + content_rows > total_content_rows {
+                scroll_offset = total_content_rows - content_rows;
+            }
+        }
+        let cursor_line_visible = cursor_line
+            .saturating_sub(scroll_offset)
+            .min(content_rows.saturating_sub(1));
+
+        for (li, line) in visual_lines
+            .iter()
+            .skip(scroll_offset)
+            .take(content_rows)
+            .enumerate()
+        {
+            let abs_idx = scroll_offset + li;
             let _ = out.queue(Print(" "));
             if is_command {
                 let _ = out.queue(SetForegroundColor(theme::ACCENT));
                 let _ = out.queue(Print(line));
                 let _ = out.queue(ResetColor);
-            } else if is_exec && li == 0 && line.starts_with('!') {
+            } else if is_exec && abs_idx == 0 && line.starts_with('!') {
                 let _ = out.queue(SetForegroundColor(theme::EXEC));
                 let _ = out.queue(SetAttribute(Attribute::Bold));
                 let _ = out.queue(Print("!"));
@@ -551,17 +603,14 @@ impl Screen {
         }
 
         // 6. Completion list (below the bar)
-        let has_comp = state
-            .completer
-            .as_ref()
-            .is_some_and(|c| !c.results.is_empty());
-        if has_comp {
+        if comp_rows > 0 {
             let _ = out.queue(Print("\r\n"));
         }
-        let comp_rows = draw_completions(state.completer.as_ref(), width);
+        let comp_rows = draw_completions(state.completer.as_ref(), comp_rows);
 
         // Clear leftover rows from previous (taller) prompt
-        let total_rows = extra_rows as usize + 1 + visual_lines.len() + 1 + comp_rows;
+        let total_rows =
+            queued_rows + 1 + content_rows + 1 + comp_gap + comp_rows;
         let new_rows = total_rows as u16;
         let cleared = if prev_rows > new_rows {
             let n = prev_rows - new_rows;
@@ -578,7 +627,7 @@ impl Screen {
         let _ = out.flush();
         let final_row = cursor::position().map(|(_, y)| y).unwrap_or(0);
         let top_row = final_row.saturating_sub(new_rows + cleared - 1);
-        let text_row = top_row + 1 + extra_rows + cursor_line as u16;
+        let text_row = top_row + 1 + extra_rows + cursor_line_visible as u16;
         let text_col = 1 + cursor_col as u16;
         let _ = out.queue(cursor::MoveTo(text_col, text_row));
 
@@ -2053,13 +2102,27 @@ fn render_line_spans(line: &str) {
     }
 }
 
-fn draw_completions(completer: Option<&crate::completer::Completer>, _width: usize) -> usize {
+fn draw_completions(
+    completer: Option<&crate::completer::Completer>,
+    max_rows: usize,
+) -> usize {
     let Some(comp) = completer else { return 0 };
-    if comp.results.is_empty() {
+    if comp.results.is_empty() || max_rows == 0 {
         return 0;
     }
     let mut out = io::stdout();
-    let last = comp.results.len() - 1;
+    let total = comp.results.len();
+    let max_rows = max_rows.min(total);
+    let mut start = 0;
+    if total > max_rows {
+        let half = max_rows / 2;
+        start = comp.selected.saturating_sub(half);
+        if start + max_rows > total {
+            start = total - max_rows;
+        }
+    }
+    let end = start + max_rows;
+    let last = max_rows - 1;
     let prefix = match comp.kind {
         crate::completer::CompleterKind::Command => "/",
         crate::completer::CompleterKind::File => "./",
@@ -2071,10 +2134,11 @@ fn draw_completions(completer: Option<&crate::completer::Completer>, _width: usi
         .map(|i| prefix.len() + i.label.len())
         .max()
         .unwrap_or(0);
-    for (i, item) in comp.results.iter().enumerate() {
+    for (i, item) in comp.results[start..end].iter().enumerate() {
+        let idx = start + i;
         let _ = out.queue(Print("  "));
         let label = format!("{}{}", prefix, item.label);
-        if i == comp.selected {
+        if idx == comp.selected {
             let _ = out.queue(SetForegroundColor(theme::ACCENT));
             let _ = out.queue(Print(&label));
             if let Some(ref desc) = item.description {
@@ -2099,7 +2163,7 @@ fn draw_completions(completer: Option<&crate::completer::Completer>, _width: usi
             let _ = out.queue(Print("\r\n"));
         }
     }
-    comp.results.len()
+    max_rows
 }
 
 pub fn erase_prompt_at(top_row: u16) {
