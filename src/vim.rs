@@ -95,6 +95,12 @@ pub struct Vim {
     insert_snapshot: Option<UndoEntry>,
 }
 
+impl Default for Vim {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Vim {
     pub fn new() -> Self {
         Self {
@@ -184,7 +190,7 @@ impl Vim {
         // Ctrl+C / Ctrl+D always pass through for cancel.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('c' | 'd') => return Action::Passthrough,
+                KeyCode::Char('c' | 'd' | 'u') => return Action::Passthrough,
                 KeyCode::Char('r') => {
                     self.redo(buf, cpos);
                     return Action::Consumed;
@@ -721,7 +727,7 @@ impl Vim {
         &mut self,
         key: KeyEvent,
         kind: FindKind,
-        buf: &mut String,
+        buf: &mut str,
         cpos: &mut usize,
     ) -> Action {
         self.sub = SubState::Ready;
@@ -740,7 +746,7 @@ impl Vim {
         Action::Consumed
     }
 
-    fn handle_waiting_g(&mut self, key: KeyEvent, buf: &mut String, cpos: &mut usize) -> Action {
+    fn handle_waiting_g(&mut self, key: KeyEvent, buf: &mut str, cpos: &mut usize) -> Action {
         self.sub = SubState::Ready;
         if let KeyCode::Char('g') = key.code {
             // gg → start of buffer.
@@ -1095,6 +1101,7 @@ enum CharClass {
     /// vim "word" boundaries: alphanumeric+underscore vs punctuation vs whitespace.
     Word,
     /// vim "WORD" boundaries: non-whitespace vs whitespace.
+    #[allow(clippy::upper_case_acronyms)]
     WORD,
 }
 
@@ -1397,7 +1404,7 @@ fn text_object_word(
     } else {
         // "a word" includes trailing whitespace, or leading if no trailing.
         let mut a_end = byte_end;
-        while a_end < buf.len() && buf[a_end..].starts_with(|c: char| c == ' ' || c == '\t') {
+        while a_end < buf.len() && buf[a_end..].starts_with([' ', '\t']) {
             a_end += 1;
         }
         if a_end > byte_end {
@@ -1406,7 +1413,7 @@ fn text_object_word(
             // No trailing whitespace — include leading.
             let mut a_start = byte_start;
             while a_start > 0
-                && buf[..a_start].ends_with(|c: char| c == ' ' || c == '\t')
+                && buf[..a_start].ends_with([' ', '\t'])
             {
                 a_start -= 1;
             }

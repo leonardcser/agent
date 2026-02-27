@@ -124,7 +124,7 @@ pub fn list_sessions() -> Vec<SessionMeta> {
         }
         out.push(meta);
     }
-    out.sort_by(|a, b| session_updated_at(b).cmp(&session_updated_at(a)));
+    out.sort_by_key(|b| std::cmp::Reverse(session_updated_at(b)));
     out
 }
 

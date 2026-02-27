@@ -6,11 +6,10 @@ use crate::session::Session;
 use crate::{permissions, render, session, state, tools, vim};
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Write};
+use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use crossterm::{
-    cursor,
     event::{self, EnableBracketedPaste, DisableBracketedPaste},
     terminal, ExecutableCommand,
 };
@@ -382,11 +381,7 @@ impl App {
     }
 
     pub fn render_screen(&mut self) {
-        let mut out = io::stdout();
-        let _ = out.execute(cursor::Hide);
         self.screen.draw_prompt_with_queued(&self.input, self.mode, render::term_width(), &self.queued_messages);
-        let _ = out.execute(cursor::Show);
-        let _ = out.flush();
     }
 
     pub fn handle_agent_event(&mut self, ev: AgentEvent, pending: &mut Option<PendingTool>, steered_count: &mut usize) -> SessionControl {
@@ -506,7 +501,7 @@ impl App {
         }
 
         if matches!(ev, event::Event::Key(crossterm::event::KeyEvent { code: crossterm::event::KeyCode::Char('c'), modifiers: crossterm::event::KeyModifiers::CONTROL, .. })) {
-            let double_tap = last_ctrlc.map_or(false, |prev| prev.elapsed() < Duration::from_millis(500));
+            let double_tap = last_ctrlc.is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
             if self.input.buf.is_empty() || double_tap {
                 *last_ctrlc = None;
                 self.screen.mark_dirty();
@@ -700,7 +695,7 @@ impl App {
             // Restore any messages that were queued but not yet injected into the
             // agent back to the input prompt so the user can edit and resend them.
             let mut leftover: Vec<String> = steering.lock().unwrap().drain(..).collect();
-            leftover.extend(self.queued_messages.drain(..));
+            leftover.append(&mut self.queued_messages);
             if !leftover.is_empty() {
                 let mut combined = leftover.join("\n");
                 if !self.input.buf.is_empty() {

@@ -184,8 +184,8 @@ pub(super) fn render_tool(
     };
     let tl = if name == "bash" && status == ToolStatus::Pending {
         let ms = args.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(120_000);
-        let secs = (ms / 1000) as u64;
-        Some(if secs % 60 == 0 {
+        let secs = ms / 1000;
+        Some(if secs.is_multiple_of(60) {
             format!("timeout {}m", secs / 60)
         } else if secs >= 60 {
             format!("timeout {}m{}s", secs / 60, secs % 60)
@@ -299,146 +299,120 @@ fn print_tool_output(
     is_error: bool,
     args: &HashMap<String, serde_json::Value>,
 ) -> u16 {
-    let mut out = io::stdout();
     match name {
-        "read_file" if !is_error => {
-            let line_count = content.lines().count();
-            let _ = out
-                .queue(SetAttribute(Attribute::Dim))
-                .and_then(|o| {
-                    o.queue(Print(format!(
-                        "   {}\r\n",
-                        pluralize(line_count, "line", "lines")
-                    )))
-                })
-                .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
-            1
-        }
-        "edit_file" if !is_error => {
-            let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-            let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-            let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            if new.is_empty() {
-                let n = old.lines().count();
-                let _ = out
-                    .queue(SetAttribute(Attribute::Dim))
-                    .and_then(|o| {
-                        o.queue(Print(format!(
-                            "   {}\r\n",
-                            pluralize(n, "line deleted", "lines deleted")
-                        )))
-                    })
-                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
-                1
-            } else {
-                print_inline_diff(old, new, path, new, 0)
-            }
-        }
-        "write_file" if !is_error => {
-            let file_content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            print_syntax_file(file_content, path, 0)
-        }
-        "ask_user_question" if !is_error => {
-            let mut out = io::stdout();
-            let mut rows = 0u16;
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(content) {
-                for (question, answer) in &map {
-                    let answer_str = match answer {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Array(arr) => arr
-                            .iter()
-                            .filter_map(|v| v.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        other => other.to_string(),
-                    };
-                    let _ = out
-                        .queue(SetAttribute(Attribute::Dim))
-                        .and_then(|o| o.queue(Print(format!("   {} ", question))))
-                        .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
-                        .and_then(|o| o.queue(Print(format!("{}\r\n", answer_str))));
-                    rows += 1;
-                }
-            } else {
-                let _ = out
-                    .queue(SetAttribute(Attribute::Dim))
-                    .and_then(|o| o.queue(Print(format!("   {}\r\n", content))))
-                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
-                rows += 1;
-            }
-            rows
-        }
+        "read_file" if !is_error => print_dim_count(content.lines().count(), "line", "lines"),
+        "edit_file" if !is_error => render_edit_output(args),
+        "write_file" if !is_error => render_write_output(args),
+        "ask_user_question" if !is_error => render_question_output(content),
         "bash" if content.is_empty() => 0,
-        "bash" => {
-            const MAX_LINES: usize = 20;
-            let lines: Vec<&str> = content.lines().collect();
-            let total = lines.len();
-            let mut rows = 0u16;
-            if total > MAX_LINES {
-                let skipped = total - MAX_LINES;
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print(format!("   ... {} lines above\r\n", skipped)));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
-                rows += 1;
-            }
-            let visible = if total > MAX_LINES { &lines[total - MAX_LINES..] } else { &lines[..] };
-            for line in visible {
-                if is_error {
-                    let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
-                    let _ = out.queue(Print(format!("   {}\r\n", line)));
-                    let _ = out.queue(ResetColor);
-                } else {
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
-                    let _ = out.queue(Print(format!("   {}\r\n", line)));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
-                }
-                rows += 1;
-            }
-            rows
-        }
-        "grep" if !is_error => {
-            let count = content.lines().count();
-            let _ = out
-                .queue(SetAttribute(Attribute::Dim))
-                .and_then(|o| {
-                    o.queue(Print(format!(
-                        "   {}\r\n",
-                        pluralize(count, "match", "matches")
-                    )))
-                })
-                .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
-            1
-        }
-        "glob" if !is_error => {
-            let count = content.lines().count();
-            let _ = out
-                .queue(SetAttribute(Attribute::Dim))
-                .and_then(|o| {
-                    o.queue(Print(format!(
-                        "   {}\r\n",
-                        pluralize(count, "file", "files")
-                    )))
-                })
-                .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
-            1
-        }
-        _ => {
-            let preview = result_preview(content, 3);
-            if is_error {
-                let _ = out
-                    .queue(SetForegroundColor(theme::TOOL_ERR))
-                    .and_then(|o| o.queue(Print(format!("   {}\r\n", preview))))
-                    .and_then(|o| o.queue(ResetColor));
-            } else {
-                let _ = out
-                    .queue(SetAttribute(Attribute::Dim))
-                    .and_then(|o| o.queue(Print(format!("   {}\r\n", preview))))
-                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
-            }
-            preview.lines().count() as u16
-        }
+        "bash" => render_bash_output(content, is_error),
+        "grep" if !is_error => print_dim_count(content.lines().count(), "match", "matches"),
+        "glob" if !is_error => print_dim_count(content.lines().count(), "file", "files"),
+        _ => render_default_output(content, is_error),
     }
+}
+
+fn print_dim_count(count: usize, singular: &str, plural: &str) -> u16 {
+    let mut out = io::stdout();
+    let _ = out
+        .queue(SetAttribute(Attribute::Dim))
+        .and_then(|o| o.queue(Print(format!("   {}\r\n", pluralize(count, singular, plural)))))
+        .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
+    1
+}
+
+fn render_edit_output(args: &HashMap<String, serde_json::Value>) -> u16 {
+    let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+    let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+    let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+    if new.is_empty() {
+        print_dim_count(old.lines().count(), "line deleted", "lines deleted")
+    } else {
+        print_inline_diff(old, new, path, new, 0)
+    }
+}
+
+fn render_write_output(args: &HashMap<String, serde_json::Value>) -> u16 {
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+    print_syntax_file(content, path, 0)
+}
+
+fn render_question_output(content: &str) -> u16 {
+    let mut out = io::stdout();
+    let mut rows = 0u16;
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(content) {
+        for (question, answer) in &map {
+            let answer_str = match answer {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                other => other.to_string(),
+            };
+            let _ = out
+                .queue(SetAttribute(Attribute::Dim))
+                .and_then(|o| o.queue(Print(format!("   {} ", question))))
+                .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
+                .and_then(|o| o.queue(Print(format!("{}\r\n", answer_str))));
+            rows += 1;
+        }
+    } else {
+        let _ = out
+            .queue(SetAttribute(Attribute::Dim))
+            .and_then(|o| o.queue(Print(format!("   {}\r\n", content))))
+            .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
+        rows += 1;
+    }
+    rows
+}
+
+fn render_bash_output(content: &str, is_error: bool) -> u16 {
+    const MAX_LINES: usize = 20;
+    let mut out = io::stdout();
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    let mut rows = 0u16;
+    if total > MAX_LINES {
+        let skipped = total - MAX_LINES;
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(format!("   ... {} lines above\r\n", skipped)));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        rows += 1;
+    }
+    let visible = if total > MAX_LINES { &lines[total - MAX_LINES..] } else { &lines[..] };
+    for line in visible {
+        if is_error {
+            let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
+            let _ = out.queue(Print(format!("   {}\r\n", line)));
+            let _ = out.queue(ResetColor);
+        } else {
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print(format!("   {}\r\n", line)));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+        }
+        rows += 1;
+    }
+    rows
+}
+
+fn render_default_output(content: &str, is_error: bool) -> u16 {
+    let mut out = io::stdout();
+    let preview = result_preview(content, 3);
+    if is_error {
+        let _ = out
+            .queue(SetForegroundColor(theme::TOOL_ERR))
+            .and_then(|o| o.queue(Print(format!("   {}\r\n", preview))))
+            .and_then(|o| o.queue(ResetColor));
+    } else {
+        let _ = out
+            .queue(SetAttribute(Attribute::Dim))
+            .and_then(|o| o.queue(Print(format!("   {}\r\n", preview))))
+            .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
+    }
+    preview.lines().count() as u16
 }
 
 fn pluralize(count: usize, singular: &str, plural: &str) -> String {

@@ -8,13 +8,12 @@ use crate::completer::{Completer, CompleterKind};
 use crate::render::{self, Screen};
 use crate::vim::{self, ViMode, Vim};
 use crossterm::{
-    cursor,
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
     },
     terminal, ExecutableCommand,
 };
-use std::io::{self, Write};
+use std::io;
 use std::time::Duration;
 
 /// Object Replacement Character — inline placeholder for large pastes.
@@ -75,6 +74,12 @@ pub enum Action {
     ToggleMode,
     Resize(usize),
     Noop,
+}
+
+impl Default for InputState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InputState {
@@ -305,7 +310,7 @@ impl InputState {
             }) if self.vim.as_ref().is_some_and(|v| v.mode() == ViMode::Normal) => {
                 let half = render::term_height() / 2;
                 let line = current_line(&self.buf, self.cpos);
-                let total = self.buf.lines().count().max(1);
+                let total = self.buf.chars().filter(|&c| c == '\n').count() + 1;
                 let target = (line + half).min(total - 1);
                 self.move_to_line(target);
                 Action::Redraw
@@ -702,7 +707,7 @@ impl InputState {
     }
 
     fn maybe_remove_paste(&mut self, byte_pos: usize) {
-        if self.buf[byte_pos..].chars().next() == Some(PASTE_MARKER) {
+        if self.buf[byte_pos..].starts_with(PASTE_MARKER) {
             let idx = self.buf[..byte_pos]
                 .chars()
                 .filter(|&c| c == PASTE_MARKER)
@@ -728,9 +733,7 @@ pub fn read_input(
 
     terminal::enable_raw_mode().ok()?;
     let _ = out.execute(EnableBracketedPaste);
-    let _ = out.execute(cursor::Hide);
     screen.draw_prompt(state, *mode, width);
-    let _ = out.execute(cursor::Show);
 
     let mut resize_pending = false;
     let mut last_ctrlc: Option<std::time::Instant> = None;
@@ -746,10 +749,8 @@ pub fn read_input(
                 },
                 _ => {
                     resize_pending = false;
-                    let _ = out.execute(cursor::Hide);
                     screen.redraw_in_place();
                     screen.draw_prompt(state, *mode, width);
-                    let _ = out.execute(cursor::Show);
                     continue;
                 }
             }
@@ -775,9 +776,7 @@ pub fn read_input(
                 state.set_vim_mode(crate::vim::ViMode::Insert);
             }
             state.open_history_search(history);
-            let _ = out.execute(cursor::Hide);
             screen.draw_prompt(state, *mode, width);
-            let _ = out.execute(cursor::Show);
             continue;
         }
 
@@ -791,12 +790,9 @@ pub fn read_input(
             })
         ) {
             let double_tap =
-                last_ctrlc.map_or(false, |prev| prev.elapsed() < Duration::from_millis(500));
+                last_ctrlc.is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
             if state.buf.is_empty() || double_tap {
-                let _ = out.execute(cursor::Hide);
                 screen.erase_prompt();
-                let _ = out.execute(cursor::Show);
-                let _ = out.flush();
                 let _ = out.execute(DisableBracketedPaste);
                 terminal::disable_raw_mode().ok();
                 return None;
@@ -806,9 +802,7 @@ pub fn read_input(
             state.cpos = 0;
             state.pastes.clear();
             state.completer = None;
-            let _ = out.execute(cursor::Hide);
             screen.draw_prompt(state, *mode, width);
-            let _ = out.execute(cursor::Show);
             continue;
         }
 
@@ -822,9 +816,7 @@ pub fn read_input(
             })
         ) {
             state.toggle_stash();
-            let _ = out.execute(cursor::Hide);
             screen.draw_prompt(state, *mode, width);
-            let _ = out.execute(cursor::Show);
             continue;
         }
 
@@ -838,7 +830,7 @@ pub fn read_input(
         ) {
             let in_normal = !state.vim_enabled() || !state.vim_in_insert_mode();
             if in_normal {
-                let double = last_esc.map_or(false, |t| t.elapsed() < Duration::from_millis(500));
+                let double = last_esc.is_some_and(|t| t.elapsed() < Duration::from_millis(500));
                 if double {
                     last_esc = None;
                     let restore_insert = esc_was_insert;
@@ -849,10 +841,7 @@ pub fn read_input(
                         continue;
                     }
                     if let Some(block_idx) = render::show_rewind(&turns) {
-                        let _ = out.execute(cursor::Hide);
                         screen.erase_prompt();
-                        let _ = out.execute(cursor::Show);
-                        let _ = out.flush();
                         let _ = out.execute(DisableBracketedPaste);
                         terminal::disable_raw_mode().ok();
                         return Some(format!("\x00rewind:{}", block_idx));
@@ -861,9 +850,7 @@ pub fn read_input(
                     if restore_insert {
                         state.set_vim_mode(crate::vim::ViMode::Insert);
                     }
-                    let _ = out.execute(cursor::Hide);
                     screen.draw_prompt(state, *mode, width);
-                    let _ = out.execute(cursor::Show);
                     continue;
                 } else {
                     last_esc = Some(std::time::Instant::now());
@@ -888,33 +875,23 @@ pub fn read_input(
                 state.cpos = 0;
                 state.open_settings(state.vim_enabled(), auto_compact);
                 // Don't restore stash yet — settings is an overlay, restore on close.
-                let _ = out.execute(cursor::Hide);
                 screen.draw_prompt(state, *mode, width);
-                let _ = out.execute(cursor::Show);
             }
             Action::Submit(text) => {
-                let _ = out.execute(cursor::Hide);
                 screen.erase_prompt();
-                let _ = out.execute(cursor::Show);
-                let _ = out.flush();
                 let _ = out.execute(DisableBracketedPaste);
                 terminal::disable_raw_mode().ok();
                 return Some(text);
             }
             Action::Cancel => {
-                let _ = out.execute(cursor::Hide);
                 screen.erase_prompt();
-                let _ = out.execute(cursor::Show);
-                let _ = out.flush();
                 let _ = out.execute(DisableBracketedPaste);
                 terminal::disable_raw_mode().ok();
                 return None;
             }
             Action::ToggleMode => {
                 *mode = mode.toggle();
-                let _ = out.execute(cursor::Hide);
                 screen.draw_prompt(state, *mode, width);
-                let _ = out.execute(cursor::Show);
             }
             Action::Resize(w) => {
                 width = w;
@@ -922,9 +899,7 @@ pub fn read_input(
                 resize_pending = true;
             }
             Action::Redraw => {
-                let _ = out.execute(cursor::Hide);
                 screen.draw_prompt(state, *mode, width);
-                let _ = out.execute(cursor::Show);
             }
             Action::Noop => {}
         }
@@ -966,7 +941,7 @@ fn cursor_in_at_zone(buf: &str, cpos: usize) -> Option<usize> {
     // Include the char at cpos so the cursor-on-@ case works.
     let search_end = (cpos + 1).min(buf.len());
     // Make sure we land on a char boundary.
-    let search_end = buf.char_indices().map(|(i, _)| i).filter(|&i| i <= search_end).last().map(|i| i + 1).unwrap_or(search_end);
+    let search_end = buf.char_indices().map(|(i, _)| i).rfind(|&i| i <= search_end).map(|i| i + 1).unwrap_or(search_end);
     let at_pos = buf[..search_end].rfind('@')?;
     // @ must be at start or preceded by whitespace.
     if at_pos > 0 && !buf[..at_pos].ends_with(char::is_whitespace) {

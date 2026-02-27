@@ -38,6 +38,7 @@ fn system_prompt(mode: Mode) -> String {
     template.replace("{cwd}", &cwd)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agent(
     provider: &Provider,
     model: &str,

@@ -109,51 +109,243 @@ pub enum Throbber {
     Interrupted,
 }
 
-pub struct Screen {
+struct BlockHistory {
     blocks: Vec<Block>,
     flushed: usize,
     last_block_rows: u16,
-    active_tool: Option<ActiveTool>,
-    prompt_drawn: bool,
-    prompt_dirty: bool,
-    prompt_top_row: u16,
-    working_since: Option<Instant>,
+}
+
+impl BlockHistory {
+    fn new() -> Self {
+        Self { blocks: Vec::new(), flushed: 0, last_block_rows: 0 }
+    }
+
+    fn push(&mut self, block: Block) {
+        self.blocks.push(block);
+    }
+
+    fn has_unflushed(&self) -> bool {
+        self.flushed < self.blocks.len()
+    }
+
+    fn clear(&mut self) {
+        self.blocks.clear();
+        self.flushed = 0;
+        self.last_block_rows = 0;
+    }
+
+    fn truncate(&mut self, idx: usize) {
+        self.blocks.truncate(idx);
+        self.flushed = self.flushed.min(idx);
+    }
+
+    /// Render unflushed blocks. Returns total rows printed.
+    fn render(&mut self, width: usize) -> u16 {
+        if !self.has_unflushed() {
+            return 0;
+        }
+        let mut out = io::stdout();
+        let mut total = 0u16;
+        let last_idx = self.blocks.len().saturating_sub(1);
+        for i in self.flushed..self.blocks.len() {
+            let gap = if i > 0 {
+                gap_between(
+                    &Element::Block(&self.blocks[i - 1]),
+                    &Element::Block(&self.blocks[i]),
+                )
+            } else {
+                0
+            };
+            for _ in 0..gap {
+                let _ = out.queue(Print("\r\n"));
+            }
+            let rows = render_block(&self.blocks[i], width);
+            total += gap + rows;
+            if i == last_idx {
+                self.last_block_rows = rows + gap;
+            }
+        }
+        self.flushed = self.blocks.len();
+        total
+    }
+}
+
+struct PromptState {
+    drawn: bool,
+    dirty: bool,
+    top_row: u16,
+    prev_rows: u16,
+    /// Cursor row to use when `drawn` is false, avoiding racy cursor::position() queries.
+    fallback_row: Option<u16>,
+}
+
+impl PromptState {
+    fn new() -> Self {
+        Self { drawn: false, dirty: true, top_row: 0, prev_rows: 0, fallback_row: None }
+    }
+}
+
+struct WorkingState {
+    since: Option<Instant>,
     final_elapsed: Option<Duration>,
-    context_tokens: Option<u32>,
     throbber: Option<Throbber>,
     last_spinner_frame: usize,
-    prev_prompt_rows: u16,
     retry_deadline: Option<Instant>,
+}
+
+impl WorkingState {
+    fn new() -> Self {
+        Self {
+            since: None,
+            final_elapsed: None,
+            throbber: None,
+            last_spinner_frame: usize::MAX,
+            retry_deadline: None,
+        }
+    }
+
+    fn set_throbber(&mut self, state: Throbber) {
+        let is_active = matches!(
+            state,
+            Throbber::Working | Throbber::Retrying { .. } | Throbber::Compacting
+        );
+        if is_active && self.since.is_none() {
+            self.since = Some(Instant::now());
+            self.final_elapsed = None;
+        }
+        if !is_active {
+            self.final_elapsed = self.since.map(|s| s.elapsed());
+            self.since = None;
+        }
+        self.retry_deadline = match state {
+            Throbber::Retrying { delay, .. } => Some(Instant::now() + delay),
+            _ => None,
+        };
+        self.throbber = Some(state);
+    }
+
+    fn clear(&mut self) {
+        self.throbber = None;
+        self.since = None;
+        self.final_elapsed = None;
+    }
+
+    fn throbber_spans(&self) -> Vec<BarSpan> {
+        let Some(state) = self.throbber else {
+            return vec![];
+        };
+        match state {
+            Throbber::Compacting => {
+                let Some(start) = self.since else {
+                    return vec![];
+                };
+                let elapsed = start.elapsed();
+                let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
+                vec![
+                    BarSpan {
+                        text: format!("{} compacting", SPINNER_FRAMES[idx]),
+                        color: Color::Reset,
+                        attr: Some(Attribute::Bold),
+                    },
+                    BarSpan {
+                        text: format!(" {}s", elapsed.as_secs()),
+                        color: theme::MUTED,
+                        attr: Some(Attribute::Dim),
+                    },
+                ]
+            }
+            Throbber::Working | Throbber::Retrying { .. } => {
+                let Some(start) = self.since else {
+                    return vec![];
+                };
+                let elapsed = start.elapsed();
+                let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
+                let spinner_color = if matches!(state, Throbber::Retrying { .. }) {
+                    theme::MUTED
+                } else {
+                    Color::Reset
+                };
+                let mut spans = vec![
+                    BarSpan {
+                        text: format!("{} working", SPINNER_FRAMES[idx]),
+                        color: spinner_color,
+                        attr: Some(Attribute::Bold),
+                    },
+                    BarSpan {
+                        text: format!(" {}s", elapsed.as_secs()),
+                        color: theme::MUTED,
+                        attr: Some(Attribute::Dim),
+                    },
+                ];
+                if let Throbber::Retrying { delay, attempt } = state {
+                    let remaining = self
+                        .retry_deadline
+                        .map(|t| t.saturating_duration_since(Instant::now()))
+                        .unwrap_or(delay);
+                    spans.push(BarSpan {
+                        text: format!(
+                            " (retrying in {}s #{})",
+                            remaining.as_secs(),
+                            attempt
+                        ),
+                        color: theme::MUTED,
+                        attr: Some(Attribute::Dim),
+                    });
+                }
+                spans
+            }
+            Throbber::Done => {
+                let secs = self.final_elapsed.map(|d| d.as_secs()).unwrap_or(0);
+                vec![BarSpan {
+                    text: format!("done {}s", secs),
+                    color: theme::MUTED,
+                    attr: Some(Attribute::Dim),
+                }]
+            }
+            Throbber::Interrupted => {
+                vec![BarSpan {
+                    text: "interrupted".into(),
+                    color: theme::MUTED,
+                    attr: Some(Attribute::Dim),
+                }]
+            }
+        }
+    }
+}
+
+pub struct Screen {
+    history: BlockHistory,
+    active_tool: Option<ActiveTool>,
+    prompt: PromptState,
+    working: WorkingState,
+    context_tokens: Option<u32>,
+}
+
+impl Default for Screen {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Screen {
     pub fn new() -> Self {
         Self {
-            blocks: Vec::new(),
-            flushed: 0,
-            last_block_rows: 0,
+            history: BlockHistory::new(),
             active_tool: None,
-            prompt_drawn: false,
-            prompt_dirty: true,
-            prompt_top_row: 0,
-            working_since: None,
-            final_elapsed: None,
+            prompt: PromptState::new(),
+            working: WorkingState::new(),
             context_tokens: None,
-            throbber: None,
-            last_spinner_frame: usize::MAX,
-            prev_prompt_rows: 0,
-            retry_deadline: None,
         }
     }
 
     pub fn begin_turn(&mut self) {
-        self.last_block_rows = 0;
+        self.history.last_block_rows = 0;
         self.active_tool = None;
     }
 
     pub fn push(&mut self, block: Block) {
-        self.blocks.push(block);
-        self.prompt_dirty = true;
+        self.history.push(block);
+        self.prompt.dirty = true;
     }
 
     pub fn start_tool(
@@ -170,7 +362,7 @@ impl Screen {
             output: None,
             start_time: Instant::now(),
         });
-        self.prompt_dirty = true;
+        self.prompt.dirty = true;
     }
 
     pub fn append_active_output(&mut self, chunk: &str) {
@@ -189,7 +381,7 @@ impl Screen {
                     });
                 }
             }
-            self.prompt_dirty = true;
+            self.prompt.dirty = true;
         }
     }
 
@@ -199,7 +391,7 @@ impl Screen {
             if status == ToolStatus::Pending {
                 tool.start_time = Instant::now();
             }
-            self.prompt_dirty = true;
+            self.prompt.dirty = true;
         }
     }
 
@@ -210,7 +402,7 @@ impl Screen {
     ) {
         if let Some(tool) = self.active_tool.take() {
             let elapsed = tool.elapsed();
-            self.blocks.push(Block::ToolCall {
+            self.history.push(Block::ToolCall {
                 name: tool.name,
                 summary: tool.summary,
                 args: tool.args,
@@ -218,18 +410,18 @@ impl Screen {
                 elapsed,
                 output,
             });
-            self.prompt_dirty = true;
+            self.prompt.dirty = true;
         }
     }
 
     pub fn set_context_tokens(&mut self, tokens: u32) {
         self.context_tokens = Some(tokens);
-        self.prompt_dirty = true;
+        self.prompt.dirty = true;
     }
 
     pub fn clear_context_tokens(&mut self) {
         self.context_tokens = None;
-        self.prompt_dirty = true;
+        self.prompt.dirty = true;
     }
 
     pub fn context_tokens(&self) -> Option<u32> {
@@ -237,41 +429,23 @@ impl Screen {
     }
 
     pub fn set_throbber(&mut self, state: Throbber) {
-        let is_active = matches!(
-            state,
-            Throbber::Working | Throbber::Retrying { .. } | Throbber::Compacting
-        );
-        if is_active && self.working_since.is_none() {
-            self.working_since = Some(Instant::now());
-            self.final_elapsed = None;
-        }
-        if !is_active {
-            self.final_elapsed = self.working_since.map(|s| s.elapsed());
-            self.working_since = None;
-        }
-        self.retry_deadline = match state {
-            Throbber::Retrying { delay, .. } => Some(Instant::now() + delay),
-            _ => None,
-        };
-        self.throbber = Some(state);
-        self.prompt_dirty = true;
+        self.working.set_throbber(state);
+        self.prompt.dirty = true;
     }
 
     pub fn clear_throbber(&mut self) {
-        self.throbber = None;
-        self.working_since = None;
-        self.final_elapsed = None;
-        self.prompt_dirty = true;
+        self.working.clear();
+        self.prompt.dirty = true;
     }
 
     pub fn mark_dirty(&mut self) {
-        self.prompt_dirty = true;
+        self.prompt.dirty = true;
     }
 
     pub fn flush_blocks(&mut self) {
         if let Some(tool) = self.active_tool.take() {
             let elapsed = tool.elapsed();
-            self.blocks.push(Block::ToolCall {
+            self.history.push(Block::ToolCall {
                 name: tool.name,
                 summary: tool.summary,
                 args: tool.args,
@@ -281,19 +455,28 @@ impl Screen {
             });
         }
         let mut out = io::stdout();
-        if self.prompt_drawn {
-            let _ = out.queue(cursor::MoveTo(0, self.prompt_top_row));
+        let _ = out.queue(Print("\x1b[?2026h"));
+        let start_row = if self.prompt.drawn {
+            let row = self.prompt.top_row;
+            let _ = out.queue(cursor::MoveTo(0, row));
             let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-            self.prompt_drawn = false;
-        }
-        self.render_blocks();
+            self.prompt.drawn = false;
+            row
+        } else {
+            self.prompt.fallback_row.take().unwrap_or_else(|| {
+                cursor::position().map(|(_, y)| y).unwrap_or(0)
+            })
+        };
+        let block_rows = self.history.render(term_width());
+        self.prompt.fallback_row = Some(start_row + block_rows);
+        let _ = out.queue(Print("\x1b[?2026l"));
         let _ = out.flush();
     }
 
     pub fn erase_prompt(&mut self) {
-        if self.prompt_drawn {
-            erase_prompt_at(self.prompt_top_row);
-            self.prompt_drawn = false;
+        if self.prompt.drawn {
+            erase_prompt_at(self.prompt.top_row);
+            self.prompt.drawn = false;
         }
     }
 
@@ -303,31 +486,26 @@ impl Screen {
         let mut out = io::stdout();
         let _ = out.queue(Print("\x1b[?2026h"));
         let _ = out.queue(cursor::MoveTo(0, 0));
-        self.flushed = 0;
-        self.last_block_rows = 0;
-        self.render_blocks();
+        self.history.flushed = 0;
+        self.history.last_block_rows = 0;
+        let block_rows = self.history.render(term_width());
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
         let _ = out.queue(Print("\x1b[?2026l"));
         let _ = out.flush();
-        self.prompt_drawn = false;
-        self.prompt_dirty = true;
-        self.prev_prompt_rows = 0;
+        self.prompt.drawn = false;
+        self.prompt.dirty = true;
+        self.prompt.prev_rows = 0;
+        self.prompt.fallback_row = Some(block_rows);
     }
 
 
     pub fn clear(&mut self) {
-        self.blocks.clear();
-        self.flushed = 0;
-        self.last_block_rows = 0;
+        self.history.clear();
         self.active_tool = None;
-        self.prompt_drawn = false;
-        self.prompt_dirty = true;
-        self.prev_prompt_rows = 0;
-        self.throbber = None;
-        self.working_since = None;
-        self.final_elapsed = None;
+        self.prompt = PromptState::new();
+        self.prompt.fallback_row = Some(0);
+        self.working.clear();
         self.context_tokens = None;
-        self.retry_deadline = None;
         let mut out = io::stdout();
         let _ = out.queue(cursor::MoveTo(0, 0));
         let _ = out.queue(terminal::Clear(terminal::ClearType::All));
@@ -336,12 +514,12 @@ impl Screen {
     }
 
     pub fn has_history(&self) -> bool {
-        !self.blocks.is_empty()
+        !self.history.blocks.is_empty()
     }
 
     /// Returns (block_index, full_text) for each User block.
     pub fn user_turns(&self) -> Vec<(usize, String)> {
-        self.blocks
+        self.history.blocks
             .iter()
             .enumerate()
             .filter_map(|(i, b)| {
@@ -356,45 +534,14 @@ impl Screen {
 
     /// Truncate blocks so that only blocks before `block_idx` remain.
     pub fn truncate_to(&mut self, block_idx: usize) {
-        self.blocks.truncate(block_idx);
-        self.flushed = self.flushed.min(block_idx);
+        self.history.truncate(block_idx);
         self.active_tool = None;
-        self.prompt_dirty = true;
+        self.prompt.dirty = true;
         self.redraw_in_place();
     }
 
-    fn render_blocks(&mut self) {
-        let has_new = self.flushed < self.blocks.len();
-        if !has_new {
-            return;
-        }
-
-        let mut out = io::stdout();
-        let w = term_width();
-        let last_idx = self.blocks.len().saturating_sub(1);
-        for i in self.flushed..self.blocks.len() {
-            let gap = if i > 0 {
-                gap_between(
-                    &Element::Block(&self.blocks[i - 1]),
-                    &Element::Block(&self.blocks[i]),
-                )
-            } else {
-                0
-            };
-            for _ in 0..gap {
-                let _ = out.queue(Print("\r\n"));
-            }
-            let rows = render_block(&self.blocks[i], w);
-            if i == last_idx {
-                self.last_block_rows = rows + gap;
-            }
-        }
-        self.flushed = self.blocks.len();
-        self.prompt_drawn = false;
-    }
-
     pub fn draw_prompt(&mut self, state: &InputState, mode: super::input::Mode, width: usize) {
-        self.prompt_dirty = true;
+        self.prompt.dirty = true;
         self.draw_prompt_with_queued(state, mode, width, &[]);
     }
 
@@ -405,38 +552,43 @@ impl Screen {
         width: usize,
         queued: &[String],
     ) {
-        if let Some(start) = self.working_since {
+        if let Some(start) = self.working.since {
             let frame = (start.elapsed().as_millis() / 150) as usize % SPINNER_FRAMES.len();
-            if frame != self.last_spinner_frame {
-                self.last_spinner_frame = frame;
-                self.prompt_dirty = true;
+            if frame != self.working.last_spinner_frame {
+                self.working.last_spinner_frame = frame;
+                self.prompt.dirty = true;
             }
         }
 
-        let has_new_blocks = self.flushed < self.blocks.len();
-        if !has_new_blocks && !self.prompt_dirty {
+        let has_new_blocks = self.history.has_unflushed();
+        if !has_new_blocks && !self.prompt.dirty {
             return;
         }
 
         let mut out = io::stdout();
 
-        let draw_start_row = if self.prompt_drawn {
+        let draw_start_row = if self.prompt.drawn {
             let _ = out.queue(Print("\x1b[?2026h"));
-            let _ = out.queue(cursor::MoveTo(0, self.prompt_top_row));
+            let _ = out.queue(cursor::Hide);
+            let _ = out.queue(cursor::MoveTo(0, self.prompt.top_row));
             let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-            self.prompt_top_row
+            self.prompt.top_row
         } else {
-            // Query position before BSU so the terminal isn't buffering
-            let row = cursor::position().map(|(_, y)| y).unwrap_or(0);
+            // Use tracked row when available to avoid cursor::position() which
+            // races with pending keystrokes in stdin and can return wrong values.
+            let row = self.prompt.fallback_row.take().unwrap_or_else(|| {
+                cursor::position().map(|(_, y)| y).unwrap_or(0)
+            });
             let _ = out.queue(Print("\x1b[?2026h"));
+            let _ = out.queue(cursor::Hide);
             row
         };
 
-        self.render_blocks();
+        let block_rows = self.history.render(term_width());
 
         let mut active_rows: u16 = 0;
         if let Some(ref tool) = self.active_tool {
-            let tool_gap = if let Some(last) = self.blocks.last() {
+            let tool_gap = if let Some(last) = self.history.blocks.last() {
                 gap_between(&Element::Block(last), &Element::ActiveTool)
             } else {
                 0
@@ -460,7 +612,7 @@ impl Screen {
         let gap = if self.active_tool.is_some() {
             gap_between(&Element::ActiveTool, &Element::Prompt)
         } else {
-            self.blocks.last().map_or(0, |last| {
+            self.history.blocks.last().map_or(0, |last| {
                 gap_between(&Element::Block(last), &Element::Prompt)
             })
         };
@@ -469,27 +621,29 @@ impl Screen {
             let _ = out.queue(Print("\r\n"));
         }
 
-        let pre_prompt = active_rows + gap;
+        let pre_prompt = block_rows + active_rows + gap;
         let (top_row, new_rows) = self.draw_prompt_sections(
             state,
             mode,
             width,
             queued,
-            self.prev_prompt_rows.saturating_sub(pre_prompt),
+            self.prompt.prev_rows.saturating_sub(pre_prompt),
             draw_start_row,
             pre_prompt,
         );
-        self.prev_prompt_rows = pre_prompt + new_rows;
+        self.prompt.prev_rows = pre_prompt + new_rows;
 
-        self.prompt_top_row = top_row.saturating_sub(pre_prompt);
-        self.prompt_drawn = true;
-        self.prompt_dirty = false;
+        self.prompt.top_row = top_row + block_rows;
+        self.prompt.drawn = true;
+        self.prompt.dirty = false;
 
+        let _ = out.queue(cursor::Show);
         let _ = out.queue(Print("\x1b[?2026l"));
         let _ = out.flush();
     }
 
     /// Returns (top_row, total_prompt_rows).
+    #[allow(clippy::too_many_arguments)]
     fn draw_prompt_sections(
         &self,
         state: &InputState,
@@ -512,10 +666,10 @@ impl Screen {
             let line_count = stash_buf.lines().count();
             let max_chars = usable.saturating_sub(2);
             let display: String = first_line.chars().take(max_chars).collect();
-            let suffix = if display.chars().count() < first_line.chars().count() {
+            let suffix = if display.chars().count() < first_line.chars().count()
+                || line_count > 1
+            {
                 "\u{2026}" // ellipsis
-            } else if line_count > 1 {
-                "\u{2026}"
             } else {
                 ""
             };
@@ -548,7 +702,7 @@ impl Screen {
         let bar_color = if vi_normal { theme::ACCENT } else { theme::BAR };
 
         let tokens_label = self.context_tokens.map(format_tokens);
-        let throbber_spans = self.throbber_spans();
+        let throbber_spans = self.working.throbber_spans();
         draw_bar(
             width,
             if throbber_spans.is_empty() { None } else { Some(&throbber_spans) },
@@ -656,7 +810,7 @@ impl Screen {
             }
         }
 
-        let rows_below: u16 = if prev_rows > new_rows { prev_rows - new_rows } else { 0 };
+        let rows_below: u16 = prev_rows.saturating_sub(new_rows);
         let total_drawn = pre_prompt_rows + new_rows + rows_below;
         let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
         // If content would extend past terminal bottom, the terminal scrolls up
@@ -665,7 +819,7 @@ impl Screen {
         } else {
             draw_start_row
         };
-        let text_row = top_row + pre_prompt_rows + 1 + extra_rows as u16 + cursor_line_visible as u16;
+        let text_row = top_row + pre_prompt_rows + 1 + extra_rows + cursor_line_visible as u16;
         let text_col = 1 + cursor_col as u16;
         let _ = out.queue(cursor::MoveTo(text_col, text_row));
 
@@ -684,87 +838,6 @@ impl Screen {
         (top_row, total_rows as u16)
     }
 
-    fn throbber_spans(&self) -> Vec<BarSpan> {
-        let Some(state) = self.throbber else {
-            return vec![];
-        };
-        match state {
-            Throbber::Compacting => {
-                let Some(start) = self.working_since else {
-                    return vec![];
-                };
-                let elapsed = start.elapsed();
-                let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
-                vec![
-                    BarSpan {
-                        text: format!("{} compacting", SPINNER_FRAMES[idx]),
-                        color: Color::Reset,
-                        attr: Some(Attribute::Bold),
-                    },
-                    BarSpan {
-                        text: format!(" {}s", elapsed.as_secs()),
-                        color: theme::MUTED,
-                        attr: Some(Attribute::Dim),
-                    },
-                ]
-            }
-            Throbber::Working | Throbber::Retrying { .. } => {
-                let Some(start) = self.working_since else {
-                    return vec![];
-                };
-                let elapsed = start.elapsed();
-                let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
-                let spinner_color = if matches!(state, Throbber::Retrying { .. }) {
-                    theme::MUTED
-                } else {
-                    Color::Reset
-                };
-                let mut spans = vec![
-                    BarSpan {
-                        text: format!("{} working", SPINNER_FRAMES[idx]),
-                        color: spinner_color,
-                        attr: Some(Attribute::Bold),
-                    },
-                    BarSpan {
-                        text: format!(" {}s", elapsed.as_secs()),
-                        color: theme::MUTED,
-                        attr: Some(Attribute::Dim),
-                    },
-                ];
-                if let Throbber::Retrying { delay, attempt } = state {
-                    let remaining = self
-                        .retry_deadline
-                        .map(|t| t.saturating_duration_since(Instant::now()))
-                        .unwrap_or(delay);
-                    spans.push(BarSpan {
-                        text: format!(
-                            " (retrying in {}s #{})",
-                            remaining.as_secs(),
-                            attempt
-                        ),
-                        color: theme::MUTED,
-                        attr: Some(Attribute::Dim),
-                    });
-                }
-                spans
-            }
-            Throbber::Done => {
-                let secs = self.final_elapsed.map(|d| d.as_secs()).unwrap_or(0);
-                vec![BarSpan {
-                    text: format!("done {}s", secs),
-                    color: theme::MUTED,
-                    attr: Some(Attribute::Dim),
-                }]
-            }
-            Throbber::Interrupted => {
-                vec![BarSpan {
-                    text: "interrupted".into(),
-                    color: theme::MUTED,
-                    attr: Some(Attribute::Dim),
-                }]
-            }
-        }
-    }
 }
 
 pub fn term_width() -> usize {
@@ -786,8 +859,10 @@ pub(super) fn truncate_str(s: &str, max: usize) -> String {
 
 pub fn erase_prompt_at(top_row: u16) {
     let mut out = io::stdout();
+    let _ = out.queue(Print("\x1b[?2026h"));
     let _ = out.queue(cursor::MoveTo(0, top_row));
     let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+    let _ = out.queue(Print("\x1b[?2026l"));
     let _ = out.flush();
 }
 

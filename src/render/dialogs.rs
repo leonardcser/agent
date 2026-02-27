@@ -113,7 +113,7 @@ pub fn show_confirm(
 
     let total_preview = confirm_preview_row_count(tool_name, args);
     let fixed_rows: u16 = 11;
-    let max_preview = (height as u16).saturating_sub(fixed_rows + 2);
+    let max_preview = height.saturating_sub(fixed_rows + 2);
     let preview_rows = total_preview.min(max_preview);
     let has_preview = preview_rows > 0;
     let extra = if has_preview {
@@ -170,7 +170,7 @@ pub fn show_confirm(
                 let _ = out.queue(SetAttribute(Attribute::Dim));
                 let _ = out.queue(Print(format!("{}. ", i + 1)));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
-                let _ = out.queue(Print(format!("{}", label)));
+                let _ = out.queue(Print(label.to_string()));
             }
             let _ = out.queue(Print("\r\n"));
         }
@@ -323,8 +323,7 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
         row = row.saturating_add(1);
 
         let end = (scroll_offset + max_visible).min(turns.len());
-        for i in scroll_offset..end {
-            let (_, ref full_text) = turns[i];
+        for (i, (_, ref full_text)) in turns.iter().enumerate().take(end).skip(scroll_offset) {
             let label = full_text.lines().next().unwrap_or("");
             let num = i + 1;
             let max_label = w.saturating_sub(8);
@@ -467,8 +466,7 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
         } else {
             let end = (scroll_offset + max_visible).min(filtered.len());
             let num_width = end.to_string().len();
-            for i in scroll_offset..end {
-                let entry = &filtered[i];
+            for (i, entry) in filtered.iter().enumerate().take(end).skip(scroll_offset) {
                 let title = resume_title(entry);
                 let time_ago = session::time_ago(resume_ts(entry), now_ms);
                 let time_len = time_ago.chars().count() + 1;
