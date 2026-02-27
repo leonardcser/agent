@@ -703,6 +703,7 @@ pub fn read_input(
     let mut resize_pending = false;
     let mut last_ctrlc: Option<std::time::Instant> = None;
     let mut last_esc: Option<std::time::Instant> = None;
+    let mut esc_was_insert = false;
 
     loop {
         let ev = if resize_pending {
@@ -792,6 +793,8 @@ pub fn read_input(
                 let double = last_esc.map_or(false, |t| t.elapsed() < Duration::from_millis(500));
                 if double {
                     last_esc = None;
+                    let restore_insert = esc_was_insert;
+                    esc_was_insert = false;
                     let turns = screen.user_turns();
                     if !turns.is_empty() {
                         if let Some(block_idx) = render::show_rewind(&turns) {
@@ -803,21 +806,26 @@ pub fn read_input(
                             terminal::disable_raw_mode().ok();
                             return Some(format!("\x00rewind:{}", block_idx));
                         }
-                        // Cancelled — redraw prompt in place (no full clear).
-                        let _ = out.execute(cursor::Hide);
-                        screen.draw_prompt(state, *mode, width);
-                        let _ = out.execute(cursor::Show);
                     }
+                    if restore_insert {
+                        state.set_vim_mode(crate::vim::ViMode::Insert);
+                    }
+                    // Cancelled or no history — redraw prompt in place.
+                    let _ = out.execute(cursor::Hide);
+                    screen.draw_prompt(state, *mode, width);
+                    let _ = out.execute(cursor::Show);
                     continue;
                 } else {
                     last_esc = Some(std::time::Instant::now());
+                    esc_was_insert = false;
                     if !state.vim_enabled() {
                         // No vim — Esc has no other meaning in idle, just track for double
                         continue;
                     }
                 }
             } else {
-                // vim insert mode — first Esc goes to normal, reset timer
+                // vim insert mode — first Esc goes to normal, start timer
+                esc_was_insert = true;
                 last_esc = Some(std::time::Instant::now());
             }
         } else {

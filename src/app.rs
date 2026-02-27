@@ -469,8 +469,7 @@ impl App {
         self.render_screen();
         self.screen.erase_prompt();
         let choice = render::show_confirm(tool_name, desc, args);
-        self.screen.redraw_all();
-        self.render_screen();
+        self.screen.mark_dirty();
 
         match choice {
             ConfirmChoice::Yes => {
@@ -656,8 +655,7 @@ impl App {
                                     agent_done = true;
                                 }
                             }
-                            self.screen.redraw_all();
-                            self.render_screen();
+                            self.screen.mark_dirty();
                             if agent_done { break; }
                         }
                         SessionControl::Done => { agent_done = true; break; }
