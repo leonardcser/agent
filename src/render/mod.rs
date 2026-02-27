@@ -482,6 +482,7 @@ impl Screen {
     pub fn erase_prompt(&mut self) {
         if self.prompt.drawn {
             erase_prompt_at(self.prompt.redraw_row);
+            self.prompt.fallback_row = Some(self.prompt.redraw_row);
             self.prompt.drawn = false;
         }
     }
@@ -536,9 +537,11 @@ impl Screen {
         self.has_scrollback = false;
         self.content_start_row = None;
         let mut out = io::stdout();
+        let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let _ = out.queue(cursor::MoveTo(0, 0));
         let _ = out.queue(terminal::Clear(terminal::ClearType::All));
         let _ = out.queue(terminal::Clear(terminal::ClearType::Purge));
+        let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
     }
 

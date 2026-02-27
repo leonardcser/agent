@@ -531,7 +531,7 @@ impl App {
             *last_ctrlc = Some(Instant::now());
             self.input.clear();
             self.queued_messages.clear();
-            self.render_screen();
+            self.screen.mark_dirty();
             return TermAction::None;
         }
 
@@ -545,7 +545,6 @@ impl App {
                 EscAction::VimToNormal => {
                     self.input.handle_event(ev, None);
                     self.screen.mark_dirty();
-                    self.render_screen();
                 }
                 EscAction::Unqueue => {
                     let mut combined = self.queued_messages.join("\n");
@@ -557,7 +556,6 @@ impl App {
                     self.input.cpos = self.input.buf.len();
                     self.queued_messages.clear();
                     self.screen.mark_dirty();
-                    self.render_screen();
                 }
                 EscAction::Cancel { restore_vim } => {
                     if let Some(mode) = restore_vim {
@@ -577,7 +575,6 @@ impl App {
                     self.queued_messages.push(text);
                 }
                 self.screen.mark_dirty();
-                self.render_screen();
             }
             Action::Cancel => {
                 self.screen.erase_prompt();
@@ -586,16 +583,11 @@ impl App {
             Action::ToggleMode => {
                 self.mode = self.mode.toggle();
                 self.screen.mark_dirty();
-                self.render_screen();
             }
             Action::Redraw => {
                 self.screen.mark_dirty();
-                self.render_screen();
             }
-            Action::Noop => {
-                self.screen.mark_dirty();
-                self.render_screen();
-            }
+            Action::Noop => {}
             Action::Resize(_) => {}
         }
         TermAction::None
