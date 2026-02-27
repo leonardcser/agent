@@ -719,7 +719,8 @@ impl Screen {
         let (visual_lines, cursor_line, cursor_col) =
             wrap_and_locate_cursor(&display_buf, display_cursor, usable);
         let is_command = crate::completer::Completer::is_command(state.buf.trim());
-        let is_exec = state.buf.starts_with('!');
+        let is_exec = matches!(state.buf.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
+        let is_exec_invalid = state.buf == "!";
         let total_content_rows = visual_lines.len();
         let comp_total = if state.settings.is_some() {
             2
@@ -771,8 +772,8 @@ impl Screen {
                 let _ = out.queue(SetForegroundColor(theme::ACCENT));
                 let _ = out.queue(Print(line));
                 let _ = out.queue(ResetColor);
-            } else if is_exec && abs_idx == 0 && line.starts_with('!') {
-                let _ = out.queue(SetForegroundColor(theme::EXEC));
+            } else if (is_exec || is_exec_invalid) && abs_idx == 0 && line.starts_with('!') {
+                let _ = out.queue(SetForegroundColor(Color::Red));
                 let _ = out.queue(SetAttribute(Attribute::Bold));
                 let _ = out.queue(Print("!"));
                 let _ = out.queue(SetAttribute(Attribute::Reset));

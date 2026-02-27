@@ -19,8 +19,7 @@ use std::time::Duration;
 /// Object Replacement Character — inline placeholder for large pastes.
 pub const PASTE_MARKER: char = '\u{FFFC}';
 
-const PASTE_LINE_THRESHOLD: usize = 4;
-const PASTE_CHAR_THRESHOLD: usize = 200;
+const PASTE_LINE_THRESHOLD: usize = 12;
 
 // ── Mode ─────────────────────────────────────────────────────────────────────
 
@@ -244,7 +243,7 @@ impl InputState {
                     vim::Action::HistoryPrev => {
                         if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(&self.buf)) {
                             self.buf = entry.to_string();
-                            self.cpos = self.buf.len();
+                            self.cpos = 0;
                             self.sync_completer();
                         }
                         return Action::Redraw;
@@ -692,7 +691,8 @@ impl InputState {
 
     fn insert_paste(&mut self, data: String) {
         let lines = data.lines().count();
-        if lines >= PASTE_LINE_THRESHOLD || data.len() >= PASTE_CHAR_THRESHOLD {
+        let char_threshold = PASTE_LINE_THRESHOLD * (crate::render::term_width().saturating_sub(1));
+        if lines >= PASTE_LINE_THRESHOLD || data.len() >= char_threshold {
             let idx = self.buf[..self.cpos]
                 .chars()
                 .filter(|&c| c == PASTE_MARKER)
@@ -960,7 +960,7 @@ fn find_slash_anchor(buf: &str, cpos: usize) -> Option<usize> {
     if !buf.starts_with('/') {
         return None;
     }
-    if buf[1..cpos].contains(char::is_whitespace) {
+    if cpos < 1 || buf[1..cpos].contains(char::is_whitespace) {
         return None;
     }
     Some(0)
