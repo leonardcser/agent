@@ -76,6 +76,7 @@ fn confirm_preview_row_count(
 
 /// Render the syntax-highlighted preview for the confirm dialog.
 fn render_confirm_preview(
+    out: &mut io::Stdout,
     tool_name: &str,
     args: &HashMap<String, serde_json::Value>,
     max_rows: u16,
@@ -85,12 +86,12 @@ fn render_confirm_preview(
             let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
             let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            print_inline_diff(old, new, path, old, max_rows);
+            print_inline_diff(out, old, new, path, old, max_rows);
         }
         "write_file" => {
             let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            print_syntax_file(content, path, max_rows);
+            print_syntax_file(out, content, path, max_rows);
         }
         _ => {}
     }
@@ -136,7 +137,7 @@ pub fn show_confirm(
         let _ = out.queue(cursor::MoveTo(0, bar_row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
-        draw_bar(w, None, None, theme::ACCENT);
+        draw_bar(&mut out, w, None, None, theme::ACCENT);
         let _ = out.queue(Print("\r\n"));
 
         let _ = out.queue(Print(" "));
@@ -148,7 +149,7 @@ pub fn show_confirm(
 
         if has_preview {
             let _ = out.queue(Print("\r\n"));
-            render_confirm_preview(tool_name, args, max_preview);
+            render_confirm_preview(&mut out, tool_name, args, max_preview);
         }
 
         let _ = out.queue(Print("\r\n"));
@@ -312,7 +313,7 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
 
         let _ = out.queue(cursor::MoveTo(0, row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-        draw_bar(w, None, None, theme::ACCENT);
+        draw_bar(&mut out, w, None, None, theme::ACCENT);
         row = row.saturating_add(1);
 
         let _ = out.queue(cursor::MoveTo(0, row));
@@ -444,7 +445,7 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
 
         let _ = out.queue(cursor::MoveTo(0, row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-        draw_bar(w, None, None, theme::ACCENT);
+        draw_bar(&mut out, w, None, None, theme::ACCENT);
         row = row.saturating_add(1);
 
         let _ = out.queue(cursor::MoveTo(0, row));
@@ -624,7 +625,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
 
         let _ = out.queue(cursor::MoveTo(0, row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-        draw_bar(w, None, None, theme::ACCENT);
+        draw_bar(&mut out, w, None, None, theme::ACCENT);
         row = row.saturating_add(1);
 
         if questions.len() > 1 {

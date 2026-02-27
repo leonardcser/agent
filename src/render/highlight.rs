@@ -5,7 +5,7 @@ use crossterm::{
     QueueableCommand,
 };
 use similar::{ChangeTag, TextDiff};
-use std::io::{self};
+use std::io;
 use std::path::Path;
 use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
@@ -25,7 +25,7 @@ struct DiffLayout {
     max_content: usize,
 }
 
-pub(super) fn render_code_block(lines: &[&str], lang: &str) -> u16 {
+pub(super) fn render_code_block(out: &mut io::Stdout, lines: &[&str], lang: &str) -> u16 {
     let ext = match lang {
         "" => "txt",
         "js" | "javascript" => "js",
@@ -41,15 +41,15 @@ pub(super) fn render_code_block(lines: &[&str], lang: &str) -> u16 {
         .find_syntax_by_extension(ext)
         .or_else(|| SYNTAX_SET.find_syntax_by_name(lang))
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    render_highlighted(lines, syntax, 0)
+    render_highlighted(out, lines, syntax, 0)
 }
 
 pub(super) fn render_highlighted(
+    out: &mut io::Stdout,
     lines: &[&str],
     syntax: &syntect::parsing::SyntaxReference,
     max_rows: u16,
 ) -> u16 {
-    let mut out = io::stdout();
     let indent = "   ";
     let theme = &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended];
     let gutter_width = format!("{}", lines.len()).len().max(2);
@@ -72,16 +72,16 @@ pub(super) fn render_highlighted(
         let _ = out.queue(Print(format!(" {:>w$}", i + 1, w = gutter_width)));
         let _ = out.queue(ResetColor);
         let _ = out.queue(Print("   "));
-        print_syntect_regions(&regions, max_content, None);
+        print_syntect_regions(out, &regions, max_content, None);
         let _ = out.queue(Print("\r\n"));
     }
     if limit < lines.len() {
-        print_truncation(limit as u16, max_rows);
+        print_truncation(out, limit as u16, max_rows);
     }
     limit as u16
 }
 
-pub(super) fn print_syntax_file(content: &str, path: &str, max_rows: u16) -> u16 {
+pub(super) fn print_syntax_file(out: &mut io::Stdout, content: &str, path: &str, max_rows: u16) -> u16 {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -90,7 +90,7 @@ pub(super) fn print_syntax_file(content: &str, path: &str, max_rows: u16) -> u16
         .find_syntax_by_extension(ext)
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
     let lines: Vec<&str> = content.lines().collect();
-    render_highlighted(&lines, syntax, max_rows)
+    render_highlighted(out, &lines, syntax, max_rows)
 }
 
 struct DiffChange {
@@ -158,7 +158,7 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
 }
 
 /// Render a syntax-highlighted inline diff.
-pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, max_rows: u16) -> u16 {
+pub(super) fn print_inline_diff(out: &mut io::Stdout, old: &str, new: &str, path: &str, anchor: &str, max_rows: u16) -> u16 {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -198,6 +198,7 @@ pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, 
     let ctx_before_end = dv.start_line.min(dv.first_mod);
     let ctx_before_start = dv.view_start.min(ctx_before_end);
     let mut rows = print_diff_lines(
+        out,
         &mut h_new,
         &file_lines[ctx_before_start..ctx_before_end],
         ctx_before_start,
@@ -210,7 +211,7 @@ pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, 
     }
 
     if rows >= limit {
-        print_truncation(rows, limit);
+        print_truncation(out, rows, limit);
         return limit;
     }
 
@@ -218,14 +219,14 @@ pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, 
     let mut new_lineno = dv.start_line;
     for change in changes {
         if rows >= limit {
-            print_truncation(rows, limit);
+            print_truncation(out, rows, limit);
             return limit;
         }
         let text = change.value.trim_end_matches('\n');
         match change.tag {
             ChangeTag::Equal => {
                 if new_lineno >= dv.view_start && new_lineno < dv.view_end {
-                    print_diff_lines(&mut h_new, &[text], new_lineno, None, None, &layout);
+                    print_diff_lines(out, &mut h_new, &[text], new_lineno, None, None, &layout);
                     rows += 1;
                 }
                 let _ = h_old.highlight_line(&format!("{}\n", text), &SYNTAX_SET);
@@ -233,6 +234,7 @@ pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, 
             }
             ChangeTag::Delete => {
                 print_diff_lines(
+                    out,
                     &mut h_old,
                     &[text],
                     old_lineno,
@@ -245,6 +247,7 @@ pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, 
             }
             ChangeTag::Insert => {
                 print_diff_lines(
+                    out,
                     &mut h_new,
                     &[text],
                     new_lineno,
@@ -259,7 +262,7 @@ pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, 
     }
 
     if rows >= limit {
-        print_truncation(rows, limit);
+        print_truncation(out, rows, limit);
         return limit;
     }
 
@@ -274,7 +277,7 @@ pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, 
         } else {
             ctx_slice
         };
-        rows += print_diff_lines(&mut h_new, ctx_slice, after_start, None, None, &layout);
+        rows += print_diff_lines(out, &mut h_new, ctx_slice, after_start, None, None, &layout);
     }
     rows
 }
@@ -309,14 +312,14 @@ pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &
     rows as u16
 }
 
-fn print_truncation(_rows: u16, _limit: u16) {
-    let mut out = io::stdout();
+fn print_truncation(out: &mut io::Stdout, _rows: u16, _limit: u16) {
     let _ = out.queue(SetAttribute(Attribute::Dim));
     let _ = out.queue(Print("   ...\r\n"));
     let _ = out.queue(SetAttribute(Attribute::Reset));
 }
 
 fn print_diff_lines(
+    out: &mut io::Stdout,
     h: &mut HighlightLines,
     lines: &[&str],
     start_line: usize,
@@ -325,7 +328,6 @@ fn print_diff_lines(
     layout: &DiffLayout,
 ) -> u16 {
     let DiffLayout { indent, gutter_width, max_content } = *layout;
-    let mut out = io::stdout();
     for (i, line) in lines.iter().enumerate() {
         let lineno = start_line + i + 1;
         let line_with_nl = format!("{}\n", line);
@@ -339,7 +341,7 @@ fn print_diff_lines(
             let _ = out.queue(Print(format!(" {:>w$} ", lineno, w = gutter_width)));
             let _ = out.queue(SetForegroundColor(color));
             let _ = out.queue(Print(format!("{} ", ch)));
-            let content_cols = print_syntect_regions(&regions, max_content, bg);
+            let content_cols = print_syntect_regions(out, &regions, max_content, bg);
             let prefix_cols = indent.len() + 1 + gutter_width + 3;
             let right_margin = indent.len();
             let pad = term_width().saturating_sub(prefix_cols + content_cols + right_margin);
@@ -355,7 +357,7 @@ fn print_diff_lines(
             let _ = out.queue(Print(format!(" {:>w$}", lineno, w = gutter_width)));
             let _ = out.queue(ResetColor);
             let _ = out.queue(Print("   "));
-            print_syntect_regions(&regions, max_content, None);
+            print_syntect_regions(out, &regions, max_content, None);
         }
         let _ = out.queue(Print("\r\n"));
     }
@@ -365,11 +367,11 @@ fn print_diff_lines(
 /// Print syntax-highlighted regions, respecting max_width in display columns.
 /// Returns the number of display columns actually printed.
 pub(super) fn print_syntect_regions(
+    out: &mut io::Stdout,
     regions: &[(Style, &str)],
     max_width: usize,
     bg: Option<Color>,
 ) -> usize {
-    let mut out = io::stdout();
     let mut col = 0;
     for (style, text) in regions {
         let text = text.trim_end_matches('\n').trim_end_matches('\r');
@@ -403,9 +405,7 @@ pub(super) fn print_syntect_regions(
     col
 }
 
-pub(super) fn render_markdown_table(lines: &[&str]) -> u16 {
-    let mut out = io::stdout();
-
+pub(super) fn render_markdown_table(out: &mut io::Stdout, lines: &[&str]) -> u16 {
     let mut rows: Vec<Vec<String>> = Vec::new();
     for line in lines {
         let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');

@@ -140,11 +140,10 @@ impl BlockHistory {
     }
 
     /// Render unflushed blocks. Returns total rows printed.
-    fn render(&mut self, width: usize) -> u16 {
+    fn render(&mut self, out: &mut io::Stdout, width: usize) -> u16 {
         if !self.has_unflushed() {
             return 0;
         }
-        let mut out = io::stdout();
         let mut total = 0u16;
         let last_idx = self.blocks.len().saturating_sub(1);
         for i in self.flushed..self.blocks.len() {
@@ -159,7 +158,7 @@ impl BlockHistory {
             for _ in 0..gap {
                 let _ = out.queue(Print("\r\n"));
             }
-            let rows = render_block(&self.blocks[i], width);
+            let rows = render_block(out, &self.blocks[i], width);
             total += gap + rows;
             if i == last_idx {
                 self.last_block_rows = rows + gap;
@@ -173,7 +172,7 @@ impl BlockHistory {
 struct PromptState {
     drawn: bool,
     dirty: bool,
-    top_row: u16,
+    redraw_row: u16,
     prev_rows: u16,
     /// Cursor row to use when `drawn` is false, avoiding racy cursor::position() queries.
     fallback_row: Option<u16>,
@@ -181,7 +180,7 @@ struct PromptState {
 
 impl PromptState {
     fn new() -> Self {
-        Self { drawn: false, dirty: true, top_row: 0, prev_rows: 0, fallback_row: None }
+        Self { drawn: false, dirty: true, redraw_row: 0, prev_rows: 0, fallback_row: None }
     }
 }
 
@@ -458,9 +457,9 @@ impl Screen {
             });
         }
         let mut out = io::stdout();
-        let _ = out.queue(Print("\x1b[?2026h"));
+        let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let start_row = if self.prompt.drawn {
-            let row = self.prompt.top_row;
+            let row = self.prompt.redraw_row;
             let _ = out.queue(cursor::MoveTo(0, row));
             let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
             self.prompt.drawn = false;
@@ -470,37 +469,52 @@ impl Screen {
                 cursor::position().map(|(_, y)| y).unwrap_or(0)
             })
         };
-        let block_rows = self.history.render(term_width());
+        let block_rows = self.history.render(&mut out, term_width());
         self.prompt.fallback_row = Some(start_row + block_rows);
-        let _ = out.queue(Print("\x1b[?2026l"));
+        let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
     }
 
     pub fn erase_prompt(&mut self) {
         if self.prompt.drawn {
-            erase_prompt_at(self.prompt.top_row);
+            erase_prompt_at(self.prompt.redraw_row);
             self.prompt.drawn = false;
         }
     }
 
-    /// Repaint the entire visible area without flashing.
-    /// Wrapped in a synchronized update so the terminal swaps atomically.
+    /// Purge scrollback, clear screen, and re-render all history blocks.
+    /// Used for resize, after dialogs, etc.
     pub fn redraw_in_place(&mut self) {
+        self.full_redraw(true);
+    }
+
+    /// Re-render all blocks. When `purge` is true, clears scrollback and
+    /// screen first — necessary when content has overflowed the viewport.
+    /// When false, redraws over the current viewport (faster, no flash).
+    fn full_redraw(&mut self, purge: bool) {
         let mut out = io::stdout();
-        let _ = out.queue(Print("\x1b[?2026h"));
+        let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let _ = out.queue(cursor::MoveTo(0, 0));
+        if purge {
+            let _ = out.queue(terminal::Clear(terminal::ClearType::Purge));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::All));
+        }
         self.history.flushed = 0;
         self.history.last_block_rows = 0;
-        let block_rows = self.history.render(term_width());
-        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-        let _ = out.queue(Print("\x1b[?2026l"));
+        let block_rows = self.history.render(&mut out, term_width());
+        if !purge {
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+        }
+        let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
         self.prompt.drawn = false;
         self.prompt.dirty = true;
         self.prompt.prev_rows = 0;
         self.prompt.fallback_row = Some(block_rows);
+        if purge {
+            self.has_scrollback = false;
+        }
     }
-
 
     pub fn clear(&mut self) {
         self.history.clear();
@@ -540,31 +554,7 @@ impl Screen {
     pub fn truncate_to(&mut self, block_idx: usize) {
         self.history.truncate(block_idx);
         self.active_tool = None;
-        self.prompt.dirty = true;
-        if self.has_scrollback {
-            self.purge_and_redraw();
-        } else {
-            self.redraw_in_place();
-        }
-    }
-
-    /// Clear scrollback and the visible screen, then re-render all blocks.
-    fn purge_and_redraw(&mut self) {
-        let mut out = io::stdout();
-        let _ = out.queue(Print("\x1b[?2026h"));
-        let _ = out.queue(cursor::MoveTo(0, 0));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::Purge));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::All));
-        self.history.flushed = 0;
-        self.history.last_block_rows = 0;
-        let block_rows = self.history.render(term_width());
-        let _ = out.queue(Print("\x1b[?2026l"));
-        let _ = out.flush();
-        self.prompt.drawn = false;
-        self.prompt.dirty = true;
-        self.prompt.prev_rows = 0;
-        self.prompt.fallback_row = Some(block_rows);
-        self.has_scrollback = false;
+        self.full_redraw(self.has_scrollback);
     }
 
     pub fn draw_prompt(&mut self, state: &InputState, mode: super::input::Mode, width: usize) {
@@ -595,23 +585,23 @@ impl Screen {
         let mut out = io::stdout();
 
         let draw_start_row = if self.prompt.drawn {
-            let _ = out.queue(Print("\x1b[?2026h"));
+            let _ = out.queue(terminal::BeginSynchronizedUpdate);
             let _ = out.queue(cursor::Hide);
-            let _ = out.queue(cursor::MoveTo(0, self.prompt.top_row));
+            let _ = out.queue(cursor::MoveTo(0, self.prompt.redraw_row));
             let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-            self.prompt.top_row
+            self.prompt.redraw_row
         } else {
             // Use tracked row when available to avoid cursor::position() which
             // races with pending keystrokes in stdin and can return wrong values.
             let row = self.prompt.fallback_row.take().unwrap_or_else(|| {
                 cursor::position().map(|(_, y)| y).unwrap_or(0)
             });
-            let _ = out.queue(Print("\x1b[?2026h"));
+            let _ = out.queue(terminal::BeginSynchronizedUpdate);
             let _ = out.queue(cursor::Hide);
             row
         };
 
-        let block_rows = self.history.render(term_width());
+        let block_rows = self.history.render(&mut out, term_width());
 
         let mut active_rows: u16 = 0;
         if let Some(ref tool) = self.active_tool {
@@ -625,6 +615,7 @@ impl Screen {
                 let _ = out.queue(Print("\r\n"));
             }
             let rows = render_tool(
+                &mut out,
                 &tool.name,
                 &tool.summary,
                 &tool.args,
@@ -650,6 +641,7 @@ impl Screen {
 
         let pre_prompt = block_rows + active_rows + gap;
         let (top_row, new_rows, scrolled) = self.draw_prompt_sections(
+            &mut out,
             state,
             mode,
             width,
@@ -663,12 +655,12 @@ impl Screen {
         }
         self.prompt.prev_rows = pre_prompt + new_rows;
 
-        self.prompt.top_row = top_row + block_rows;
+        self.prompt.redraw_row = top_row + block_rows;
         self.prompt.drawn = true;
         self.prompt.dirty = false;
 
         let _ = out.queue(cursor::Show);
-        let _ = out.queue(Print("\x1b[?2026l"));
+        let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
     }
 
@@ -676,6 +668,7 @@ impl Screen {
     #[allow(clippy::too_many_arguments)]
     fn draw_prompt_sections(
         &self,
+        out: &mut io::Stdout,
         state: &InputState,
         mode: super::input::Mode,
         width: usize,
@@ -684,49 +677,13 @@ impl Screen {
         draw_start_row: u16,
         pre_prompt_rows: u16,
     ) -> (u16, u16, bool) {
-        let mut out = io::stdout();
         let usable = width.saturating_sub(1);
         let height = terminal::size().map(|(_, h)| h as usize).unwrap_or(24);
-        let mut extra_rows: u16 = 0;
         let stash_rows = if state.stash.is_some() { 1 } else { 0 };
         let queued_rows = queued.len();
 
-        if let Some((ref stash_buf, _, _)) = state.stash {
-            let first_line = stash_buf.lines().next().unwrap_or("");
-            let line_count = stash_buf.lines().count();
-            let max_chars = usable.saturating_sub(2);
-            let display: String = first_line.chars().take(max_chars).collect();
-            let suffix = if display.chars().count() < first_line.chars().count()
-                || line_count > 1
-            {
-                "\u{2026}" // ellipsis
-            } else {
-                ""
-            };
-            let _ = out.queue(Print("  "));
-            let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(SetForegroundColor(theme::MUTED));
-            let _ = out.queue(Print(format!("{}{}", display, suffix)));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-            let _ = out.queue(ResetColor);
-            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-            let _ = out.queue(Print("\r\n"));
-            extra_rows += 1;
-        }
-
-        for msg in queued {
-            let indent = 2usize;
-            let display: String = msg.chars().take(usable.saturating_sub(indent)).collect();
-            let _ = out.queue(Print(" ".repeat(indent)));
-            let _ = out.queue(SetBackgroundColor(theme::USER_BG));
-            let _ = out.queue(SetAttribute(Attribute::Bold));
-            let _ = out.queue(Print(format!(" {} ", display)));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-            let _ = out.queue(ResetColor);
-            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-            let _ = out.queue(Print("\r\n"));
-            extra_rows += 1;
-        }
+        let mut extra_rows = render_stash(out, &state.stash, usable);
+        extra_rows += render_queued(out, queued, usable);
 
         let vi_normal = state.vim_mode() == Some(crate::vim::ViMode::Normal);
         let bar_color = if vi_normal { theme::ACCENT } else { theme::BAR };
@@ -734,6 +691,7 @@ impl Screen {
         let tokens_label = self.context_tokens.map(format_tokens);
         let throbber_spans = self.working.throbber_spans();
         draw_bar(
+            out,
             width,
             if throbber_spans.is_empty() { None } else { Some(&throbber_spans) },
             tokens_label.as_deref().map(|l| (l, theme::MUTED)),
@@ -805,9 +763,9 @@ impl Screen {
                 let _ = out.queue(Print("!"));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
                 let _ = out.queue(ResetColor);
-                render_line_spans(&line[1..]);
+                render_line_spans(out, &line[1..]);
             } else {
-                render_line_spans(line);
+                render_line_spans(out, line);
             }
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             let _ = out.queue(Print("\r\n"));
@@ -818,15 +776,15 @@ impl Screen {
             super::input::Mode::Apply => Some(("apply", theme::APPLY)),
             super::input::Mode::Normal => None,
         };
-        draw_bar(width, None, mode_label, bar_color);
+        draw_bar(out, width, None, mode_label, bar_color);
 
         if comp_rows > 0 {
             let _ = out.queue(Print("\r\n"));
         }
         let comp_rows = if state.settings.is_some() {
-            draw_settings(state.settings.as_ref(), comp_rows)
+            draw_settings(out, state.settings.as_ref(), comp_rows)
         } else {
-            draw_completions(state.completer.as_ref(), comp_rows)
+            draw_completions(out, state.completer.as_ref(), comp_rows)
         };
 
         let total_rows = stash_rows + queued_rows + 1 + content_rows + 1 + comp_rows;
@@ -871,6 +829,50 @@ impl Screen {
 
 }
 
+fn render_stash(out: &mut io::Stdout, stash: &Option<(String, usize, Vec<String>)>, usable: usize) -> u16 {
+    let Some((ref stash_buf, _, _)) = stash else {
+        return 0;
+    };
+    let first_line = stash_buf.lines().next().unwrap_or("");
+    let line_count = stash_buf.lines().count();
+    let max_chars = usable.saturating_sub(2);
+    let display: String = first_line.chars().take(max_chars).collect();
+    let suffix = if display.chars().count() < first_line.chars().count()
+        || line_count > 1
+    {
+        "\u{2026}"
+    } else {
+        ""
+    };
+    let _ = out.queue(Print("  "));
+    let _ = out.queue(SetAttribute(Attribute::Dim));
+    let _ = out.queue(SetForegroundColor(theme::MUTED));
+    let _ = out.queue(Print(format!("{}{}", display, suffix)));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    let _ = out.queue(ResetColor);
+    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+    let _ = out.queue(Print("\r\n"));
+    1
+}
+
+fn render_queued(out: &mut io::Stdout, queued: &[String], usable: usize) -> u16 {
+    let mut rows = 0u16;
+    for msg in queued {
+        let indent = 2usize;
+        let display: String = msg.chars().take(usable.saturating_sub(indent)).collect();
+        let _ = out.queue(Print(" ".repeat(indent)));
+        let _ = out.queue(SetBackgroundColor(theme::USER_BG));
+        let _ = out.queue(SetAttribute(Attribute::Bold));
+        let _ = out.queue(Print(format!(" {} ", display)));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(ResetColor);
+        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+        let _ = out.queue(Print("\r\n"));
+        rows += 1;
+    }
+    rows
+}
+
 pub fn term_width() -> usize {
     terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
 }
@@ -888,12 +890,12 @@ pub(super) fn truncate_str(s: &str, max: usize) -> String {
     truncated
 }
 
-pub fn erase_prompt_at(top_row: u16) {
+pub fn erase_prompt_at(row: u16) {
     let mut out = io::stdout();
-    let _ = out.queue(Print("\x1b[?2026h"));
-    let _ = out.queue(cursor::MoveTo(0, top_row));
+    let _ = out.queue(terminal::BeginSynchronizedUpdate);
+    let _ = out.queue(cursor::MoveTo(0, row));
     let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-    let _ = out.queue(Print("\x1b[?2026l"));
+    let _ = out.queue(terminal::EndSynchronizedUpdate);
     let _ = out.flush();
 }
 
@@ -1010,12 +1012,12 @@ pub(super) struct BarSpan {
 }
 
 pub(super) fn draw_bar(
+    out: &mut io::Stdout,
     width: usize,
     left: Option<&[BarSpan]>,
     right: Option<(&str, Color)>,
     bar_color: Color,
 ) {
-    let mut out = io::stdout();
     let dash = "\u{2500}";
 
     let left_len: usize = left
@@ -1161,8 +1163,7 @@ fn map_cursor(raw_cursor: usize, raw_buf: &str, spans: &[Span]) -> usize {
     display_pos
 }
 
-fn render_line_spans(line: &str) {
-    let mut out = io::stdout();
+fn render_line_spans(out: &mut io::Stdout, line: &str) {
     let mut rest = line;
     while !rest.is_empty() {
         let paste_pos = rest.find("[pasted ");
@@ -1217,14 +1218,13 @@ fn render_line_spans(line: &str) {
     }
 }
 
-fn draw_completions(completer: Option<&crate::completer::Completer>, max_rows: usize) -> usize {
+fn draw_completions(out: &mut io::Stdout, completer: Option<&crate::completer::Completer>, max_rows: usize) -> usize {
     let Some(comp) = completer else {
         return 0;
     };
     if comp.results.is_empty() || max_rows == 0 {
         return 0;
     }
-    let mut out = io::stdout();
     let total = comp.results.len();
     let max_rows = max_rows.min(total);
     let mut start = 0;
@@ -1282,14 +1282,13 @@ fn draw_completions(completer: Option<&crate::completer::Completer>, max_rows: u
     max_rows
 }
 
-fn draw_settings(settings: Option<&SettingsMenu>, max_rows: usize) -> usize {
+fn draw_settings(out: &mut io::Stdout, settings: Option<&SettingsMenu>, max_rows: usize) -> usize {
     let Some(s) = settings else {
         return 0;
     };
     if max_rows == 0 {
         return 0;
     }
-    let mut out = io::stdout();
     let rows = [
         ("vim mode", s.vim_enabled, 0usize),
         ("auto compact", s.auto_compact, 1usize),

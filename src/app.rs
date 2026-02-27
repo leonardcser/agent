@@ -652,7 +652,7 @@ impl App {
                                     agent_done = true;
                                 }
                             }
-                            self.screen.mark_dirty();
+                            self.screen.redraw_in_place();
                             if agent_done { break; }
                         }
                         SessionControl::Done => { agent_done = true; break; }

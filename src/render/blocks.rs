@@ -6,7 +6,7 @@ use crossterm::{
     QueueableCommand,
 };
 use std::collections::HashMap;
-use std::io::{self};
+use std::io;
 use std::time::Duration;
 
 use super::highlight::{
@@ -39,10 +39,9 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
     }
 }
 
-pub(super) fn render_block(block: &Block, width: usize) -> u16 {
+pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) -> u16 {
     match block {
         Block::User { text } => {
-            let mut out = io::stdout();
             let w = width;
             let content_w = w.saturating_sub(1).max(1);
             let logical_lines: Vec<String> = text
@@ -84,7 +83,6 @@ pub(super) fn render_block(block: &Block, width: usize) -> u16 {
             rows
         }
         Block::Text { content } => {
-            let mut out = io::stdout();
             let lines: Vec<&str> = content.lines().collect();
             let mut i = 0;
             let mut rows = 0u16;
@@ -100,19 +98,19 @@ pub(super) fn render_block(block: &Block, width: usize) -> u16 {
                     if i < lines.len() {
                         i += 1;
                     }
-                    rows += render_code_block(code_lines, lang);
+                    rows += render_code_block(out, code_lines, lang);
                 } else if lines[i].trim_start().starts_with('|') {
                     let table_start = i;
                     while i < lines.len() && lines[i].trim_start().starts_with('|') {
                         i += 1;
                     }
-                    rows += render_markdown_table(&lines[table_start..i]);
+                    rows += render_markdown_table(out, &lines[table_start..i]);
                 } else {
                     let max_cols = width.saturating_sub(1);
                     let segments = wrap_line(lines[i], max_cols);
                     for seg in &segments {
                         let _ = out.queue(Print(" "));
-                        print_styled(seg);
+                        print_styled(out, seg);
                         let _ = out.queue(Print("\r\n"));
                     }
                     i += 1;
@@ -122,17 +120,16 @@ pub(super) fn render_block(block: &Block, width: usize) -> u16 {
             rows
         }
         Block::ToolCall { name, summary, status, elapsed, output, args } => {
-            render_tool(name, summary, args, *status, *elapsed, output.as_ref(), width)
+            render_tool(out, name, summary, args, *status, *elapsed, output.as_ref(), width)
         }
         Block::Confirm { tool, desc, choice } => {
-            render_confirm_result(tool, desc, choice.clone())
+            render_confirm_result(out, tool, desc, choice.clone())
         }
         Block::Error { message } => {
-            print_error(message);
+            print_error(out, message);
             1
         }
         Block::Exec { command, output } => {
-            let mut out = io::stdout();
             let w = width;
             let display = format!("!{}", command);
             let char_len = display.chars().count();
@@ -162,7 +159,9 @@ pub(super) fn render_block(block: &Block, width: usize) -> u16 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_tool(
+    out: &mut io::Stdout,
     name: &str,
     summary: &str,
     args: &HashMap<String, serde_json::Value>,
@@ -195,18 +194,17 @@ pub(super) fn render_tool(
     } else {
         None
     };
-    print_tool_line(name, summary, color, time, tl.as_deref(), width);
+    print_tool_line(out, name, summary, color, time, tl.as_deref(), width);
     let mut rows = 1u16;
     if status != ToolStatus::Denied {
         if let Some(out_data) = output {
-            rows += print_tool_output(name, &out_data.content, out_data.is_error, args);
+            rows += print_tool_output(out, name, &out_data.content, out_data.is_error, args);
         }
     }
     rows
 }
 
-fn render_confirm_result(tool: &str, desc: &str, choice: Option<ConfirmChoice>) -> u16 {
-    let mut out = io::stdout();
+fn render_confirm_result(out: &mut io::Stdout, tool: &str, desc: &str, choice: Option<ConfirmChoice>) -> u16 {
     let mut rows = 2u16;
 
     let _ = out
@@ -253,6 +251,7 @@ fn render_confirm_result(tool: &str, desc: &str, choice: Option<ConfirmChoice>) 
 }
 
 fn print_tool_line(
+    out: &mut io::Stdout,
     name: &str,
     summary: &str,
     pill_color: Color,
@@ -260,7 +259,6 @@ fn print_tool_line(
     timeout_label: Option<&str>,
     width: usize,
 ) {
-    let mut out = io::stdout();
     let _ = out.queue(Print(" "));
     let _ = out.queue(SetForegroundColor(pill_color));
     let _ = out.queue(Print("\u{23fa}"));
@@ -294,26 +292,26 @@ fn print_tool_line(
 }
 
 fn print_tool_output(
+    out: &mut io::Stdout,
     name: &str,
     content: &str,
     is_error: bool,
     args: &HashMap<String, serde_json::Value>,
 ) -> u16 {
     match name {
-        "read_file" if !is_error => print_dim_count(content.lines().count(), "line", "lines"),
-        "edit_file" if !is_error => render_edit_output(args),
-        "write_file" if !is_error => render_write_output(args),
-        "ask_user_question" if !is_error => render_question_output(content),
+        "read_file" if !is_error => print_dim_count(out, content.lines().count(), "line", "lines"),
+        "edit_file" if !is_error => render_edit_output(out, args),
+        "write_file" if !is_error => render_write_output(out, args),
+        "ask_user_question" if !is_error => render_question_output(out, content),
         "bash" if content.is_empty() => 0,
-        "bash" => render_bash_output(content, is_error),
-        "grep" if !is_error => print_dim_count(content.lines().count(), "match", "matches"),
-        "glob" if !is_error => print_dim_count(content.lines().count(), "file", "files"),
-        _ => render_default_output(content, is_error),
+        "bash" => render_bash_output(out, content, is_error),
+        "grep" if !is_error => print_dim_count(out, content.lines().count(), "match", "matches"),
+        "glob" if !is_error => print_dim_count(out, content.lines().count(), "file", "files"),
+        _ => render_default_output(out, content, is_error),
     }
 }
 
-fn print_dim_count(count: usize, singular: &str, plural: &str) -> u16 {
-    let mut out = io::stdout();
+fn print_dim_count(out: &mut io::Stdout, count: usize, singular: &str, plural: &str) -> u16 {
     let _ = out
         .queue(SetAttribute(Attribute::Dim))
         .and_then(|o| o.queue(Print(format!("   {}\r\n", pluralize(count, singular, plural)))))
@@ -321,25 +319,24 @@ fn print_dim_count(count: usize, singular: &str, plural: &str) -> u16 {
     1
 }
 
-fn render_edit_output(args: &HashMap<String, serde_json::Value>) -> u16 {
+fn render_edit_output(out: &mut io::Stdout, args: &HashMap<String, serde_json::Value>) -> u16 {
     let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
     let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
     let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
     if new.is_empty() {
-        print_dim_count(old.lines().count(), "line deleted", "lines deleted")
+        print_dim_count(out, old.lines().count(), "line deleted", "lines deleted")
     } else {
-        print_inline_diff(old, new, path, new, 0)
+        print_inline_diff(out, old, new, path, new, 0)
     }
 }
 
-fn render_write_output(args: &HashMap<String, serde_json::Value>) -> u16 {
+fn render_write_output(out: &mut io::Stdout, args: &HashMap<String, serde_json::Value>) -> u16 {
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
     let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-    print_syntax_file(content, path, 0)
+    print_syntax_file(out, content, path, 0)
 }
 
-fn render_question_output(content: &str) -> u16 {
-    let mut out = io::stdout();
+fn render_question_output(out: &mut io::Stdout, content: &str) -> u16 {
     let mut rows = 0u16;
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(content) {
         for (question, answer) in &map {
@@ -369,9 +366,8 @@ fn render_question_output(content: &str) -> u16 {
     rows
 }
 
-fn render_bash_output(content: &str, is_error: bool) -> u16 {
+fn render_bash_output(out: &mut io::Stdout, content: &str, is_error: bool) -> u16 {
     const MAX_LINES: usize = 20;
-    let mut out = io::stdout();
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
     let mut rows = 0u16;
@@ -398,8 +394,7 @@ fn render_bash_output(content: &str, is_error: bool) -> u16 {
     rows
 }
 
-fn render_default_output(content: &str, is_error: bool) -> u16 {
-    let mut out = io::stdout();
+fn render_default_output(out: &mut io::Stdout, content: &str, is_error: bool) -> u16 {
     let preview = result_preview(content, 3);
     if is_error {
         let _ = out
@@ -423,8 +418,7 @@ fn pluralize(count: usize, singular: &str, plural: &str) -> String {
     }
 }
 
-fn print_error(msg: &str) {
-    let mut out = io::stdout();
+fn print_error(out: &mut io::Stdout, msg: &str) {
     let _ = out
         .queue(SetForegroundColor(theme::TOOL_ERR))
         .and_then(|o| o.queue(Print(format!(" error: {}\r\n", msg))))
@@ -479,9 +473,7 @@ pub(super) fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
     segments
 }
 
-pub(super) fn print_styled(text: &str) {
-    let mut out = io::stdout();
-
+pub(super) fn print_styled(out: &mut io::Stdout, text: &str) {
     let trimmed = text.trim_start();
     if trimmed.starts_with('#') {
         let _ = out.queue(SetForegroundColor(theme::HEADING));
