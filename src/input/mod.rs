@@ -761,7 +761,8 @@ pub fn read_input(
             }
         };
 
-        // Ctrl+R: open history fuzzy search (or cycle if already open)
+        // Ctrl+R: open history fuzzy search (or cycle if already open).
+        // In vim normal mode, Ctrl+R is redo — let vim handle it.
         if matches!(
             ev,
             Event::Key(KeyEvent {
@@ -770,11 +771,8 @@ pub fn read_input(
                 ..
             })
         ) && state.history_search_query().is_none()
+            && !state.vim.as_ref().is_some_and(|v| v.mode() == crate::vim::ViMode::Normal)
         {
-            // If in vim normal mode, switch to insert before opening search.
-            if state.vim_mode() == Some(crate::vim::ViMode::Normal) {
-                state.set_vim_mode(crate::vim::ViMode::Insert);
-            }
             state.open_history_search(history);
             screen.draw_prompt(state, *mode, width);
             continue;

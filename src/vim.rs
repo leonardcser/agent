@@ -68,6 +68,8 @@ enum SubState {
     WaitingG,
     WaitingR,
     WaitingFind(FindKind),
+    /// Operator pending + find motion (e.g. `df`, `dt`), waiting for the target char.
+    WaitingOpFind(Op, FindKind),
     /// Operator + `i`/`a` pressed, waiting for object type char.
     WaitingTextObj(Op, bool),
 }
@@ -208,6 +210,9 @@ impl Vim {
         match self.sub {
             SubState::WaitingR => return self.handle_waiting_r(key, buf, cpos),
             SubState::WaitingFind(kind) => return self.handle_waiting_find(key, kind, buf, cpos),
+            SubState::WaitingOpFind(op, kind) => {
+                return self.handle_waiting_op_find(key, op, kind, buf, cpos)
+            }
             SubState::WaitingG => return self.handle_waiting_g(key, buf, cpos),
             SubState::WaitingTextObj(op, inner) => {
                 return self.handle_waiting_textobj(key, op, inner, buf, cpos)
@@ -233,7 +238,11 @@ impl Vim {
                 }
                 // Otherwise try as a motion.
                 let result = self.execute_op_motion(key, op, buf, cpos);
-                self.reset_pending();
+                // Don't reset if execute_op_motion transitioned to a new substate
+                // (e.g. WaitingOpFind for df/dt combos).
+                if matches!(self.sub, SubState::WaitingOp(_)) {
+                    self.reset_pending();
+                }
                 return result;
             }
             SubState::Ready => {}
@@ -760,6 +769,70 @@ impl Vim {
         Action::Consumed
     }
 
+    fn handle_waiting_op_find(
+        &mut self,
+        key: KeyEvent,
+        op: Op,
+        kind: FindKind,
+        buf: &mut String,
+        cpos: &mut usize,
+    ) -> Action {
+        self.sub = SubState::Ready;
+        if let KeyCode::Char(ch) = key.code {
+            let n = self.effective_count();
+            self.last_find = Some((kind, ch));
+            let origin = *cpos;
+            // For operators, always find the actual char position (Forward/Backward),
+            // then adjust the range for till variants.
+            let raw_kind = match kind {
+                FindKind::ForwardTill => FindKind::Forward,
+                FindKind::BackwardTill => FindKind::Backward,
+                other => other,
+            };
+            let mut pos = origin;
+            for _ in 0..n {
+                if let Some(p) = find_char(buf, pos, raw_kind, ch) {
+                    pos = p;
+                }
+            }
+            if pos != origin {
+                // f is inclusive (include target char), t excludes target char.
+                let (start, end) = match kind {
+                    FindKind::Forward => (*cpos, advance_chars(buf, pos, 1)),
+                    FindKind::ForwardTill => (*cpos, pos),
+                    FindKind::Backward => (pos, *cpos),
+                    FindKind::BackwardTill => (advance_chars(buf, pos, 1), *cpos),
+                };
+                if start < end {
+                    match op {
+                        Op::Delete => {
+                            self.save_undo(buf, *cpos);
+                            self.yank(&buf[start..end], false);
+                            buf.drain(start..end);
+                            *cpos = start;
+                            clamp_normal(buf, cpos);
+                        }
+                        Op::Change => {
+                            self.save_undo(buf, *cpos);
+                            self.yank(&buf[start..end], false);
+                            buf.drain(start..end);
+                            *cpos = start;
+                            self.enter_insert_mode();
+                            self.reset_counts();
+                            return Action::Consumed;
+                        }
+                        Op::Yank => {
+                            self.yank(&buf[start..end], false);
+                            *cpos = start;
+                        }
+                    }
+                }
+            }
+        }
+        self.reset_pending();
+        Action::Consumed
+    }
+
     fn handle_waiting_g(&mut self, key: KeyEvent, buf: &mut str, cpos: &mut usize) -> Action {
         self.sub = SubState::Ready;
         if let KeyCode::Char('g') = key.code {
@@ -899,19 +972,19 @@ impl Vim {
                 return Action::Consumed;
             }
             KeyCode::Char('f') => {
-                self.sub = SubState::WaitingFind(FindKind::Forward);
+                self.sub = SubState::WaitingOpFind(op, FindKind::Forward);
                 return Action::Consumed;
             }
             KeyCode::Char('F') => {
-                self.sub = SubState::WaitingFind(FindKind::Backward);
+                self.sub = SubState::WaitingOpFind(op, FindKind::Backward);
                 return Action::Consumed;
             }
             KeyCode::Char('t') => {
-                self.sub = SubState::WaitingFind(FindKind::ForwardTill);
+                self.sub = SubState::WaitingOpFind(op, FindKind::ForwardTill);
                 return Action::Consumed;
             }
             KeyCode::Char('T') => {
-                self.sub = SubState::WaitingFind(FindKind::BackwardTill);
+                self.sub = SubState::WaitingOpFind(op, FindKind::BackwardTill);
                 return Action::Consumed;
             }
             KeyCode::Home => Some(line_start(buf, origin)),
