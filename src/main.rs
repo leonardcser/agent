@@ -97,6 +97,7 @@ async fn main() {
 
     println!();
     loop {
+        app.poll_pending_title();
         let input = if !app.queued_messages.is_empty() {
             let mut parts = std::mem::take(&mut app.queued_messages);
             let buf = std::mem::take(&mut app.input.buf);
@@ -179,8 +180,7 @@ async fn main() {
         app.save_session();
         app.run_session().await;
         app.save_session();
-        // Title first: uses original history before compaction may truncate it.
-        app.maybe_generate_title().await;
+        app.maybe_generate_title();
         app.maybe_auto_compact().await;
     }
     app.save_session();

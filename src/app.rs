@@ -33,6 +33,7 @@ pub struct App {
     pub shared_session: Arc<Mutex<Option<Session>>>,
     pub context_window: Option<u32>,
     pub auto_compact: bool,
+    pending_title: Option<tokio::sync::oneshot::Receiver<String>>,
 }
 
 impl App {
@@ -61,6 +62,7 @@ impl App {
             shared_session,
             context_window: None,
             auto_compact,
+            pending_title: None,
         }
     }
 
@@ -206,33 +208,49 @@ impl App {
         }
     }
 
-    pub async fn maybe_generate_title(&mut self) {
+    pub fn maybe_generate_title(&mut self) {
         let has_title = self.session.title.as_ref().is_some_and(|t| !t.trim().is_empty());
-        if has_title {
+        if has_title || self.pending_title.is_some() {
             return;
         }
         let Some(first) = self.session.first_user_message.clone() else {
             return;
         };
-        let provider = Provider::new(&self.api_base, &self.api_key);
-        match provider.complete_title(&first, &self.model).await {
-            Ok(title) => {
-                if !title.is_empty() {
-                    self.session.title = Some(title);
-                    self.save_session();
-                }
-            }
-            Err(_) => {
-                if self.session.title.is_none() {
+        let api_base = self.api_base.clone();
+        let api_key = self.api_key.clone();
+        let model = self.model.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending_title = Some(rx);
+        tokio::spawn(async move {
+            let provider = Provider::new(&api_base, &api_key);
+            let title = match provider.complete_title(&first, &model).await {
+                Ok(t) if !t.is_empty() => t,
+                _ => {
                     let fallback = first.lines().next().unwrap_or("Untitled");
                     let mut trimmed = fallback.to_string();
                     if trimmed.len() > 48 {
                         trimmed.truncate(48);
                         trimmed = trimmed.trim().to_string();
                     }
-                    self.session.title = Some(trimmed);
+                    trimmed
+                }
+            };
+            let _ = tx.send(title);
+        });
+    }
+
+    pub fn poll_pending_title(&mut self) {
+        if let Some(ref mut rx) = self.pending_title {
+            match rx.try_recv() {
+                Ok(title) => {
+                    self.session.title = Some(title);
+                    self.pending_title = None;
                     self.save_session();
                 }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.pending_title = None;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
             }
         }
     }
