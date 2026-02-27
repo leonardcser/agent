@@ -176,12 +176,24 @@ pub(super) fn render_tool(
         ToolStatus::Confirm => theme::ACCENT,
         ToolStatus::Pending => theme::TOOL_PENDING,
     };
-    let time = if name == "bash" && !matches!(status, ToolStatus::Pending | ToolStatus::Confirm) {
+    let time = if name == "bash" && !matches!(status, ToolStatus::Confirm) {
         elapsed
     } else {
         None
     };
-    let tl = super::tool_timeout_label(args);
+    let tl = if name == "bash" && status == ToolStatus::Pending {
+        let ms = args.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(120_000);
+        let secs = (ms / 1000) as u64;
+        Some(if secs % 60 == 0 {
+            format!("timeout {}m", secs / 60)
+        } else if secs >= 60 {
+            format!("timeout {}m{}s", secs / 60, secs % 60)
+        } else {
+            format!("timeout {}s", secs)
+        })
+    } else {
+        None
+    };
     print_tool_line(name, summary, color, time, tl.as_deref());
     let mut rows = 1u16;
     if status != ToolStatus::Denied {
@@ -257,7 +269,7 @@ fn print_tool_line(
         .map(|d| format!("  {:.1}s", d.as_secs_f64()))
         .unwrap_or_default();
     let timeout_str = timeout_label
-        .map(|l| format!("  ({})", l))
+        .map(|l| format!(" ({})", l))
         .unwrap_or_default();
     let suffix_len = time_str.len() + timeout_str.len();
     let prefix_len = 3 + name.len() + 1;

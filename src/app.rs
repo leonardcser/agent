@@ -422,15 +422,10 @@ impl App {
                 SessionControl::Continue
             }
             AgentEvent::ToolResult { content, is_error } => {
-                if let Some(ref p) = pending {
-                    let elapsed = p.start.elapsed();
+                if pending.is_some() {
                     let status = if is_error { ToolStatus::Err } else { ToolStatus::Ok };
                     let output = Some(ToolOutput { content, is_error });
-                    self.screen.finish_tool(
-                        status,
-                        output,
-                        if p.name == "bash" { Some(elapsed) } else { None },
-                    );
+                    self.screen.finish_tool(status, output);
                 }
                 *pending = None;
                 SessionControl::Continue
@@ -470,19 +465,22 @@ impl App {
         self.render_screen();
         self.screen.erase_prompt();
         let choice = render::show_confirm(tool_name, desc, args);
-        self.screen.mark_dirty();
+        self.screen.redraw_in_place();
 
         match choice {
             ConfirmChoice::Yes => {
+                self.screen.set_active_status(ToolStatus::Pending);
                 let _ = reply.send(true);
                 ConfirmAction::Approved
             }
             ConfirmChoice::Always => {
                 self.auto_approved.insert(tool_name.to_string());
+                self.screen.set_active_status(ToolStatus::Pending);
                 let _ = reply.send(true);
                 ConfirmAction::Approved
             }
             ConfirmChoice::YesWithMessage(msg) => {
+                self.screen.set_active_status(ToolStatus::Pending);
                 let _ = reply.send(true);
                 self.queued_messages.push(msg);
                 ConfirmAction::Approved
@@ -590,7 +588,7 @@ impl App {
     pub fn tick(&mut self, resize_at: &mut Option<Instant>) {
         if let Some(t) = *resize_at {
             if t.elapsed() >= Duration::from_millis(150) {
-                self.screen.redraw_all();
+                self.screen.redraw_in_place();
                 *resize_at = None;
             } else {
                 return;
@@ -632,7 +630,7 @@ impl App {
                                     if let Some(ref mut p) = pending { p.start = Instant::now(); }
                                 }
                                 ConfirmAction::Denied => {
-                                    self.screen.finish_tool(ToolStatus::Denied, None, None);
+                                    self.screen.finish_tool(ToolStatus::Denied, None);
                                     pending = None;
                                     cancelled = true;
                                     agent_done = true;
@@ -650,7 +648,7 @@ impl App {
                                 }
                                 None => {
                                     let _ = reply.send("User cancelled the question.".into());
-                                    self.screen.finish_tool(ToolStatus::Denied, None, None);
+                                    self.screen.finish_tool(ToolStatus::Denied, None);
                                     pending = None;
                                     cancelled = true;
                                     agent_done = true;

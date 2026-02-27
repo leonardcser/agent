@@ -747,7 +747,7 @@ pub fn read_input(
                 _ => {
                     resize_pending = false;
                     let _ = out.execute(cursor::Hide);
-                    screen.redraw_all();
+                    screen.redraw_in_place();
                     screen.draw_prompt(state, *mode, width);
                     let _ = out.execute(cursor::Show);
                     continue;

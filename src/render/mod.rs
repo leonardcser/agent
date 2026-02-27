@@ -43,6 +43,7 @@ pub struct ActiveTool {
     pub args: HashMap<String, serde_json::Value>,
     pub status: ToolStatus,
     pub output: Option<ToolOutput>,
+    pub start_time: Instant,
 }
 
 #[derive(Clone)]
@@ -161,6 +162,7 @@ impl Screen {
             args,
             status: ToolStatus::Pending,
             output: None,
+            start_time: Instant::now(),
         });
         self.prompt_dirty = true;
     }
@@ -188,6 +190,9 @@ impl Screen {
     pub fn set_active_status(&mut self, status: ToolStatus) {
         if let Some(ref mut tool) = self.active_tool {
             tool.status = status;
+            if status == ToolStatus::Pending {
+                tool.start_time = Instant::now();
+            }
             self.prompt_dirty = true;
         }
     }
@@ -196,9 +201,13 @@ impl Screen {
         &mut self,
         status: ToolStatus,
         output: Option<ToolOutput>,
-        elapsed: Option<Duration>,
     ) {
         if let Some(tool) = self.active_tool.take() {
+            let elapsed = if tool.name == "bash" {
+                Some(tool.start_time.elapsed())
+            } else {
+                None
+            };
             self.blocks.push(Block::ToolCall {
                 name: tool.name,
                 summary: tool.summary,
@@ -259,12 +268,17 @@ impl Screen {
 
     pub fn flush_blocks(&mut self) {
         if let Some(tool) = self.active_tool.take() {
+            let elapsed = if tool.name == "bash" {
+                Some(tool.start_time.elapsed())
+            } else {
+                None
+            };
             self.blocks.push(Block::ToolCall {
                 name: tool.name,
                 summary: tool.summary,
                 args: tool.args,
-                status: tool.status,
-                elapsed: None,
+                status: ToolStatus::Err,
+                elapsed,
                 output: tool.output,
             });
         }
@@ -285,18 +299,24 @@ impl Screen {
         }
     }
 
-    pub fn redraw_all(&mut self) {
+    /// Repaint the entire visible area without flashing.
+    /// Wrapped in a synchronized update so the terminal swaps atomically.
+    pub fn redraw_in_place(&mut self) {
         let mut out = io::stdout();
+        let _ = out.queue(Print("\x1b[?2026h"));
         let _ = out.queue(cursor::MoveTo(0, 0));
         let _ = out.queue(terminal::Clear(terminal::ClearType::All));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::Purge));
-        let _ = out.flush();
         self.flushed = 0;
         self.last_block_rows = 0;
+        self.render_blocks();
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+        let _ = out.queue(Print("\x1b[?2026l"));
+        let _ = out.flush();
         self.prompt_drawn = false;
         self.prompt_dirty = true;
         self.prev_prompt_rows = 0;
     }
+
 
     pub fn clear(&mut self) {
         self.blocks.clear();
@@ -343,7 +363,7 @@ impl Screen {
         self.flushed = self.flushed.min(block_idx);
         self.active_tool = None;
         self.prompt_dirty = true;
-        self.redraw_all();
+        self.redraw_in_place();
     }
 
     fn render_blocks(&mut self) {
@@ -396,6 +416,10 @@ impl Screen {
             }
         }
 
+        if self.active_tool.is_some() {
+            self.prompt_dirty = true;
+        }
+
         let has_new_blocks = self.flushed < self.blocks.len();
         if !has_new_blocks && !self.prompt_dirty {
             return;
@@ -427,7 +451,7 @@ impl Screen {
                 &tool.summary,
                 &tool.args,
                 tool.status,
-                None,
+                Some(tool.start_time.elapsed()),
                 tool.output.as_ref(),
             );
             active_rows = tool_gap + rows;
