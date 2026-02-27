@@ -232,9 +232,10 @@ impl InputState {
     /// Open history fuzzy search using the completer component.
     pub fn open_history_search(&mut self, history: &History) {
         self.history_saved_buf = Some((self.buf.clone(), self.cpos));
-        self.buf.clear();
-        self.cpos = 0;
-        self.completer = Some(Completer::history(history.entries()));
+        // Keep buf as-is so the current content becomes the initial search query.
+        let mut comp = Completer::history(history.entries());
+        comp.update_query(self.buf.clone());
+        self.completer = Some(comp);
     }
 
     pub fn cursor_char(&self) -> usize {
@@ -560,28 +561,6 @@ impl InputState {
                 } else {
                     self.accept_completion(&comp);
                 }
-                Some(Action::Redraw)
-            }
-            // History mode: typing updates the filter query
-            Event::Key(KeyEvent {
-                code: KeyCode::Char(c),
-                modifiers,
-                ..
-            }) if is_history && (modifiers.is_empty() || *modifiers == KeyModifiers::SHIFT) => {
-                let comp = self.completer.as_mut().unwrap();
-                let mut q = comp.query.clone();
-                q.push(*c);
-                comp.update_query(q);
-                Some(Action::Redraw)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Backspace,
-                ..
-            }) if is_history => {
-                let comp = self.completer.as_mut().unwrap();
-                let mut q = comp.query.clone();
-                q.pop();
-                comp.update_query(q);
                 Some(Action::Redraw)
             }
             _ => None,

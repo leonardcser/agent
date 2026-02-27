@@ -264,11 +264,15 @@ impl Screen {
                 output: tool.output,
             });
         }
+        let mut out = io::stdout();
+        // Position cursor: overwrite prompt if drawn, otherwise append
         if self.prompt_drawn {
-            erase_prompt_at(self.prompt_top_row);
+            let _ = out.queue(cursor::MoveTo(0, self.prompt_top_row));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
             self.prompt_drawn = false;
         }
         self.render_blocks();
+        let _ = out.flush();
     }
 
     pub fn erase_prompt(&mut self) {
@@ -341,6 +345,9 @@ impl Screen {
 
     // ── Block rendering ──────────────────────────────────────────────────
 
+    /// Render unflushed blocks. Caller is responsible for positioning the
+    /// cursor beforehand and flushing afterwards (typically inside a
+    /// synchronized update).
     fn render_blocks(&mut self) {
         let has_new = self.flushed < self.blocks.len();
         if !has_new {
@@ -348,16 +355,6 @@ impl Screen {
         }
 
         let mut out = io::stdout();
-        if self.prompt_drawn {
-            erase_prompt_at(self.prompt_top_row);
-        } else {
-            let _ = out.flush();
-            let pos = cursor::position().map(|(_, y)| y).unwrap_or(0);
-            let _ = out.queue(cursor::MoveTo(0, pos));
-            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-            let _ = out.flush();
-        }
-
         let w = term_width();
         let last_idx = self.blocks.len().saturating_sub(1);
         for i in self.flushed..self.blocks.len() {
@@ -379,7 +376,6 @@ impl Screen {
         }
         self.flushed = self.blocks.len();
         self.prompt_drawn = false;
-        let _ = out.flush();
     }
 
     // ── Prompt drawing (broken into sections) ────────────────────────────
@@ -411,17 +407,21 @@ impl Screen {
             return;
         }
 
-        self.render_blocks();
-
         let mut out = io::stdout();
 
-        // Begin synchronized update — terminal buffers until end sequence
+        // Begin synchronized update — terminal buffers everything until end
+        // sequence, so no intermediate frame is ever visible.
         let _ = out.queue(Print("\x1b[?2026h"));
 
-        // Position for overwrite (or append if first draw)
+        // Position cursor: overwrite from the prompt region (which sits right
+        // after the last flushed block). When new blocks arrive we overwrite
+        // the old prompt with block content, then draw the new prompt after.
         if self.prompt_drawn {
             let _ = out.queue(cursor::MoveTo(0, self.prompt_top_row));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
         }
+
+        self.render_blocks();
 
         // Render active tool (part of the dynamic/prompt area)
         let mut active_rows: u16 = 0;
@@ -616,25 +616,32 @@ impl Screen {
         }
         let comp_rows = draw_completions(state.completer.as_ref(), comp_rows);
 
-        // Clear leftover rows from previous (taller) prompt
         let total_rows =
             queued_rows + 1 + content_rows + 1 + comp_rows;
         let new_rows = total_rows as u16;
-        let cleared = if prev_rows > new_rows {
+
+        // Clear any leftover rows from a previously taller prompt.
+        // Use ClearType::CurrentLine to avoid blanking content below that
+        // might belong to the next sync-update frame.
+        if prev_rows > new_rows {
             let n = prev_rows - new_rows;
             for _ in 0..n {
                 let _ = out.queue(Print("\r\n"));
                 let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
             }
-            n
+        }
+
+        // Flush so cursor::position() reflects actual state. This is safe
+        // inside a synchronized update — the terminal responds to the
+        // position query without swapping the display buffer.
+        let _ = out.flush();
+        let final_row = cursor::position().map(|(_, y)| y).unwrap_or(0);
+        let rows_below = if prev_rows > new_rows {
+            prev_rows - new_rows
         } else {
             0
         };
-
-        // Flush queued commands so cursor::position() reflects actual state
-        let _ = out.flush();
-        let final_row = cursor::position().map(|(_, y)| y).unwrap_or(0);
-        let top_row = final_row.saturating_sub(new_rows + cleared - 1);
+        let top_row = final_row.saturating_sub(new_rows + rows_below - 1);
         let text_row =
             top_row + 1 + extra_rows as u16 + cursor_line_visible as u16;
         let text_col = 1 + cursor_col as u16;

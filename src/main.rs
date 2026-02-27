@@ -427,7 +427,7 @@ impl App {
             let double_tap = last_ctrlc.map_or(false, |prev| prev.elapsed() < Duration::from_millis(500));
             if self.input.buf.is_empty() || double_tap {
                 *last_ctrlc = None;
-                self.screen.erase_prompt();
+                self.screen.mark_dirty();
                 return TermAction::Cancel;
             }
             *last_ctrlc = Some(Instant::now());
@@ -465,6 +465,7 @@ impl App {
                     if let Some(mode) = restore_vim {
                         self.input.set_vim_mode(mode);
                     }
+                    self.screen.mark_dirty();
                     return TermAction::Cancel;
                 }
                 EscAction::StartTimer => {}
@@ -606,6 +607,7 @@ impl App {
             }
             cancel_token.cancel();
             agent_handle.abort();
+            self.render_screen();
         } else {
             self.screen.set_throbber(render::Throbber::Done);
             if let Ok(new_messages) = agent_handle.await {
