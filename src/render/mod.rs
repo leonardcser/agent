@@ -320,6 +320,9 @@ pub struct Screen {
     context_tokens: Option<u32>,
     /// True once terminal auto-scrolling has pushed content into scrollback.
     has_scrollback: bool,
+    /// Terminal row where block content starts (top of conversation).
+    /// Set once when the first block is rendered; reset on purge/clear.
+    content_start_row: Option<u16>,
 }
 
 impl Default for Screen {
@@ -337,6 +340,7 @@ impl Screen {
             working: WorkingState::new(),
             context_tokens: None,
             has_scrollback: false,
+            content_start_row: None,
         }
     }
 
@@ -494,10 +498,12 @@ impl Screen {
     fn full_redraw(&mut self, purge: bool) {
         let mut out = io::stdout();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
-        let _ = out.queue(cursor::MoveTo(0, 0));
         if purge {
-            let _ = out.queue(terminal::Clear(terminal::ClearType::Purge));
+            let _ = out.queue(cursor::MoveTo(0, 0));
             let _ = out.queue(terminal::Clear(terminal::ClearType::All));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::Purge));
+        } else {
+            let _ = out.queue(cursor::MoveTo(0, self.content_start_row.unwrap_or(0)));
         }
         self.history.flushed = 0;
         self.history.last_block_rows = 0;
@@ -510,9 +516,13 @@ impl Screen {
         self.prompt.drawn = false;
         self.prompt.dirty = true;
         self.prompt.prev_rows = 0;
-        self.prompt.fallback_row = Some(block_rows);
         if purge {
             self.has_scrollback = false;
+            self.content_start_row = None;
+            self.prompt.fallback_row = Some(block_rows);
+        } else {
+            let start = self.content_start_row.unwrap_or(0);
+            self.prompt.fallback_row = Some(start + block_rows);
         }
     }
 
@@ -524,6 +534,7 @@ impl Screen {
         self.working.clear();
         self.context_tokens = None;
         self.has_scrollback = false;
+        self.content_start_row = None;
         let mut out = io::stdout();
         let _ = out.queue(cursor::MoveTo(0, 0));
         let _ = out.queue(terminal::Clear(terminal::ClearType::All));
@@ -655,6 +666,9 @@ impl Screen {
         }
         self.prompt.prev_rows = pre_prompt + new_rows;
 
+        if self.content_start_row.is_none() {
+            self.content_start_row = Some(top_row);
+        }
         self.prompt.redraw_row = top_row + block_rows;
         self.prompt.drawn = true;
         self.prompt.dirty = false;
