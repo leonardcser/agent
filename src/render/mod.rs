@@ -476,7 +476,31 @@ impl Screen {
         let usable = width.saturating_sub(1);
         let height = terminal::size().map(|(_, h)| h as usize).unwrap_or(24);
         let mut extra_rows: u16 = 0;
+        let stash_rows = if state.stash.is_some() { 1 } else { 0 };
         let queued_rows = queued.len();
+
+        if let Some((ref stash_buf, _, _)) = state.stash {
+            let first_line = stash_buf.lines().next().unwrap_or("");
+            let line_count = stash_buf.lines().count();
+            let max_chars = usable.saturating_sub(2);
+            let display: String = first_line.chars().take(max_chars).collect();
+            let suffix = if display.chars().count() < first_line.chars().count() {
+                "\u{2026}" // ellipsis
+            } else if line_count > 1 {
+                "\u{2026}"
+            } else {
+                ""
+            };
+            let _ = out.queue(Print("  "));
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(SetForegroundColor(theme::MUTED));
+            let _ = out.queue(Print(format!("{}{}", display, suffix)));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+            let _ = out.queue(ResetColor);
+            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            let _ = out.queue(Print("\r\n"));
+            extra_rows += 1;
+        }
 
         for msg in queued {
             let indent = 2usize;
@@ -520,7 +544,7 @@ impl Screen {
         };
         let mut comp_rows = comp_total;
 
-        let fixed_base = queued_rows + 2;
+        let fixed_base = stash_rows + queued_rows + 2;
         let mut fixed = fixed_base + comp_rows;
         let mut max_content_rows = height.saturating_sub(fixed);
         if max_content_rows == 0 {
@@ -593,7 +617,7 @@ impl Screen {
             draw_completions(state.completer.as_ref(), comp_rows)
         };
 
-        let total_rows = queued_rows + 1 + content_rows + 1 + comp_rows;
+        let total_rows = stash_rows + queued_rows + 1 + content_rows + 1 + comp_rows;
         let new_rows = total_rows as u16;
 
         if prev_rows > new_rows {

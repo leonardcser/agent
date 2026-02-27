@@ -905,10 +905,9 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                         );
                         continue;
                     }
-                    let is_multi = questions[active_tab].multi_select;
-                    if !is_multi && questions.len() > 1 && active_tab + 1 < questions.len() {
-                        answered[active_tab] = true;
-                        active_tab += 1;
+                    answered[active_tab] = true;
+                    if let Some(next) = (0..questions.len()).find(|&i| !answered[i]) {
+                        active_tab = next;
                         draw(
                             active_tab,
                             &selections,

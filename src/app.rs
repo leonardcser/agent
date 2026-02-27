@@ -68,6 +68,7 @@ impl App {
     pub fn read_input(&mut self) -> Option<String> {
         let result = read_input(&mut self.screen, &mut self.mode, &mut self.input_history, &mut self.input, self.auto_compact);
         self.input.clear();
+        self.input.restore_stash();
         result
     }
 

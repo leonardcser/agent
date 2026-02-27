@@ -63,6 +63,8 @@ pub struct InputState {
     vim: Option<Vim>,
     /// Saved buffer before history search, restored on cancel.
     history_saved_buf: Option<(String, usize)>,
+    /// Stashed prompt: (buf, cpos, pastes). Ctrl+S toggles.
+    pub stash: Option<(String, usize, Vec<String>)>,
 }
 
 /// What the caller should do after `handle_event`.
@@ -85,6 +87,7 @@ impl InputState {
             settings: None,
             vim: None,
             history_saved_buf: None,
+            stash: None,
         }
     }
 
@@ -138,6 +141,35 @@ impl InputState {
         self.completer = None;
         self.settings = None;
         self.history_saved_buf = None;
+        // Note: stash is intentionally NOT cleared here.
+    }
+
+    /// Toggle stash: if no stash, save current buf and clear; if stashed, restore.
+    pub fn toggle_stash(&mut self) {
+        if let Some((buf, cpos, pastes)) = self.stash.take() {
+            // Unstash: restore stashed content
+            self.buf = buf;
+            self.cpos = cpos;
+            self.pastes = pastes;
+            self.completer = None;
+        } else if !self.buf.is_empty() {
+            // Stash: save current content and clear
+            self.stash = Some((
+                std::mem::take(&mut self.buf),
+                std::mem::replace(&mut self.cpos, 0),
+                std::mem::take(&mut self.pastes),
+            ));
+            self.completer = None;
+        }
+    }
+
+    /// Restore stash into the buffer (called after submit/command completes).
+    pub fn restore_stash(&mut self) {
+        if let Some((buf, cpos, pastes)) = self.stash.take() {
+            self.buf = buf;
+            self.cpos = cpos;
+            self.pastes = pastes;
+        }
     }
 
     pub fn open_settings(&mut self, vim_enabled: bool, auto_compact: bool) {
@@ -780,6 +812,22 @@ pub fn read_input(
             continue;
         }
 
+        // Ctrl+S: toggle stash
+        if matches!(
+            ev,
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('s'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            })
+        ) {
+            state.toggle_stash();
+            let _ = out.execute(cursor::Hide);
+            screen.draw_prompt(state, *mode, width);
+            let _ = out.execute(cursor::Show);
+            continue;
+        }
+
         // Double-Esc in idle → show rewind menu
         if matches!(
             ev,
@@ -796,21 +844,23 @@ pub fn read_input(
                     let restore_insert = esc_was_insert;
                     esc_was_insert = false;
                     let turns = screen.user_turns();
-                    if !turns.is_empty() {
-                        if let Some(block_idx) = render::show_rewind(&turns) {
-                            let _ = out.execute(cursor::Hide);
-                            screen.erase_prompt();
-                            let _ = out.execute(cursor::Show);
-                            let _ = out.flush();
-                            let _ = out.execute(DisableBracketedPaste);
-                            terminal::disable_raw_mode().ok();
-                            return Some(format!("\x00rewind:{}", block_idx));
-                        }
+                    if turns.is_empty() {
+                        // No history to rewind to — double-Esc is a no-op; stay in Normal.
+                        continue;
                     }
+                    if let Some(block_idx) = render::show_rewind(&turns) {
+                        let _ = out.execute(cursor::Hide);
+                        screen.erase_prompt();
+                        let _ = out.execute(cursor::Show);
+                        let _ = out.flush();
+                        let _ = out.execute(DisableBracketedPaste);
+                        terminal::disable_raw_mode().ok();
+                        return Some(format!("\x00rewind:{}", block_idx));
+                    }
+                    // Rewind cancelled — restore Insert if that's where we started.
                     if restore_insert {
                         state.set_vim_mode(crate::vim::ViMode::Insert);
                     }
-                    // Cancelled or no history — redraw prompt in place.
                     let _ = out.execute(cursor::Hide);
                     screen.draw_prompt(state, *mode, width);
                     let _ = out.execute(cursor::Show);
@@ -837,6 +887,7 @@ pub fn read_input(
                 state.buf.clear();
                 state.cpos = 0;
                 state.open_settings(state.vim_enabled(), auto_compact);
+                // Don't restore stash yet — settings is an overlay, restore on close.
                 let _ = out.execute(cursor::Hide);
                 screen.draw_prompt(state, *mode, width);
                 let _ = out.execute(cursor::Show);
