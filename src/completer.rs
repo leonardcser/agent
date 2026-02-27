@@ -61,6 +61,7 @@ impl Completer {
             ("vim", "toggle vim mode"),
             ("settings", "open settings menu"),
             ("compact", "compact conversation history"),
+            ("export", "copy conversation to clipboard"),
             ("exit", "exit the app"),
             ("quit", "exit the app"),
         ]

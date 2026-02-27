@@ -319,6 +319,8 @@ pub struct Screen {
     prompt: PromptState,
     working: WorkingState,
     context_tokens: Option<u32>,
+    /// True once terminal auto-scrolling has pushed content into scrollback.
+    has_scrollback: bool,
 }
 
 impl Default for Screen {
@@ -335,6 +337,7 @@ impl Screen {
             prompt: PromptState::new(),
             working: WorkingState::new(),
             context_tokens: None,
+            has_scrollback: false,
         }
     }
 
@@ -506,6 +509,7 @@ impl Screen {
         self.prompt.fallback_row = Some(0);
         self.working.clear();
         self.context_tokens = None;
+        self.has_scrollback = false;
         let mut out = io::stdout();
         let _ = out.queue(cursor::MoveTo(0, 0));
         let _ = out.queue(terminal::Clear(terminal::ClearType::All));
@@ -537,7 +541,30 @@ impl Screen {
         self.history.truncate(block_idx);
         self.active_tool = None;
         self.prompt.dirty = true;
-        self.redraw_in_place();
+        if self.has_scrollback {
+            self.purge_and_redraw();
+        } else {
+            self.redraw_in_place();
+        }
+    }
+
+    /// Clear scrollback and the visible screen, then re-render all blocks.
+    fn purge_and_redraw(&mut self) {
+        let mut out = io::stdout();
+        let _ = out.queue(Print("\x1b[?2026h"));
+        let _ = out.queue(cursor::MoveTo(0, 0));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::Purge));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::All));
+        self.history.flushed = 0;
+        self.history.last_block_rows = 0;
+        let block_rows = self.history.render(term_width());
+        let _ = out.queue(Print("\x1b[?2026l"));
+        let _ = out.flush();
+        self.prompt.drawn = false;
+        self.prompt.dirty = true;
+        self.prompt.prev_rows = 0;
+        self.prompt.fallback_row = Some(block_rows);
+        self.has_scrollback = false;
     }
 
     pub fn draw_prompt(&mut self, state: &InputState, mode: super::input::Mode, width: usize) {
@@ -622,7 +649,7 @@ impl Screen {
         }
 
         let pre_prompt = block_rows + active_rows + gap;
-        let (top_row, new_rows) = self.draw_prompt_sections(
+        let (top_row, new_rows, scrolled) = self.draw_prompt_sections(
             state,
             mode,
             width,
@@ -631,6 +658,9 @@ impl Screen {
             draw_start_row,
             pre_prompt,
         );
+        if scrolled {
+            self.has_scrollback = true;
+        }
         self.prompt.prev_rows = pre_prompt + new_rows;
 
         self.prompt.top_row = top_row + block_rows;
@@ -642,7 +672,7 @@ impl Screen {
         let _ = out.flush();
     }
 
-    /// Returns (top_row, total_prompt_rows).
+    /// Returns (top_row, total_prompt_rows, scrolled).
     #[allow(clippy::too_many_arguments)]
     fn draw_prompt_sections(
         &self,
@@ -653,7 +683,7 @@ impl Screen {
         prev_rows: u16,
         draw_start_row: u16,
         pre_prompt_rows: u16,
-    ) -> (u16, u16) {
+    ) -> (u16, u16, bool) {
         let mut out = io::stdout();
         let usable = width.saturating_sub(1);
         let height = terminal::size().map(|(_, h)| h as usize).unwrap_or(24);
@@ -814,7 +844,8 @@ impl Screen {
         let total_drawn = pre_prompt_rows + new_rows + rows_below;
         let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
         // If content would extend past terminal bottom, the terminal scrolls up
-        let top_row = if draw_start_row + total_drawn > height {
+        let scrolled = draw_start_row + total_drawn > height;
+        let top_row = if scrolled {
             height.saturating_sub(total_drawn)
         } else {
             draw_start_row
@@ -835,7 +866,7 @@ impl Screen {
             }
         }
 
-        (top_row, total_rows as u16)
+        (top_row, total_rows as u16, scrolled)
     }
 
 }

@@ -86,6 +86,9 @@ impl App {
                 self.app_state.set_vim_enabled(enabled);
             }
             "/compact" => {} // handled in main loop after handle_command returns
+            "/export" => {
+                self.export_to_clipboard();
+            }
             _ => {}
         }
         true
@@ -718,6 +721,56 @@ impl App {
         let _ = io::stdout().execute(DisableBracketedPaste);
         terminal::disable_raw_mode().ok();
         self.app_state.set_mode(self.mode);
+    }
+
+    fn export_to_clipboard(&mut self) {
+        let text = self.format_conversation_text();
+        if text.is_empty() {
+            self.screen.push(Block::Error { message: "nothing to export".into() });
+            self.screen.flush_blocks();
+            return;
+        }
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
+            Ok(()) => {
+                self.screen.push(Block::Text { content: "conversation copied to clipboard".into() });
+                self.screen.flush_blocks();
+            }
+            Err(e) => {
+                self.screen.push(Block::Error { message: format!("clipboard error: {}", e) });
+                self.screen.flush_blocks();
+            }
+        }
+    }
+
+    fn format_conversation_text(&self) -> String {
+        let mut out = String::new();
+        for msg in &self.history {
+            match msg.role {
+                Role::System | Role::Tool => continue,
+                Role::User => {
+                    if let Some(c) = &msg.content {
+                        out.push_str("User: ");
+                        out.push_str(c);
+                        out.push_str("\n\n");
+                    }
+                }
+                Role::Assistant => {
+                    if let Some(c) = &msg.content {
+                        if !c.is_empty() {
+                            out.push_str("Assistant: ");
+                            out.push_str(c);
+                            out.push_str("\n\n");
+                        }
+                    }
+                    if let Some(calls) = &msg.tool_calls {
+                        for tc in calls {
+                            out.push_str(&format!("[Tool call: {}]\n\n", tc.function.name));
+                        }
+                    }
+                }
+            }
+        }
+        out.trim_end().to_string()
     }
 }
 
