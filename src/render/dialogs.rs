@@ -750,9 +750,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                 let _ = out.queue(Print("Other"));
             }
         }
-        if editing_other[active_tab]
-            || (is_other_current && !other_texts[active_tab].is_empty())
-        {
+        if editing_other[active_tab] || !other_texts[active_tab].is_empty() {
             let _ = out.queue(Print(", "));
             let _ = out.queue(Print(&other_texts[active_tab]));
             if editing_other[active_tab] {
@@ -881,21 +879,6 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                 (KeyCode::Esc, _) => break true,
                 (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break true,
                 (KeyCode::Enter, _) => {
-                    if selections[active_tab] == other_idx
-                        && other_texts[active_tab].is_empty()
-                    {
-                        editing_other[active_tab] = true;
-                        draw(
-                            active_tab,
-                            &selections,
-                            &multi_toggles,
-                            &other_texts,
-                            &editing_other,
-                            &visited,
-                            &answered,
-                        );
-                        continue;
-                    }
                     answered[active_tab] = true;
                     if let Some(next) = (0..questions.len()).find(|&i| !answered[i]) {
                         active_tab = next;
