@@ -16,6 +16,7 @@ use agent::{run_agent, AgentEvent};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use clap::Parser;
+use session::Session;
 use crossterm::{
     cursor,
     event::{self, EnableBracketedPaste, DisableBracketedPaste},
@@ -59,10 +60,11 @@ struct App {
     queued_messages: Vec<String>,
     auto_approved: HashSet<String>,
     session: session::Session,
+    shared_session: Arc<Mutex<Option<Session>>>,
 }
 
 impl App {
-    fn new(api_base: String, api_key: String, model: String, vim_from_config: bool) -> Self {
+    fn new(api_base: String, api_key: String, model: String, vim_from_config: bool, shared_session: Arc<Mutex<Option<Session>>>) -> Self {
         let app_state = state::State::load();
         let mode = app_state.mode();
         let vim_enabled = app_state.vim_enabled() || vim_from_config;
@@ -84,6 +86,7 @@ impl App {
             queued_messages: Vec::new(),
             auto_approved: HashSet::new(),
             session: session::Session::new(),
+            shared_session,
         }
     }
 
@@ -206,9 +209,15 @@ impl App {
     }
 
     fn save_session(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
         self.session.messages = self.history.clone();
         self.session.updated_at_ms = session::now_ms();
         session::save(&self.session);
+        if let Ok(mut guard) = self.shared_session.lock() {
+            *guard = Some(self.session.clone());
+        }
     }
 
     async fn maybe_generate_title(&mut self) {
@@ -494,7 +503,11 @@ impl App {
                 self.screen.mark_dirty();
                 self.render_screen();
             }
-            Action::Resize(_) | Action::Noop => {}
+            Action::Noop => {
+                self.screen.mark_dirty();
+                self.render_screen();
+            }
+            Action::Resize(_) => {}
         }
         TermAction::None
     }
@@ -664,7 +677,35 @@ async fn main() {
     }
 
     let vim_enabled = cfg.vim_mode.unwrap_or(false);
-    let mut app = App::new(api_base, api_key, model, vim_enabled);
+    let shared_session: Arc<Mutex<Option<Session>>> = Arc::new(Mutex::new(None));
+
+    {
+        let shared = shared_session.clone();
+        tokio::spawn(async move {
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+                let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+                tokio::select! {
+                    _ = sigint.recv() => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                tokio::signal::ctrl_c().await.ok();
+            }
+            if let Ok(guard) = shared.lock() {
+                if let Some(ref s) = *guard {
+                    session::save(s);
+                }
+            }
+            std::process::exit(0);
+        });
+    }
+
+    let mut app = App::new(api_base, api_key, model, vim_enabled, shared_session);
 
     eprintln!("log: {}", log::path().display());
     println!();
@@ -687,6 +728,14 @@ async fn main() {
 
         let input = input.trim().to_string();
         if input.is_empty() { continue; }
+
+        // Handle settings close signal
+        if let Some(rest) = input.strip_prefix("\x00settings:vim=") {
+            let enabled = rest == "true";
+            app.input.set_vim_enabled(enabled);
+            app.app_state.set_vim_enabled(enabled);
+            continue;
+        }
 
         // Handle rewind signal from double-Esc menu
         if let Some(idx_str) = input.strip_prefix("\x00rewind:") {
@@ -732,10 +781,12 @@ async fn main() {
             app.session.first_user_message = Some(input.clone());
         }
         app.push_user_message(input);
+        app.save_session();
         app.run_session().await;
         app.save_session();
         app.maybe_generate_title().await;
     }
+    app.save_session();
 }
 
 /// Expand `@path` references in user input by appending file contents.

@@ -46,33 +46,32 @@ impl Completer {
         }
     }
 
+    pub fn is_command(s: &str) -> bool {
+        Self::command_items()
+            .iter()
+            .any(|(label, _)| s == format!("/{}", label))
+    }
+
+    fn command_items() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("clear", "clear conversation"),
+            ("new", "start new conversation"),
+            ("resume", "resume saved session"),
+            ("vim", "toggle vim mode"),
+            ("settings", "open settings menu"),
+            ("exit", "exit the app"),
+            ("quit", "exit the app"),
+        ]
+    }
+
     pub fn commands(anchor: usize) -> Self {
-        let all_items = vec![
-            CompletionItem {
-                label: "clear".into(),
-                description: Some("clear conversation".into()),
-            },
-            CompletionItem {
-                label: "new".into(),
-                description: Some("start new conversation".into()),
-            },
-            CompletionItem {
-                label: "resume".into(),
-                description: Some("resume saved session".into()),
-            },
-            CompletionItem {
-                label: "vim".into(),
-                description: Some("toggle vim mode".into()),
-            },
-            CompletionItem {
-                label: "exit".into(),
-                description: Some("exit the app".into()),
-            },
-            CompletionItem {
-                label: "quit".into(),
-                description: Some("exit the app".into()),
-            },
-        ];
+        let all_items = Self::command_items()
+            .into_iter()
+            .map(|(label, desc)| CompletionItem {
+                label: label.into(),
+                description: Some(desc.into()),
+            })
+            .collect::<Vec<_>>();
         let results = all_items.clone();
         Self {
             anchor,

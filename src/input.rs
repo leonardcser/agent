@@ -131,6 +131,12 @@ impl Mode {
     }
 }
 
+// ── Settings menu ─────────────────────────────────────────────────────────────
+
+pub struct SettingsMenu {
+    pub vim_enabled: bool,
+}
+
 // ── Shared input state ───────────────────────────────────────────────────────
 
 /// Unified input buffer with paste tokens and file completer.
@@ -140,6 +146,7 @@ pub struct InputState {
     pub cpos: usize,
     pub pastes: Vec<String>,
     pub completer: Option<Completer>,
+    pub settings: Option<SettingsMenu>,
     vim: Option<Vim>,
     /// Saved buffer before history search, restored on cancel.
     history_saved_buf: Option<(String, usize)>,
@@ -162,6 +169,7 @@ impl InputState {
             cpos: 0,
             pastes: Vec::new(),
             completer: None,
+            settings: None,
             vim: None,
             history_saved_buf: None,
         }
@@ -215,7 +223,13 @@ impl InputState {
         self.cpos = 0;
         self.pastes.clear();
         self.completer = None;
+        self.settings = None;
         self.history_saved_buf = None;
+    }
+
+    pub fn open_settings(&mut self, vim_enabled: bool) {
+        self.completer = None;
+        self.settings = Some(SettingsMenu { vim_enabled });
     }
 
     /// Returns the history search query if a history completer is active.
@@ -249,6 +263,11 @@ impl InputState {
 
     /// Process a terminal event. Returns what the caller should do next.
     pub fn handle_event(&mut self, ev: Event, mut history: Option<&mut History>) -> Action {
+        // Settings menu intercepts all keys when open
+        if self.settings.is_some() {
+            return self.handle_settings_event(&ev);
+        }
+
         // Completer intercepts navigation keys when active
         if self.completer.is_some() {
             if let Some(action) = self.handle_completer_event(&ev) {
@@ -472,6 +491,22 @@ impl InputState {
 
     // ── Completer ────────────────────────────────────────────────────────
 
+    fn handle_settings_event(&mut self, ev: &Event) -> Action {
+        match ev {
+            Event::Key(KeyEvent { code: KeyCode::Esc, .. })
+            | Event::Key(KeyEvent { code: KeyCode::Char('q'), .. }) => {
+                let vim_enabled = self.settings.take().unwrap().vim_enabled;
+                Action::Submit(format!("\x00settings:vim={}", vim_enabled))
+            }
+            Event::Key(KeyEvent { code: KeyCode::Enter, .. })
+            | Event::Key(KeyEvent { code: KeyCode::Char(' '), .. }) => {
+                self.settings.as_mut().unwrap().vim_enabled ^= true;
+                Action::Redraw
+            }
+            _ => Action::Noop,
+        }
+    }
+
     /// Try to handle the event as a completer navigation. Returns Some if consumed.
     fn handle_completer_event(&mut self, ev: &Event) -> Option<Action> {
         let is_history = self.completer.as_ref().is_some_and(|c| c.kind == CompleterKind::History);
@@ -490,9 +525,15 @@ impl InputState {
                     self.history_saved_buf = None;
                     Some(Action::Redraw)
                 } else {
-                    // Dismiss the picker and let normal Enter handling submit.
-                    self.completer = None;
-                    None
+                    let comp = self.completer.take().unwrap();
+                    let kind = comp.kind;
+                    self.accept_completion(&comp);
+                    if kind == CompleterKind::Command {
+                        Some(Action::Submit(self.expanded_text()))
+                    } else {
+                        // File: accept and keep editing
+                        Some(Action::Redraw)
+                    }
                 }
             }
             Event::Key(KeyEvent {
@@ -850,6 +891,14 @@ pub fn read_input(
         }
 
         match state.handle_event(ev, Some(history)) {
+            Action::Submit(text) if text.trim() == "/settings" => {
+                state.buf.clear();
+                state.cpos = 0;
+                state.open_settings(state.vim_enabled());
+                let _ = out.execute(cursor::Hide);
+                screen.draw_prompt(state, *mode, width);
+                let _ = out.execute(cursor::Show);
+            }
             Action::Submit(text) => {
                 let _ = out.execute(cursor::Hide);
                 screen.erase_prompt();

@@ -1,4 +1,4 @@
-use crate::input::{InputState, PASTE_MARKER};
+use crate::input::{InputState, SettingsMenu, PASTE_MARKER};
 use crate::session;
 use crate::theme;
 use comfy_table::{presets::UTF8_BORDERS_ONLY, ContentArrangement, Table};
@@ -531,17 +531,14 @@ impl Screen {
         let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
         let (visual_lines, cursor_line, cursor_col) =
             wrap_and_locate_cursor(&display_buf, display_cursor, usable);
-        let is_command = matches!(
-            state.buf.trim(),
-            "/clear" | "/new" | "/exit" | "/quit" | "/vim"
-        );
+        let is_command = crate::completer::Completer::is_command(state.buf.trim());
         let is_exec = state.buf.starts_with('!');
         let total_content_rows = visual_lines.len();
-        let comp_total = state
-            .completer
-            .as_ref()
-            .map(|c| c.results.len().min(5))
-            .unwrap_or(0);
+        let comp_total = if state.settings.is_some() {
+            1
+        } else {
+            state.completer.as_ref().map(|c| c.results.len().min(5)).unwrap_or(0)
+        };
         let mut comp_rows = comp_total;
 
         // Ensure the prompt never exceeds terminal height by shrinking the content window.
@@ -610,11 +607,15 @@ impl Screen {
             draw_bar(width, None, None, bar_color);
         }
 
-        // 6. Completion list (below the bar)
+        // 6. Completion list or settings menu (below the bar)
         if comp_rows > 0 {
             let _ = out.queue(Print("\r\n"));
         }
-        let comp_rows = draw_completions(state.completer.as_ref(), comp_rows);
+        let comp_rows = if state.settings.is_some() {
+            draw_settings(state.settings.as_ref(), comp_rows)
+        } else {
+            draw_completions(state.completer.as_ref(), comp_rows)
+        };
 
         let total_rows =
             queued_rows + 1 + content_rows + 1 + comp_rows;
@@ -2206,6 +2207,23 @@ fn draw_completions(
         }
     }
     max_rows
+}
+
+fn draw_settings(settings: Option<&SettingsMenu>, max_rows: usize) -> usize {
+    let Some(s) = settings else { return 0 };
+    if max_rows == 0 {
+        return 0;
+    }
+    let mut out = io::stdout();
+    let _ = out.queue(Print("  "));
+    let _ = out.queue(SetForegroundColor(theme::ACCENT));
+    let _ = out.queue(Print("vim mode"));
+    let _ = out.queue(ResetColor);
+    let _ = out.queue(SetAttribute(Attribute::Dim));
+    let _ = out.queue(Print(if s.vim_enabled { "    on" } else { "    off" }));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+    1
 }
 
 pub fn erase_prompt_at(top_row: u16) {
