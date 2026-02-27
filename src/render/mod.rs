@@ -675,7 +675,7 @@ impl Screen {
         if scrolled {
             self.has_scrollback = true;
         }
-        self.prompt.prev_rows = pre_prompt + new_rows;
+        self.prompt.prev_rows = (pre_prompt - block_rows) + new_rows;
 
         if self.content_start_row.is_none() {
             self.content_start_row = Some(top_row);
