@@ -1,8 +1,10 @@
 use crate::input::{InputState, PASTE_MARKER};
+use crate::session;
 use crate::theme;
 use comfy_table::{presets::UTF8_BORDERS_ONLY, ContentArrangement, Table};
 use crossterm::{
     cursor,
+    event::{DisableBracketedPaste, EnableBracketedPaste},
     style::{
         Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     },
@@ -46,6 +48,15 @@ pub struct ActiveTool {
     pub args: HashMap<String, serde_json::Value>,
     pub status: ToolStatus,
     pub output: Option<ToolOutput>,
+}
+
+#[derive(Clone)]
+pub struct ResumeEntry {
+    pub id: String,
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub updated_at_ms: u64,
+    pub created_at_ms: u64,
 }
 
 #[derive(Clone)]
@@ -529,26 +540,23 @@ impl Screen {
         let comp_total = state
             .completer
             .as_ref()
-            .map(|c| c.results.len())
+            .map(|c| c.results.len().min(5))
             .unwrap_or(0);
         let mut comp_rows = comp_total;
-        let mut comp_gap = if comp_rows > 0 { 1 } else { 0 };
 
         // Ensure the prompt never exceeds terminal height by shrinking the content window.
         let fixed_base = queued_rows + 2; // queued + top bar + bottom bar
-        let mut fixed = fixed_base + comp_gap + comp_rows;
+        let mut fixed = fixed_base + comp_rows;
         let mut max_content_rows = height.saturating_sub(fixed);
         if max_content_rows == 0 {
             // Make room for at least one content row by trimming completions.
             let available_for_comp = height.saturating_sub(fixed_base + 1);
             if available_for_comp == 0 {
                 comp_rows = 0;
-                comp_gap = 0;
             } else {
                 comp_rows = comp_rows.min(available_for_comp);
-                comp_gap = if comp_rows > 0 { 1 } else { 0 };
             }
-            fixed = fixed_base + comp_gap + comp_rows;
+            fixed = fixed_base + comp_rows;
             max_content_rows = height.saturating_sub(fixed);
             if max_content_rows == 0 {
                 max_content_rows = 1;
@@ -610,7 +618,7 @@ impl Screen {
 
         // Clear leftover rows from previous (taller) prompt
         let total_rows =
-            queued_rows + 1 + content_rows + 1 + comp_gap + comp_rows;
+            queued_rows + 1 + content_rows + 1 + comp_rows;
         let new_rows = total_rows as u16;
         let cleared = if prev_rows > new_rows {
             let n = prev_rows - new_rows;
@@ -627,7 +635,8 @@ impl Screen {
         let _ = out.flush();
         let final_row = cursor::position().map(|(_, y)| y).unwrap_or(0);
         let top_row = final_row.saturating_sub(new_rows + cleared - 1);
-        let text_row = top_row + 1 + extra_rows + cursor_line_visible as u16;
+        let text_row =
+            top_row + 1 + extra_rows as u16 + cursor_line_visible as u16;
         let text_col = 1 + cursor_col as u16;
         let _ = out.queue(cursor::MoveTo(text_col, text_row));
 
@@ -753,6 +762,10 @@ pub fn term_width() -> usize {
     terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
 }
 
+pub fn term_height() -> usize {
+    terminal::size().map(|(_, h)| h as usize).unwrap_or(24)
+}
+
 fn truncate_str(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -766,30 +779,32 @@ fn render_block(block: &Block, _width: usize) -> u16 {
     match block {
         Block::User { text } => {
             let mut out = io::stdout();
-            let lines: Vec<&str> = text.lines().collect();
+            // Collapse multi-line text: left-trim, then join lines with a space.
+            let single: String = text
+                .trim_start()
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
             let w = term_width();
-            let max_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-            // Cap box width to terminal width so lines never wrap
-            let pad_width = (max_len + 2).min(w);
-            for line in &lines {
-                let char_len = line.chars().count();
-                // Truncate line if it exceeds available space (pad_width - 1 for leading space)
-                let display: String = if char_len + 1 > pad_width {
-                    line.chars().take(pad_width.saturating_sub(1)).collect()
-                } else {
-                    line.to_string()
-                };
-                let display_len = display.chars().count();
-                let trailing = pad_width.saturating_sub(display_len + 1);
-                let _ = out
-                    .queue(SetBackgroundColor(theme::USER_BG))
-                    .and_then(|o| o.queue(SetAttribute(Attribute::Bold)))
-                    .and_then(|o| o.queue(Print(format!(" {}{}", display, " ".repeat(trailing)))))
-                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
-                    .and_then(|o| o.queue(ResetColor));
-                let _ = out.queue(Print("\r\n"));
-            }
-            lines.len() as u16
+            let char_len = single.chars().count();
+            let pad_width = (char_len + 2).min(w);
+            let display: String = if char_len + 1 > pad_width {
+                single.chars().take(pad_width.saturating_sub(1)).collect()
+            } else {
+                single.clone()
+            };
+            let display_len = display.chars().count();
+            let trailing = pad_width.saturating_sub(display_len + 1);
+            let _ = out
+                .queue(SetBackgroundColor(theme::USER_BG))
+                .and_then(|o| o.queue(SetAttribute(Attribute::Bold)))
+                .and_then(|o| o.queue(Print(format!(" {}{}", display, " ".repeat(trailing)))))
+                .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
+                .and_then(|o| o.queue(ResetColor));
+            let _ = out.queue(Print("\r\n"));
+            1
         }
         Block::Text { content } => {
             let mut out = io::stdout();
@@ -1187,8 +1202,19 @@ fn print_tool_output(
         }
         "bash" if content.is_empty() => 0,
         "bash" => {
-            let count = content.lines().count();
-            for line in content.lines() {
+            const MAX_LINES: usize = 20;
+            let lines: Vec<&str> = content.lines().collect();
+            let total = lines.len();
+            let mut rows = 0u16;
+            if total > MAX_LINES {
+                let skipped = total - MAX_LINES;
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(format!("   ... {} lines above\r\n", skipped)));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                rows += 1;
+            }
+            let visible = if total > MAX_LINES { &lines[total - MAX_LINES..] } else { &lines[..] };
+            for line in visible {
                 if is_error {
                     let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
                     let _ = out.queue(Print(format!("   {}\r\n", line)));
@@ -1198,8 +1224,9 @@ fn print_tool_output(
                     let _ = out.queue(Print(format!("   {}\r\n", line)));
                     let _ = out.queue(SetAttribute(Attribute::Reset));
                 }
+                rows += 1;
             }
-            count as u16
+            rows
         }
         "grep" if !is_error => {
             let count = content.lines().count();
@@ -2050,7 +2077,7 @@ fn map_cursor(raw_cursor: usize, raw_buf: &str, spans: &[Span]) -> usize {
 }
 
 /// Render a visual line with span-aware highlighting.
-/// We re-parse the wrapped line to find @ tokens and paste labels.
+/// `@path` tokens are highlighted in accent if the path exists on disk.
 fn render_line_spans(line: &str) {
     let mut out = io::stdout();
     let mut rest = line;
@@ -2091,9 +2118,14 @@ fn render_line_spans(line: &str) {
             let after = &rest[pos + 1..];
             let tok_end = after.find(char::is_whitespace).unwrap_or(after.len());
             let token = &rest[pos..pos + 1 + tok_end];
-            let _ = out.queue(SetForegroundColor(theme::ACCENT));
-            let _ = out.queue(Print(token));
-            let _ = out.queue(ResetColor);
+            let path_str = &token[1..]; // strip leading '@'
+            if !path_str.is_empty() && std::path::Path::new(path_str).exists() {
+                let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                let _ = out.queue(Print(token));
+                let _ = out.queue(ResetColor);
+            } else {
+                let _ = out.queue(Print(token));
+            }
             rest = &rest[pos + 1 + tok_end..];
         } else {
             let _ = out.queue(Print(&rest[pos..pos + 1]));
@@ -2126,6 +2158,7 @@ fn draw_completions(
     let prefix = match comp.kind {
         crate::completer::CompleterKind::Command => "/",
         crate::completer::CompleterKind::File => "./",
+        crate::completer::CompleterKind::History => "",
     };
     // Find the longest label to align descriptions.
     let max_label = comp
@@ -2497,4 +2530,237 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
     let _ = out.flush();
 
     result
+}
+
+/// Show a resume menu listing saved sessions. Returns the selected session id,
+/// or `None` if cancelled.
+pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+
+    let mut out = io::stdout();
+    let (width, height) = terminal::size().unwrap_or((80, 24));
+    let w = width.saturating_sub(1) as usize;
+    let max_visible = (height as usize).saturating_sub(7).min(entries.len().max(1));
+    let total_rows = (max_visible + 6) as u16; // bar + header + options + 3 blank
+    let bar_row = height.saturating_sub(total_rows);
+
+    let mut query = String::new();
+    let mut filtered = filter_resume_entries(entries, &query);
+    let mut selected: usize = filtered.len().saturating_sub(1);
+    let mut scroll_offset: usize = filtered.len().saturating_sub(max_visible);
+
+    let _ = out.flush();
+    let saved_pos = cursor::position().unwrap_or((0, 0));
+    let _ = out.queue(cursor::Hide);
+    let _ = out.flush();
+
+    let draw = |selected: usize, scroll_offset: usize, query: &str, filtered: &[ResumeEntry]| {
+        let mut out = io::stdout();
+        let _ = out.queue(cursor::MoveTo(0, bar_row));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+
+        let mut row = bar_row;
+        let now_ms = session::now_ms();
+
+        // Bar line
+        let _ = out.queue(cursor::MoveTo(0, row));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+        draw_bar(w, None, None, theme::ACCENT);
+        row = row.saturating_add(1);
+
+        // Header + query
+        let _ = out.queue(cursor::MoveTo(0, row));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(" Resume:"));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(Print(" "));
+        let _ = out.queue(Print(query));
+        row = row.saturating_add(1);
+
+        if filtered.is_empty() {
+            let _ = out.queue(cursor::MoveTo(0, row));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print("  No matches"));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+            row = row.saturating_add(1);
+        } else {
+            let end = (scroll_offset + max_visible).min(filtered.len());
+            for i in scroll_offset..end {
+                let entry = &filtered[i];
+                let title = resume_title(entry);
+                let time_ago = session::time_ago(resume_ts(entry), now_ms);
+                let time_len = time_ago.chars().count() + 1;
+                let max_label = w.saturating_sub(time_len + 6);
+                let truncated = truncate_str(&title, max_label);
+
+                let _ = out.queue(cursor::MoveTo(0, row));
+                let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+                let _ = out.queue(Print("  "));
+                if i == selected {
+                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    let _ = out.queue(Print(format!("{}.", i + 1)));
+                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                    let _ = out.queue(Print(" "));
+                    let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                    let _ = out.queue(Print(&truncated));
+                    let _ = out.queue(ResetColor);
+                } else {
+                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    let _ = out.queue(Print(format!("{}. ", i + 1)));
+                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                    let _ = out.queue(Print(&truncated));
+                }
+
+                let _ = out.queue(Print(" "));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(&time_ago));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                row = row.saturating_add(1);
+            }
+        }
+
+        // Blank padding (3 rows)
+        for _ in 0..3 {
+            let _ = out.queue(cursor::MoveTo(0, row));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+            row = row.saturating_add(1);
+        }
+
+        let _ = out.flush();
+    };
+
+    draw(selected, scroll_offset, &query, &filtered);
+
+    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+
+    terminal::enable_raw_mode().ok();
+    let _ = out.queue(EnableBracketedPaste);
+    let _ = out.flush();
+
+    let result = loop {
+        if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = event::read() {
+            match (code, modifiers) {
+                (KeyCode::Enter, _) => {
+                    if let Some(entry) = filtered.get(selected) {
+                        break Some(entry.id.clone());
+                    }
+                }
+                (KeyCode::Esc, _) => break None,
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break None,
+                (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    query.clear();
+                }
+                (KeyCode::Backspace, _) => {
+                    query.pop();
+                }
+                (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                    if selected > 0 {
+                        selected -= 1;
+                        if selected < scroll_offset {
+                            scroll_offset = selected;
+                        }
+                    }
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                    if selected + 1 < filtered.len() {
+                        selected += 1;
+                        if selected >= scroll_offset + max_visible {
+                            scroll_offset = selected + 1 - max_visible;
+                        }
+                    }
+                }
+                (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                    query.push(c);
+                }
+                _ => {}
+            }
+
+            let next_filtered = filter_resume_entries(entries, &query);
+            if next_filtered.len() != filtered.len() || query.is_empty() {
+                filtered = next_filtered;
+                if filtered.is_empty() {
+                    selected = 0;
+                    scroll_offset = 0;
+                } else {
+                    selected = selected.min(filtered.len().saturating_sub(1));
+                    scroll_offset = scroll_offset.min(filtered.len().saturating_sub(max_visible));
+                }
+            } else {
+                filtered = next_filtered;
+                if filtered.is_empty() {
+                    selected = 0;
+                    scroll_offset = 0;
+                } else {
+                    selected = selected.min(filtered.len().saturating_sub(1));
+                    scroll_offset = scroll_offset.min(filtered.len().saturating_sub(max_visible));
+                }
+            }
+            draw(selected, scroll_offset, &query, &filtered);
+        }
+    };
+
+    // Erase the overlay
+    let _ = out.queue(cursor::MoveTo(0, bar_row));
+    let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+    let _ = out.queue(cursor::MoveTo(saved_pos.0, saved_pos.1));
+    let _ = out.queue(cursor::Show);
+    let _ = out.queue(DisableBracketedPaste);
+    let _ = out.flush();
+    terminal::disable_raw_mode().ok();
+
+    result
+}
+
+fn resume_title(entry: &ResumeEntry) -> String {
+    if !entry.title.trim().is_empty() {
+        entry.title.clone()
+    } else {
+        entry.subtitle.clone().unwrap_or_else(|| "Untitled".into())
+    }
+}
+
+fn resume_ts(entry: &ResumeEntry) -> u64 {
+    if entry.updated_at_ms > 0 {
+        entry.updated_at_ms
+    } else {
+        entry.created_at_ms
+    }
+}
+
+fn filter_resume_entries(entries: &[ResumeEntry], query: &str) -> Vec<ResumeEntry> {
+    if query.is_empty() {
+        return entries.to_vec();
+    }
+    let q = query.to_lowercase();
+    entries
+        .iter()
+        .filter(|e| {
+            let mut hay = resume_title(e);
+            if let Some(ref subtitle) = e.subtitle {
+                hay.push(' ');
+                hay.push_str(subtitle);
+            }
+            fuzzy_match(&hay, &q)
+        })
+        .cloned()
+        .collect()
+}
+
+fn fuzzy_match(text: &str, query: &str) -> bool {
+    let lower = text.to_lowercase();
+    let mut hay = lower.chars().peekable();
+    for qc in query.chars() {
+        loop {
+            match hay.next() {
+                Some(pc) if pc == qc => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
 }

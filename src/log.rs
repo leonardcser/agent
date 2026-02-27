@@ -1,11 +1,42 @@
+use crate::config;
 use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+static LOG_LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    Debug = 0,
+    Info = 1,
+    Warn = 2,
+    Error = 3,
+}
+
+impl Level {
+    fn enabled(self) -> bool {
+        self as u8 >= LOG_LEVEL.load(Ordering::Relaxed)
+    }
+}
+
+pub fn set_level(level: Level) {
+    LOG_LEVEL.store(level as u8, Ordering::Relaxed);
+}
+
+pub fn parse_level(s: &str) -> Option<Level> {
+    match s.trim().to_lowercase().as_str() {
+        "debug" => Some(Level::Debug),
+        "info" => Some(Level::Info),
+        "warn" | "warning" => Some(Level::Warn),
+        "error" => Some(Level::Error),
+        _ => None,
+    }
+}
 
 fn log_path() -> &'static PathBuf {
     LOG_PATH.get_or_init(|| {
@@ -20,15 +51,17 @@ fn log_path() -> &'static PathBuf {
 }
 
 fn dirs() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".agent").join("logs")
+    config::state_dir().join("logs")
 }
 
 pub fn path() -> &'static PathBuf {
     log_path()
 }
 
-pub fn entry(event: &str, data: &impl Serialize) {
+pub fn entry(level: Level, event: &str, data: &impl Serialize) {
+    if !level.enabled() {
+        return;
+    }
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -36,6 +69,7 @@ pub fn entry(event: &str, data: &impl Serialize) {
 
     let payload = serde_json::json!({
         "ts": ts,
+        "level": format!("{:?}", level).to_lowercase(),
         "event": event,
         "data": data,
     });

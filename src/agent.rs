@@ -191,7 +191,7 @@ pub async fn run_agent(
             } else {
                 tool.execute(&args)
             };
-            log::entry("tool_result", &serde_json::json!({
+            log::entry(log::Level::Debug, "tool_result", &serde_json::json!({
                 "tool": tc.function.name,
                 "id": tc.id,
                 "is_error": is_error,

@@ -101,6 +101,10 @@ impl History {
             Some(&self.entries[self.cursor])
         }
     }
+
+    pub fn entries(&self) -> &[String] {
+        &self.entries
+    }
 }
 
 // ── Mode ─────────────────────────────────────────────────────────────────────
@@ -137,6 +141,8 @@ pub struct InputState {
     pub pastes: Vec<String>,
     pub completer: Option<Completer>,
     vim: Option<Vim>,
+    /// Saved buffer before history search, restored on cancel.
+    history_saved_buf: Option<(String, usize)>,
 }
 
 /// What the caller should do after `handle_event`.
@@ -157,6 +163,7 @@ impl InputState {
             pastes: Vec::new(),
             completer: None,
             vim: None,
+            history_saved_buf: None,
         }
     }
 
@@ -208,6 +215,24 @@ impl InputState {
         self.cpos = 0;
         self.pastes.clear();
         self.completer = None;
+        self.history_saved_buf = None;
+    }
+
+    /// Returns the history search query if a history completer is active.
+    pub fn history_search_query(&self) -> Option<&str> {
+        self.completer.as_ref().and_then(|c| {
+            if c.kind == CompleterKind::History {
+                Some(c.query.as_str())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Open history fuzzy search using the completer component.
+    pub fn open_history_search(&mut self, history: &History) {
+        self.history_saved_buf = Some((self.buf.clone(), self.cpos));
+        self.completer = Some(Completer::history(history.entries()));
     }
 
     pub fn cursor_char(&self) -> usize {
@@ -233,7 +258,7 @@ impl InputState {
             if let Event::Key(key_ev) = ev {
                 match vim.handle_key(key_ev, &mut self.buf, &mut self.cpos) {
                     vim::Action::Consumed => {
-                        self.completer = None;
+                        self.recompute_completer();
                         return Action::Redraw;
                     }
                     vim::Action::Submit => {
@@ -288,12 +313,42 @@ impl InputState {
                     Action::Submit(text)
                 }
             }
-            // Ctrl+C / Ctrl+D handled in the input loop (double-tap logic).
+            // Ctrl+C handled in the input loop (double-tap logic).
             Event::Key(KeyEvent {
-                code: KeyCode::Char('c' | 'd'),
+                code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
             }) => Action::Noop,
+            // Ctrl+U / Ctrl+D: half-page up/down in vim normal mode.
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('u'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }) if self.vim.as_ref().is_some_and(|v| v.mode() == ViMode::Normal) => {
+                let half = render::term_height() / 2;
+                let line = current_line(&self.buf, self.cpos);
+                let target = line.saturating_sub(half);
+                self.move_to_line(target);
+                Action::Redraw
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }) if self.vim.as_ref().is_some_and(|v| v.mode() == ViMode::Normal) => {
+                let half = render::term_height() / 2;
+                let line = current_line(&self.buf, self.cpos);
+                let total = self.buf.lines().count().max(1);
+                let target = (line + half).min(total - 1);
+                self.move_to_line(target);
+                Action::Redraw
+            }
+            // Ctrl+R: open history fuzzy search.
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('r'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }) => Action::Noop, // handled in read_input
             Event::Key(KeyEvent {
                 code: KeyCode::Char('j'),
                 modifiers: KeyModifiers::CONTROL,
@@ -311,7 +366,7 @@ impl InputState {
             }) => {
                 let before = &self.buf[..self.cpos];
                 self.cpos = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-                self.completer = None;
+                self.recompute_completer();
                 Action::Redraw
             }
             Event::Key(KeyEvent {
@@ -321,7 +376,7 @@ impl InputState {
             }) => {
                 let after = &self.buf[self.cpos..];
                 self.cpos += after.find('\n').unwrap_or(after.len());
-                self.completer = None;
+                self.recompute_completer();
                 Action::Redraw
             }
             Event::Key(KeyEvent {
@@ -346,7 +401,7 @@ impl InputState {
                 if self.cpos > 0 {
                     let cp = char_pos(&self.buf, self.cpos);
                     self.cpos = byte_of_char(&self.buf, cp - 1);
-                    self.completer = None;
+                    self.recompute_completer();
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -359,7 +414,7 @@ impl InputState {
                 if self.cpos < self.buf.len() {
                     let cp = char_pos(&self.buf, self.cpos);
                     self.cpos = byte_of_char(&self.buf, cp + 1);
-                    self.completer = None;
+                    self.recompute_completer();
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -396,7 +451,7 @@ impl InputState {
             }) => {
                 let before = &self.buf[..self.cpos];
                 self.cpos = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-                self.completer = None;
+                self.recompute_completer();
                 Action::Redraw
             }
             Event::Key(KeyEvent {
@@ -404,7 +459,7 @@ impl InputState {
             }) => {
                 let after = &self.buf[self.cpos..];
                 self.cpos += after.find('\n').unwrap_or(after.len());
-                self.completer = None;
+                self.recompute_completer();
                 Action::Redraw
             }
             Event::Resize(w, _) => Action::Resize(w as usize),
@@ -416,28 +471,47 @@ impl InputState {
 
     /// Try to handle the event as a completer navigation. Returns Some if consumed.
     fn handle_completer_event(&mut self, ev: &Event) -> Option<Action> {
+        let is_history = self.completer.as_ref().is_some_and(|c| c.kind == CompleterKind::History);
+
         match ev {
             Event::Key(KeyEvent {
                 code: KeyCode::Enter,
                 ..
             }) => {
-                let comp = self.completer.take().unwrap();
-                let is_command = comp.kind == CompleterKind::Command;
-                self.accept_completion(&comp);
-                if is_command {
-                    let text = self.expanded_text();
-                    self.buf.clear();
-                    self.cpos = 0;
-                    self.pastes.clear();
-                    Some(Action::Submit(text))
-                } else {
+                if is_history {
+                    let comp = self.completer.take().unwrap();
+                    if let Some(label) = comp.accept() {
+                        self.buf = label.to_string();
+                        self.cpos = self.buf.len();
+                    }
+                    self.history_saved_buf = None;
                     Some(Action::Redraw)
+                } else {
+                    // Dismiss the picker and let normal Enter handling submit.
+                    self.completer = None;
+                    None
                 }
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Esc, ..
             }) => {
+                if is_history {
+                    if let Some((buf, cpos)) = self.history_saved_buf.take() {
+                        self.buf = buf;
+                        self.cpos = cpos;
+                    }
+                }
                 self.completer = None;
+                Some(Action::Redraw)
+            }
+            // Ctrl+R cycles forward through history matches
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('r'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }) if is_history => {
+                let comp = self.completer.as_mut().unwrap();
+                comp.move_down();
                 Some(Action::Redraw)
             }
             Event::Key(KeyEvent {
@@ -475,7 +549,37 @@ impl InputState {
                 code: KeyCode::Tab, ..
             }) => {
                 let comp = self.completer.take().unwrap();
-                self.accept_completion(&comp);
+                if comp.kind == CompleterKind::History {
+                    if let Some(label) = comp.accept() {
+                        self.buf = label.to_string();
+                        self.cpos = self.buf.len();
+                    }
+                    self.history_saved_buf = None;
+                } else {
+                    self.accept_completion(&comp);
+                }
+                Some(Action::Redraw)
+            }
+            // History mode: typing updates the filter query
+            Event::Key(KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers,
+                ..
+            }) if is_history && (modifiers.is_empty() || *modifiers == KeyModifiers::SHIFT) => {
+                let comp = self.completer.as_mut().unwrap();
+                let mut q = comp.query.clone();
+                q.push(*c);
+                comp.update_query(q);
+                Some(Action::Redraw)
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Backspace,
+                ..
+            }) if is_history => {
+                let comp = self.completer.as_mut().unwrap();
+                let mut q = comp.query.clone();
+                q.pop();
+                comp.update_query(q);
                 Some(Action::Redraw)
             }
             _ => None,
@@ -497,24 +601,6 @@ impl InputState {
         }
     }
 
-    fn update_completer(&mut self) {
-        if let Some(ref comp) = self.completer {
-            let anchor = comp.anchor;
-            let trigger = self.buf.as_bytes().get(anchor).copied();
-            let valid = match trigger {
-                Some(b'@') => find_at_anchor(&self.buf, self.cpos).is_some(),
-                Some(b'/') => find_slash_anchor(&self.buf, self.cpos).is_some(),
-                _ => false,
-            };
-            if valid && self.cpos > anchor {
-                let query = self.buf[anchor + 1..self.cpos].to_string();
-                self.completer.as_mut().unwrap().update_query(query);
-            } else {
-                self.completer = None;
-            }
-        }
-    }
-
     /// Activate completer if the buffer looks like a command or file ref.
     fn sync_completer(&mut self) {
         if find_slash_anchor(&self.buf, self.cpos).is_some() {
@@ -526,19 +612,73 @@ impl InputState {
         }
     }
 
+    /// Recompute the completer based on where the cursor currently sits.
+    /// Shows the file or command picker if the cursor is inside an @/slash zone,
+    /// hides it otherwise. Never touches a history completer.
+    fn recompute_completer(&mut self) {
+        if self.completer.as_ref().is_some_and(|c| c.kind == CompleterKind::History) {
+            return;
+        }
+        if let Some(at_pos) = cursor_in_at_zone(&self.buf, self.cpos) {
+            let query = if self.cpos > at_pos + 1 {
+                self.buf[at_pos + 1..self.cpos].to_string()
+            } else {
+                String::new()
+            };
+            if self.completer.as_ref().is_some_and(|c| c.kind == CompleterKind::File && c.anchor == at_pos) {
+                self.completer.as_mut().unwrap().update_query(query);
+            } else {
+                let mut comp = Completer::files(at_pos);
+                comp.update_query(query);
+                self.completer = Some(comp);
+            }
+        } else if find_slash_anchor(&self.buf, self.cpos).is_some()
+            || (self.cpos == 0 && self.buf.starts_with('/'))
+        {
+            let query = self.buf[1..self.cpos].to_string();
+            if self.completer.as_ref().is_some_and(|c| c.kind == CompleterKind::Command) {
+                self.completer.as_mut().unwrap().update_query(query);
+            } else {
+                let mut comp = Completer::commands(0);
+                comp.update_query(query);
+                self.completer = Some(comp);
+            }
+        } else {
+            self.completer = None;
+        }
+    }
+
+    /// Move cursor to the beginning of the given line number (0-indexed).
+    fn move_to_line(&mut self, target_line: usize) {
+        let mut line = 0;
+        let mut pos = 0;
+        for (i, c) in self.buf.char_indices() {
+            if line == target_line {
+                pos = i;
+                break;
+            }
+            if c == '\n' {
+                line += 1;
+                if line == target_line {
+                    pos = i + 1;
+                    break;
+                }
+            }
+        }
+        if line < target_line {
+            // target beyond end, go to last line start
+            pos = self.buf.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        }
+        self.cpos = pos;
+        self.recompute_completer();
+    }
+
     // ── Editing primitives ───────────────────────────────────────────────
 
     fn insert_char(&mut self, c: char) {
         self.buf.insert(self.cpos, c);
         self.cpos += c.len_utf8();
-        let anchor = self.cpos - c.len_utf8();
-        if c == '@' {
-            self.completer = Some(Completer::files(anchor));
-        } else if c == '/' && anchor == 0 {
-            self.completer = Some(Completer::commands(anchor));
-        } else {
-            self.update_completer();
-        }
+        self.recompute_completer();
     }
 
     fn backspace(&mut self) {
@@ -553,7 +693,7 @@ impl InputState {
         self.maybe_remove_paste(prev);
         self.buf.drain(prev..self.cpos);
         self.cpos = prev;
-        self.update_completer();
+        self.recompute_completer();
     }
 
     fn insert_paste(&mut self, data: String) {
@@ -629,11 +769,28 @@ pub fn read_input(
             }
         };
 
-        // Ctrl+C / Ctrl+D: if empty or double-tap, quit; otherwise clear input.
+        // Ctrl+R: open history fuzzy search (or cycle if already open)
         if matches!(
             ev,
             Event::Key(KeyEvent {
-                code: KeyCode::Char('c' | 'd'),
+                code: KeyCode::Char('r'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            })
+        ) && state.history_search_query().is_none()
+        {
+            state.open_history_search(history);
+            let _ = out.execute(cursor::Hide);
+            screen.draw_prompt(state, *mode, width);
+            let _ = out.execute(cursor::Show);
+            continue;
+        }
+
+        // Ctrl+C: if empty or double-tap, quit; otherwise clear input.
+        if matches!(
+            ev,
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
             })
@@ -653,6 +810,7 @@ pub fn read_input(
             state.buf.clear();
             state.cpos = 0;
             state.pastes.clear();
+            state.completer = None;
             let _ = out.execute(cursor::Hide);
             screen.draw_prompt(state, *mode, width);
             let _ = out.execute(cursor::Show);
@@ -770,17 +928,28 @@ fn expand_pastes(buf: &str, pastes: &[String]) -> String {
     result
 }
 
-fn find_at_anchor(buf: &str, cpos: usize) -> Option<usize> {
-    let before = &buf[..cpos];
-    let at_pos = before.rfind('@')?;
-    if buf[at_pos + 1..cpos].contains(char::is_whitespace) {
+fn current_line(buf: &str, cpos: usize) -> usize {
+    buf[..cpos].chars().filter(|&c| c == '\n').count()
+}
+
+/// Like find_at_anchor but also matches when the cursor is ON the '@' itself.
+fn cursor_in_at_zone(buf: &str, cpos: usize) -> Option<usize> {
+    // Include the char at cpos so the cursor-on-@ case works.
+    let search_end = (cpos + 1).min(buf.len());
+    // Make sure we land on a char boundary.
+    let search_end = buf.char_indices().map(|(i, _)| i).filter(|&i| i <= search_end).last().map(|i| i + 1).unwrap_or(search_end);
+    let at_pos = buf[..search_end].rfind('@')?;
+    // @ must be at start or preceded by whitespace.
+    if at_pos > 0 && !buf[..at_pos].ends_with(char::is_whitespace) {
         return None;
     }
-    if at_pos > 0 && !buf[..at_pos].ends_with(char::is_whitespace) {
+    // No whitespace between @ and cpos.
+    if at_pos < cpos && buf[at_pos + 1..cpos].contains(char::is_whitespace) {
         return None;
     }
     Some(at_pos)
 }
+
 
 fn find_slash_anchor(buf: &str, cpos: usize) -> Option<usize> {
     // Only valid when `/` is at position 0 and no whitespace in the query.

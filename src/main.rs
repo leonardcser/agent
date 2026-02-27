@@ -6,6 +6,7 @@ mod log;
 mod permissions;
 mod provider;
 pub mod render;
+mod session;
 mod state;
 mod theme;
 mod tools;
@@ -21,7 +22,7 @@ use crossterm::{
 };
 use input::{Action, EscAction, InputState, History, Mode, read_input, resolve_agent_esc};
 use provider::{Message, Provider, Role};
-use render::{tool_arg_summary, Block, ConfirmChoice, Screen, ToolOutput, ToolStatus};
+use render::{tool_arg_summary, Block, ConfirmChoice, Screen, ToolOutput, ToolStatus, ResumeEntry};
 use std::collections::HashSet;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
@@ -39,6 +40,8 @@ struct Args {
     api_key_env: Option<String>,
     #[arg(long)]
     model: Option<String>,
+    #[arg(long, default_value = "info", value_name = "LEVEL")]
+    log_level: String,
 }
 
 struct App {
@@ -54,6 +57,7 @@ struct App {
     input: InputState,
     queued_messages: Vec<String>,
     auto_approved: HashSet<String>,
+    session: session::Session,
 }
 
 impl App {
@@ -78,6 +82,7 @@ impl App {
             input,
             queued_messages: Vec::new(),
             auto_approved: HashSet::new(),
+            session: session::Session::new(),
         }
     }
 
@@ -91,9 +96,10 @@ impl App {
         match input {
             "/exit" | "/quit" => return false,
             "/clear" | "/new" => {
-                self.history.clear();
-                self.auto_approved.clear();
-                self.screen.clear();
+                self.reset_session();
+            }
+            "/resume" => {
+                self.resume_session();
             }
             "/vim" => {
                 let enabled = !self.input.vim_enabled();
@@ -103,6 +109,136 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    fn reset_session(&mut self) {
+        self.history.clear();
+        self.auto_approved.clear();
+        self.queued_messages.clear();
+        self.screen.clear();
+        self.input.clear();
+        self.session = session::Session::new();
+    }
+
+    fn resume_session(&mut self) {
+        let sessions = session::list_sessions();
+        if sessions.is_empty() {
+            self.screen.push(Block::Error { message: "no saved sessions".into() });
+            self.screen.flush_blocks();
+            return;
+        }
+
+        let entries: Vec<ResumeEntry> = sessions
+            .into_iter()
+            .map(|s| ResumeEntry {
+                id: s.id,
+                title: s.title.unwrap_or_default(),
+                subtitle: s.first_user_message,
+                updated_at_ms: s.updated_at_ms,
+                created_at_ms: s.created_at_ms,
+            })
+            .collect();
+
+        if let Some(id) = render::show_resume(&entries) {
+            if let Some(loaded) = session::load(&id) {
+                self.session = loaded;
+                self.history = self.session.messages.clone();
+                self.auto_approved.clear();
+                self.queued_messages.clear();
+                self.input.clear();
+                self.rebuild_screen_from_history();
+                self.screen.flush_blocks();
+            }
+        }
+    }
+
+    fn rebuild_screen_from_history(&mut self) {
+        self.screen.clear();
+        if self.history.is_empty() {
+            return;
+        }
+
+        let mut tool_outputs: HashMap<String, ToolOutput> = HashMap::new();
+        for msg in &self.history {
+            if matches!(msg.role, Role::Tool) {
+                if let Some(ref id) = msg.tool_call_id {
+                    let content = msg.content.clone().unwrap_or_default();
+                    tool_outputs.insert(id.clone(), ToolOutput { content, is_error: false });
+                }
+            }
+        }
+
+        for msg in &self.history {
+            match msg.role {
+                Role::User => {
+                    if let Some(ref content) = msg.content {
+                        self.screen.push(Block::User { text: content.clone() });
+                    }
+                }
+                Role::Assistant => {
+                    if let Some(ref content) = msg.content {
+                        if !content.is_empty() {
+                            self.screen.push(Block::Text { content: content.clone() });
+                        }
+                    }
+                    if let Some(ref calls) = msg.tool_calls {
+                        for tc in calls {
+                            let args: HashMap<String, serde_json::Value> =
+                                serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                            let summary = tool_arg_summary(&tc.function.name, &args);
+                            let output = tool_outputs.get(&tc.id).cloned();
+                            let status = if output.is_some() { ToolStatus::Ok } else { ToolStatus::Pending };
+                            self.screen.push(Block::ToolCall {
+                                name: tc.function.name.clone(),
+                                summary,
+                                args,
+                                status,
+                                elapsed: None,
+                                output,
+                            });
+                        }
+                    }
+                }
+                Role::Tool | Role::System => {}
+            }
+        }
+    }
+
+    fn save_session(&mut self) {
+        self.session.messages = self.history.clone();
+        self.session.updated_at_ms = session::now_ms();
+        session::save(&self.session);
+    }
+
+    async fn maybe_generate_title(&mut self) {
+        let has_title = self.session.title.as_ref().is_some_and(|t| !t.trim().is_empty());
+        if has_title {
+            return;
+        }
+        let Some(first) = self.session.first_user_message.clone() else {
+            return;
+        };
+        let provider = Provider::new(&self.api_base, &self.api_key);
+        match provider.complete_title(&first, &self.model).await {
+            Ok(title) => {
+                if !title.is_empty() {
+                    self.session.title = Some(title);
+                    self.save_session();
+                }
+            }
+            Err(_) => {
+                if self.session.title.is_none() {
+                    let fallback = first.lines().next().unwrap_or("Untitled");
+                    let mut trimmed = fallback.to_string();
+                    if trimmed.len() > 48 {
+                        trimmed.truncate(48);
+                        trimmed = trimmed.trim().to_string();
+                    }
+                    self.session.title = Some(trimmed);
+                    self.save_session();
+                }
+            }
+        }
     }
 
     /// Rewind conversation to the turn starting at `block_idx`.
@@ -178,7 +314,9 @@ impl App {
     fn handle_agent_event(&mut self, ev: AgentEvent, pending: &mut Option<PendingTool>) -> SessionControl {
         match ev {
             AgentEvent::TokenUsage { prompt_tokens } => {
-                self.screen.set_context_tokens(prompt_tokens);
+                if prompt_tokens > 0 {
+                    self.screen.set_context_tokens(prompt_tokens);
+                }
                 self.screen.set_throbber(render::Throbber::Working);
                 SessionControl::Continue
             }
@@ -433,8 +571,18 @@ impl App {
         self.screen.flush_blocks();
         if cancelled {
             self.screen.set_throbber(render::Throbber::Interrupted);
-            self.input.clear();
-            self.queued_messages.clear();
+            // Restore any queued messages back to the input prompt so the user can
+            // edit and resend them. If nothing was queued, leave the input as-is.
+            if !self.queued_messages.is_empty() {
+                let mut combined = self.queued_messages.join("\n");
+                if !self.input.buf.is_empty() {
+                    combined.push('\n');
+                    combined.push_str(&self.input.buf);
+                }
+                self.input.buf = combined;
+                self.input.cpos = self.input.buf.len();
+                self.queued_messages.clear();
+            }
             cancel_token.cancel();
             agent_handle.abort();
         } else {
@@ -485,6 +633,12 @@ async fn main() {
     let model = args.model
         .or(cfg.model)
         .expect("model must be set via --model or config file");
+
+    if let Some(level) = log::parse_level(&args.log_level) {
+        log::set_level(level);
+    } else {
+        eprintln!("warning: invalid --log-level {}, defaulting to info", args.log_level);
+    }
 
     let vim_enabled = cfg.vim_mode.unwrap_or(false);
     let mut app = App::new(api_base, api_key, model, vim_enabled);
@@ -551,8 +705,13 @@ async fn main() {
 
         app.screen.begin_turn();
         app.show_user_message(&input);
+        if app.session.first_user_message.is_none() {
+            app.session.first_user_message = Some(input.clone());
+        }
         app.push_user_message(input);
         app.run_session().await;
+        app.save_session();
+        app.maybe_generate_title().await;
     }
 }
 

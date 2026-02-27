@@ -116,7 +116,7 @@ impl Provider {
             body.insert("tools", serde_json::to_value(tools).unwrap());
         }
 
-        log::entry("request", &serde_json::json!({
+        log::entry(log::Level::Debug, "request", &serde_json::json!({
             "model": model,
             "messages": messages,
             "tool_count": tools.len(),
@@ -185,7 +185,7 @@ impl Provider {
 
             let prompt_tokens = data["usage"]["prompt_tokens"].as_u64().map(|n| n as u32);
 
-            log::entry("response", &serde_json::json!({
+            log::entry(log::Level::Debug, "response", &serde_json::json!({
                 "content": content,
                 "tool_calls": tool_calls,
                 "prompt_tokens": prompt_tokens,
@@ -200,4 +200,67 @@ impl Provider {
 
         Err("max retries exceeded".into())
     }
+
+    pub async fn complete_title(&self, first_user_message: &str, model: &str) -> Result<String, String> {
+        let prompt = format!(
+            "Generate a short session title (3-6 words) for: \"{}\"",
+            first_user_message.replace('\n', " ")
+        );
+
+        let body = serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "max_tokens": 16,
+            "temperature": 0.2,
+            "n": 1,
+            "stop": ["\n"],
+        });
+
+        log::entry(log::Level::Debug, "title_request", &serde_json::json!({
+            "model": model,
+            "prompt_len": first_user_message.len(),
+        }));
+
+        let url = format!("{}/completions", self.api_base);
+        let mut req = self.client.post(&url).json(&body);
+        if !self.api_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+        }
+
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("API error {}: {}", status, text));
+        }
+
+        let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let text = data["choices"]
+            .get(0)
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let title = normalize_title(&text);
+        log::entry(log::Level::Debug, "title_response", &serde_json::json!({
+            "title": title,
+        }));
+
+        if title.is_empty() {
+            Err("empty title".into())
+        } else {
+            Ok(title)
+        }
+    }
+}
+
+fn normalize_title(raw: &str) -> String {
+    let mut t = raw.trim().trim_matches('"').trim_matches('\'').to_string();
+    t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    if t.len() > 64 {
+        t.truncate(64);
+        t = t.trim().to_string();
+    }
+    t
 }
