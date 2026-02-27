@@ -459,6 +459,9 @@ impl App {
             AgentEvent::Confirm { desc, args, reply } => {
                 SessionControl::NeedsConfirm { desc, args, reply }
             }
+            AgentEvent::AskQuestion { args, reply } => {
+                SessionControl::NeedsAskQuestion { args, reply }
+            }
             AgentEvent::Retrying { delay, attempt } => {
                 self.screen
                     .set_throbber(render::Throbber::Retrying { delay, attempt });
@@ -499,6 +502,11 @@ impl App {
             ConfirmChoice::Always => {
                 self.auto_approved.insert(tool_name.to_string());
                 let _ = reply.send(true);
+                ConfirmAction::Approved
+            }
+            ConfirmChoice::YesWithMessage(msg) => {
+                let _ = reply.send(true);
+                self.queued_messages.push(msg);
                 ConfirmAction::Approved
             }
             ConfirmChoice::No => {
@@ -654,6 +662,26 @@ impl App {
                                 }
                             }
                         }
+                        SessionControl::NeedsAskQuestion { args, reply } => {
+                            self.render_screen();
+                            self.screen.erase_prompt();
+                            let questions = render::parse_questions(&args);
+                            match render::show_ask_question(&questions) {
+                                Some(answer) => {
+                                    let _ = reply.send(answer);
+                                }
+                                None => {
+                                    let _ = reply.send("User cancelled the question.".into());
+                                    self.screen.finish_tool(ToolStatus::Denied, None, None);
+                                    pending = None;
+                                    cancelled = true;
+                                    agent_done = true;
+                                }
+                            }
+                            self.screen.redraw_all();
+                            self.render_screen();
+                            if agent_done { break; }
+                        }
                         SessionControl::Done => { agent_done = true; break; }
                     },
                     Err(mpsc::error::TryRecvError::Empty) => break,
@@ -726,6 +754,7 @@ impl App {
 enum SessionControl {
     Continue,
     NeedsConfirm { desc: String, args: HashMap<String, serde_json::Value>, reply: tokio::sync::oneshot::Sender<bool> },
+    NeedsAskQuestion { args: HashMap<String, serde_json::Value>, reply: tokio::sync::oneshot::Sender<String> },
     Done,
 }
 

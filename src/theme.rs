@@ -9,4 +9,5 @@ pub const USER_BG: Color = Color::AnsiValue(236);
 pub const BAR: Color = Color::AnsiValue(237);
 pub const HEADING: Color = Color::AnsiValue(214); // orange for markdown headings
 pub const MUTED: Color = Color::AnsiValue(244); // light gray for token count and other muted elements
+pub const PLAN: Color = Color::AnsiValue(29); // dark forest green for plan mode
 pub const EXEC: Color = Color::AnsiValue(197); // red-pink for exec mode

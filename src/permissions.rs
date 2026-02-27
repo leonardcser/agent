@@ -53,6 +53,7 @@ struct ModePerms {
 #[derive(Debug, Clone)]
 pub struct Permissions {
     normal: ModePerms,
+    plan: ModePerms,
     apply: ModePerms,
 }
 
@@ -97,7 +98,14 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
     
     // grep: always allow by default in both modes
     tools.entry("grep".to_string()).or_insert(Decision::Allow);
-    
+
+    // ask_user_question: always allow
+    tools.entry("ask_user_question".to_string()).or_insert(Decision::Allow);
+
+    // exit_plan_mode: only in plan mode
+    let default_exit_plan = if mode == Mode::Plan { Decision::Allow } else { Decision::Deny };
+    tools.entry("exit_plan_mode".to_string()).or_insert(default_exit_plan);
+
     ModePerms {
         tools,
         bash: RuleSet {
@@ -115,6 +123,7 @@ impl Permissions {
         let raw: RawConfig = serde_yml::from_str(&contents).unwrap_or_default();
         Self {
             normal: build_mode(&raw.permissions.normal, Mode::Normal),
+            plan: build_mode(&raw.permissions.normal, Mode::Plan),
             apply: build_mode(&raw.permissions.apply, Mode::Apply),
         }
     }
@@ -122,6 +131,7 @@ impl Permissions {
     pub fn check_tool(&self, mode: Mode, tool_name: &str) -> Decision {
         let perms = match mode {
             Mode::Normal => &self.normal,
+            Mode::Plan => &self.plan,
             Mode::Apply => &self.apply,
         };
         perms.tools.get(tool_name).cloned().unwrap_or(Decision::Ask)
@@ -130,6 +140,7 @@ impl Permissions {
     pub fn check_bash(&self, mode: Mode, command: &str) -> Decision {
         let perms = match mode {
             Mode::Normal => &self.normal,
+            Mode::Plan => &self.plan,
             Mode::Apply => &self.apply,
         };
         // Deny wins

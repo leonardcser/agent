@@ -112,13 +112,15 @@ impl History {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
     Normal,
+    Plan,
     Apply,
 }
 
 impl Mode {
     pub fn toggle(self) -> Self {
         match self {
-            Mode::Normal => Mode::Apply,
+            Mode::Normal => Mode::Plan,
+            Mode::Plan => Mode::Apply,
             Mode::Apply => Mode::Normal,
         }
     }
@@ -126,6 +128,7 @@ impl Mode {
     pub fn as_str(self) -> &'static str {
         match self {
             Mode::Normal => "normal",
+            Mode::Plan => "plan",
             Mode::Apply => "apply",
         }
     }

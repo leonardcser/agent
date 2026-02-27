@@ -36,6 +36,7 @@ impl State {
 
     pub fn mode(&self) -> Mode {
         match self.mode.as_str() {
+            "plan" => Mode::Plan,
             "apply" => Mode::Apply,
             _ => Mode::Normal,
         }

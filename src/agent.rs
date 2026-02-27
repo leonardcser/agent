@@ -17,6 +17,7 @@ pub enum AgentEvent {
     ToolOutputChunk(String),
     ToolResult { content: String, is_error: bool },
     Confirm { desc: String, args: HashMap<String, Value>, reply: tokio::sync::oneshot::Sender<bool> },
+    AskQuestion { args: HashMap<String, Value>, reply: tokio::sync::oneshot::Sender<String> },
     TokenUsage { prompt_tokens: u32 },
     Retrying { delay: std::time::Duration, attempt: u32 },
     Done,
@@ -30,7 +31,8 @@ fn system_prompt(mode: Mode) -> String {
 
     let template = match mode {
         Mode::Apply => include_str!("prompts/system_apply.txt"),
-        _ => include_str!("prompts/system.txt"),
+        Mode::Plan => include_str!("prompts/system_plan.txt"),
+        Mode::Normal => include_str!("prompts/system.txt"),
     };
 
     template.replace("{cwd}", &cwd)
@@ -208,7 +210,15 @@ pub async fn run_agent(
                 Decision::Allow => {}
             }
 
-            let ToolResult { content, is_error } = if tc.function.name == "bash" {
+            let ToolResult { content, is_error } = if tc.function.name == "ask_user_question" {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                let _ = tx.send(AgentEvent::AskQuestion {
+                    args: args.clone(),
+                    reply: reply_tx,
+                });
+                let answer = reply_rx.await.unwrap_or_else(|_| "no response".into());
+                ToolResult { content: answer, is_error: false }
+            } else if tc.function.name == "bash" {
                 execute_bash_streaming(&args, tx).await
             } else {
                 tool.execute(&args)
