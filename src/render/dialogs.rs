@@ -128,7 +128,6 @@ pub fn show_confirm(
     let mut message = String::new();
     let mut editing = false;
 
-    let saved_pos = cursor::position().unwrap_or((0, 0));
     let _ = out.queue(cursor::Hide);
     let _ = out.flush();
 
@@ -277,7 +276,6 @@ pub fn show_confirm(
 
     let _ = out.queue(cursor::MoveTo(0, bar_row));
     let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-    let _ = out.queue(cursor::MoveTo(saved_pos.0, saved_pos.1));
     let _ = out.flush();
 
     choice
@@ -300,7 +298,6 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
     let mut scroll_offset: usize = turns.len().saturating_sub(max_visible);
 
     let _ = out.flush();
-    let saved_pos = cursor::position().unwrap_or((0, 0));
     let _ = out.queue(cursor::Hide);
     let _ = out.flush();
 
@@ -405,7 +402,6 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
 
     let _ = out.queue(cursor::MoveTo(0, bar_row));
     let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-    let _ = out.queue(cursor::MoveTo(saved_pos.0, saved_pos.1));
     let _ = out.queue(cursor::Show);
     let _ = out.flush();
 
@@ -431,7 +427,6 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
     let mut scroll_offset: usize = 0;
 
     let _ = out.flush();
-    let saved_pos = cursor::position().unwrap_or((0, 0));
     let _ = out.queue(cursor::Hide);
     let _ = out.flush();
 
@@ -571,7 +566,6 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
 
     let _ = out.queue(cursor::MoveTo(0, bar_row));
     let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-    let _ = out.queue(cursor::MoveTo(saved_pos.0, saved_pos.1));
     let _ = out.queue(cursor::Show);
     let _ = out.queue(DisableBracketedPaste);
     let _ = out.flush();
@@ -606,7 +600,6 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
     let fixed_rows = 1 + (has_tabs as usize) + 3 + max_options + 1 + 1;
     let bar_row = height.saturating_sub(fixed_rows as u16);
 
-    let saved_pos = cursor::position().unwrap_or((0, 0));
     let _ = out.queue(cursor::Hide);
     let _ = out.flush();
 
@@ -1042,7 +1035,6 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
 
     let _ = out.queue(cursor::MoveTo(0, bar_row));
     let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-    let _ = out.queue(cursor::MoveTo(saved_pos.0, saved_pos.1));
     let _ = out.queue(cursor::Show);
     let _ = out.flush();
 
