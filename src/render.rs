@@ -101,6 +101,7 @@ pub enum Throbber {
     /// Agent is running. Stores the start instant for elapsed time.
     Working,
     Retrying { delay: Duration, attempt: u32 },
+    Compacting,
     Done,
     Interrupted,
 }
@@ -224,8 +225,12 @@ impl Screen {
         self.prompt_dirty = true;
     }
 
+    pub fn context_tokens(&self) -> Option<u32> {
+        self.context_tokens
+    }
+
     pub fn set_throbber(&mut self, state: Throbber) {
-        let is_active = matches!(state, Throbber::Working | Throbber::Retrying { .. });
+        let is_active = matches!(state, Throbber::Working | Throbber::Retrying { .. } | Throbber::Compacting);
         if is_active && self.working_since.is_none() {
             self.working_since = Some(Instant::now());
             self.final_elapsed = None;
@@ -535,7 +540,7 @@ impl Screen {
         let is_exec = state.buf.starts_with('!');
         let total_content_rows = visual_lines.len();
         let comp_total = if state.settings.is_some() {
-            1
+            2
         } else {
             state.completer.as_ref().map(|c| c.results.len().min(5)).unwrap_or(0)
         };
@@ -656,6 +661,23 @@ impl Screen {
             return vec![];
         };
         match state {
+            Throbber::Compacting => {
+                let Some(start) = self.working_since else { return vec![]; };
+                let elapsed = start.elapsed();
+                let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
+                return vec![
+                    BarSpan {
+                        text: format!("{} compacting", SPINNER_FRAMES[idx]),
+                        color: Color::Reset,
+                        attr: Some(Attribute::Bold),
+                    },
+                    BarSpan {
+                        text: format!(" {}s", elapsed.as_secs()),
+                        color: theme::MUTED,
+                        attr: Some(Attribute::Dim),
+                    },
+                ];
+            }
             Throbber::Working | Throbber::Retrying { .. } => {
                 let Some(start) = self.working_since else {
                     return vec![];
@@ -667,50 +689,42 @@ impl Screen {
                 } else {
                     Color::Reset
                 };
-                let mut spans = vec![BarSpan {
-                    text: format!("{} working", SPINNER_FRAMES[idx]),
-                    color: spinner_color,
-                    attr: Some(Attribute::Bold),
-                }];
-                let time_text = if let Throbber::Retrying { delay, attempt } = state {
+                let mut spans = vec![
+                    BarSpan {
+                        text: format!("{} working", SPINNER_FRAMES[idx]),
+                        color: spinner_color,
+                        attr: Some(Attribute::Bold),
+                    },
+                    BarSpan {
+                        text: format!(" {}s", elapsed.as_secs()),
+                        color: theme::MUTED,
+                        attr: Some(Attribute::Dim),
+                    },
+                ];
+                if let Throbber::Retrying { delay, attempt } = state {
                     let remaining = self
                         .retry_deadline
                         .map(|t| t.saturating_duration_since(Instant::now()))
                         .unwrap_or(delay);
-                    format!(
-                        "({}s, retrying in {}s #{})",
-                        elapsed.as_secs(),
-                        remaining.as_secs(),
-                        attempt
-                    )
-                } else {
-                    format!("({})", format_elapsed(elapsed))
-                };
-                spans.push(BarSpan {
-                    text: format!(" {}", time_text),
-                    color: theme::MUTED,
-                    attr: Some(Attribute::Dim),
-                });
+                    spans.push(BarSpan {
+                        text: format!(" (retrying in {}s #{})", remaining.as_secs(), attempt),
+                        color: theme::MUTED,
+                        attr: Some(Attribute::Dim),
+                    });
+                }
                 spans
             }
             Throbber::Done => {
-                let time = self
-                    .final_elapsed
-                    .map(|d| format!(" ({})", format_elapsed(d)))
-                    .unwrap_or_default();
+                let secs = self.final_elapsed.map(|d| d.as_secs()).unwrap_or(0);
                 vec![BarSpan {
-                    text: format!("done{}", time),
+                    text: format!("done {}s", secs),
                     color: theme::MUTED,
                     attr: Some(Attribute::Dim),
                 }]
             }
             Throbber::Interrupted => {
-                let time = self
-                    .final_elapsed
-                    .map(|d| format!(" ({})", format_elapsed(d)))
-                    .unwrap_or_default();
                 vec![BarSpan {
-                    text: format!("interrupted{}", time),
+                    text: "interrupted".into(),
                     color: theme::MUTED,
                     attr: Some(Attribute::Dim),
                 }]
@@ -757,14 +771,6 @@ fn format_tokens(n: u32) -> String {
     }
 }
 
-fn format_elapsed(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs >= 60 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else {
-        format!("{}s", secs)
-    }
-}
 
 pub fn term_width() -> usize {
     terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
@@ -787,7 +793,7 @@ fn render_block(block: &Block, _width: usize) -> u16 {
     match block {
         Block::User { text } => {
             let mut out = io::stdout();
-            // Collapse multi-line text: left-trim, then join lines with a space.
+            // Collapse multi-line input into a single string, then wrap to terminal width.
             let single: String = text
                 .trim_start()
                 .lines()
@@ -796,23 +802,30 @@ fn render_block(block: &Block, _width: usize) -> u16 {
                 .collect::<Vec<_>>()
                 .join(" ");
             let w = term_width();
-            let char_len = single.chars().count();
-            let pad_width = (char_len + 2).min(w);
-            let display: String = if char_len + 1 > pad_width {
-                single.chars().take(pad_width.saturating_sub(1)).collect()
-            } else {
-                single.clone()
-            };
-            let display_len = display.chars().count();
-            let trailing = pad_width.saturating_sub(display_len + 1);
-            let _ = out
-                .queue(SetBackgroundColor(theme::USER_BG))
-                .and_then(|o| o.queue(SetAttribute(Attribute::Bold)))
-                .and_then(|o| o.queue(Print(format!(" {}{}", display, " ".repeat(trailing)))))
-                .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
-                .and_then(|o| o.queue(ResetColor));
-            let _ = out.queue(Print("\r\n"));
-            1
+            // Each rendered line has 1 leading space; content width is w-1.
+            let content_w = w.saturating_sub(1).max(1);
+            let chars: Vec<char> = single.chars().collect();
+            let single_line = chars.len() <= content_w;
+            let mut rows = 0u16;
+            let mut start = 0;
+            loop {
+                let chunk: String = chars[start..(start + content_w).min(chars.len())].iter().collect();
+                let chunk_len = chunk.chars().count();
+                // On a single-line message pad only to message length + 1 trailing space;
+                // on wrapped lines fill the full width so the background is continuous.
+                let trailing = if single_line { 1 } else { content_w.saturating_sub(chunk_len) };
+                let _ = out
+                    .queue(SetBackgroundColor(theme::USER_BG))
+                    .and_then(|o| o.queue(SetAttribute(Attribute::Bold)))
+                    .and_then(|o| o.queue(Print(format!(" {}{}", chunk, " ".repeat(trailing)))))
+                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
+                    .and_then(|o| o.queue(ResetColor));
+                let _ = out.queue(Print("\r\n"));
+                rows += 1;
+                start += content_w;
+                if start >= chars.len() { break; }
+            }
+            rows
         }
         Block::Text { content } => {
             let mut out = io::stdout();
@@ -1327,28 +1340,30 @@ fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, max_rows: u
 
     let ctx = 3usize;
 
-    // Walk changes to find the file line numbers of the first and last modification.
+    // Walk changes to find the new-file line numbers of the first and last modification.
+    // Track new_line separately so insertions (which advance new_line but not old_line)
+    // are reflected in last_mod, keeping it consistent with new_lineno in the render loop.
     let mut first_mod: Option<usize> = None;
     let mut last_mod: Option<usize> = None;
     {
-        let mut line = start_line;
+        let mut new_line = start_line;
         for change in &changes {
             match change.tag() {
                 ChangeTag::Equal => {
-                    line += 1;
+                    new_line += 1;
                 }
                 ChangeTag::Delete => {
                     if first_mod.is_none() {
-                        first_mod = Some(line);
+                        first_mod = Some(new_line);
                     }
-                    last_mod = Some(line);
-                    line += 1;
+                    last_mod = Some(new_line);
                 }
                 ChangeTag::Insert => {
                     if first_mod.is_none() {
-                        first_mod = Some(line);
+                        first_mod = Some(new_line);
                     }
-                    last_mod = Some(line);
+                    last_mod = Some(new_line);
+                    new_line += 1;
                 }
             }
         }
@@ -1517,24 +1532,24 @@ fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &str) -> u16
     let mut first_mod: Option<usize> = None;
     let mut last_mod: Option<usize> = None;
     {
-        let mut line = start_line;
+        let mut new_line = start_line;
         for change in &changes {
             match change.tag() {
                 ChangeTag::Equal => {
-                    line += 1;
+                    new_line += 1;
                 }
                 ChangeTag::Delete => {
                     if first_mod.is_none() {
-                        first_mod = Some(line);
+                        first_mod = Some(new_line);
                     }
-                    last_mod = Some(line);
-                    line += 1;
+                    last_mod = Some(new_line);
                 }
                 ChangeTag::Insert => {
                     if first_mod.is_none() {
-                        first_mod = Some(line);
+                        first_mod = Some(new_line);
                     }
-                    last_mod = Some(line);
+                    last_mod = Some(new_line);
+                    new_line += 1;
                 }
             }
         }
@@ -2215,15 +2230,37 @@ fn draw_settings(settings: Option<&SettingsMenu>, max_rows: usize) -> usize {
         return 0;
     }
     let mut out = io::stdout();
-    let _ = out.queue(Print("  "));
-    let _ = out.queue(SetForegroundColor(theme::ACCENT));
-    let _ = out.queue(Print("vim mode"));
-    let _ = out.queue(ResetColor);
-    let _ = out.queue(SetAttribute(Attribute::Dim));
-    let _ = out.queue(Print(if s.vim_enabled { "    on" } else { "    off" }));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
-    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-    1
+    let rows = [
+        ("vim mode", s.vim_enabled, 0usize),
+        ("auto compact", s.auto_compact, 1usize),
+    ];
+    let col = rows.iter().map(|(l, _, _)| l.len()).max().unwrap_or(0) + 4;
+    let mut drawn = 0;
+    for (label, value, idx) in &rows {
+        if drawn >= max_rows {
+            break;
+        }
+        if drawn > 0 {
+            let _ = out.queue(Print("\r\n"));
+        }
+        let _ = out.queue(Print("  "));
+        if *idx == s.selected {
+            let _ = out.queue(SetForegroundColor(theme::ACCENT));
+            let _ = out.queue(Print(label));
+            let _ = out.queue(ResetColor);
+        } else {
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print(label));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+        }
+        let padding = " ".repeat(col - label.len());
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(format!("{}{}", padding, if *value { "on" } else { "off" })));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+        drawn += 1;
+    }
+    drawn
 }
 
 pub fn erase_prompt_at(top_row: u16) {
@@ -2616,29 +2653,29 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
             row = row.saturating_add(1);
         } else {
             let end = (scroll_offset + max_visible).min(filtered.len());
+            // Width of the widest number prefix so all titles start at the same column.
+            let num_width = end.to_string().len();
             for i in scroll_offset..end {
                 let entry = &filtered[i];
                 let title = resume_title(entry);
                 let time_ago = session::time_ago(resume_ts(entry), now_ms);
                 let time_len = time_ago.chars().count() + 1;
-                let max_label = w.saturating_sub(time_len + 6);
+                let prefix_len = 2 + num_width + 2; // "  " + num + ". "
+                let max_label = w.saturating_sub(time_len + prefix_len);
                 let truncated = truncate_str(&title, max_label);
+                let num_str = format!("{:>width$}. ", i + 1, width = num_width);
 
                 let _ = out.queue(cursor::MoveTo(0, row));
                 let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
                 let _ = out.queue(Print("  "));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(&num_str));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
                 if i == selected {
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
-                    let _ = out.queue(Print(format!("{}.", i + 1)));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
-                    let _ = out.queue(Print(" "));
                     let _ = out.queue(SetForegroundColor(theme::ACCENT));
                     let _ = out.queue(Print(&truncated));
                     let _ = out.queue(ResetColor);
                 } else {
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
-                    let _ = out.queue(Print(format!("{}. ", i + 1)));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
                     let _ = out.queue(Print(&truncated));
                 }
 
@@ -2669,55 +2706,46 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
     let _ = out.flush();
 
     let result = loop {
-        if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = event::read() {
-            match (code, modifiers) {
-                (KeyCode::Enter, _) => {
-                    if let Some(entry) = filtered.get(selected) {
-                        break Some(entry.id.clone());
-                    }
-                }
-                (KeyCode::Esc, _) => break None,
-                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break None,
-                (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
-                    query.clear();
-                }
-                (KeyCode::Backspace, _) => {
-                    query.pop();
-                }
-                (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
-                    if selected > 0 {
-                        selected -= 1;
-                        if selected < scroll_offset {
-                            scroll_offset = selected;
+        let has_event = event::poll(Duration::from_millis(500)).unwrap_or(false);
+        if has_event {
+            if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = event::read() {
+                match (code, modifiers) {
+                    (KeyCode::Enter, _) => {
+                        if let Some(entry) = filtered.get(selected) {
+                            break Some(entry.id.clone());
                         }
                     }
-                }
-                (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                    if selected + 1 < filtered.len() {
-                        selected += 1;
-                        if selected >= scroll_offset + max_visible {
-                            scroll_offset = selected + 1 - max_visible;
+                    (KeyCode::Esc, _) => break None,
+                    (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break None,
+                    (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
+                        query.clear();
+                    }
+                    (KeyCode::Backspace, _) => {
+                        query.pop();
+                    }
+                    (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                        if selected > 0 {
+                            selected -= 1;
+                            if selected < scroll_offset {
+                                scroll_offset = selected;
+                            }
                         }
                     }
+                    (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                        if selected + 1 < filtered.len() {
+                            selected += 1;
+                            if selected >= scroll_offset + max_visible {
+                                scroll_offset = selected + 1 - max_visible;
+                            }
+                        }
+                    }
+                    (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                        query.push(c);
+                    }
+                    _ => {}
                 }
-                (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                    query.push(c);
-                }
-                _ => {}
-            }
 
-            let next_filtered = filter_resume_entries(entries, &query);
-            if next_filtered.len() != filtered.len() || query.is_empty() {
-                filtered = next_filtered;
-                if filtered.is_empty() {
-                    selected = 0;
-                    scroll_offset = 0;
-                } else {
-                    selected = selected.min(filtered.len().saturating_sub(1));
-                    scroll_offset = scroll_offset.min(filtered.len().saturating_sub(max_visible));
-                }
-            } else {
-                filtered = next_filtered;
+                filtered = filter_resume_entries(entries, &query);
                 if filtered.is_empty() {
                     selected = 0;
                     scroll_offset = 0;
@@ -2726,8 +2754,8 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
                     scroll_offset = scroll_offset.min(filtered.len().saturating_sub(max_visible));
                 }
             }
-            draw(selected, scroll_offset, &query, &filtered);
         }
+        draw(selected, scroll_offset, &query, &filtered);
     };
 
     // Erase the overlay
@@ -2742,12 +2770,25 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
     result
 }
 
+fn is_junk_title(s: &str) -> bool {
+    let t = s.trim();
+    t.is_empty()
+        || t.eq_ignore_ascii_case("untitled")
+        || t.starts_with('/')
+        || t.starts_with('\x00')
+}
+
 fn resume_title(entry: &ResumeEntry) -> String {
-    if !entry.title.trim().is_empty() {
-        entry.title.clone()
-    } else {
-        entry.subtitle.clone().unwrap_or_else(|| "Untitled".into())
+    if !is_junk_title(&entry.title) {
+        return entry.title.clone();
     }
+    // Fall back to first user message, skipping junk there too.
+    if let Some(ref sub) = entry.subtitle {
+        if !is_junk_title(sub) {
+            return sub.clone();
+        }
+    }
+    "Untitled".into()
 }
 
 fn resume_ts(entry: &ResumeEntry) -> u64 {

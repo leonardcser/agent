@@ -54,10 +54,6 @@ fn dirs() -> PathBuf {
     config::state_dir().join("logs")
 }
 
-pub fn path() -> &'static PathBuf {
-    log_path()
-}
-
 pub fn entry(level: Level, event: &str, data: &impl Serialize) {
     if !level.enabled() {
         return;

@@ -135,6 +135,8 @@ impl Mode {
 
 pub struct SettingsMenu {
     pub vim_enabled: bool,
+    pub auto_compact: bool,
+    pub selected: usize, // 0 = vim mode, 1 = auto compact
 }
 
 // ── Shared input state ───────────────────────────────────────────────────────
@@ -227,9 +229,9 @@ impl InputState {
         self.history_saved_buf = None;
     }
 
-    pub fn open_settings(&mut self, vim_enabled: bool) {
+    pub fn open_settings(&mut self, vim_enabled: bool, auto_compact: bool) {
         self.completer = None;
-        self.settings = Some(SettingsMenu { vim_enabled });
+        self.settings = Some(SettingsMenu { vim_enabled, auto_compact, selected: 0 });
     }
 
     /// Returns the history search query if a history completer is active.
@@ -495,12 +497,32 @@ impl InputState {
         match ev {
             Event::Key(KeyEvent { code: KeyCode::Esc, .. })
             | Event::Key(KeyEvent { code: KeyCode::Char('q'), .. }) => {
-                let vim_enabled = self.settings.take().unwrap().vim_enabled;
-                Action::Submit(format!("\x00settings:vim={}", vim_enabled))
+                let s = self.settings.take().unwrap();
+                Action::Submit(format!(
+                    "\x00settings:{{\"vim\":{},\"auto_compact\":{}}}",
+                    s.vim_enabled, s.auto_compact
+                ))
             }
             Event::Key(KeyEvent { code: KeyCode::Enter, .. })
             | Event::Key(KeyEvent { code: KeyCode::Char(' '), .. }) => {
-                self.settings.as_mut().unwrap().vim_enabled ^= true;
+                let s = self.settings.as_mut().unwrap();
+                match s.selected {
+                    0 => s.vim_enabled ^= true,
+                    1 => s.auto_compact ^= true,
+                    _ => {}
+                }
+                Action::Redraw
+            }
+            Event::Key(KeyEvent { code: KeyCode::Up, .. })
+            | Event::Key(KeyEvent { code: KeyCode::Char('k'), .. }) => {
+                let s = self.settings.as_mut().unwrap();
+                if s.selected > 0 { s.selected -= 1; }
+                Action::Redraw
+            }
+            Event::Key(KeyEvent { code: KeyCode::Down, .. })
+            | Event::Key(KeyEvent { code: KeyCode::Char('j'), .. }) => {
+                let s = self.settings.as_mut().unwrap();
+                if s.selected < 1 { s.selected += 1; }
                 Action::Redraw
             }
             _ => Action::Noop,
@@ -756,6 +778,7 @@ pub fn read_input(
     mode: &mut Mode,
     history: &mut History,
     state: &mut InputState,
+    auto_compact: bool,
 ) -> Option<String> {
     let mut out = io::stdout();
     let mut width = render::term_width();
@@ -894,7 +917,7 @@ pub fn read_input(
             Action::Submit(text) if text.trim() == "/settings" => {
                 state.buf.clear();
                 state.cpos = 0;
-                state.open_settings(state.vim_enabled());
+                state.open_settings(state.vim_enabled(), auto_compact);
                 let _ = out.execute(cursor::Hide);
                 screen.draw_prompt(state, *mode, width);
                 let _ = out.execute(cursor::Show);

@@ -61,10 +61,12 @@ struct App {
     auto_approved: HashSet<String>,
     session: session::Session,
     shared_session: Arc<Mutex<Option<Session>>>,
+    context_window: Option<u32>,
+    auto_compact: bool,
 }
 
 impl App {
-    fn new(api_base: String, api_key: String, model: String, vim_from_config: bool, shared_session: Arc<Mutex<Option<Session>>>) -> Self {
+    fn new(api_base: String, api_key: String, model: String, vim_from_config: bool, auto_compact: bool, shared_session: Arc<Mutex<Option<Session>>>) -> Self {
         let app_state = state::State::load();
         let mode = app_state.mode();
         let vim_enabled = app_state.vim_enabled() || vim_from_config;
@@ -87,11 +89,13 @@ impl App {
             auto_approved: HashSet::new(),
             session: session::Session::new(),
             shared_session,
+            context_window: None,
+            auto_compact,
         }
     }
 
     fn read_input(&mut self) -> Option<String> {
-        let result = read_input(&mut self.screen, &mut self.mode, &mut self.input_history, &mut self.input);
+        let result = read_input(&mut self.screen, &mut self.mode, &mut self.input_history, &mut self.input, self.auto_compact);
         self.input.clear();
         result
     }
@@ -110,6 +114,7 @@ impl App {
                 self.input.set_vim_enabled(enabled);
                 self.app_state.set_vim_enabled(enabled);
             }
+            "/compact" => {} // handled in main loop after handle_command returns
             _ => {}
         }
         true
@@ -248,6 +253,90 @@ impl App {
                     self.save_session();
                 }
             }
+        }
+    }
+
+    async fn compact_history(&mut self) {
+        // Number of complete turns (user + assistant exchange) to retain verbatim.
+        const KEEP_TURNS: usize = 2;
+
+        // Find the cut point: the message index of the (N-from-last)th User message.
+        let cut = {
+            let mut turns_seen = 0;
+            let mut idx = self.history.len();
+            for (i, msg) in self.history.iter().enumerate().rev() {
+                if matches!(msg.role, Role::User) {
+                    turns_seen += 1;
+                    if turns_seen == KEEP_TURNS {
+                        idx = i;
+                        break;
+                    }
+                }
+            }
+            idx
+        };
+
+        if cut == 0 {
+            self.screen.push(Block::Error { message: "not enough history to compact".into() });
+            self.screen.flush_blocks();
+            return;
+        }
+
+        let to_summarize = self.history[..cut].to_vec();
+
+        let api_base = self.api_base.clone();
+        let api_key = self.api_key.clone();
+        let model = self.model.clone();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(async move {
+            let provider = Provider::new(&api_base, &api_key);
+            provider.compact(&to_summarize, &model, &cancel).await
+        });
+
+        terminal::enable_raw_mode().ok();
+        self.screen.set_throbber(render::Throbber::Compacting);
+        loop {
+            self.render_screen();
+            if task.is_finished() { break; }
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+        terminal::disable_raw_mode().ok();
+
+        let result = task.await.unwrap_or_else(|_| Err("task panicked".into()));
+
+        match result {
+            Ok(summary) => {
+                let summary_msg = Message {
+                    role: Role::System,
+                    content: Some(format!("Summary of prior conversation:\n\n{}", summary)),
+                    tool_calls: None,
+                    tool_call_id: None,
+                };
+                let tail = self.history[cut..].to_vec();
+                self.history = vec![summary_msg];
+                self.history.extend(tail);
+                self.save_session();
+                self.screen.clear();
+                self.screen.push(Block::Text { content: summary.clone() });
+                self.screen.flush_blocks();
+                self.screen.set_throbber(render::Throbber::Done);
+            }
+            Err(e) => {
+                self.screen.push(Block::Error { message: format!("compact failed: {}", e) });
+                self.screen.flush_blocks();
+            }
+        }
+    }
+
+    /// Check if auto-compact should trigger (prompt tokens > 80% of context window).
+    async fn maybe_auto_compact(&mut self) {
+        if !self.auto_compact {
+            return;
+        }
+        let Some(ctx) = self.context_window else { return };
+        let Some(tokens) = self.screen.context_tokens() else { return };
+        if tokens as u64 * 100 >= ctx as u64 * 80 {
+            self.compact_history().await;
         }
     }
 
@@ -626,6 +715,7 @@ impl App {
             if let Ok(new_messages) = agent_handle.await {
                 self.history = new_messages;
             }
+            self.render_screen();
         }
         let _ = io::stdout().execute(DisableBracketedPaste);
         terminal::disable_raw_mode().ok();
@@ -677,6 +767,7 @@ async fn main() {
     }
 
     let vim_enabled = cfg.vim_mode.unwrap_or(false);
+    let auto_compact = cfg.auto_compact.unwrap_or(false);
     let shared_session: Arc<Mutex<Option<Session>>> = Arc::new(Mutex::new(None));
 
     {
@@ -705,9 +796,14 @@ async fn main() {
         });
     }
 
-    let mut app = App::new(api_base, api_key, model, vim_enabled, shared_session);
+    let mut app = App::new(api_base, api_key, model, vim_enabled, auto_compact, shared_session);
 
-    eprintln!("log: {}", log::path().display());
+    // Fetch context window once at startup. Re-fetch here if model switching is ever added.
+    {
+        let provider = Provider::new(&app.api_base, &app.api_key);
+        app.context_window = provider.fetch_context_window(&app.model).await;
+    }
+
     println!();
     loop {
         let input = if !app.queued_messages.is_empty() {
@@ -729,11 +825,15 @@ async fn main() {
         let input = input.trim().to_string();
         if input.is_empty() { continue; }
 
-        // Handle settings close signal
-        if let Some(rest) = input.strip_prefix("\x00settings:vim=") {
-            let enabled = rest == "true";
-            app.input.set_vim_enabled(enabled);
-            app.app_state.set_vim_enabled(enabled);
+        // Handle settings close signal: \x00settings:{json}
+        if let Some(json) = input.strip_prefix("\x00settings:") {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
+                let vim_val = v["vim"].as_bool().unwrap_or(app.input.vim_enabled());
+                let ac_val = v["auto_compact"].as_bool().unwrap_or(app.auto_compact);
+                app.input.set_vim_enabled(vim_val);
+                app.app_state.set_vim_enabled(vim_val);
+                app.auto_compact = ac_val;
+            }
             continue;
         }
 
@@ -750,6 +850,10 @@ async fn main() {
 
         app.input_history.push(input.clone());
         if !app.handle_command(&input) { break; }
+        if input == "/compact" {
+            app.compact_history().await;
+            continue;
+        }
         if input.starts_with('/') { continue; }
 
         if let Some(cmd) = input.strip_prefix('!') {
@@ -784,7 +888,9 @@ async fn main() {
         app.save_session();
         app.run_session().await;
         app.save_session();
+        // Title first: uses original history before compaction may truncate it.
         app.maybe_generate_title().await;
+        app.maybe_auto_compact().await;
     }
     app.save_session();
 }

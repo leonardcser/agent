@@ -60,6 +60,7 @@ impl Completer {
             ("resume", "resume saved session"),
             ("vim", "toggle vim mode"),
             ("settings", "open settings menu"),
+            ("compact", "compact conversation history"),
             ("exit", "exit the app"),
             ("quit", "exit the app"),
         ]

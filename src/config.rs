@@ -31,6 +31,7 @@ pub struct Config {
     pub api_key_env: Option<String>,
     pub model: Option<String>,
     pub vim_mode: Option<bool>,
+    pub auto_compact: Option<bool>,
 }
 
 impl Config {

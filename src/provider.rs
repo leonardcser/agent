@@ -86,6 +86,7 @@ pub struct LLMResponse {
     pub prompt_tokens: Option<u32>,
 }
 
+
 pub struct Provider {
     api_base: String,
     api_key: String,
@@ -199,6 +200,80 @@ impl Provider {
         }
 
         Err("max retries exceeded".into())
+    }
+
+    /// Fetch the context window size for `model` from the /v1/models endpoint.
+    /// Parses --ctx-size from the model's args list.
+    pub async fn fetch_context_window(&self, model: &str) -> Option<u32> {
+        let url = format!("{}/models", self.api_base);
+        let mut req = self.client.get(&url);
+        if !self.api_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+        }
+        let resp = req.send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let data: serde_json::Value = resp.json().await.ok()?;
+        let models = data["data"].as_array()?;
+        let entry = models.iter().find(|m| m["id"].as_str() == Some(model))?;
+        let args = entry["status"]["args"].as_array()?;
+        for i in 0..args.len().saturating_sub(1) {
+            if args[i].as_str() == Some("--ctx-size") {
+                return args[i + 1].as_str()?.parse::<u32>().ok();
+            }
+        }
+        None
+    }
+
+    /// Summarize `messages` into a compact string using the model.
+    pub async fn compact(
+        &self,
+        messages: &[Message],
+        model: &str,
+        cancel: &CancellationToken,
+    ) -> Result<String, String> {
+        const COMPACT_PROMPT: &str = include_str!("prompts/compact.txt");
+
+        let conversation = messages
+            .iter()
+            .filter_map(|m| {
+                let role = match m.role {
+                    Role::User => "User",
+                    Role::Assistant => "Assistant",
+                    Role::System => "System",
+                    Role::Tool => return None,
+                };
+                let content = m.content.as_deref().unwrap_or("").trim();
+                if content.is_empty() {
+                    None
+                } else {
+                    Some(format!("{}: {}", role, content))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let system = Message {
+            role: Role::System,
+            content: Some(COMPACT_PROMPT.trim().to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        let user = Message {
+            role: Role::User,
+            content: Some(format!("Conversation to summarize:\n\n{}", conversation)),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        let resp = self
+            .chat(&[system, user], &[], model, cancel, None)
+            .await?;
+        let summary = resp.content.unwrap_or_default();
+        if summary.trim().is_empty() {
+            return Err("empty summary".into());
+        }
+        Ok(summary)
     }
 
     pub async fn complete_title(&self, first_user_message: &str, model: &str) -> Result<String, String> {
