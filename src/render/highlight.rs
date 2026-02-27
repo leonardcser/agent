@@ -93,21 +93,23 @@ pub(super) fn print_syntax_file(content: &str, path: &str, max_rows: u16) -> u16
     render_highlighted(&lines, syntax, max_rows)
 }
 
-/// Render a syntax-highlighted inline diff.
-pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, max_rows: u16) -> u16 {
-    let ext = Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("txt");
-    let syntax = SYNTAX_SET
-        .find_syntax_by_extension(ext)
-        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    let theme = &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended];
+struct DiffChange {
+    tag: ChangeTag,
+    value: String,
+}
 
-    let indent = "   ";
+struct DiffViewData {
+    file_content: String,
+    start_line: usize,
+    first_mod: usize,
+    view_start: usize,
+    view_end: usize,
+    changes: Vec<DiffChange>,
+}
 
+fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffViewData {
     let file_content = std::fs::read_to_string(path).unwrap_or_default();
-    let file_lines: Vec<&str> = file_content.lines().collect();
+    let file_lines_count = file_content.lines().count();
     let lookup = if !anchor.is_empty() {
         anchor
     } else if !old.is_empty() {
@@ -125,42 +127,53 @@ pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, 
     };
 
     let diff = TextDiff::from_lines(old, new);
-    let changes: Vec<_> = diff.iter_all_changes().collect();
-
+    let changes: Vec<DiffChange> = diff
+        .iter_all_changes()
+        .map(|c| DiffChange { tag: c.tag(), value: c.value().to_string() })
+        .collect();
     let ctx = 3usize;
-
     let mut first_mod: Option<usize> = None;
     let mut last_mod: Option<usize> = None;
-    {
-        let mut new_line = start_line;
-        for change in &changes {
-            match change.tag() {
-                ChangeTag::Equal => {
-                    new_line += 1;
-                }
-                ChangeTag::Delete => {
-                    if first_mod.is_none() {
-                        first_mod = Some(new_line);
-                    }
-                    last_mod = Some(new_line);
-                }
-                ChangeTag::Insert => {
-                    if first_mod.is_none() {
-                        first_mod = Some(new_line);
-                    }
-                    last_mod = Some(new_line);
-                    new_line += 1;
-                }
+    let mut new_line = start_line;
+    for c in &changes {
+        match c.tag {
+            ChangeTag::Equal => { new_line += 1; }
+            ChangeTag::Delete => {
+                if first_mod.is_none() { first_mod = Some(new_line); }
+                last_mod = Some(new_line);
+            }
+            ChangeTag::Insert => {
+                if first_mod.is_none() { first_mod = Some(new_line); }
+                last_mod = Some(new_line);
+                new_line += 1;
             }
         }
     }
     let first_mod = first_mod.unwrap_or(start_line);
     let last_mod = last_mod.unwrap_or(start_line);
-
     let view_start = first_mod.saturating_sub(ctx);
-    let view_end = (last_mod + 1 + ctx).min(file_lines.len());
+    let view_end = (last_mod + 1 + ctx).min(file_lines_count);
 
-    let max_lineno = view_end;
+    DiffViewData { file_content, start_line, first_mod, view_start, view_end, changes }
+}
+
+/// Render a syntax-highlighted inline diff.
+pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, max_rows: u16) -> u16 {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("txt");
+    let syntax = SYNTAX_SET
+        .find_syntax_by_extension(ext)
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    let theme = &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended];
+
+    let indent = "   ";
+    let dv = compute_diff_view(old, new, path, anchor);
+    let file_lines: Vec<&str> = dv.file_content.lines().collect();
+    let changes = &dv.changes;
+
+    let max_lineno = dv.view_end;
     let gutter_width = format!("{}", max_lineno).len().max(2);
     let prefix_len = indent.len() + 1 + gutter_width + 3;
     let right_margin = indent.len();
@@ -174,7 +187,7 @@ pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, 
 
     let mut h_old = HighlightLines::new(syntax, theme);
     let mut h_new = HighlightLines::new(syntax, theme);
-    for i in 0..view_start {
+    for i in 0..dv.view_start {
         if i < file_lines.len() {
             let line = format!("{}\n", file_lines[i]);
             let _ = h_old.highlight_line(&line, &SYNTAX_SET);
@@ -182,8 +195,8 @@ pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, 
         }
     }
 
-    let ctx_before_end = start_line.min(first_mod);
-    let ctx_before_start = view_start.min(ctx_before_end);
+    let ctx_before_end = dv.start_line.min(dv.first_mod);
+    let ctx_before_start = dv.view_start.min(ctx_before_end);
     let mut rows = print_diff_lines(
         &mut h_new,
         &file_lines[ctx_before_start..ctx_before_end],
@@ -201,17 +214,17 @@ pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, 
         return limit;
     }
 
-    let mut old_lineno = start_line;
-    let mut new_lineno = start_line;
-    for change in &changes {
+    let mut old_lineno = dv.start_line;
+    let mut new_lineno = dv.start_line;
+    for change in changes {
         if rows >= limit {
             print_truncation(rows, limit);
             return limit;
         }
-        let text = change.value().trim_end_matches('\n');
-        match change.tag() {
+        let text = change.value.trim_end_matches('\n');
+        match change.tag {
             ChangeTag::Equal => {
-                if new_lineno >= view_start && new_lineno < view_end {
+                if new_lineno >= dv.view_start && new_lineno < dv.view_end {
                     print_diff_lines(&mut h_new, &[text], new_lineno, None, None, &layout);
                     rows += 1;
                 }
@@ -251,8 +264,8 @@ pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, 
     }
 
     let anchor_lines = anchor.lines().count();
-    let after_start = start_line + anchor_lines;
-    let after_end = view_end.min(file_lines.len());
+    let after_start = dv.start_line + anchor_lines;
+    let after_end = dv.view_end.min(file_lines.len());
     if after_start < after_end {
         let remaining = (limit - rows) as usize;
         let ctx_slice = &file_lines[after_start..after_end];
@@ -268,88 +281,31 @@ pub(super) fn print_inline_diff(old: &str, new: &str, path: &str, anchor: &str, 
 
 /// Count rows an inline diff would take without rendering.
 pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &str) -> u16 {
-    let file_content = std::fs::read_to_string(path).unwrap_or_default();
-    let file_lines_count = file_content.lines().count();
-    let lookup = if !anchor.is_empty() {
-        anchor
-    } else if !old.is_empty() {
-        old
-    } else {
-        new
-    };
-    let start_line = if lookup.is_empty() {
-        0
-    } else {
-        file_content
-            .find(lookup)
-            .map(|pos| file_content[..pos].lines().count())
-            .unwrap_or(0)
-    };
+    let dv = compute_diff_view(old, new, path, anchor);
 
-    let diff = TextDiff::from_lines(old, new);
-    let changes: Vec<_> = diff.iter_all_changes().collect();
+    let ctx_before_end = dv.start_line.min(dv.first_mod);
+    let ctx_before_start = dv.view_start.min(ctx_before_end);
+    let mut rows: usize = ctx_before_end.saturating_sub(ctx_before_start);
 
-    let ctx = 3usize;
-    let mut first_mod: Option<usize> = None;
-    let mut last_mod: Option<usize> = None;
-    {
-        let mut new_line = start_line;
-        for change in &changes {
-            match change.tag() {
-                ChangeTag::Equal => {
-                    new_line += 1;
-                }
-                ChangeTag::Delete => {
-                    if first_mod.is_none() {
-                        first_mod = Some(new_line);
-                    }
-                    last_mod = Some(new_line);
-                }
-                ChangeTag::Insert => {
-                    if first_mod.is_none() {
-                        first_mod = Some(new_line);
-                    }
-                    last_mod = Some(new_line);
-                    new_line += 1;
-                }
-            }
-        }
-    }
-    let first_mod = first_mod.unwrap_or(start_line);
-    let last_mod = last_mod.unwrap_or(start_line);
-
-    let view_start = first_mod.saturating_sub(ctx);
-    let view_end = (last_mod + 1 + ctx).min(file_lines_count);
-
-    let mut rows: usize = 0;
-    let ctx_before_end = start_line.min(first_mod);
-    let ctx_before_start = view_start.min(ctx_before_end);
-    rows += ctx_before_end.saturating_sub(ctx_before_start);
-    let mut new_lineno = start_line;
-    for change in &changes {
-        match change.tag() {
+    let mut new_lineno = dv.start_line;
+    for change in &dv.changes {
+        match change.tag {
             ChangeTag::Equal => {
-                if new_lineno >= view_start && new_lineno < view_end {
+                if new_lineno >= dv.view_start && new_lineno < dv.view_end {
                     rows += 1;
                 }
                 new_lineno += 1;
             }
-            ChangeTag::Delete => {
-                rows += 1;
-            }
-            ChangeTag::Insert => {
-                rows += 1;
-                new_lineno += 1;
-            }
+            ChangeTag::Delete => { rows += 1; }
+            ChangeTag::Insert => { rows += 1; new_lineno += 1; }
         }
     }
 
     let anchor_lines = anchor.lines().count();
-    let after_start = start_line + anchor_lines;
-    if after_start < view_end {
-        rows += view_end - after_start;
+    let after_start = dv.start_line + anchor_lines;
+    if after_start < dv.view_end {
+        rows += dv.view_end - after_start;
     }
-
     rows as u16
 }
 

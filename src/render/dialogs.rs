@@ -183,8 +183,7 @@ pub fn show_confirm(
             let _ = out.queue(ResetColor);
             let _ = out.queue(Print(message));
             let _ = out.flush();
-            let cursor_col = cursor::position().map(|(x, _)| x).unwrap_or(0);
-            let cursor_row = cursor::position().map(|(_, y)| y).unwrap_or(0);
+            let (cursor_col, cursor_row) = cursor::position().unwrap_or((0, 0));
             let _ = out.queue(Print("\r\n\r\n"));
             let _ = out.queue(SetAttribute(Attribute::Dim));
             let _ = out.queue(Print(" enter: approve with message  esc: back"));

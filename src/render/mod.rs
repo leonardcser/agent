@@ -46,6 +46,12 @@ pub struct ActiveTool {
     pub start_time: Instant,
 }
 
+impl ActiveTool {
+    fn elapsed(&self) -> Option<Duration> {
+        if self.name == "bash" { Some(self.start_time.elapsed()) } else { None }
+    }
+}
+
 #[derive(Clone)]
 pub struct ResumeEntry {
     pub id: String,
@@ -203,11 +209,7 @@ impl Screen {
         output: Option<ToolOutput>,
     ) {
         if let Some(tool) = self.active_tool.take() {
-            let elapsed = if tool.name == "bash" {
-                Some(tool.start_time.elapsed())
-            } else {
-                None
-            };
+            let elapsed = tool.elapsed();
             self.blocks.push(Block::ToolCall {
                 name: tool.name,
                 summary: tool.summary,
@@ -268,11 +270,7 @@ impl Screen {
 
     pub fn flush_blocks(&mut self) {
         if let Some(tool) = self.active_tool.take() {
-            let elapsed = if tool.name == "bash" {
-                Some(tool.start_time.elapsed())
-            } else {
-                None
-            };
+            let elapsed = tool.elapsed();
             self.blocks.push(Block::ToolCall {
                 name: tool.name,
                 summary: tool.summary,
@@ -305,7 +303,6 @@ impl Screen {
         let mut out = io::stdout();
         let _ = out.queue(Print("\x1b[?2026h"));
         let _ = out.queue(cursor::MoveTo(0, 0));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::All));
         self.flushed = 0;
         self.last_block_rows = 0;
         self.render_blocks();
@@ -416,22 +413,24 @@ impl Screen {
             }
         }
 
-        if self.active_tool.is_some() {
-            self.prompt_dirty = true;
-        }
-
         let has_new_blocks = self.flushed < self.blocks.len();
         if !has_new_blocks && !self.prompt_dirty {
             return;
         }
 
         let mut out = io::stdout();
-        let _ = out.queue(Print("\x1b[?2026h"));
 
-        if self.prompt_drawn {
+        let draw_start_row = if self.prompt_drawn {
+            let _ = out.queue(Print("\x1b[?2026h"));
             let _ = out.queue(cursor::MoveTo(0, self.prompt_top_row));
             let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-        }
+            self.prompt_top_row
+        } else {
+            // Query position before BSU so the terminal isn't buffering
+            let row = cursor::position().map(|(_, y)| y).unwrap_or(0);
+            let _ = out.queue(Print("\x1b[?2026h"));
+            row
+        };
 
         self.render_blocks();
 
@@ -453,6 +452,7 @@ impl Screen {
                 tool.status,
                 Some(tool.start_time.elapsed()),
                 tool.output.as_ref(),
+                width,
             );
             active_rows = tool_gap + rows;
         }
@@ -476,6 +476,8 @@ impl Screen {
             width,
             queued,
             self.prev_prompt_rows.saturating_sub(pre_prompt),
+            draw_start_row,
+            pre_prompt,
         );
         self.prev_prompt_rows = pre_prompt + new_rows;
 
@@ -495,6 +497,8 @@ impl Screen {
         width: usize,
         queued: &[String],
         prev_rows: u16,
+        draw_start_row: u16,
+        pre_prompt_rows: u16,
     ) -> (u16, u16) {
         let mut out = io::stdout();
         let usable = width.saturating_sub(1);
@@ -652,13 +656,30 @@ impl Screen {
             }
         }
 
-        let _ = out.flush();
-        let final_row = cursor::position().map(|(_, y)| y).unwrap_or(0);
-        let rows_below = if prev_rows > new_rows { prev_rows - new_rows } else { 0 };
-        let top_row = final_row.saturating_sub(new_rows + rows_below - 1);
-        let text_row = top_row + 1 + extra_rows as u16 + cursor_line_visible as u16;
+        let rows_below: u16 = if prev_rows > new_rows { prev_rows - new_rows } else { 0 };
+        let total_drawn = pre_prompt_rows + new_rows + rows_below;
+        let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
+        // If content would extend past terminal bottom, the terminal scrolls up
+        let top_row = if draw_start_row + total_drawn > height {
+            height.saturating_sub(total_drawn)
+        } else {
+            draw_start_row
+        };
+        let text_row = top_row + pre_prompt_rows + 1 + extra_rows as u16 + cursor_line_visible as u16;
         let text_col = 1 + cursor_col as u16;
         let _ = out.queue(cursor::MoveTo(text_col, text_row));
+
+        #[cfg(debug_assertions)]
+        {
+            let _ = out.flush();
+            if let Ok((_, actual_row)) = cursor::position() {
+                debug_assert_eq!(
+                    actual_row, text_row,
+                    "cursor row drift: calculated={text_row} actual={actual_row} \
+                     top={top_row} pre_prompt={pre_prompt_rows} draw_start={draw_start_row}"
+                );
+            }
+        }
 
         (top_row, total_rows as u16)
     }
@@ -1075,7 +1096,7 @@ fn render_line_spans(line: &str) {
             let tok_end = after.find(char::is_whitespace).unwrap_or(after.len());
             let token = &rest[pos..pos + 1 + tok_end];
             let path_str = &token[1..];
-            if !path_str.is_empty() && std::path::Path::new(path_str).exists() {
+            if !path_str.is_empty() {
                 let _ = out.queue(SetForegroundColor(theme::ACCENT));
                 let _ = out.queue(Print(token));
                 let _ = out.queue(ResetColor);

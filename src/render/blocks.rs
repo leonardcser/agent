@@ -12,7 +12,7 @@ use std::time::Duration;
 use super::highlight::{
     print_inline_diff, print_syntax_file, render_code_block, render_markdown_table,
 };
-use super::{Block, ConfirmChoice, ToolOutput, ToolStatus, term_width, truncate_str};
+use super::{Block, ConfirmChoice, ToolOutput, ToolStatus, truncate_str};
 
 /// Element types for spacing calculation.
 pub(super) enum Element<'a> {
@@ -39,11 +39,11 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
     }
 }
 
-pub(super) fn render_block(block: &Block, _width: usize) -> u16 {
+pub(super) fn render_block(block: &Block, width: usize) -> u16 {
     match block {
         Block::User { text } => {
             let mut out = io::stdout();
-            let w = term_width();
+            let w = width;
             let content_w = w.saturating_sub(1).max(1);
             let logical_lines: Vec<String> = text
                 .trim_start()
@@ -108,7 +108,7 @@ pub(super) fn render_block(block: &Block, _width: usize) -> u16 {
                     }
                     rows += render_markdown_table(&lines[table_start..i]);
                 } else {
-                    let max_cols = term_width().saturating_sub(1);
+                    let max_cols = width.saturating_sub(1);
                     let segments = wrap_line(lines[i], max_cols);
                     for seg in &segments {
                         let _ = out.queue(Print(" "));
@@ -122,7 +122,7 @@ pub(super) fn render_block(block: &Block, _width: usize) -> u16 {
             rows
         }
         Block::ToolCall { name, summary, status, elapsed, output, args } => {
-            render_tool(name, summary, args, *status, *elapsed, output.as_ref())
+            render_tool(name, summary, args, *status, *elapsed, output.as_ref(), width)
         }
         Block::Confirm { tool, desc, choice } => {
             render_confirm_result(tool, desc, choice.clone())
@@ -133,7 +133,7 @@ pub(super) fn render_block(block: &Block, _width: usize) -> u16 {
         }
         Block::Exec { command, output } => {
             let mut out = io::stdout();
-            let w = term_width();
+            let w = width;
             let display = format!("!{}", command);
             let char_len = display.chars().count();
             let pad_width = (char_len + 2).min(w);
@@ -169,6 +169,7 @@ pub(super) fn render_tool(
     status: ToolStatus,
     elapsed: Option<Duration>,
     output: Option<&ToolOutput>,
+    width: usize,
 ) -> u16 {
     let color = match status {
         ToolStatus::Ok => theme::TOOL_OK,
@@ -194,7 +195,7 @@ pub(super) fn render_tool(
     } else {
         None
     };
-    print_tool_line(name, summary, color, time, tl.as_deref());
+    print_tool_line(name, summary, color, time, tl.as_deref(), width);
     let mut rows = 1u16;
     if status != ToolStatus::Denied {
         if let Some(out_data) = output {
@@ -257,9 +258,9 @@ fn print_tool_line(
     pill_color: Color,
     elapsed: Option<Duration>,
     timeout_label: Option<&str>,
+    width: usize,
 ) {
     let mut out = io::stdout();
-    let width = term_width();
     let _ = out.queue(Print(" "));
     let _ = out.queue(SetForegroundColor(pill_color));
     let _ = out.queue(Print("\u{23fa}"));
