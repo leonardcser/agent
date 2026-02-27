@@ -428,8 +428,8 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
 
     let mut query = String::new();
     let mut filtered = filter_resume_entries(entries, &query);
-    let mut selected: usize = filtered.len().saturating_sub(1);
-    let mut scroll_offset: usize = filtered.len().saturating_sub(max_visible);
+    let mut selected: usize = 0;
+    let mut scroll_offset: usize = 0;
 
     let _ = out.flush();
     let saved_pos = cursor::position().unwrap_or((0, 0));
@@ -600,6 +600,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
         .collect();
     let mut other_texts: Vec<String> = questions.iter().map(|_| String::new()).collect();
     let mut editing_other: Vec<bool> = questions.iter().map(|_| false).collect();
+    let mut visited: Vec<bool> = questions.iter().map(|_| false).collect();
 
     let max_options = questions.iter().map(|q| q.options.len()).max().unwrap_or(0) + 1;
     let has_tabs = questions.len() > 1;
@@ -614,7 +615,8 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                 selections: &[usize],
                 multi_toggles: &[Vec<bool>],
                 other_texts: &[String],
-                editing_other: &[bool]| {
+                editing_other: &[bool],
+                visited: &[bool]| {
         let mut out = io::stdout();
         let _ = out.queue(cursor::MoveTo(0, bar_row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
@@ -631,20 +633,16 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
             let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
             let _ = out.queue(Print(" "));
             for (i, q) in questions.iter().enumerate() {
+                let bullet = if visited[i] { "■" } else { "□" };
                 if i == active_tab {
                     let _ = out.queue(SetForegroundColor(theme::ACCENT));
                     let _ = out.queue(SetAttribute(Attribute::Bold));
-                    let _ = out.queue(Print(format!(" {} ", q.header)));
+                    let _ = out.queue(Print(format!(" {} {} ", bullet, q.header)));
                     let _ = out.queue(SetAttribute(Attribute::Reset));
                     let _ = out.queue(ResetColor);
                 } else {
                     let _ = out.queue(SetAttribute(Attribute::Dim));
-                    let _ = out.queue(Print(format!(" {} ", q.header)));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
-                }
-                if i + 1 < questions.len() {
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
-                    let _ = out.queue(Print("│"));
+                    let _ = out.queue(Print(format!(" {} {} ", bullet, q.header)));
                     let _ = out.queue(SetAttribute(Attribute::Reset));
                 }
             }
@@ -788,7 +786,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
         let _ = out.flush();
     };
 
-    draw(active_tab, &selections, &multi_toggles, &other_texts, &editing_other);
+    draw(active_tab, &selections, &multi_toggles, &other_texts, &editing_other, &visited);
 
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
@@ -804,12 +802,19 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                         if q.multi_select {
                             multi_toggles[active_tab][other_idx] = true;
                         }
+                        visited[active_tab] = true;
+                        if questions.len() == 1 {
+                            break false;
+                        } else if active_tab + 1 < questions.len() {
+                            active_tab += 1;
+                        }
                         draw(
                             active_tab,
                             &selections,
                             &multi_toggles,
                             &other_texts,
                             &editing_other,
+                            &visited,
                         );
                     }
                     (KeyCode::Esc, _) => {
@@ -820,6 +825,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                             &multi_toggles,
                             &other_texts,
                             &editing_other,
+                            &visited,
                         );
                     }
                     (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
@@ -834,6 +840,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                             &multi_toggles,
                             &other_texts,
                             &editing_other,
+                            &visited,
                         );
                     }
                     (KeyCode::Backspace, _) => {
@@ -844,6 +851,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                             &multi_toggles,
                             &other_texts,
                             &editing_other,
+                            &visited,
                         );
                     }
                     (KeyCode::Char(c), _) => {
@@ -854,6 +862,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                             &multi_toggles,
                             &other_texts,
                             &editing_other,
+                            &visited,
                         );
                     }
                     _ => {}
@@ -875,6 +884,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                             &multi_toggles,
                             &other_texts,
                             &editing_other,
+                            &visited,
                         );
                         continue;
                     }
@@ -892,11 +902,13 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                             &multi_toggles,
                             &other_texts,
                             &editing_other,
+                            &visited,
                         );
                     }
                 }
                 (KeyCode::Right, _) | (KeyCode::Char('l'), _) => {
                     if questions.len() > 1 {
+                        visited[active_tab] = true;
                         active_tab = (active_tab + 1) % questions.len();
                         draw(
                             active_tab,
@@ -904,11 +916,13 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                             &multi_toggles,
                             &other_texts,
                             &editing_other,
+                            &visited,
                         );
                     }
                 }
                 (KeyCode::BackTab, _) | (KeyCode::Left, _) | (KeyCode::Char('h'), _) => {
                     if questions.len() > 1 {
+                        visited[active_tab] = true;
                         active_tab = if active_tab == 0 {
                             questions.len() - 1
                         } else {
@@ -920,6 +934,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                             &multi_toggles,
                             &other_texts,
                             &editing_other,
+                            &visited,
                         );
                     }
                 }
@@ -935,6 +950,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                         &multi_toggles,
                         &other_texts,
                         &editing_other,
+                        &visited,
                     );
                 }
                 (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
@@ -945,6 +961,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                         &multi_toggles,
                         &other_texts,
                         &editing_other,
+                        &visited,
                     );
                 }
                 (KeyCode::Char(' '), _) if q.multi_select => {
@@ -960,6 +977,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                         &multi_toggles,
                         &other_texts,
                         &editing_other,
+                        &visited,
                     );
                 }
                 (KeyCode::Char(c), _) if c.is_ascii_digit() => {
@@ -977,6 +995,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                             &multi_toggles,
                             &other_texts,
                             &editing_other,
+                            &visited,
                         );
                     }
                 }

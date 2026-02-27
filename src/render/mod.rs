@@ -479,10 +479,11 @@ impl Screen {
         let queued_rows = queued.len();
 
         for msg in queued {
-            let display: String = msg.chars().take(usable).collect();
+            let indent = 4usize;
+            let display: String = msg.chars().take(usable.saturating_sub(indent)).collect();
             let _ = out.queue(SetBackgroundColor(theme::USER_BG));
             let _ = out.queue(SetAttribute(Attribute::Bold));
-            let _ = out.queue(Print(format!(" {} ", display)));
+            let _ = out.queue(Print(format!("{}{}  ", " ".repeat(indent), display)));
             let _ = out.queue(SetAttribute(Attribute::Reset));
             let _ = out.queue(ResetColor);
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));

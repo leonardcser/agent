@@ -325,6 +325,36 @@ fn print_tool_output(
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
             print_syntax_file(file_content, path, 0)
         }
+        "ask_user_question" if !is_error => {
+            let mut out = io::stdout();
+            let mut rows = 0u16;
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(content) {
+                for (question, answer) in &map {
+                    let answer_str = match answer {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Array(arr) => arr
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        other => other.to_string(),
+                    };
+                    let _ = out
+                        .queue(SetAttribute(Attribute::Dim))
+                        .and_then(|o| o.queue(Print(format!("   {} ", question))))
+                        .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
+                        .and_then(|o| o.queue(Print(format!("{}\r\n", answer_str))));
+                    rows += 1;
+                }
+            } else {
+                let _ = out
+                    .queue(SetAttribute(Attribute::Dim))
+                    .and_then(|o| o.queue(Print(format!("   {}\r\n", content))))
+                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
+                rows += 1;
+            }
+            rows
+        }
         "bash" if content.is_empty() => 0,
         "bash" => {
             const MAX_LINES: usize = 20;

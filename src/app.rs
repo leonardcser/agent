@@ -179,7 +179,14 @@ impl App {
                         }
                     }
                 }
-                Role::Tool | Role::System => {}
+                Role::Tool => {}
+                Role::System => {
+                    if let Some(ref content) = msg.content {
+                        if let Some(summary) = content.strip_prefix("Summary of prior conversation:\n\n") {
+                            self.screen.push(Block::Text { content: summary.to_string() });
+                        }
+                    }
+                }
             }
         }
     }
