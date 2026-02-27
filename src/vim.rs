@@ -945,17 +945,19 @@ impl Vim {
 
         let (mut start, _) = current_line_range(buf, *cpos);
         let mut end = start;
+        let mut included_trailing_nl = false;
         for _ in 0..n {
             end = line_end(buf, end);
             if end < buf.len() {
                 end += 1; // include the newline
+                included_trailing_nl = true;
             }
         }
         // If deleting all content, don't leave a trailing newline.
-        if start == 0 && end == buf.len() {
+        if start == 0 && end == buf.len() && !included_trailing_nl {
             // Deleting everything.
-        } else if start > 0 && end == buf.len() {
-            // Last line(s): remove preceding newline instead.
+        } else if start > 0 && end == buf.len() && !included_trailing_nl {
+            // Last line(s) with no trailing newline: remove preceding newline instead.
             start -= 1;
         }
 
@@ -1656,6 +1658,16 @@ mod tests {
         vim.handle_key(key('d'), &mut buf, &mut cpos);
         vim.handle_key(key('d'), &mut buf, &mut cpos);
         assert_eq!(buf, "aaa\nccc");
+    }
+
+    #[test]
+    fn test_dd_middle_line_with_empty_neighbors() {
+        // Three lines: empty, "foo", empty. Delete middle line.
+        let (mut vim, mut buf, mut cpos) = setup("\nfoo\n");
+        cpos = 1; // on 'f'
+        vim.handle_key(key('d'), &mut buf, &mut cpos);
+        vim.handle_key(key('d'), &mut buf, &mut cpos);
+        assert_eq!(buf, "\n"); // Two empty lines remain.
     }
 
     #[test]
