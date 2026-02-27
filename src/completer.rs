@@ -93,9 +93,9 @@ impl Completer {
                     .trim_start()
                     .lines()
                     .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("")
+                    .to_string();
                 CompletionItem {
                     label,
                     description: None,

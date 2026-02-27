@@ -5,12 +5,14 @@ use crate::provider::{Message, Provider, Role, ToolDefinition};
 use crate::tools::{self, ToolRegistry, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub enum AgentEvent {
     Text(String),
+    Steered { text: String, count: usize },
     ToolCall { name: String, args: HashMap<String, Value> },
     ToolOutputChunk(String),
     ToolResult { content: String, is_error: bool },
@@ -43,6 +45,7 @@ pub async fn run_agent(
     permissions: &Permissions,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: CancellationToken,
+    steering: Arc<Mutex<Vec<String>>>,
 ) -> Vec<Message> {
     let mut messages = Vec::with_capacity(history.len() + 2);
     messages.push(Message {
@@ -54,8 +57,27 @@ pub async fn run_agent(
     messages.extend_from_slice(history);
 
     let tool_defs: Vec<ToolDefinition> = registry.definitions(permissions, mode);
+    let mut first = true;
 
     loop {
+        // Inject any user-steered messages queued while the agent was working,
+        // but skip on the very first iteration (the triggering message is already in history).
+        if !first {
+            let pending: Vec<String> = steering.lock().unwrap().drain(..).collect();
+            if !pending.is_empty() {
+                let count = pending.len();
+                let text = pending.join("\n");
+                let _ = tx.send(AgentEvent::Steered { text: text.clone(), count });
+                messages.push(Message {
+                    role: Role::User,
+                    content: Some(text),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+        }
+        first = false;
+
         let on_retry = |delay: std::time::Duration, attempt: u32| {
             let _ = tx.send(AgentEvent::Retrying { delay, attempt });
         };

@@ -14,6 +14,7 @@ pub mod vim;
 
 use agent::{run_agent, AgentEvent};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use clap::Parser;
 use crossterm::{
     cursor,
@@ -288,7 +289,7 @@ impl App {
         });
     }
 
-    fn spawn_agent(&self, tx: mpsc::UnboundedSender<AgentEvent>, cancel: CancellationToken) -> tokio::task::JoinHandle<Vec<Message>> {
+    fn spawn_agent(&self, tx: mpsc::UnboundedSender<AgentEvent>, cancel: CancellationToken, steering: Arc<Mutex<Vec<String>>>) -> tokio::task::JoinHandle<Vec<Message>> {
         let api_base = self.api_base.clone();
         let api_key = self.api_key.clone();
         let model = self.model.clone();
@@ -299,7 +300,7 @@ impl App {
         tokio::spawn(async move {
             let provider = Provider::new(&api_base, &api_key);
             let registry = tools::build_tools();
-            run_agent(&provider, &model, &history, &registry, mode, &permissions, &tx, cancel).await
+            run_agent(&provider, &model, &history, &registry, mode, &permissions, &tx, cancel, steering).await
         })
     }
 
@@ -311,7 +312,7 @@ impl App {
         let _ = out.flush();
     }
 
-    fn handle_agent_event(&mut self, ev: AgentEvent, pending: &mut Option<PendingTool>) -> SessionControl {
+    fn handle_agent_event(&mut self, ev: AgentEvent, pending: &mut Option<PendingTool>, steered_count: &mut usize) -> SessionControl {
         match ev {
             AgentEvent::TokenUsage { prompt_tokens } => {
                 if prompt_tokens > 0 {
@@ -322,6 +323,15 @@ impl App {
             }
             AgentEvent::ToolOutputChunk(chunk) => {
                 self.screen.append_active_output(&chunk);
+                SessionControl::Continue
+            }
+            AgentEvent::Steered { text, count } => {
+                // Remove the injected messages from the display queue and
+                // adjust the sync counter accordingly.
+                let drain_n = count.min(self.queued_messages.len());
+                self.queued_messages.drain(..drain_n);
+                *steered_count = steered_count.saturating_sub(drain_n);
+                self.screen.push(Block::User { text });
                 SessionControl::Continue
             }
             AgentEvent::Text(content) => {
@@ -455,7 +465,6 @@ impl App {
                     if let Some(mode) = restore_vim {
                         self.input.set_vim_mode(mode);
                     }
-                    self.screen.erase_prompt();
                     return TermAction::Cancel;
                 }
                 EscAction::StartTimer => {}
@@ -509,9 +518,11 @@ impl App {
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
-        let agent_handle = self.spawn_agent(tx, cancel_token.clone());
+        let steering: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let agent_handle = self.spawn_agent(tx, cancel_token.clone(), steering.clone());
 
         let mut pending: Option<PendingTool> = None;
+        let mut steered_count: usize = 0; // how many queued_messages have been synced to steering
         let mut agent_done = false;
         let mut resize_at: Option<Instant> = None;
         let mut cancelled = false;
@@ -523,7 +534,7 @@ impl App {
             // Drain agent events
             loop {
                 match rx.try_recv() {
-                    Ok(ev) => match self.handle_agent_event(ev, &mut pending) {
+                    Ok(ev) => match self.handle_agent_event(ev, &mut pending, &mut steered_count) {
                         SessionControl::Continue => {}
                         SessionControl::NeedsConfirm { desc, args, reply } => {
                             let tool_name = pending.as_ref().map(|p| p.name.as_str()).unwrap_or("");
@@ -564,6 +575,15 @@ impl App {
 
             if agent_done { break; }
 
+            // Sync any newly queued messages into the steering queue without
+            // removing them from queued_messages — they stay visible in the
+            // prompt until the agent actually injects them (Steered event).
+            if self.queued_messages.len() > steered_count {
+                let new = self.queued_messages[steered_count..].to_vec();
+                steering.lock().unwrap().extend(new);
+                steered_count = self.queued_messages.len();
+            }
+
             self.tick(&mut resize_at);
             tokio::time::sleep(Duration::from_millis(80)).await;
         }
@@ -571,17 +591,18 @@ impl App {
         self.screen.flush_blocks();
         if cancelled {
             self.screen.set_throbber(render::Throbber::Interrupted);
-            // Restore any queued messages back to the input prompt so the user can
-            // edit and resend them. If nothing was queued, leave the input as-is.
-            if !self.queued_messages.is_empty() {
-                let mut combined = self.queued_messages.join("\n");
+            // Restore any messages that were queued but not yet injected into the
+            // agent back to the input prompt so the user can edit and resend them.
+            let mut leftover: Vec<String> = steering.lock().unwrap().drain(..).collect();
+            leftover.extend(self.queued_messages.drain(..));
+            if !leftover.is_empty() {
+                let mut combined = leftover.join("\n");
                 if !self.input.buf.is_empty() {
                     combined.push('\n');
                     combined.push_str(&self.input.buf);
                 }
                 self.input.buf = combined;
                 self.input.cpos = self.input.buf.len();
-                self.queued_messages.clear();
             }
             cancel_token.cancel();
             agent_handle.abort();

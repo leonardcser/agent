@@ -2167,10 +2167,12 @@ fn draw_completions(
         .map(|i| prefix.len() + i.label.len())
         .max()
         .unwrap_or(0);
+    let avail = term_width().saturating_sub(2); // 2-space indent
     for (i, item) in comp.results[start..end].iter().enumerate() {
         let idx = start + i;
         let _ = out.queue(Print("  "));
-        let label = format!("{}{}", prefix, item.label);
+        let raw = format!("{}{}", prefix, item.label);
+        let label: String = raw.chars().take(avail).collect();
         if idx == comp.selected {
             let _ = out.queue(SetForegroundColor(theme::ACCENT));
             let _ = out.queue(Print(&label));

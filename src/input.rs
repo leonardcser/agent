@@ -232,6 +232,8 @@ impl InputState {
     /// Open history fuzzy search using the completer component.
     pub fn open_history_search(&mut self, history: &History) {
         self.history_saved_buf = Some((self.buf.clone(), self.cpos));
+        self.buf.clear();
+        self.cpos = 0;
         self.completer = Some(Completer::history(history.entries()));
     }
 
@@ -617,6 +619,8 @@ impl InputState {
     /// hides it otherwise. Never touches a history completer.
     fn recompute_completer(&mut self) {
         if self.completer.as_ref().is_some_and(|c| c.kind == CompleterKind::History) {
+            let query = self.buf.clone();
+            self.completer.as_mut().unwrap().update_query(query);
             return;
         }
         if let Some(at_pos) = cursor_in_at_zone(&self.buf, self.cpos) {
@@ -779,6 +783,10 @@ pub fn read_input(
             })
         ) && state.history_search_query().is_none()
         {
+            // If in vim normal mode, switch to insert before opening search.
+            if state.vim_mode() == Some(crate::vim::ViMode::Normal) {
+                state.set_vim_mode(crate::vim::ViMode::Insert);
+            }
             state.open_history_search(history);
             let _ = out.execute(cursor::Hide);
             screen.draw_prompt(state, *mode, width);
