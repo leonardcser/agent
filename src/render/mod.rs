@@ -20,6 +20,14 @@ use std::time::{Duration, Instant};
 
 use blocks::{gap_between, render_block, render_tool, Element};
 
+/// Clear remaining characters on the current line and advance to the next.
+/// Using Clear(UntilNewLine) before \r\n ensures old content doesn't leak
+/// through when overwriting in place (flicker-free rendering).
+pub(super) fn crlf(out: &mut io::Stdout) {
+    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+    let _ = out.queue(Print("\r\n"));
+}
+
 const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -156,6 +164,7 @@ impl BlockHistory {
                 0
             };
             for _ in 0..gap {
+                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
                 let _ = out.queue(Print("\r\n"));
             }
             let rows = render_block(out, &self.blocks[i], width);
@@ -602,7 +611,6 @@ impl Screen {
             let _ = out.queue(terminal::BeginSynchronizedUpdate);
             let _ = out.queue(cursor::Hide);
             let _ = out.queue(cursor::MoveTo(0, self.prompt.redraw_row));
-            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
             self.prompt.redraw_row
         } else {
             // Use tracked row when available to avoid cursor::position() which
@@ -815,6 +823,9 @@ impl Screen {
                 let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
             }
         }
+        // Clear anything remaining below — catches edge cases where the previous
+        // frame was taller due to pre-prompt section changes (active tool, blocks).
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
         let rows_below: u16 = prev_rows.saturating_sub(new_rows);
         let total_drawn = pre_prompt_rows + new_rows + rows_below;

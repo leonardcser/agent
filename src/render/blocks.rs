@@ -12,7 +12,7 @@ use std::time::Duration;
 use super::highlight::{
     print_inline_diff, print_syntax_file, render_code_block, render_markdown_table,
 };
-use super::{Block, ConfirmChoice, ToolOutput, ToolStatus, truncate_str};
+use super::{crlf, Block, ConfirmChoice, ToolOutput, ToolStatus, truncate_str};
 
 /// Element types for spacing calculation.
 pub(super) enum Element<'a> {
@@ -72,7 +72,7 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
                         })
                         .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
                         .and_then(|o| o.queue(ResetColor));
-                    let _ = out.queue(Print("\r\n"));
+                    crlf(out);
                     rows += 1;
                     start += content_w;
                     if start >= chars.len() {
@@ -111,7 +111,7 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
                     for seg in &segments {
                         let _ = out.queue(Print(" "));
                         print_styled(out, seg);
-                        let _ = out.queue(Print("\r\n"));
+                        crlf(out);
                     }
                     i += 1;
                     rows += segments.len() as u16;
@@ -143,14 +143,14 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             let _ = out.queue(Print(format!("{}{}", command, " ".repeat(trailing))));
             let _ = out.queue(SetAttribute(Attribute::Reset));
             let _ = out.queue(ResetColor);
-            let _ = out.queue(Print("\r\n"));
+            crlf(out);
             let mut rows = 1u16;
             if !output.is_empty() {
                 for line in output.lines() {
-                    let _ = out
-                        .queue(SetForegroundColor(theme::MUTED))
-                        .and_then(|o| o.queue(Print(format!("  {}\r\n", line))))
-                        .and_then(|o| o.queue(ResetColor));
+                    let _ = out.queue(SetForegroundColor(theme::MUTED));
+                    let _ = out.queue(Print(format!("  {}", line)));
+                    let _ = out.queue(ResetColor);
+                    crlf(out);
                     rows += 1;
                 }
             }
@@ -207,45 +207,41 @@ pub(super) fn render_tool(
 fn render_confirm_result(out: &mut io::Stdout, tool: &str, desc: &str, choice: Option<ConfirmChoice>) -> u16 {
     let mut rows = 2u16;
 
-    let _ = out
-        .queue(SetForegroundColor(theme::APPLY))
-        .and_then(|o| o.queue(Print("   allow? ")))
-        .and_then(|o| o.queue(ResetColor))
-        .and_then(|o| o.queue(SetAttribute(Attribute::Dim)))
-        .and_then(|o| o.queue(Print(tool)))
-        .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
-        .and_then(|o| o.queue(Print("\r\n")));
+    let _ = out.queue(SetForegroundColor(theme::APPLY));
+    let _ = out.queue(Print("   allow? "));
+    let _ = out.queue(ResetColor);
+    let _ = out.queue(SetAttribute(Attribute::Dim));
+    let _ = out.queue(Print(tool));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    crlf(out);
 
-    let _ = out
-        .queue(SetAttribute(Attribute::Dim))
-        .and_then(|o| o.queue(Print("   \u{2502} ")))
-        .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
-        .and_then(|o| o.queue(Print(desc)))
-        .and_then(|o| o.queue(Print("\r\n")));
+    let _ = out.queue(SetAttribute(Attribute::Dim));
+    let _ = out.queue(Print("   \u{2502} "));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    let _ = out.queue(Print(desc));
+    crlf(out);
 
     if let Some(c) = choice {
         rows += 1;
         let _ = out.queue(Print("   "));
         match c {
             ConfirmChoice::Yes | ConfirmChoice::YesWithMessage(_) => {
-                let _ = out
-                    .queue(SetAttribute(Attribute::Dim))
-                    .and_then(|o| o.queue(Print("approved\r\n")))
-                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print("approved"));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
             }
             ConfirmChoice::Always => {
-                let _ = out
-                    .queue(SetAttribute(Attribute::Dim))
-                    .and_then(|o| o.queue(Print("always\r\n")))
-                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print("always"));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
             }
             ConfirmChoice::No => {
-                let _ = out
-                    .queue(SetForegroundColor(theme::TOOL_ERR))
-                    .and_then(|o| o.queue(Print("denied\r\n")))
-                    .and_then(|o| o.queue(ResetColor));
+                let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
+                let _ = out.queue(Print("denied"));
+                let _ = out.queue(ResetColor);
             }
         }
+        crlf(out);
     }
     rows
 }
@@ -288,7 +284,7 @@ fn print_tool_line(
         let _ = out.queue(Print(&timeout_str));
         let _ = out.queue(SetAttribute(Attribute::Reset));
     }
-    let _ = out.queue(Print("\r\n"));
+    crlf(out);
 }
 
 fn print_tool_output(
@@ -312,10 +308,10 @@ fn print_tool_output(
 }
 
 fn print_dim_count(out: &mut io::Stdout, count: usize, singular: &str, plural: &str) -> u16 {
-    let _ = out
-        .queue(SetAttribute(Attribute::Dim))
-        .and_then(|o| o.queue(Print(format!("   {}\r\n", pluralize(count, singular, plural)))))
-        .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
+    let _ = out.queue(SetAttribute(Attribute::Dim));
+    let _ = out.queue(Print(format!("   {}", pluralize(count, singular, plural))));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    crlf(out);
     1
 }
 
@@ -349,18 +345,18 @@ fn render_question_output(out: &mut io::Stdout, content: &str) -> u16 {
                     .join(", "),
                 other => other.to_string(),
             };
-            let _ = out
-                .queue(SetAttribute(Attribute::Dim))
-                .and_then(|o| o.queue(Print(format!("   {} ", question))))
-                .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
-                .and_then(|o| o.queue(Print(format!("{}\r\n", answer_str))));
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print(format!("   {} ", question)));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+            let _ = out.queue(Print(&answer_str));
+            crlf(out);
             rows += 1;
         }
     } else {
-        let _ = out
-            .queue(SetAttribute(Attribute::Dim))
-            .and_then(|o| o.queue(Print(format!("   {}\r\n", content))))
-            .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(format!("   {}", content)));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        crlf(out);
         rows += 1;
     }
     rows
@@ -374,21 +370,23 @@ fn render_bash_output(out: &mut io::Stdout, content: &str, is_error: bool) -> u1
     if total > MAX_LINES {
         let skipped = total - MAX_LINES;
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(format!("   ... {} lines above\r\n", skipped)));
+        let _ = out.queue(Print(format!("   ... {} lines above", skipped)));
         let _ = out.queue(SetAttribute(Attribute::Reset));
+        crlf(out);
         rows += 1;
     }
     let visible = if total > MAX_LINES { &lines[total - MAX_LINES..] } else { &lines[..] };
     for line in visible {
         if is_error {
             let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
-            let _ = out.queue(Print(format!("   {}\r\n", line)));
+            let _ = out.queue(Print(format!("   {}", line)));
             let _ = out.queue(ResetColor);
         } else {
             let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(Print(format!("   {}\r\n", line)));
+            let _ = out.queue(Print(format!("   {}", line)));
             let _ = out.queue(SetAttribute(Attribute::Reset));
         }
+        crlf(out);
         rows += 1;
     }
     rows
@@ -397,16 +395,15 @@ fn render_bash_output(out: &mut io::Stdout, content: &str, is_error: bool) -> u1
 fn render_default_output(out: &mut io::Stdout, content: &str, is_error: bool) -> u16 {
     let preview = result_preview(content, 3);
     if is_error {
-        let _ = out
-            .queue(SetForegroundColor(theme::TOOL_ERR))
-            .and_then(|o| o.queue(Print(format!("   {}\r\n", preview))))
-            .and_then(|o| o.queue(ResetColor));
+        let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
+        let _ = out.queue(Print(format!("   {}", preview)));
+        let _ = out.queue(ResetColor);
     } else {
-        let _ = out
-            .queue(SetAttribute(Attribute::Dim))
-            .and_then(|o| o.queue(Print(format!("   {}\r\n", preview))))
-            .and_then(|o| o.queue(SetAttribute(Attribute::Reset)));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(format!("   {}", preview)));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
     }
+    crlf(out);
     preview.lines().count() as u16
 }
 
@@ -419,10 +416,10 @@ fn pluralize(count: usize, singular: &str, plural: &str) -> String {
 }
 
 fn print_error(out: &mut io::Stdout, msg: &str) {
-    let _ = out
-        .queue(SetForegroundColor(theme::TOOL_ERR))
-        .and_then(|o| o.queue(Print(format!(" error: {}\r\n", msg))))
-        .and_then(|o| o.queue(ResetColor));
+    let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
+    let _ = out.queue(Print(format!(" error: {}", msg)));
+    let _ = out.queue(ResetColor);
+    crlf(out);
 }
 
 fn result_preview(content: &str, max_lines: usize) -> String {

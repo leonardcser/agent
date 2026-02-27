@@ -12,7 +12,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::Style;
 use syntect::parsing::SyntaxSet;
 
-use super::term_width;
+use super::{crlf, term_width};
 
 pub(super) static SYNTAX_SET: LazyLock<SyntaxSet> =
     LazyLock::new(SyntaxSet::load_defaults_newlines);
@@ -73,7 +73,7 @@ pub(super) fn render_highlighted(
         let _ = out.queue(ResetColor);
         let _ = out.queue(Print("   "));
         print_syntect_regions(out, &regions, max_content, None);
-        let _ = out.queue(Print("\r\n"));
+        crlf(out);
     }
     if limit < lines.len() {
         print_truncation(out, limit as u16, max_rows);
@@ -314,8 +314,9 @@ pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &
 
 fn print_truncation(out: &mut io::Stdout, _rows: u16, _limit: u16) {
     let _ = out.queue(SetAttribute(Attribute::Dim));
-    let _ = out.queue(Print("   ...\r\n"));
+    let _ = out.queue(Print("   ..."));
     let _ = out.queue(SetAttribute(Attribute::Reset));
+    crlf(out);
 }
 
 fn print_diff_lines(
@@ -359,7 +360,7 @@ fn print_diff_lines(
             let _ = out.queue(Print("   "));
             print_syntect_regions(out, &regions, max_content, None);
         }
-        let _ = out.queue(Print("\r\n"));
+        crlf(out);
     }
     lines.len() as u16
 }
@@ -455,7 +456,7 @@ pub(super) fn render_markdown_table(out: &mut io::Stdout, lines: &[&str]) -> u16
         if in_border {
             let _ = out.queue(ResetColor);
         }
-        let _ = out.queue(Print("\r\n"));
+        crlf(out);
     }
     rendered.lines().count() as u16
 }

@@ -10,9 +10,10 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use crossterm::{
-    event::{self, EnableBracketedPaste, DisableBracketedPaste},
+    event::{self, EnableBracketedPaste, DisableBracketedPaste, EventStream},
     terminal, ExecutableCommand,
 };
+use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tokio::sync::mpsc;
 
@@ -624,6 +625,7 @@ impl App {
         let mut last_esc: Option<Instant> = None;
         let mut vim_mode_at_esc: Option<vim::ViMode> = None;
         let mut last_ctrlc: Option<Instant> = None;
+        let mut term_events = EventStream::new();
 
         loop {
             // Drain agent events
@@ -674,21 +676,6 @@ impl App {
 
             if agent_done { break; }
 
-            // Drain terminal events
-            while event::poll(Duration::ZERO).unwrap_or(false) {
-                if let Ok(ev) = event::read() {
-                    if let TermAction::Cancel = self.handle_terminal_event(
-                        ev, &mut last_esc, &mut vim_mode_at_esc, &mut last_ctrlc, &mut resize_at,
-                    ) {
-                        cancelled = true;
-                        agent_done = true;
-                        break;
-                    }
-                }
-            }
-
-            if agent_done { break; }
-
             // Sync any newly queued messages into the steering queue without
             // removing them from queued_messages — they stay visible in the
             // prompt until the agent actually injects them (Steered event).
@@ -699,7 +686,80 @@ impl App {
             }
 
             self.tick(&mut resize_at);
-            tokio::time::sleep(Duration::from_millis(80)).await;
+
+            // Wait for the next event: terminal input, agent message, or
+            // a timer tick for spinner animation.  Terminal input wakes us
+            // immediately so typing feels responsive even while the agent
+            // is running.
+            tokio::select! {
+                biased;
+                Some(Ok(ev)) = term_events.next() => {
+                    if let TermAction::Cancel = self.handle_terminal_event(
+                        ev, &mut last_esc, &mut vim_mode_at_esc, &mut last_ctrlc, &mut resize_at,
+                    ) {
+                        cancelled = true;
+                        agent_done = true;
+                    }
+                    // Drain any remaining buffered terminal events
+                    while event::poll(Duration::ZERO).unwrap_or(false) {
+                        if let Ok(ev) = event::read() {
+                            if let TermAction::Cancel = self.handle_terminal_event(
+                                ev, &mut last_esc, &mut vim_mode_at_esc, &mut last_ctrlc, &mut resize_at,
+                            ) {
+                                cancelled = true;
+                                agent_done = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                Some(ev) = rx.recv() => {
+                    // Put it back for the drain loop at the top to handle
+                    // (channel is unbounded so this won't block).
+                    // We just need to wake up — the drain loop processes it.
+                    match self.handle_agent_event(ev, &mut pending, &mut steered_count) {
+                        SessionControl::Continue => {}
+                        SessionControl::NeedsConfirm { desc, args, reply } => {
+                            let tool_name = pending.as_ref().map(|p| p.name.as_str()).unwrap_or("");
+                            match self.handle_confirm(tool_name, &desc, &args, reply) {
+                                ConfirmAction::Approved => {
+                                    if let Some(ref mut p) = pending { p.start = Instant::now(); }
+                                }
+                                ConfirmAction::Denied => {
+                                    self.screen.finish_tool(ToolStatus::Denied, None);
+                                    pending = None;
+                                    cancelled = true;
+                                    agent_done = true;
+                                }
+                            }
+                        }
+                        SessionControl::NeedsAskQuestion { args, reply } => {
+                            self.render_screen();
+                            self.screen.erase_prompt();
+                            let questions = render::parse_questions(&args);
+                            match render::show_ask_question(&questions) {
+                                Some(answer) => {
+                                    let _ = reply.send(answer);
+                                }
+                                None => {
+                                    let _ = reply.send("User cancelled the question.".into());
+                                    self.screen.finish_tool(ToolStatus::Denied, None);
+                                    pending = None;
+                                    cancelled = true;
+                                    agent_done = true;
+                                }
+                            }
+                            self.screen.redraw_in_place();
+                        }
+                        SessionControl::Done => { agent_done = true; }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(80)) => {
+                    // Timer tick — spinner animation refresh
+                }
+            }
+
+            if agent_done { break; }
         }
 
         self.screen.flush_blocks();
