@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::process::Command;
 
 pub struct CompletionItem {
@@ -84,9 +85,11 @@ impl Completer {
     }
 
     pub fn history(entries: &[String]) -> Self {
+        let mut seen = HashSet::new();
         let all_items: Vec<CompletionItem> = entries
             .iter()
             .rev()
+            .filter(|text| seen.insert(text.as_str()))
             .map(|text| {
                 let label = text
                     .trim_start()
