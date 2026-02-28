@@ -57,7 +57,11 @@ impl Tool for ReadFileTool {
         let offset = int_arg(args, "offset").max(1);
         let limit = {
             let l = int_arg(args, "limit");
-            if l > 0 { l } else { 2000 }
+            if l > 0 {
+                l
+            } else {
+                2000
+            }
         };
 
         let start = offset - 1;
@@ -73,7 +77,11 @@ impl Tool for ReadFileTool {
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let truncated = if line.len() > 2000 { &line[..2000] } else { line };
+                let truncated = if line.len() > 2000 {
+                    &line[..2000]
+                } else {
+                    line
+                };
                 format!("{:4}\t{}", start + i + 1, truncated)
             })
             .collect::<Vec<_>>()

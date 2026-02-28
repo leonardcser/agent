@@ -97,7 +97,10 @@ pub fn timeout_arg(args: &HashMap<String, Value>, default_secs: u64) -> Duration
     Duration::from_millis(ms)
 }
 
-pub(crate) fn run_command_with_timeout(mut child: std::process::Child, timeout: Duration) -> ToolResult {
+pub(crate) fn run_command_with_timeout(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> ToolResult {
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
@@ -161,9 +164,13 @@ pub fn new_file_hashes() -> FileHashes {
 pub fn build_tools() -> ToolRegistry {
     let hashes = new_file_hashes();
     let mut r = ToolRegistry::new();
-    r.register(Box::new(ReadFileTool { hashes: hashes.clone() }));
+    r.register(Box::new(ReadFileTool {
+        hashes: hashes.clone(),
+    }));
     r.register(Box::new(WriteFileTool));
-    r.register(Box::new(EditFileTool { hashes: hashes.clone() }));
+    r.register(Box::new(EditFileTool {
+        hashes: hashes.clone(),
+    }));
     r.register(Box::new(BashTool));
     r.register(Box::new(GlobTool));
     r.register(Box::new(GrepTool));

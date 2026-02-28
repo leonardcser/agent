@@ -1,7 +1,9 @@
 use crate::theme;
 use comfy_table::{presets::UTF8_BORDERS_ONLY, ContentArrangement, Table};
 use crossterm::{
-    style::{Color, Print, ResetColor, SetAttribute, SetForegroundColor, SetBackgroundColor, Attribute},
+    style::{
+        Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    },
     QueueableCommand,
 };
 use similar::{ChangeTag, TextDiff};
@@ -81,7 +83,12 @@ pub(super) fn render_highlighted(
     limit as u16
 }
 
-pub(super) fn print_syntax_file(out: &mut io::Stdout, content: &str, path: &str, max_rows: u16) -> u16 {
+pub(super) fn print_syntax_file(
+    out: &mut io::Stdout,
+    content: &str,
+    path: &str,
+    max_rows: u16,
+) -> u16 {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -129,7 +136,10 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
     let diff = TextDiff::from_lines(old, new);
     let changes: Vec<DiffChange> = diff
         .iter_all_changes()
-        .map(|c| DiffChange { tag: c.tag(), value: c.value().to_string() })
+        .map(|c| DiffChange {
+            tag: c.tag(),
+            value: c.value().to_string(),
+        })
         .collect();
     let ctx = 3usize;
     let mut first_mod: Option<usize> = None;
@@ -137,13 +147,19 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
     let mut new_line = start_line;
     for c in &changes {
         match c.tag {
-            ChangeTag::Equal => { new_line += 1; }
+            ChangeTag::Equal => {
+                new_line += 1;
+            }
             ChangeTag::Delete => {
-                if first_mod.is_none() { first_mod = Some(new_line); }
+                if first_mod.is_none() {
+                    first_mod = Some(new_line);
+                }
                 last_mod = Some(new_line);
             }
             ChangeTag::Insert => {
-                if first_mod.is_none() { first_mod = Some(new_line); }
+                if first_mod.is_none() {
+                    first_mod = Some(new_line);
+                }
                 last_mod = Some(new_line);
                 new_line += 1;
             }
@@ -154,11 +170,25 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
     let view_start = first_mod.saturating_sub(ctx);
     let view_end = (last_mod + 1 + ctx).min(file_lines_count);
 
-    DiffViewData { file_content, start_line, first_mod, view_start, view_end, changes }
+    DiffViewData {
+        file_content,
+        start_line,
+        first_mod,
+        view_start,
+        view_end,
+        changes,
+    }
 }
 
 /// Render a syntax-highlighted inline diff.
-pub(super) fn print_inline_diff(out: &mut io::Stdout, old: &str, new: &str, path: &str, anchor: &str, max_rows: u16) -> u16 {
+pub(super) fn print_inline_diff(
+    out: &mut io::Stdout,
+    old: &str,
+    new: &str,
+    path: &str,
+    anchor: &str,
+    max_rows: u16,
+) -> u16 {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -179,10 +209,22 @@ pub(super) fn print_inline_diff(out: &mut io::Stdout, old: &str, new: &str, path
     let right_margin = indent.len();
     let max_content = term_width().saturating_sub(prefix_len + right_margin);
 
-    let bg_del = Color::Rgb { r: 60, g: 20, b: 20 };
-    let bg_add = Color::Rgb { r: 20, g: 50, b: 20 };
+    let bg_del = Color::Rgb {
+        r: 60,
+        g: 20,
+        b: 20,
+    };
+    let bg_add = Color::Rgb {
+        r: 20,
+        g: 50,
+        b: 20,
+    };
 
-    let layout = DiffLayout { indent, gutter_width, max_content };
+    let layout = DiffLayout {
+        indent,
+        gutter_width,
+        max_content,
+    };
     let limit = if max_rows == 0 { u16::MAX } else { max_rows };
 
     let mut h_old = HighlightLines::new(syntax, theme);
@@ -299,8 +341,13 @@ pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &
                 }
                 new_lineno += 1;
             }
-            ChangeTag::Delete => { rows += 1; }
-            ChangeTag::Insert => { rows += 1; new_lineno += 1; }
+            ChangeTag::Delete => {
+                rows += 1;
+            }
+            ChangeTag::Insert => {
+                rows += 1;
+                new_lineno += 1;
+            }
         }
     }
 
@@ -328,7 +375,11 @@ fn print_diff_lines(
     bg: Option<Color>,
     layout: &DiffLayout,
 ) -> u16 {
-    let DiffLayout { indent, gutter_width, max_content } = *layout;
+    let DiffLayout {
+        indent,
+        gutter_width,
+        max_content,
+    } = *layout;
     for (i, line) in lines.iter().enumerate() {
         let lineno = start_line + i + 1;
         let line_with_nl = format!("{}\n", line);

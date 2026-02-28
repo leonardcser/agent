@@ -80,31 +80,53 @@ fn build_tool_map(raw: &RawRuleSet) -> HashMap<String, Decision> {
 
 fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
     let mut tools = build_tool_map(&raw.tools);
-    
+
     // Set default permissions for tools if not explicitly configured
     // read_file: allow in both modes by default
-    tools.entry("read_file".to_string()).or_insert(Decision::Allow);
-    
+    tools
+        .entry("read_file".to_string())
+        .or_insert(Decision::Allow);
+
     // edit_file: ask in normal mode, allow in apply mode
-    let default_edit_file = if mode == Mode::Apply { Decision::Allow } else { Decision::Ask };
-    tools.entry("edit_file".to_string()).or_insert(default_edit_file);
-    
+    let default_edit_file = if mode == Mode::Apply {
+        Decision::Allow
+    } else {
+        Decision::Ask
+    };
+    tools
+        .entry("edit_file".to_string())
+        .or_insert(default_edit_file);
+
     // write_file: ask in normal mode, allow in apply mode
-    let default_write_file = if mode == Mode::Apply { Decision::Allow } else { Decision::Ask };
-    tools.entry("write_file".to_string()).or_insert(default_write_file);
-    
+    let default_write_file = if mode == Mode::Apply {
+        Decision::Allow
+    } else {
+        Decision::Ask
+    };
+    tools
+        .entry("write_file".to_string())
+        .or_insert(default_write_file);
+
     // glob: always allow by default in both modes
     tools.entry("glob".to_string()).or_insert(Decision::Allow);
-    
+
     // grep: always allow by default in both modes
     tools.entry("grep".to_string()).or_insert(Decision::Allow);
 
     // ask_user_question: always allow
-    tools.entry("ask_user_question".to_string()).or_insert(Decision::Allow);
+    tools
+        .entry("ask_user_question".to_string())
+        .or_insert(Decision::Allow);
 
     // exit_plan_mode: only in plan mode
-    let default_exit_plan = if mode == Mode::Plan { Decision::Allow } else { Decision::Deny };
-    tools.entry("exit_plan_mode".to_string()).or_insert(default_exit_plan);
+    let default_exit_plan = if mode == Mode::Plan {
+        Decision::Allow
+    } else {
+        Decision::Deny
+    };
+    tools
+        .entry("exit_plan_mode".to_string())
+        .or_insert(default_exit_plan);
 
     ModePerms {
         tools,

@@ -3,7 +3,7 @@ mod dialogs;
 mod highlight;
 
 pub use dialogs::{
-    parse_questions, show_ask_question, show_confirm, show_rewind, show_resume, Question,
+    parse_questions, show_ask_question, show_confirm, show_resume, show_rewind, Question,
     QuestionOption,
 };
 
@@ -11,7 +11,9 @@ use crate::input::{InputState, SettingsMenu, PASTE_MARKER};
 use crate::theme;
 use crossterm::{
     cursor,
-    style::{Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor},
+    style::{
+        Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    },
     terminal, QueueableCommand,
 };
 use std::collections::HashMap;
@@ -59,7 +61,11 @@ pub struct ActiveTool {
 
 impl ActiveTool {
     fn elapsed(&self) -> Option<Duration> {
-        if self.name == "bash" { Some(self.start_time.elapsed()) } else { None }
+        if self.name == "bash" {
+            Some(self.start_time.elapsed())
+        } else {
+            None
+        }
     }
 }
 
@@ -128,7 +134,11 @@ struct BlockHistory {
 
 impl BlockHistory {
     fn new() -> Self {
-        Self { blocks: Vec::new(), flushed: 0, last_block_rows: 0 }
+        Self {
+            blocks: Vec::new(),
+            flushed: 0,
+            last_block_rows: 0,
+        }
     }
 
     fn push(&mut self, block: Block) {
@@ -192,7 +202,13 @@ struct PromptState {
 
 impl PromptState {
     fn new() -> Self {
-        Self { drawn: false, dirty: true, redraw_row: 0, prev_rows: 0, fallback_row: None }
+        Self {
+            drawn: false,
+            dirty: true,
+            redraw_row: 0,
+            prev_rows: 0,
+            fallback_row: None,
+        }
     }
 }
 
@@ -294,11 +310,7 @@ impl WorkingState {
                         .map(|t| t.saturating_duration_since(Instant::now()))
                         .unwrap_or(delay);
                     spans.push(BarSpan {
-                        text: format!(
-                            " (retrying in {}s #{})",
-                            remaining.as_secs(),
-                            attempt
-                        ),
+                        text: format!(" (retrying in {}s #{})", remaining.as_secs(), attempt),
                         color: theme::MUTED,
                         attr: Some(Attribute::Dim),
                     });
@@ -413,11 +425,7 @@ impl Screen {
         }
     }
 
-    pub fn finish_tool(
-        &mut self,
-        status: ToolStatus,
-        output: Option<ToolOutput>,
-    ) {
+    pub fn finish_tool(&mut self, status: ToolStatus, output: Option<ToolOutput>) {
         if let Some(tool) = self.active_tool.take() {
             let elapsed = tool.elapsed();
             self.history.push(Block::ToolCall {
@@ -460,8 +468,6 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
-
-
     pub fn flush_blocks(&mut self) {
         let _perf = crate::perf::begin("flush_blocks");
         if let Some(tool) = self.active_tool.take() {
@@ -484,9 +490,10 @@ impl Screen {
             self.prompt.drawn = false;
             row
         } else {
-            self.prompt.fallback_row.take().unwrap_or_else(|| {
-                cursor::position().map(|(_, y)| y).unwrap_or(0)
-            })
+            self.prompt
+                .fallback_row
+                .take()
+                .unwrap_or_else(|| cursor::position().map(|(_, y)| y).unwrap_or(0))
         };
         let block_rows = self.history.render(&mut out, term_width());
         self.prompt.fallback_row = Some(start_row + block_rows);
@@ -560,7 +567,8 @@ impl Screen {
 
     /// Returns (block_index, full_text) for each User block.
     pub fn user_turns(&self) -> Vec<(usize, String)> {
-        self.history.blocks
+        self.history
+            .blocks
             .iter()
             .enumerate()
             .filter_map(|(i, b)| {
@@ -617,9 +625,11 @@ impl Screen {
         } else {
             // Use tracked row when available to avoid cursor::position() which
             // races with pending keystrokes in stdin and can return wrong values.
-            let row = self.prompt.fallback_row.take().unwrap_or_else(|| {
-                cursor::position().map(|(_, y)| y).unwrap_or(0)
-            });
+            let row = self
+                .prompt
+                .fallback_row
+                .take()
+                .unwrap_or_else(|| cursor::position().map(|(_, y)| y).unwrap_or(0));
             let _ = out.queue(terminal::BeginSynchronizedUpdate);
             let _ = out.queue(cursor::Hide);
             row
@@ -720,7 +730,11 @@ impl Screen {
         draw_bar(
             out,
             width,
-            if throbber_spans.is_empty() { None } else { Some(&throbber_spans) },
+            if throbber_spans.is_empty() {
+                None
+            } else {
+                Some(&throbber_spans)
+            },
             tokens_label.as_deref().map(|l| (l, theme::MUTED)),
             bar_color,
         );
@@ -738,7 +752,11 @@ impl Screen {
         let comp_total = if state.settings.is_some() {
             2
         } else {
-            state.completer.as_ref().map(|c| c.results.len().min(5)).unwrap_or(0)
+            state
+                .completer
+                .as_ref()
+                .map(|c| c.results.len().min(5))
+                .unwrap_or(0)
         };
         let mut comp_rows = comp_total;
 
@@ -857,10 +875,13 @@ impl Screen {
 
         (top_row, total_rows as u16, scrolled)
     }
-
 }
 
-fn render_stash(out: &mut io::Stdout, stash: &Option<(String, usize, Vec<String>)>, usable: usize) -> u16 {
+fn render_stash(
+    out: &mut io::Stdout,
+    stash: &Option<(String, usize, Vec<String>)>,
+    usable: usize,
+) -> u16 {
     let Some((ref stash_buf, _, _)) = stash else {
         return 0;
     };
@@ -868,9 +889,7 @@ fn render_stash(out: &mut io::Stdout, stash: &Option<(String, usize, Vec<String>
     let line_count = stash_buf.lines().count();
     let max_chars = usable.saturating_sub(2);
     let display: String = first_line.chars().take(max_chars).collect();
-    let suffix = if display.chars().count() < first_line.chars().count()
-        || line_count > 1
-    {
+    let suffix = if display.chars().count() < first_line.chars().count() || line_count > 1 {
         "\u{2026}"
     } else {
         ""
@@ -1249,7 +1268,11 @@ fn render_line_spans(out: &mut io::Stdout, line: &str) {
     }
 }
 
-fn draw_completions(out: &mut io::Stdout, completer: Option<&crate::completer::Completer>, max_rows: usize) -> usize {
+fn draw_completions(
+    out: &mut io::Stdout,
+    completer: Option<&crate::completer::Completer>,
+    max_rows: usize,
+) -> usize {
     let Some(comp) = completer else {
         return 0;
     };

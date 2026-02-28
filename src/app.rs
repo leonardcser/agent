@@ -1,21 +1,26 @@
 use crate::agent::{run_agent, AgentEvent};
-use crate::input::{Action, EscAction, InputState, History, Mode, resolve_agent_esc};
+use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, Mode};
 use crate::provider::{Message, Provider, Role};
-use crate::render::{tool_arg_summary, Block, ConfirmChoice, Screen, ToolOutput, ToolStatus, ResumeEntry};
+use crate::render::{
+    tool_arg_summary, Block, ConfirmChoice, ResumeEntry, Screen, ToolOutput, ToolStatus,
+};
 use crate::session::Session;
 use crate::{permissions, render, session, state, tools, vim};
 
+use crossterm::{
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
+        KeyModifiers,
+    },
+    terminal, ExecutableCommand,
+};
+use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use crossterm::{
-    event::{self, EnableBracketedPaste, DisableBracketedPaste, EventStream, Event, KeyCode, KeyEvent, KeyModifiers},
-    terminal, ExecutableCommand,
-};
-use futures_util::StreamExt;
-use tokio_util::sync::CancellationToken;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 // ── App ──────────────────────────────────────────────────────────────────────
 
@@ -79,7 +84,14 @@ struct Timers {
 // ── App impl ─────────────────────────────────────────────────────────────────
 
 impl App {
-    pub fn new(api_base: String, api_key: String, model: String, vim_from_config: bool, auto_compact: bool, shared_session: Arc<Mutex<Option<Session>>>) -> Self {
+    pub fn new(
+        api_base: String,
+        api_key: String,
+        model: String,
+        vim_from_config: bool,
+        auto_compact: bool,
+        shared_session: Arc<Mutex<Option<Session>>>,
+    ) -> Self {
         let app_state = state::State::load();
         let mode = app_state.mode();
         let vim_enabled = app_state.vim_enabled() || vim_from_config;
@@ -117,7 +129,8 @@ impl App {
         terminal::enable_raw_mode().ok();
         let _ = io::stdout().execute(EnableBracketedPaste);
 
-        self.screen.draw_prompt(&self.input, self.mode, render::term_width());
+        self.screen
+            .draw_prompt(&self.input, self.mode, render::term_width());
 
         let mut term_events = EventStream::new();
         let mut agent: Option<AgentState> = None;
@@ -153,7 +166,8 @@ impl App {
                     };
                     let action = {
                         let ag = agent.as_mut().unwrap();
-                        let ctrl = self.handle_agent_event(ev, &mut ag.pending, &mut ag.steered_count);
+                        let ctrl =
+                            self.handle_agent_event(ev, &mut ag.pending, &mut ag.steered_count);
                         self.dispatch_control(ctrl, &mut ag.pending)
                     };
                     match action {
@@ -255,7 +269,6 @@ impl App {
                     // Timer tick for spinner animation.
                 }
             }
-
         }
 
         // Cleanup
@@ -348,9 +361,18 @@ impl App {
         }
 
         // Ctrl+R: open history fuzzy search (not in vim normal mode).
-        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Char('r'), modifiers: KeyModifiers::CONTROL, .. }))
-            && self.input.history_search_query().is_none()
-            && !self.input.vim_mode().is_some_and(|m| m == vim::ViMode::Normal)
+        if matches!(
+            ev,
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('r'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            })
+        ) && self.input.history_search_query().is_none()
+            && !self
+                .input
+                .vim_mode()
+                .is_some_and(|m| m == vim::ViMode::Normal)
         {
             self.input.open_history_search(&self.input_history);
             self.screen.mark_dirty();
@@ -358,8 +380,17 @@ impl App {
         }
 
         // Ctrl+C: double-tap → quit, single → clear input.
-        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL, .. })) {
-            let double_tap = t.last_ctrlc.is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
+        if matches!(
+            ev,
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            })
+        ) {
+            let double_tap = t
+                .last_ctrlc
+                .is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
             if self.input.buf.is_empty() || double_tap {
                 return EventOutcome::Quit;
             }
@@ -373,17 +404,32 @@ impl App {
         }
 
         // Ctrl+S: toggle stash.
-        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Char('s'), modifiers: KeyModifiers::CONTROL, .. })) {
+        if matches!(
+            ev,
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('s'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            })
+        ) {
             self.input.toggle_stash();
             self.screen.mark_dirty();
             return EventOutcome::Redraw;
         }
 
         // Esc / double-Esc
-        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Esc, .. })) {
+        if matches!(
+            ev,
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc,
+                ..
+            })
+        ) {
             let in_normal = !self.input.vim_enabled() || !self.input.vim_in_insert_mode();
             if in_normal {
-                let double = t.last_esc.is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
+                let double = t
+                    .last_esc
+                    .is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
                 if double {
                     t.last_esc = None;
                     let restore_mode = t.esc_vim_mode.take();
@@ -423,7 +469,8 @@ impl App {
         // Delegate to InputState::handle_event
         match self.input.handle_event(ev, Some(&mut self.input_history)) {
             Action::Submit(text) if text.trim() == "/settings" => {
-                self.input.open_settings(self.input.vim_enabled(), self.auto_compact);
+                self.input
+                    .open_settings(self.input.vim_enabled(), self.auto_compact);
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
@@ -431,15 +478,16 @@ impl App {
                 self.input.restore_stash();
                 EventOutcome::Submit(text)
             }
-            Action::Settings { vim, auto_compact } => {
-                EventOutcome::Settings { vim, auto_compact }
-            }
+            Action::Settings { vim, auto_compact } => EventOutcome::Settings { vim, auto_compact },
             Action::ToggleMode => {
                 self.mode = self.mode.toggle();
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
-            Action::Resize { width: w, height: h } => {
+            Action::Resize {
+                width: w,
+                height: h,
+            } => {
                 let (w16, h16) = (w as u16, h as u16);
                 if w16 != self.last_width || h16 != self.last_height {
                     self.last_width = w16;
@@ -470,8 +518,17 @@ impl App {
         }
 
         // Ctrl+C: double-tap → cancel agent, single → clear input + queued.
-        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL, .. })) {
-            let double_tap = t.last_ctrlc.is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
+        if matches!(
+            ev,
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            })
+        ) {
+            let double_tap = t
+                .last_ctrlc
+                .is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
             if self.input.buf.is_empty() || double_tap {
                 t.last_ctrlc = None;
                 self.screen.mark_dirty();
@@ -485,7 +542,13 @@ impl App {
         }
 
         // Esc: use resolve_agent_esc for the running-mode logic.
-        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Esc, .. })) {
+        if matches!(
+            ev,
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc,
+                ..
+            })
+        ) {
             match resolve_agent_esc(
                 self.input.vim_mode(),
                 !self.queued_messages.is_empty(),
@@ -572,14 +635,19 @@ impl App {
                         let mut s = String::from_utf8_lossy(&o.stdout).to_string();
                         let stderr = String::from_utf8_lossy(&o.stderr);
                         if !stderr.is_empty() {
-                            if !s.is_empty() { s.push('\n'); }
+                            if !s.is_empty() {
+                                s.push('\n');
+                            }
                             s.push_str(&stderr);
                         }
                         s.truncate(s.trim_end().len());
                         s
                     })
                     .unwrap_or_else(|e| format!("error: {}", e));
-                self.screen.push(Block::Exec { command: cmd.to_string(), output });
+                self.screen.push(Block::Exec {
+                    command: cmd.to_string(),
+                    output,
+                });
             }
             return InputOutcome::Continue;
         }
@@ -590,7 +658,10 @@ impl App {
 
     // ── Agent lifecycle ──────────────────────────────────────────────────
 
-    fn begin_agent_turn(&mut self, input: &str) -> (mpsc::UnboundedReceiver<AgentEvent>, AgentState) {
+    fn begin_agent_turn(
+        &mut self,
+        input: &str,
+    ) -> (mpsc::UnboundedReceiver<AgentEvent>, AgentState) {
         self.screen.begin_turn();
         self.show_user_message(input);
         if self.session.first_user_message.is_none() {
@@ -683,7 +754,9 @@ impl App {
     pub fn resume_session(&mut self) {
         let sessions = session::list_sessions();
         if sessions.is_empty() {
-            self.screen.push(Block::Error { message: "no saved sessions".into() });
+            self.screen.push(Block::Error {
+                message: "no saved sessions".into(),
+            });
             self.screen.flush_blocks();
             return;
         }
@@ -727,7 +800,13 @@ impl App {
             if matches!(msg.role, Role::Tool) {
                 if let Some(ref id) = msg.tool_call_id {
                     let content = msg.content.clone().unwrap_or_default();
-                    tool_outputs.insert(id.clone(), ToolOutput { content, is_error: false });
+                    tool_outputs.insert(
+                        id.clone(),
+                        ToolOutput {
+                            content,
+                            is_error: false,
+                        },
+                    );
                 }
             }
         }
@@ -736,13 +815,17 @@ impl App {
             match msg.role {
                 Role::User => {
                     if let Some(ref content) = msg.content {
-                        self.screen.push(Block::User { text: content.clone() });
+                        self.screen.push(Block::User {
+                            text: content.clone(),
+                        });
                     }
                 }
                 Role::Assistant => {
                     if let Some(ref content) = msg.content {
                         if !content.is_empty() {
-                            self.screen.push(Block::Text { content: content.clone() });
+                            self.screen.push(Block::Text {
+                                content: content.clone(),
+                            });
                         }
                     }
                     if let Some(ref calls) = msg.tool_calls {
@@ -751,7 +834,11 @@ impl App {
                                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
                             let summary = tool_arg_summary(&tc.function.name, &args);
                             let output = tool_outputs.get(&tc.id).cloned();
-                            let status = if output.is_some() { ToolStatus::Ok } else { ToolStatus::Pending };
+                            let status = if output.is_some() {
+                                ToolStatus::Ok
+                            } else {
+                                ToolStatus::Pending
+                            };
                             self.screen.push(Block::ToolCall {
                                 name: tc.function.name.clone(),
                                 summary,
@@ -766,8 +853,12 @@ impl App {
                 Role::Tool => {}
                 Role::System => {
                     if let Some(ref content) = msg.content {
-                        if let Some(summary) = content.strip_prefix("Summary of prior conversation:\n\n") {
-                            self.screen.push(Block::Text { content: summary.to_string() });
+                        if let Some(summary) =
+                            content.strip_prefix("Summary of prior conversation:\n\n")
+                        {
+                            self.screen.push(Block::Text {
+                                content: summary.to_string(),
+                            });
                         }
                     }
                 }
@@ -789,7 +880,11 @@ impl App {
     }
 
     pub fn maybe_generate_title(&mut self) {
-        let has_title = self.session.title.as_ref().is_some_and(|t| !t.trim().is_empty());
+        let has_title = self
+            .session
+            .title
+            .as_ref()
+            .is_some_and(|t| !t.trim().is_empty());
         if has_title || self.pending_title.is_some() {
             return;
         }
@@ -855,7 +950,9 @@ impl App {
         };
 
         if cut == 0 {
-            self.screen.push(Block::Error { message: "not enough history to compact".into() });
+            self.screen.push(Block::Error {
+                message: "not enough history to compact".into(),
+            });
             self.screen.flush_blocks();
             return;
         }
@@ -875,7 +972,9 @@ impl App {
         self.screen.set_throbber(render::Throbber::Compacting);
         loop {
             self.render_screen();
-            if task.is_finished() { break; }
+            if task.is_finished() {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(80)).await;
         }
 
@@ -894,12 +993,16 @@ impl App {
                 self.history.extend(tail);
                 self.save_session();
                 self.screen.clear();
-                self.screen.push(Block::Text { content: summary.clone() });
+                self.screen.push(Block::Text {
+                    content: summary.clone(),
+                });
                 self.screen.flush_blocks();
                 self.screen.set_throbber(render::Throbber::Done);
             }
             Err(e) => {
-                self.screen.push(Block::Error { message: format!("compact failed: {}", e) });
+                self.screen.push(Block::Error {
+                    message: format!("compact failed: {}", e),
+                });
                 self.screen.flush_blocks();
             }
         }
@@ -909,8 +1012,12 @@ impl App {
         if !self.auto_compact {
             return;
         }
-        let Some(ctx) = self.context_window else { return };
-        let Some(tokens) = self.screen.context_tokens() else { return };
+        let Some(ctx) = self.context_window else {
+            return;
+        };
+        let Some(tokens) = self.screen.context_tokens() else {
+            return;
+        };
         if tokens as u64 * 100 >= ctx as u64 * 80 {
             self.compact_history().await;
         }
@@ -918,7 +1025,10 @@ impl App {
 
     pub fn rewind_to(&mut self, block_idx: usize) -> Option<String> {
         let turns = self.screen.user_turns();
-        let turn_text = turns.iter().find(|(i, _)| *i == block_idx).map(|(_, t)| t.clone());
+        let turn_text = turns
+            .iter()
+            .find(|(i, _)| *i == block_idx)
+            .map(|(_, t)| t.clone());
         let user_turns_to_keep = turns.iter().filter(|(i, _)| *i < block_idx).count();
 
         let mut user_count = 0;
@@ -944,7 +1054,9 @@ impl App {
     // ── Agent internals ──────────────────────────────────────────────────
 
     pub fn show_user_message(&mut self, input: &str) {
-        self.screen.push(Block::User { text: input.to_string() });
+        self.screen.push(Block::User {
+            text: input.to_string(),
+        });
     }
 
     pub fn push_user_message(&mut self, input: String) {
@@ -957,7 +1069,12 @@ impl App {
         });
     }
 
-    pub fn spawn_agent(&self, tx: mpsc::UnboundedSender<AgentEvent>, cancel: CancellationToken, steering: Arc<Mutex<Vec<String>>>) -> tokio::task::JoinHandle<Vec<Message>> {
+    pub fn spawn_agent(
+        &self,
+        tx: mpsc::UnboundedSender<AgentEvent>,
+        cancel: CancellationToken,
+        steering: Arc<Mutex<Vec<String>>>,
+    ) -> tokio::task::JoinHandle<Vec<Message>> {
         let api_base = self.api_base.clone();
         let api_key = self.api_key.clone();
         let model = self.model.clone();
@@ -969,15 +1086,36 @@ impl App {
         tokio::spawn(async move {
             let provider = Provider::new(api_base, api_key, client);
             let registry = tools::build_tools();
-            run_agent(&provider, &model, &history, &registry, mode, &permissions, &tx, cancel, steering).await
+            run_agent(
+                &provider,
+                &model,
+                &history,
+                &registry,
+                mode,
+                &permissions,
+                &tx,
+                cancel,
+                steering,
+            )
+            .await
         })
     }
 
     pub fn render_screen(&mut self) {
-        self.screen.draw_prompt_with_queued(&self.input, self.mode, render::term_width(), &self.queued_messages);
+        self.screen.draw_prompt_with_queued(
+            &self.input,
+            self.mode,
+            render::term_width(),
+            &self.queued_messages,
+        );
     }
 
-    pub fn handle_agent_event(&mut self, ev: AgentEvent, pending: &mut Option<PendingTool>, steered_count: &mut usize) -> SessionControl {
+    pub fn handle_agent_event(
+        &mut self,
+        ev: AgentEvent,
+        pending: &mut Option<PendingTool>,
+        steered_count: &mut usize,
+    ) -> SessionControl {
         match ev {
             AgentEvent::TokenUsage { prompt_tokens } => {
                 if prompt_tokens > 0 {
@@ -1004,12 +1142,19 @@ impl App {
             AgentEvent::ToolCall { name, args } => {
                 let summary = tool_arg_summary(&name, &args);
                 self.screen.start_tool(name.clone(), summary, args);
-                *pending = Some(PendingTool { name, start: Instant::now() });
+                *pending = Some(PendingTool {
+                    name,
+                    start: Instant::now(),
+                });
                 SessionControl::Continue
             }
             AgentEvent::ToolResult { content, is_error } => {
                 if pending.is_some() {
-                    let status = if is_error { ToolStatus::Err } else { ToolStatus::Ok };
+                    let status = if is_error {
+                        ToolStatus::Err
+                    } else {
+                        ToolStatus::Ok
+                    };
                     let output = Some(ToolOutput { content, is_error });
                     self.screen.finish_tool(status, output);
                 }
@@ -1090,7 +1235,9 @@ impl App {
                 let tool_name = pending.as_ref().map(|p| p.name.as_str()).unwrap_or("");
                 match self.handle_confirm(tool_name, &desc, &args, reply) {
                     ConfirmAction::Approved => {
-                        if let Some(ref mut p) = pending { p.start = Instant::now(); }
+                        if let Some(ref mut p) = pending {
+                            p.start = Instant::now();
+                        }
                         LoopAction::Continue
                     }
                     ConfirmAction::Denied => {
@@ -1134,24 +1281,31 @@ impl App {
         if agent_running {
             self.render_screen();
         } else {
-            self.screen.draw_prompt(&self.input, self.mode, render::term_width());
+            self.screen
+                .draw_prompt(&self.input, self.mode, render::term_width());
         }
     }
 
     fn export_to_clipboard(&mut self) {
         let text = self.format_conversation_text();
         if text.is_empty() {
-            self.screen.push(Block::Error { message: "nothing to export".into() });
+            self.screen.push(Block::Error {
+                message: "nothing to export".into(),
+            });
             self.screen.flush_blocks();
             return;
         }
         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
             Ok(()) => {
-                self.screen.push(Block::Text { content: "conversation copied to clipboard".into() });
+                self.screen.push(Block::Text {
+                    content: "conversation copied to clipboard".into(),
+                });
                 self.screen.flush_blocks();
             }
             Err(e) => {
-                self.screen.push(Block::Error { message: format!("clipboard error: {}", e) });
+                self.screen.push(Block::Error {
+                    message: format!("clipboard error: {}", e),
+                });
                 self.screen.flush_blocks();
             }
         }
@@ -1193,8 +1347,15 @@ impl App {
 
 pub enum SessionControl {
     Continue,
-    NeedsConfirm { desc: String, args: HashMap<String, serde_json::Value>, reply: tokio::sync::oneshot::Sender<bool> },
-    NeedsAskQuestion { args: HashMap<String, serde_json::Value>, reply: tokio::sync::oneshot::Sender<String> },
+    NeedsConfirm {
+        desc: String,
+        args: HashMap<String, serde_json::Value>,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    NeedsAskQuestion {
+        args: HashMap<String, serde_json::Value>,
+        reply: tokio::sync::oneshot::Sender<String>,
+    },
     Done,
 }
 

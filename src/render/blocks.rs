@@ -12,7 +12,7 @@ use std::time::Duration;
 use super::highlight::{
     print_inline_diff, print_syntax_file, render_code_block, render_markdown_table,
 };
-use super::{crlf, Block, ConfirmChoice, ToolOutput, ToolStatus, truncate_str};
+use super::{crlf, truncate_str, Block, ConfirmChoice, ToolOutput, ToolStatus};
 
 /// Element types for spacing calculation.
 pub(super) enum Element<'a> {
@@ -45,13 +45,12 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
         Block::User { text } => {
             let w = width;
             let content_w = w.saturating_sub(1).max(1);
-            let logical_lines: Vec<String> = text
-                .trim()
-                .lines()
-                .map(|l| l.trim().to_string())
-                .collect();
+            let logical_lines: Vec<String> =
+                text.trim().lines().map(|l| l.trim().to_string()).collect();
             let multiline = logical_lines.len() > 1
-                || logical_lines.first().map_or(false, |l| l.chars().count() > content_w);
+                || logical_lines
+                    .first()
+                    .map_or(false, |l| l.chars().count() > content_w);
             // For multi-line messages, pad all lines to the same width.
             let block_w = if multiline {
                 logical_lines
@@ -65,7 +64,11 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             let mut rows = 0u16;
             for logical_line in &logical_lines {
                 if logical_line.is_empty() {
-                    let fill = if multiline { (block_w + 2).min(content_w + 1) } else { 2 };
+                    let fill = if multiline {
+                        (block_w + 2).min(content_w + 1)
+                    } else {
+                        2
+                    };
                     let _ = out
                         .queue(SetBackgroundColor(theme::USER_BG))
                         .and_then(|o| o.queue(Print(" ".repeat(fill))))
@@ -78,8 +81,9 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
                 let chars: Vec<char> = logical_line.chars().collect();
                 let mut start = 0;
                 loop {
-                    let chunk: String =
-                        chars[start..(start + content_w).min(chars.len())].iter().collect();
+                    let chunk: String = chars[start..(start + content_w).min(chars.len())]
+                        .iter()
+                        .collect();
                     let chunk_len = chunk.chars().count();
                     let full_width = chunk_len >= content_w;
                     let trailing = if full_width {
@@ -92,9 +96,7 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
                     let _ = out
                         .queue(SetBackgroundColor(theme::USER_BG))
                         .and_then(|o| o.queue(SetAttribute(Attribute::Bold)))
-                        .and_then(|o| {
-                            o.queue(Print(format!(" {}{}", chunk, " ".repeat(trailing))))
-                        })
+                        .and_then(|o| o.queue(Print(format!(" {}{}", chunk, " ".repeat(trailing)))))
                         .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
                         .and_then(|o| o.queue(ResetColor));
                     let wraps = full_width && start + content_w < chars.len();
@@ -147,9 +149,23 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             }
             rows
         }
-        Block::ToolCall { name, summary, status, elapsed, output, args } => {
-            render_tool(out, name, summary, args, *status, *elapsed, output.as_ref(), width)
-        }
+        Block::ToolCall {
+            name,
+            summary,
+            status,
+            elapsed,
+            output,
+            args,
+        } => render_tool(
+            out,
+            name,
+            summary,
+            args,
+            *status,
+            *elapsed,
+            output.as_ref(),
+            width,
+        ),
         Block::Confirm { tool, desc, choice } => {
             render_confirm_result(out, tool, desc, choice.clone())
         }
@@ -210,7 +226,10 @@ pub(super) fn render_tool(
         None
     };
     let tl = if name == "bash" && status == ToolStatus::Pending {
-        let ms = args.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(120_000);
+        let ms = args
+            .get("timeout_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(120_000);
         let secs = ms / 1000;
         Some(if secs.is_multiple_of(60) {
             format!("timeout {}m", secs / 60)
@@ -232,7 +251,12 @@ pub(super) fn render_tool(
     rows
 }
 
-fn render_confirm_result(out: &mut io::Stdout, tool: &str, desc: &str, choice: Option<ConfirmChoice>) -> u16 {
+fn render_confirm_result(
+    out: &mut io::Stdout,
+    tool: &str,
+    desc: &str,
+    choice: Option<ConfirmChoice>,
+) -> u16 {
     let mut rows = 2u16;
 
     let _ = out.queue(SetForegroundColor(theme::APPLY));
@@ -344,8 +368,14 @@ fn print_dim_count(out: &mut io::Stdout, count: usize, singular: &str, plural: &
 }
 
 fn render_edit_output(out: &mut io::Stdout, args: &HashMap<String, serde_json::Value>) -> u16 {
-    let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-    let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+    let old = args
+        .get("old_string")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let new = args
+        .get("new_string")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
     if new.is_empty() {
         print_dim_count(out, old.lines().count(), "line deleted", "lines deleted")
@@ -403,7 +433,11 @@ fn render_bash_output(out: &mut io::Stdout, content: &str, is_error: bool) -> u1
         crlf(out);
         rows += 1;
     }
-    let visible = if total > MAX_LINES { &lines[total - MAX_LINES..] } else { &lines[..] };
+    let visible = if total > MAX_LINES {
+        &lines[total - MAX_LINES..]
+    } else {
+        &lines[..]
+    };
     for line in visible {
         if is_error {
             let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));

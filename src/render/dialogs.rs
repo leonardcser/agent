@@ -36,8 +36,10 @@ pub fn parse_questions(args: &HashMap<String, serde_json::Value>) -> Vec<Questio
         .filter_map(|q| {
             let question = q.get("question")?.as_str()?.to_string();
             let header = q.get("header")?.as_str()?.to_string();
-            let multi_select =
-                q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false);
+            let multi_select = q
+                .get("multiSelect")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let options = q
                 .get("options")?
                 .as_array()?
@@ -49,20 +51,28 @@ pub fn parse_questions(args: &HashMap<String, serde_json::Value>) -> Vec<Questio
                     })
                 })
                 .collect();
-            Some(Question { question, header, options, multi_select })
+            Some(Question {
+                question,
+                header,
+                options,
+                multi_select,
+            })
         })
         .collect()
 }
 
 /// Compute preview row count for the confirm dialog.
-fn confirm_preview_row_count(
-    tool_name: &str,
-    args: &HashMap<String, serde_json::Value>,
-) -> u16 {
+fn confirm_preview_row_count(tool_name: &str, args: &HashMap<String, serde_json::Value>) -> u16 {
     match tool_name {
         "edit_file" => {
-            let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-            let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            let old = args
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new = args
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
             count_inline_diff_rows(old, new, path, old)
         }
@@ -83,8 +93,14 @@ fn render_confirm_preview(
 ) {
     match tool_name {
         "edit_file" => {
-            let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-            let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            let old = args
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new = args
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
             print_inline_diff(out, old, new, path, old, max_rows);
         }
@@ -211,7 +227,10 @@ pub fn show_confirm(
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
     let choice = loop {
-        if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = event::read() {
+        if let Ok(Event::Key(KeyEvent {
+            code, modifiers, ..
+        })) = event::read()
+        {
             if editing {
                 match (code, modifiers) {
                     (KeyCode::Enter, _) => {
@@ -372,7 +391,10 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
     let result = loop {
-        if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = event::read() {
+        if let Ok(Event::Key(KeyEvent {
+            code, modifiers, ..
+        })) = event::read()
+        {
             match (code, modifiers) {
                 (KeyCode::Enter, _) => break Some(turns[selected].0),
                 (KeyCode::Esc, _) => break None,
@@ -417,7 +439,9 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
     let mut out = io::stdout();
     let (width, height) = terminal::size().unwrap_or((80, 24));
     let w = width.saturating_sub(1) as usize;
-    let max_visible = (height as usize).saturating_sub(7).min(entries.len().max(1));
+    let max_visible = (height as usize)
+        .saturating_sub(7)
+        .min(entries.len().max(1));
     let total_rows = (max_visible + 6) as u16;
     let bar_row = height.saturating_sub(total_rows);
 
@@ -513,7 +537,10 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
     let result = loop {
         let has_event = event::poll(Duration::from_millis(500)).unwrap_or(false);
         if has_event {
-            if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = event::read() {
+            if let Ok(Event::Key(KeyEvent {
+                code, modifiers, ..
+            })) = event::read()
+            {
                 match (code, modifiers) {
                     (KeyCode::Enter, _) => {
                         if let Some(entry) = filtered.get(selected) {
@@ -556,8 +583,7 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
                     scroll_offset = 0;
                 } else {
                     selected = selected.min(filtered.len().saturating_sub(1));
-                    scroll_offset =
-                        scroll_offset.min(filtered.len().saturating_sub(max_visible));
+                    scroll_offset = scroll_offset.min(filtered.len().saturating_sub(max_visible));
                 }
             }
         }
@@ -626,7 +652,11 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
             let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
             let _ = out.queue(Print(" "));
             for (i, q) in questions.iter().enumerate() {
-                let bullet = if answered[i] || visited[i] { "■" } else { "□" };
+                let bullet = if answered[i] || visited[i] {
+                    "■"
+                } else {
+                    "□"
+                };
                 if i == active_tab {
                     let _ = out.queue(SetForegroundColor(theme::ACCENT));
                     let _ = out.queue(SetAttribute(Attribute::Bold));
@@ -784,12 +814,23 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
         let _ = out.flush();
     };
 
-    draw(active_tab, &selections, &multi_toggles, &other_texts, &editing_other, &visited, &answered);
+    draw(
+        active_tab,
+        &selections,
+        &multi_toggles,
+        &other_texts,
+        &editing_other,
+        &visited,
+        &answered,
+    );
 
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
     let cancelled = loop {
-        if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = event::read() {
+        if let Ok(Event::Key(KeyEvent {
+            code, modifiers, ..
+        })) = event::read()
+        {
             let q = &questions[active_tab];
             let other_idx = q.options.len();
 
@@ -1047,7 +1088,10 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                 }
             } else {
                 serde_json::Value::Array(
-                    selected.into_iter().map(serde_json::Value::String).collect(),
+                    selected
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
                 )
             }
         } else if selections[i] == other_idx {

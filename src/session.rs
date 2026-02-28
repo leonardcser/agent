@@ -1,10 +1,10 @@
+use crate::config;
 use crate::provider::Message;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::config;
 
 static SESSION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -155,8 +155,12 @@ pub fn list_sessions() -> Vec<SessionMeta> {
         }
         // Fall back to reading the full session file
         let path = dir.join(format!("{}.json", id));
-        let Ok(contents) = fs::read_to_string(&path) else { continue };
-        let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) else { continue };
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) else {
+            continue;
+        };
         if meta.id.is_empty() {
             meta.id = id;
         }

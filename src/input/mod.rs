@@ -458,7 +458,10 @@ impl InputState {
                 ..
             }) => {
                 let s = self.settings.take().unwrap();
-                Action::Settings { vim: s.vim_enabled, auto_compact: s.auto_compact }
+                Action::Settings {
+                    vim: s.vim_enabled,
+                    auto_compact: s.auto_compact,
+                }
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Enter,
@@ -765,7 +768,6 @@ impl InputState {
         }
     }
 }
-
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

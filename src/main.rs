@@ -51,21 +51,27 @@ async fn main() {
     let args = Args::parse();
     let cfg = config::Config::load();
 
-    let api_base = args.api_base
+    let api_base = args
+        .api_base
         .or(cfg.api_base)
         .unwrap_or_else(|| "http://localhost:11434/v1".into());
     let api_key_env = args.api_key_env.or(cfg.api_key_env).unwrap_or_default();
-    let api_key = args.api_key
+    let api_key = args
+        .api_key
         .or(cfg.api_key)
         .unwrap_or_else(|| std::env::var(&api_key_env).unwrap_or_default());
-    let model = args.model
+    let model = args
+        .model
         .or(cfg.model)
         .expect("model must be set via --model or config file");
 
     if let Some(level) = log::parse_level(&args.log_level) {
         log::set_level(level);
     } else {
-        eprintln!("warning: invalid --log-level {}, defaulting to info", args.log_level);
+        eprintln!(
+            "warning: invalid --log-level {}, defaulting to info",
+            args.log_level
+        );
     }
 
     if args.bench {
@@ -82,8 +88,10 @@ async fn main() {
             #[cfg(unix)]
             {
                 use tokio::signal::unix::{signal, SignalKind};
-                let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
-                let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+                let mut sigint =
+                    signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
                 tokio::select! {
                     _ = sigint.recv() => {}
                     _ = sigterm.recv() => {}
@@ -104,11 +112,22 @@ async fn main() {
         });
     }
 
-    let mut app = App::new(api_base, api_key, model, vim_enabled, auto_compact, shared_session);
+    let mut app = App::new(
+        api_base,
+        api_key,
+        model,
+        vim_enabled,
+        auto_compact,
+        shared_session,
+    );
 
     // Fetch context window in background so startup isn't blocked by the network call.
     let ctx_rx = {
-        let provider = Provider::new(app.api_base.clone(), app.api_key.clone(), app.client.clone());
+        let provider = Provider::new(
+            app.api_base.clone(),
+            app.api_key.clone(),
+            app.client.clone(),
+        );
         let model = app.model.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
@@ -155,7 +174,10 @@ pub fn expand_at_refs(input: &str) -> String {
     let mut result = input.to_string();
     for path in &refs {
         if let Ok(contents) = std::fs::read_to_string(path) {
-            result.push_str(&format!("\n\nContents of {}:\n```\n{}\n```", path, contents));
+            result.push_str(&format!(
+                "\n\nContents of {}:\n```\n{}\n```",
+                path, contents
+            ));
         }
     }
     result

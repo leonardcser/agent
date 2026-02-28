@@ -12,14 +12,35 @@ use tokio_util::sync::CancellationToken;
 
 pub enum AgentEvent {
     Text(String),
-    Steered { text: String, count: usize },
-    ToolCall { name: String, args: HashMap<String, Value> },
+    Steered {
+        text: String,
+        count: usize,
+    },
+    ToolCall {
+        name: String,
+        args: HashMap<String, Value>,
+    },
     ToolOutputChunk(String),
-    ToolResult { content: String, is_error: bool },
-    Confirm { desc: String, args: HashMap<String, Value>, reply: tokio::sync::oneshot::Sender<bool> },
-    AskQuestion { args: HashMap<String, Value>, reply: tokio::sync::oneshot::Sender<String> },
-    TokenUsage { prompt_tokens: u32 },
-    Retrying { delay: std::time::Duration, attempt: u32 },
+    ToolResult {
+        content: String,
+        is_error: bool,
+    },
+    Confirm {
+        desc: String,
+        args: HashMap<String, Value>,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    AskQuestion {
+        args: HashMap<String, Value>,
+        reply: tokio::sync::oneshot::Sender<String>,
+    },
+    TokenUsage {
+        prompt_tokens: u32,
+    },
+    Retrying {
+        delay: std::time::Duration,
+        attempt: u32,
+    },
     Done,
     Error(String),
 }
@@ -70,7 +91,10 @@ pub async fn run_agent(
             if !pending.is_empty() {
                 let count = pending.len();
                 let text = pending.join("\n");
-                let _ = tx.send(AgentEvent::Steered { text: text.clone(), count });
+                let _ = tx.send(AgentEvent::Steered {
+                    text: text.clone(),
+                    count,
+                });
                 messages.push(Message {
                     role: Role::User,
                     content: Some(text),
@@ -86,7 +110,10 @@ pub async fn run_agent(
         };
         let resp = {
             let _perf = crate::perf::begin("llm_chat");
-            match provider.chat(&messages, &tool_defs, model, &cancel, Some(&on_retry)).await {
+            match provider
+                .chat(&messages, &tool_defs, model, &cancel, Some(&on_retry))
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     let _ = tx.send(AgentEvent::Error(e));
@@ -97,7 +124,9 @@ pub async fn run_agent(
         };
 
         if let Some(tokens) = resp.prompt_tokens {
-            let _ = tx.send(AgentEvent::TokenUsage { prompt_tokens: tokens });
+            let _ = tx.send(AgentEvent::TokenUsage {
+                prompt_tokens: tokens,
+            });
         }
 
         if let Some(ref content) = resp.content {
@@ -190,7 +219,8 @@ pub async fn run_agent(
                     continue;
                 }
                 Decision::Ask => {
-                    let desc = tool.needs_confirm(&args)
+                    let desc = tool
+                        .needs_confirm(&args)
                         .unwrap_or_else(|| tc.function.name.clone());
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = tx.send(AgentEvent::Confirm {
@@ -224,7 +254,10 @@ pub async fn run_agent(
                     reply: reply_tx,
                 });
                 let answer = reply_rx.await.unwrap_or_else(|_| "no response".into());
-                ToolResult { content: answer, is_error: false }
+                ToolResult {
+                    content: answer,
+                    is_error: false,
+                }
             } else if tc.function.name == "bash" {
                 let _perf = crate::perf::begin("tool_bash");
                 execute_bash_streaming(&args, tx).await
@@ -232,13 +265,17 @@ pub async fn run_agent(
                 let _perf = crate::perf::begin("tool_sync");
                 tokio::task::block_in_place(|| tool.execute(&args))
             };
-            log::entry(log::Level::Debug, "tool_result", &serde_json::json!({
-                "tool": tc.function.name,
-                "id": tc.id,
-                "is_error": is_error,
-                "content_len": content.len(),
-                "content_preview": &content[..content.len().min(500)],
-            }));
+            log::entry(
+                log::Level::Debug,
+                "tool_result",
+                &serde_json::json!({
+                    "tool": tc.function.name,
+                    "id": tc.id,
+                    "is_error": is_error,
+                    "content_len": content.len(),
+                    "content_preview": &content[..content.len().min(500)],
+                }),
+            );
             let model_content = match tc.function.name.as_str() {
                 "grep" => trim_tool_output_for_model(&content, 200),
                 "glob" => trim_tool_output_for_model(&content, 200),
@@ -250,10 +287,7 @@ pub async fn run_agent(
                 tool_calls: None,
                 tool_call_id: Some(tc.id.clone()),
             });
-            let _ = tx.send(AgentEvent::ToolResult {
-                content,
-                is_error,
-            });
+            let _ = tx.send(AgentEvent::ToolResult { content, is_error });
         }
     }
 }
@@ -286,7 +320,12 @@ async fn execute_bash_streaming(
         .spawn()
     {
         Ok(c) => c,
-        Err(e) => return ToolResult { content: e.to_string(), is_error: true },
+        Err(e) => {
+            return ToolResult {
+                content: e.to_string(),
+                is_error: true,
+            }
+        }
     };
 
     let stdout = child.stdout.take().unwrap();
@@ -338,5 +377,8 @@ async fn execute_bash_streaming(
 
     let status = child.wait().await;
     let is_error = status.map(|s| !s.success()).unwrap_or(true);
-    ToolResult { content: output, is_error }
+    ToolResult {
+        content: output,
+        is_error,
+    }
 }

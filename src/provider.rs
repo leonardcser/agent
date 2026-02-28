@@ -55,7 +55,10 @@ impl<'de> Deserialize<'de> for AlwaysFunction {
         if v == "function" {
             Ok(AlwaysFunction)
         } else {
-            Err(serde::de::Error::custom(format!("expected \"function\", got \"{}\"", v)))
+            Err(serde::de::Error::custom(format!(
+                "expected \"function\", got \"{}\"",
+                v
+            )))
         }
     }
 }
@@ -76,7 +79,10 @@ pub struct FunctionSchema {
 
 impl ToolDefinition {
     pub fn new(function: FunctionSchema) -> Self {
-        Self { def_type: AlwaysFunction, function }
+        Self {
+            def_type: AlwaysFunction,
+            function,
+        }
     }
 }
 
@@ -85,7 +91,6 @@ pub struct LLMResponse {
     pub tool_calls: Vec<ToolCall>,
     pub prompt_tokens: Option<u32>,
 }
-
 
 pub struct Provider {
     api_base: String,
@@ -117,11 +122,15 @@ impl Provider {
             body.insert("tools", serde_json::to_value(tools).unwrap());
         }
 
-        log::entry(log::Level::Debug, "request", &serde_json::json!({
-            "model": model,
-            "messages": messages,
-            "tool_count": tools.len(),
-        }));
+        log::entry(
+            log::Level::Debug,
+            "request",
+            &serde_json::json!({
+                "model": model,
+                "messages": messages,
+                "tool_count": tools.len(),
+            }),
+        );
 
         let url = format!("{}/chat/completions", self.api_base);
         let max_retries = 9;
@@ -161,7 +170,9 @@ impl Provider {
                     let delay = Duration::from_millis(500 * 2u64.pow(attempt as u32));
                     // Only show retrying after at least one retry has occurred
                     if attempt > 0 {
-                        if let Some(f) = on_retry { f(delay, attempt as u32); }
+                        if let Some(f) = on_retry {
+                            f(delay, attempt as u32);
+                        }
                     }
                     tokio::time::sleep(delay).await;
                     continue;
@@ -171,9 +182,7 @@ impl Provider {
 
             let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
 
-            let choice = data["choices"]
-                .get(0)
-                .ok_or("no choices in response")?;
+            let choice = data["choices"].get(0).ok_or("no choices in response")?;
             let msg = &choice["message"];
 
             let content = msg["content"].as_str().map(|s| s.to_string());
@@ -186,11 +195,15 @@ impl Provider {
 
             let prompt_tokens = data["usage"]["prompt_tokens"].as_u64().map(|n| n as u32);
 
-            log::entry(log::Level::Debug, "response", &serde_json::json!({
-                "content": content,
-                "tool_calls": tool_calls,
-                "prompt_tokens": prompt_tokens,
-            }));
+            log::entry(
+                log::Level::Debug,
+                "response",
+                &serde_json::json!({
+                    "content": content,
+                    "tool_calls": tool_calls,
+                    "prompt_tokens": prompt_tokens,
+                }),
+            );
 
             return Ok(LLMResponse {
                 content,
@@ -266,9 +279,7 @@ impl Provider {
             tool_calls: None,
             tool_call_id: None,
         };
-        let resp = self
-            .chat(&[system, user], &[], model, cancel, None)
-            .await?;
+        let resp = self.chat(&[system, user], &[], model, cancel, None).await?;
         let summary = resp.content.unwrap_or_default();
         if summary.trim().is_empty() {
             return Err("empty summary".into());
@@ -276,7 +287,11 @@ impl Provider {
         Ok(summary)
     }
 
-    pub async fn complete_title(&self, first_user_message: &str, model: &str) -> Result<String, String> {
+    pub async fn complete_title(
+        &self,
+        first_user_message: &str,
+        model: &str,
+    ) -> Result<String, String> {
         let prompt = format!(
             "Generate a short session title (3-6 words) for: \"{}\"",
             first_user_message.replace('\n', " ")
@@ -291,10 +306,14 @@ impl Provider {
             "stop": ["\n"],
         });
 
-        log::entry(log::Level::Debug, "title_request", &serde_json::json!({
-            "model": model,
-            "prompt_len": first_user_message.len(),
-        }));
+        log::entry(
+            log::Level::Debug,
+            "title_request",
+            &serde_json::json!({
+                "model": model,
+                "prompt_len": first_user_message.len(),
+            }),
+        );
 
         let url = format!("{}/completions", self.api_base);
         let mut req = self.client.post(&url).json(&body);
@@ -318,9 +337,13 @@ impl Provider {
             .to_string();
 
         let title = normalize_title(&text);
-        log::entry(log::Level::Debug, "title_response", &serde_json::json!({
-            "title": title,
-        }));
+        log::entry(
+            log::Level::Debug,
+            "title_response",
+            &serde_json::json!({
+                "title": title,
+            }),
+        );
 
         if title.is_empty() {
             Err("empty title".into())

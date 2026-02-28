@@ -24,7 +24,10 @@ pub fn begin(label: &'static str) -> Option<Guard> {
     if !enabled() {
         return None;
     }
-    Some(Guard { label, start: Instant::now() })
+    Some(Guard {
+        label,
+        start: Instant::now(),
+    })
 }
 
 pub struct Guard {
@@ -36,7 +39,10 @@ impl Drop for Guard {
     fn drop(&mut self) {
         let dur = self.start.elapsed();
         if let Ok(mut samples) = SAMPLES.lock() {
-            samples.push(Sample { label: self.label, dur });
+            samples.push(Sample {
+                label: self.label,
+                dur,
+            });
         }
     }
 }

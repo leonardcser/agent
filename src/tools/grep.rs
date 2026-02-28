@@ -96,14 +96,15 @@ impl Tool for GrepTool {
         let before_ctx = int_arg(args, "-B");
         let context = {
             let c = int_arg(args, "context");
-            if c > 0 { c } else { int_arg(args, "-C") }
+            if c > 0 {
+                c
+            } else {
+                int_arg(args, "-C")
+            }
         };
         let head_limit = int_arg(args, "head_limit");
         let offset = int_arg(args, "offset");
-        let line_numbers = args
-            .get("-n")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let line_numbers = args.get("-n").and_then(|v| v.as_bool()).unwrap_or(true);
         let timeout = timeout_arg(args, 30);
 
         let search_path = if path.is_empty() { ".".into() } else { path };

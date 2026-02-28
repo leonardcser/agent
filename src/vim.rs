@@ -142,7 +142,9 @@ impl Vim {
     fn handle_insert(&mut self, key: KeyEvent, buf: &mut String, cpos: &mut usize) -> Action {
         match key {
             // Esc or Ctrl+[ → normal mode
-            KeyEvent { code: KeyCode::Esc, .. }
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            }
             | KeyEvent {
                 code: KeyCode::Char('['),
                 modifiers: KeyModifiers::CONTROL,
@@ -291,8 +293,7 @@ impl Vim {
     fn handle_normal_char(&mut self, c: char, buf: &mut String, cpos: &mut usize) -> Action {
         // Count digit accumulation.
         if c.is_ascii_digit() && (c != '0' || self.count1.is_some()) {
-            self.count1 =
-                Some(self.count1.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
+            self.count1 = Some(self.count1.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
             return Action::Consumed;
         }
 
@@ -1427,9 +1428,7 @@ fn find_char(buf: &str, cpos: usize, kind: FindKind, ch: char) -> Option<usize> 
                 if c == ch {
                     let pos = sol + i;
                     return Some(match kind {
-                        FindKind::BackwardTill => {
-                            next_char_boundary(buf, pos).min(cpos)
-                        }
+                        FindKind::BackwardTill => next_char_boundary(buf, pos).min(cpos),
                         _ => pos,
                     });
                 }
@@ -1499,9 +1498,7 @@ fn text_object_word(
         } else {
             // No trailing whitespace — include leading.
             let mut a_start = byte_start;
-            while a_start > 0
-                && buf[..a_start].ends_with([' ', '\t'])
-            {
+            while a_start > 0 && buf[..a_start].ends_with([' ', '\t']) {
                 a_start -= 1;
             }
             Some((a_start, byte_end))
@@ -1509,12 +1506,7 @@ fn text_object_word(
     }
 }
 
-fn text_object_quote(
-    buf: &str,
-    cpos: usize,
-    inner: bool,
-    quote: char,
-) -> Option<(usize, usize)> {
+fn text_object_quote(buf: &str, cpos: usize, inner: bool, quote: char) -> Option<(usize, usize)> {
     // Find the opening quote before or at cpos, and closing quote after.
     let line_s = line_start(buf, cpos);
     let line_e = line_end(buf, cpos);
@@ -1949,10 +1941,10 @@ mod tests {
         // Move to end of first line.
         vim.handle_key(key('$'), &mut buf, &mut cpos);
         assert_eq!(cpos, 1); // On second 'a'.
-        // 'l' should NOT cross to next line.
+                             // 'l' should NOT cross to next line.
         vim.handle_key(key('l'), &mut buf, &mut cpos);
         assert_eq!(cpos, 1); // Still on 'a'.
-        // Move to start of second line.
+                             // Move to start of second line.
         vim.handle_key(key('j'), &mut buf, &mut cpos);
         vim.handle_key(key('0'), &mut buf, &mut cpos);
         assert_eq!(cpos, 3);
