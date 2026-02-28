@@ -727,7 +727,10 @@ impl Screen {
         pre_prompt_rows: u16,
     ) -> (u16, u16, bool) {
         let usable = width.saturating_sub(1);
-        let height = terminal::size().map(|(_, h)| h as usize).unwrap_or(24);
+        let height = terminal::size()
+            .map(|(_, h)| h as usize)
+            .unwrap_or(24)
+            .saturating_sub(pre_prompt_rows as usize);
         let stash_rows = if state.stash.is_some() { 1 } else { 0 };
         let queued_rows = queued.len();
 
