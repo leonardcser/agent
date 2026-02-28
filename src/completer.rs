@@ -123,6 +123,7 @@ impl Completer {
     }
 
     fn filter(&mut self) {
+        let _perf = crate::perf::begin("completer_filter");
         if self.query.is_empty() {
             self.results = self.all_items.clone();
         } else {

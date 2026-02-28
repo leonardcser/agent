@@ -200,6 +200,7 @@ impl App {
     }
 
     pub fn save_session(&mut self) {
+        let _perf = crate::perf::begin("save_session");
         if self.history.is_empty() {
             return;
         }
@@ -659,6 +660,7 @@ impl App {
     }
 
     pub async fn run_session(&mut self) {
+        let _perf = crate::perf::begin("run_session");
         terminal::enable_raw_mode().ok();
         let _ = io::stdout().execute(EnableBracketedPaste);
         self.screen.set_throbber(render::Throbber::Working);

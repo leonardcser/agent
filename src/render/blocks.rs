@@ -40,6 +40,7 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
 }
 
 pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) -> u16 {
+    let _perf = crate::perf::begin("render_block");
     match block {
         Block::User { text } => {
             let w = width;

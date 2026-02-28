@@ -4,6 +4,7 @@ pub mod completer;
 mod config;
 pub mod input;
 mod log;
+pub mod perf;
 mod permissions;
 mod provider;
 pub mod render;
@@ -34,6 +35,8 @@ struct Args {
     model: Option<String>,
     #[arg(long, default_value = "info", value_name = "LEVEL")]
     log_level: String,
+    #[arg(long, help = "Print performance timing summary on exit")]
+    bench: bool,
 }
 
 #[tokio::main]
@@ -56,6 +59,10 @@ async fn main() {
         log::set_level(level);
     } else {
         eprintln!("warning: invalid --log-level {}, defaulting to info", args.log_level);
+    }
+
+    if args.bench {
+        perf::enable();
     }
 
     let vim_enabled = cfg.vim_mode.unwrap_or(false);
@@ -187,6 +194,7 @@ async fn main() {
         app.maybe_auto_compact().await;
     }
     app.save_session();
+    perf::print_summary();
 }
 
 /// Expand `@path` references in user input by appending file contents.

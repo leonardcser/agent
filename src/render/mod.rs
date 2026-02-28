@@ -458,6 +458,7 @@ impl Screen {
     }
 
     pub fn flush_blocks(&mut self) {
+        let _perf = crate::perf::begin("flush_blocks");
         if let Some(tool) = self.active_tool.take() {
             let elapsed = tool.elapsed();
             self.history.push(Block::ToolCall {
@@ -592,6 +593,8 @@ impl Screen {
         width: usize,
         queued: &[String],
     ) {
+        let _perf = crate::perf::begin("draw_prompt");
+
         if let Some(start) = self.working.since {
             let frame = (start.elapsed().as_millis() / 150) as usize % SPINNER_FRAMES.len();
             if frame != self.working.last_spinner_frame {

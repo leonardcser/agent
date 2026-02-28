@@ -89,6 +89,7 @@ pub fn time_ago(ts_ms: u64, now_ms: u64) -> String {
 }
 
 pub fn save(session: &Session) {
+    let _perf = crate::perf::begin("session_save");
     let dir = sessions_dir();
     let _ = fs::create_dir_all(&dir);
     let ts = now_ms();
@@ -119,6 +120,7 @@ pub fn load(id: &str) -> Option<Session> {
 }
 
 pub fn list_sessions() -> Vec<SessionMeta> {
+    let _perf = crate::perf::begin("session_list");
     let dir = sessions_dir();
     let Ok(entries) = fs::read_dir(&dir) else {
         return Vec::new();

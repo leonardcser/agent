@@ -84,12 +84,15 @@ pub async fn run_agent(
         let on_retry = |delay: std::time::Duration, attempt: u32| {
             let _ = tx.send(AgentEvent::Retrying { delay, attempt });
         };
-        let resp = match provider.chat(&messages, &tool_defs, model, &cancel, Some(&on_retry)).await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = tx.send(AgentEvent::Error(e));
-                messages.remove(0);
-                return messages;
+        let resp = {
+            let _perf = crate::perf::begin("llm_chat");
+            match provider.chat(&messages, &tool_defs, model, &cancel, Some(&on_retry)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(AgentEvent::Error(e));
+                    messages.remove(0);
+                    return messages;
+                }
             }
         };
 
@@ -223,8 +226,10 @@ pub async fn run_agent(
                 let answer = reply_rx.await.unwrap_or_else(|_| "no response".into());
                 ToolResult { content: answer, is_error: false }
             } else if tc.function.name == "bash" {
+                let _perf = crate::perf::begin("tool_bash");
                 execute_bash_streaming(&args, tx).await
             } else {
+                let _perf = crate::perf::begin("tool_sync");
                 tokio::task::block_in_place(|| tool.execute(&args))
             };
             log::entry(log::Level::Debug, "tool_result", &serde_json::json!({
