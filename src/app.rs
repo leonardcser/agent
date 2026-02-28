@@ -275,6 +275,7 @@ impl App {
         }
         self.save_session();
 
+        self.screen.move_cursor_past_prompt();
         let _ = io::stdout().execute(DisableBracketedPaste);
         terminal::disable_raw_mode().ok();
     }

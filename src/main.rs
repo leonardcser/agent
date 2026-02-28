@@ -116,6 +116,7 @@ async fn main() {
             }
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
+            println!();
             std::process::exit(0);
         });
     }

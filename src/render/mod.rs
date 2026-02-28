@@ -365,6 +365,22 @@ impl Screen {
         }
     }
 
+    /// Move the cursor to the line after the prompt so the shell resumes cleanly.
+    pub fn move_cursor_past_prompt(&self) {
+        if self.prompt.drawn {
+            let end_row = self.prompt.redraw_row + self.prompt.prev_rows;
+            let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
+            let mut out = io::stdout();
+            let _ = out.queue(cursor::MoveTo(0, end_row));
+            // At the terminal bottom there's no row below to land on —
+            // emit a newline so the shell prompt gets a fresh line.
+            if end_row >= height.saturating_sub(1) {
+                let _ = out.queue(Print("\n"));
+            }
+            let _ = out.flush();
+        }
+    }
+
     pub fn begin_turn(&mut self) {
         self.history.last_block_rows = 0;
         self.active_tool = None;
