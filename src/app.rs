@@ -479,6 +479,7 @@ impl App {
             Action::Settings { vim, auto_compact } => EventOutcome::Settings { vim, auto_compact },
             Action::ToggleMode => {
                 self.mode = self.mode.toggle();
+                self.app_state.set_mode(self.mode);
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
@@ -590,6 +591,7 @@ impl App {
             }
             Action::ToggleMode => {
                 self.mode = self.mode.toggle();
+                self.app_state.set_mode(self.mode);
                 self.screen.mark_dirty();
             }
             Action::Redraw => {
