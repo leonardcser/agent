@@ -28,6 +28,8 @@ pub enum AgentEvent {
     Confirm {
         desc: String,
         args: HashMap<String, Value>,
+        /// Glob pattern for "always allow this domain/pattern" session approval.
+        approval_pattern: Option<String>,
         reply: tokio::sync::oneshot::Sender<bool>,
     },
     AskQuestion {
@@ -50,13 +52,18 @@ fn system_prompt(mode: Mode) -> String {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".into());
 
-    let template = match mode {
+    let base = include_str!("prompts/system.txt");
+    let overlay = match mode {
         Mode::Apply | Mode::Yolo => include_str!("prompts/system_apply.txt"),
         Mode::Plan => include_str!("prompts/system_plan.txt"),
-        Mode::Normal => include_str!("prompts/system.txt"),
+        Mode::Normal => "",
     };
 
-    let mut prompt = template.replace("{cwd}", &cwd);
+    let mut prompt = base.replace("{cwd}", &cwd);
+    if !overlay.is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(overlay);
+    }
 
     if let Some(instructions) = crate::instructions::load() {
         prompt.push_str("\n\n");
@@ -206,6 +213,21 @@ pub async fn run_agent(
                         _ => bash_decision,
                     }
                 }
+            } else if tc.function.name == "web_fetch" {
+                let url = tools::str_arg(&args, "url");
+                let tool_decision = permissions.check_tool(mode, "web_fetch");
+                if tool_decision == Decision::Deny {
+                    Decision::Deny
+                } else {
+                    let pattern_decision =
+                        permissions.check_tool_pattern(mode, "web_fetch", &url);
+                    match (&tool_decision, &pattern_decision) {
+                        (_, Decision::Deny) => Decision::Deny,
+                        (_, Decision::Allow) => Decision::Allow,
+                        (Decision::Allow, Decision::Ask) => Decision::Ask,
+                        _ => pattern_decision,
+                    }
+                }
             } else {
                 permissions.check_tool(mode, &tc.function.name)
             };
@@ -229,10 +251,12 @@ pub async fn run_agent(
                     let desc = tool
                         .needs_confirm(&args)
                         .unwrap_or_else(|| tc.function.name.clone());
+                    let approval_pattern = tool.approval_pattern(&args);
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = tx.send(AgentEvent::Confirm {
                         desc,
                         args: args.clone(),
+                        approval_pattern,
                         reply: reply_tx,
                     });
                     let confirmed = reply_rx.await.unwrap_or(false);

@@ -15,7 +15,7 @@ use crossterm::{
     terminal, ExecutableCommand,
 };
 use futures_util::StreamExt;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -38,7 +38,7 @@ pub struct App {
     pub app_state: state::State,
     pub input: InputState,
     pub queued_messages: Vec<String>,
-    pub auto_approved: HashSet<String>,
+    pub auto_approved: HashMap<String, Vec<glob::Pattern>>,
     pub session: session::Session,
     pub shared_session: Arc<Mutex<Option<Session>>>,
     pub context_window: Option<u32>,
@@ -114,7 +114,7 @@ impl App {
             app_state,
             input,
             queued_messages: Vec::new(),
-            auto_approved: HashSet::new(),
+            auto_approved: HashMap::new(),
             session: session::Session::new(),
             shared_session,
             context_window: None,
@@ -1167,8 +1167,8 @@ impl App {
                 *pending = None;
                 SessionControl::Continue
             }
-            AgentEvent::Confirm { desc, args, reply } => {
-                SessionControl::NeedsConfirm { desc, args, reply }
+            AgentEvent::Confirm { desc, args, approval_pattern, reply } => {
+                SessionControl::NeedsConfirm { desc, args, approval_pattern, reply }
             }
             AgentEvent::AskQuestion { args, reply } => {
                 SessionControl::NeedsAskQuestion { args, reply }
@@ -1191,17 +1191,30 @@ impl App {
         tool_name: &str,
         desc: &str,
         args: &HashMap<String, serde_json::Value>,
+        approval_pattern: Option<&str>,
         reply: tokio::sync::oneshot::Sender<bool>,
     ) -> ConfirmAction {
-        if self.auto_approved.contains(tool_name) {
-            let _ = reply.send(true);
-            return ConfirmAction::Approved;
+        // Check session auto-approvals: either tool-level (empty patterns)
+        // or match the description (command/URL) against stored patterns
+        if let Some(patterns) = self.auto_approved.get(tool_name) {
+            if patterns.is_empty() {
+                let _ = reply.send(true);
+                return ConfirmAction::Approved;
+            }
+            // Match the full description against stored patterns.
+            // For bash, glob * can match shell operators, so we match
+            // the complete string — the stored pattern already includes
+            // operators (e.g. "cargo * && cargo *").
+            if patterns.iter().any(|p| p.matches(desc)) {
+                let _ = reply.send(true);
+                return ConfirmAction::Approved;
+            }
         }
 
         self.screen.set_active_status(ToolStatus::Confirm);
         self.render_screen();
         self.screen.erase_prompt();
-        let choice = render::show_confirm(tool_name, desc, args);
+        let choice = render::show_confirm(tool_name, desc, args, approval_pattern);
         self.screen.redraw(self.screen.has_scrollback);
 
         match choice {
@@ -1211,7 +1224,20 @@ impl App {
                 ConfirmAction::Approved
             }
             ConfirmChoice::Always => {
-                self.auto_approved.insert(tool_name.to_string());
+                // Tool-level always: approve all future calls to this tool
+                self.auto_approved.insert(tool_name.to_string(), vec![]);
+                self.screen.set_active_status(ToolStatus::Pending);
+                let _ = reply.send(true);
+                ConfirmAction::Approved
+            }
+            ConfirmChoice::AlwaysPattern(pattern) => {
+                // Pattern-level always: approve future calls matching this pattern
+                if let Ok(compiled) = glob::Pattern::new(&pattern) {
+                    self.auto_approved
+                        .entry(tool_name.to_string())
+                        .or_default()
+                        .push(compiled);
+                }
                 self.screen.set_active_status(ToolStatus::Pending);
                 let _ = reply.send(true);
                 ConfirmAction::Approved
@@ -1237,9 +1263,9 @@ impl App {
         match ctrl {
             SessionControl::Continue => LoopAction::Continue,
             SessionControl::Done => LoopAction::Done,
-            SessionControl::NeedsConfirm { desc, args, reply } => {
+            SessionControl::NeedsConfirm { desc, args, approval_pattern, reply } => {
                 let tool_name = pending.as_ref().map(|p| p.name.as_str()).unwrap_or("");
-                match self.handle_confirm(tool_name, &desc, &args, reply) {
+                match self.handle_confirm(tool_name, &desc, &args, approval_pattern.as_deref(), reply) {
                     ConfirmAction::Approved => {
                         if let Some(ref mut p) = pending {
                             p.start = Instant::now();
@@ -1348,6 +1374,7 @@ pub enum SessionControl {
     NeedsConfirm {
         desc: String,
         args: HashMap<String, serde_json::Value>,
+        approval_pattern: Option<String>,
         reply: tokio::sync::oneshot::Sender<bool>,
     },
     NeedsAskQuestion {

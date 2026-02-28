@@ -42,6 +42,9 @@ permissions:
       allow: ["ls *", "grep *", "find *"]
       ask: []
       deny: []
+    web_fetch:
+      allow: ["https://docs.rs/*", "https://github.com/*"]
+      deny: ["https://evil.com/*"]
   apply:
     tools:
       allow: [read_file, glob, grep, edit_file, write_file]
@@ -65,8 +68,19 @@ multiple provider connections will be added in the future.
 | `grep`              | Allow       | Allow      |
 | `ask_user_question` | Allow       | Allow      |
 | `bash`              | Ask         | Ask        |
+| `web_fetch`         | Ask         | Ask        |
+| `web_search`        | Ask         | Ask        |
 
-Bash commands not matching any rule default to **Ask**. Deny rules always win.
+Bash commands and web fetch URLs not matching any rule default to **Ask**. Deny
+rules always win.
+
+**Domain permissions for `web_fetch`:** URL patterns use glob syntax to
+allow/deny fetching specific domains. When the agent asks to fetch a URL, the
+confirmation dialog offers three approval levels:
+
+1. **yes** — approve this single request
+2. **no** — deny this request
+3. **allow \<domain\>** — approve all future fetches to this domain for the session
 
 ## CLI Flags
 

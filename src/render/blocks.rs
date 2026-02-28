@@ -262,14 +262,10 @@ fn render_confirm_result(
     let _ = out.queue(SetForegroundColor(theme::APPLY));
     let _ = out.queue(Print("   allow? "));
     let _ = out.queue(ResetColor);
-    let _ = out.queue(SetAttribute(Attribute::Dim));
-    let _ = out.queue(Print(tool));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
+    print_dim(out, tool);
     crlf(out);
 
-    let _ = out.queue(SetAttribute(Attribute::Dim));
-    let _ = out.queue(Print("   \u{2502} "));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
+    print_dim(out, "   \u{2502} ");
     let _ = out.queue(Print(desc));
     crlf(out);
 
@@ -278,14 +274,13 @@ fn render_confirm_result(
         let _ = out.queue(Print("   "));
         match c {
             ConfirmChoice::Yes | ConfirmChoice::YesWithMessage(_) => {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print("approved"));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                print_dim(out, "approved");
             }
             ConfirmChoice::Always => {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print("always"));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                print_dim(out, "always");
+            }
+            ConfirmChoice::AlwaysPattern(ref pat) => {
+                print_dim(out, &format!("always ({})", pat));
             }
             ConfirmChoice::No => {
                 let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
@@ -322,19 +317,13 @@ fn print_tool_line(
     let prefix_len = 3 + name.len() + 1;
     let max_summary = width.saturating_sub(prefix_len + suffix_len + 1);
     let truncated = truncate_str(summary, max_summary);
-    let _ = out.queue(SetAttribute(Attribute::Dim));
-    let _ = out.queue(Print(format!(" {}", name)));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
+    print_dim(out, &format!(" {}", name));
     let _ = out.queue(Print(format!(" {}", truncated)));
     if !time_str.is_empty() {
-        let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(&time_str));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        print_dim(out, &time_str);
     }
     if !timeout_str.is_empty() {
-        let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(&timeout_str));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        print_dim(out, &timeout_str);
     }
     crlf(out);
 }
@@ -347,22 +336,31 @@ fn print_tool_output(
     args: &HashMap<String, serde_json::Value>,
 ) -> u16 {
     match name {
-        "read_file" if !is_error => print_dim_count(out, content.lines().count(), "line", "lines"),
+        "read_file" | "glob" | "grep" | "web_fetch" | "web_search" if !is_error => {
+            let (s, p) = match name {
+                "glob" => ("file", "files"),
+                "grep" => ("match", "matches"),
+                _ => ("line", "lines"),
+            };
+            print_dim_count(out, content.lines().count(), s, p)
+        }
         "edit_file" if !is_error => render_edit_output(out, args),
         "write_file" if !is_error => render_write_output(out, args),
         "ask_user_question" if !is_error => render_question_output(out, content),
         "bash" if content.is_empty() => 0,
         "bash" => render_bash_output(out, content, is_error),
-        "grep" if !is_error => print_dim_count(out, content.lines().count(), "match", "matches"),
-        "glob" if !is_error => print_dim_count(out, content.lines().count(), "file", "files"),
         _ => render_default_output(out, content, is_error),
     }
 }
 
-fn print_dim_count(out: &mut io::Stdout, count: usize, singular: &str, plural: &str) -> u16 {
+fn print_dim(out: &mut io::Stdout, text: &str) {
     let _ = out.queue(SetAttribute(Attribute::Dim));
-    let _ = out.queue(Print(format!("   {}", pluralize(count, singular, plural))));
+    let _ = out.queue(Print(text));
     let _ = out.queue(SetAttribute(Attribute::Reset));
+}
+
+fn print_dim_count(out: &mut io::Stdout, count: usize, singular: &str, plural: &str) -> u16 {
+    print_dim(out, &format!("   {}", pluralize(count, singular, plural)));
     crlf(out);
     1
 }
@@ -403,17 +401,13 @@ fn render_question_output(out: &mut io::Stdout, content: &str) -> u16 {
                     .join(", "),
                 other => other.to_string(),
             };
-            let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(Print(format!("   {} ", question)));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            print_dim(out, &format!("   {} ", question));
             let _ = out.queue(Print(&answer_str));
             crlf(out);
             rows += 1;
         }
     } else {
-        let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(format!("   {}", content)));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        print_dim(out, &format!("   {}", content));
         crlf(out);
         rows += 1;
     }
@@ -427,9 +421,7 @@ fn render_bash_output(out: &mut io::Stdout, content: &str, is_error: bool) -> u1
     let mut rows = 0u16;
     if total > MAX_LINES {
         let skipped = total - MAX_LINES;
-        let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(format!("   ... {} lines above", skipped)));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        print_dim(out, &format!("   ... {} lines above", skipped));
         crlf(out);
         rows += 1;
     }
@@ -444,9 +436,7 @@ fn render_bash_output(out: &mut io::Stdout, content: &str, is_error: bool) -> u1
             let _ = out.queue(Print(format!("   {}", line)));
             let _ = out.queue(ResetColor);
         } else {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(Print(format!("   {}", line)));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            print_dim(out, &format!("   {}", line));
         }
         crlf(out);
         rows += 1;
@@ -461,9 +451,7 @@ fn render_default_output(out: &mut io::Stdout, content: &str, is_error: bool) ->
         let _ = out.queue(Print(format!("   {}", preview)));
         let _ = out.queue(ResetColor);
     } else {
-        let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(format!("   {}", preview)));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        print_dim(out, &format!("   {}", preview));
     }
     crlf(out);
     preview.lines().count() as u16

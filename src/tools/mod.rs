@@ -5,6 +5,10 @@ mod exit_plan_mode;
 mod glob;
 mod grep;
 mod read_file;
+mod web_cache;
+mod web_fetch;
+mod web_search;
+mod web_shared;
 mod write_file;
 
 use crate::input::Mode;
@@ -22,6 +26,8 @@ pub use exit_plan_mode::ExitPlanModeTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use read_file::ReadFileTool;
+pub use web_fetch::WebFetchTool;
+pub use web_search::WebSearchTool;
 pub use write_file::WriteFileTool;
 
 pub struct ToolResult {
@@ -35,6 +41,12 @@ pub trait Tool: Send + Sync {
     fn parameters(&self) -> Value;
     fn execute(&self, args: &HashMap<String, Value>) -> ToolResult;
     fn needs_confirm(&self, _args: &HashMap<String, Value>) -> Option<String> {
+        None
+    }
+
+    /// Returns a glob pattern for session-level "always allow" approval.
+    /// For web tools this is a domain pattern like "*.github.com".
+    fn approval_pattern(&self, _args: &HashMap<String, Value>) -> Option<String> {
         None
     }
 }
@@ -176,5 +188,7 @@ pub fn build_tools() -> ToolRegistry {
     r.register(Box::new(GrepTool));
     r.register(Box::new(ExitPlanModeTool));
     r.register(Box::new(AskUserQuestionTool));
+    r.register(Box::new(WebFetchTool));
+    r.register(Box::new(WebSearchTool));
     r
 }

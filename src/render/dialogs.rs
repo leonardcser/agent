@@ -118,18 +118,35 @@ pub fn show_confirm(
     tool_name: &str,
     desc: &str,
     args: &HashMap<String, serde_json::Value>,
+    approval_pattern: Option<&str>,
 ) -> ConfirmChoice {
     let mut out = io::stdout();
     let (width, height) = terminal::size().unwrap_or((80, 24));
     let w = width.saturating_sub(1) as usize;
-    let options: &[(&str, ConfirmChoice)] = &[
-        ("yes", ConfirmChoice::Yes),
-        ("no", ConfirmChoice::No),
-        ("always allow", ConfirmChoice::Always),
+
+    let mut options_vec: Vec<(String, ConfirmChoice)> = vec![
+        ("yes".into(), ConfirmChoice::Yes),
+        ("no".into(), ConfirmChoice::No),
     ];
+    if let Some(pattern) = approval_pattern {
+        let display = pattern
+            .strip_suffix("/*")
+            .unwrap_or(pattern);
+        let display = display
+            .split("://")
+            .nth(1)
+            .unwrap_or(display);
+        options_vec.push((format!("allow {display}"), ConfirmChoice::AlwaysPattern(pattern.to_string())));
+    } else {
+        options_vec.push(("always allow".into(), ConfirmChoice::Always));
+    }
+    let options: Vec<(&str, ConfirmChoice)> = options_vec
+        .iter()
+        .map(|(l, c)| (l.as_str(), c.clone()))
+        .collect();
 
     let total_preview = confirm_preview_row_count(tool_name, args);
-    let fixed_rows: u16 = 11;
+    let fixed_rows: u16 = 8 + options.len() as u16;
     let max_preview = height.saturating_sub(fixed_rows + 2);
     let preview_rows = total_preview.min(max_preview);
     let has_preview = preview_rows > 0;
@@ -269,9 +286,12 @@ pub fn show_confirm(
                     editing = true;
                     draw(selected, &message, editing);
                 }
-                (KeyCode::Char('1'), _) => break ConfirmChoice::Yes,
-                (KeyCode::Char('2'), _) => break ConfirmChoice::No,
-                (KeyCode::Char('3'), _) => break ConfirmChoice::Always,
+                (KeyCode::Char(c @ '1'..='9'), _) => {
+                    let idx = (c as usize) - ('1' as usize);
+                    if idx < options.len() {
+                        break options[idx].1.clone();
+                    }
+                }
                 (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
                     break ConfirmChoice::No
                 }

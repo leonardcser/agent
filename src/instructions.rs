@@ -20,7 +20,7 @@ fn paths() -> Vec<PathBuf> {
             let candidate = d.join(FILENAME);
             if candidate.exists() {
                 // Avoid duplicating the root-level file
-                if paths.first().map_or(true, |r| *r != candidate) {
+                if paths.first().is_none_or(|r| *r != candidate) {
                     paths.push(candidate);
                 }
                 break;

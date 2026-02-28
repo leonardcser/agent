@@ -110,6 +110,8 @@ pub enum ConfirmChoice {
     Yes,
     No,
     Always,
+    /// Approve all future calls matching a specific pattern (e.g. domain).
+    AlwaysPattern(String),
     /// User approved and typed additional instructions.
     YesWithMessage(String),
 }
