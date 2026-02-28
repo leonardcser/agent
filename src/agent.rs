@@ -56,7 +56,14 @@ fn system_prompt(mode: Mode) -> String {
         Mode::Normal => include_str!("prompts/system.txt"),
     };
 
-    template.replace("{cwd}", &cwd)
+    let mut prompt = template.replace("{cwd}", &cwd);
+
+    if let Some(instructions) = crate::instructions::load() {
+        prompt.push_str("\n\n");
+        prompt.push_str(&instructions);
+    }
+
+    prompt
 }
 
 #[allow(clippy::too_many_arguments)]

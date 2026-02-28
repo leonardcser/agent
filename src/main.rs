@@ -2,6 +2,7 @@ mod agent;
 mod app;
 pub mod completer;
 mod config;
+mod instructions;
 pub mod input;
 mod log;
 pub mod perf;
