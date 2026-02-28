@@ -74,7 +74,7 @@ pub(super) fn render_highlighted(
         let _ = out.queue(Print(format!(" {:>w$}", i + 1, w = gutter_width)));
         let _ = out.queue(ResetColor);
         let _ = out.queue(Print("   "));
-        print_syntect_regions(out, &regions, max_content, None);
+        print_syntect_regions(out, &regions, max_content, theme::CODE_BG);
         crlf(out);
     }
     if limit < lines.len() {
