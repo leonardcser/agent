@@ -441,7 +441,6 @@ impl App {
                     }
                     self.screen.erase_prompt();
                     if let Some(block_idx) = render::show_rewind(&turns) {
-                        self.screen.redraw(self.screen.has_scrollback);
                         return EventOutcome::Rewind(block_idx);
                     }
                     // Rewind cancelled — restore vim mode if we started from insert.
