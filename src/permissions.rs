@@ -128,10 +128,21 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
         .entry("exit_plan_mode".to_string())
         .or_insert(default_exit_plan);
 
+    const DEFAULT_BASH_ALLOW: &[&str] = &["ls *", "grep *", "find *"];
+    let mut bash_allow = compile_patterns(&raw.bash.allow);
+    if bash_allow.is_empty() {
+        bash_allow = compile_patterns(
+            &DEFAULT_BASH_ALLOW
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        );
+    }
+
     ModePerms {
         tools,
         bash: RuleSet {
-            allow: compile_patterns(&raw.bash.allow),
+            allow: bash_allow,
             ask: compile_patterns(&raw.bash.ask),
             deny: compile_patterns(&raw.bash.deny),
         },
@@ -140,7 +151,7 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
 
 impl Permissions {
     pub fn load() -> Self {
-        let path = crate::config::config_dir().join("permissions.yaml");
+        let path = crate::config::config_dir().join("config.yaml");
         let contents = std::fs::read_to_string(&path).unwrap_or_default();
         let raw: RawConfig = serde_yml::from_str(&contents).unwrap_or_default();
         Self {

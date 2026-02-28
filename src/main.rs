@@ -26,9 +26,9 @@ use std::sync::{Arc, Mutex};
 #[command(name = "agent", about = "Coding agent TUI")]
 struct Args {
     #[arg(long)]
-    api_base: Option<String>,
+    provider: Option<String>,
     #[arg(long)]
-    api_key: Option<String>,
+    api_base: Option<String>,
     #[arg(long)]
     api_key_env: Option<String>,
     #[arg(long)]
@@ -51,18 +51,26 @@ async fn main() {
     let args = Args::parse();
     let cfg = config::Config::load();
 
+    let provider_name = args.provider.or(cfg.default_provider);
+    let provider_cfg = provider_name
+        .as_deref()
+        .and_then(|name| cfg.providers.get(name))
+        .or_else(|| cfg.providers.values().next())
+        .cloned()
+        .unwrap_or_default();
+
     let api_base = args
         .api_base
-        .or(cfg.api_base)
+        .or(provider_cfg.api_base)
         .unwrap_or_else(|| "http://localhost:11434/v1".into());
-    let api_key_env = args.api_key_env.or(cfg.api_key_env).unwrap_or_default();
-    let api_key = args
-        .api_key
-        .or(cfg.api_key)
-        .unwrap_or_else(|| std::env::var(&api_key_env).unwrap_or_default());
+    let api_key_env = args
+        .api_key_env
+        .or(provider_cfg.api_key_env)
+        .unwrap_or_default();
+    let api_key = std::env::var(&api_key_env).unwrap_or_default();
     let model = args
         .model
-        .or(cfg.model)
+        .or(provider_cfg.model)
         .expect("model must be set via --model or config file");
 
     if let Some(level) = log::parse_level(&args.log_level) {
@@ -78,8 +86,8 @@ async fn main() {
         perf::enable();
     }
 
-    let vim_enabled = cfg.vim_mode.unwrap_or(false);
-    let auto_compact = cfg.auto_compact.unwrap_or(false);
+    let vim_enabled = cfg.settings.vim_mode.unwrap_or(false);
+    let auto_compact = cfg.settings.auto_compact.unwrap_or(false);
     let shared_session: Arc<Mutex<Option<Session>>> = Arc::new(Mutex::new(None));
 
     {

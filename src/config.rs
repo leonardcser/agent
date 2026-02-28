@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 const APP_NAME: &str = "agent";
@@ -23,15 +24,27 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct ProviderConfig {
+    pub api_base: Option<String>,
+    pub api_key_env: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct SettingsConfig {
+    pub vim_mode: Option<bool>,
+    pub auto_compact: Option<bool>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub api_base: Option<String>,
-    pub api_key: Option<String>,
-    pub api_key_env: Option<String>,
-    pub model: Option<String>,
-    pub vim_mode: Option<bool>,
-    pub auto_compact: Option<bool>,
+    pub providers: HashMap<String, ProviderConfig>,
+    pub default_provider: Option<String>,
+    pub settings: SettingsConfig,
 }
 
 impl Config {

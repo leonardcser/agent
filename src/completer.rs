@@ -55,7 +55,7 @@ impl Completer {
 
     fn command_items() -> Vec<(&'static str, &'static str)> {
         vec![
-            ("clear", "clear conversation"),
+            ("clear", "start new conversation"),
             ("new", "start new conversation"),
             ("resume", "resume saved session"),
             ("vim", "toggle vim mode"),
