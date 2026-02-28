@@ -146,7 +146,7 @@ async fn main() {
             app.compact_history().await;
             continue;
         }
-        if input.starts_with('/') { continue; }
+        if input.starts_with('/') && crate::completer::Completer::is_command(input.trim()) { continue; }
 
         if let Some(cmd) = input.strip_prefix('!') {
             let cmd = cmd.trim();
