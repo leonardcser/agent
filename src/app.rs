@@ -36,6 +36,8 @@ pub struct App {
     pub context_window: Option<u32>,
     pub auto_compact: bool,
     pending_title: Option<tokio::sync::oneshot::Receiver<String>>,
+    last_width: u16,
+    last_height: u16,
 }
 
 impl App {
@@ -66,6 +68,8 @@ impl App {
             context_window: None,
             auto_compact,
             pending_title: None,
+            last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
+            last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
         }
     }
 
@@ -570,9 +574,12 @@ impl App {
         last_ctrlc: &mut Option<Instant>,
         resize_at: &mut Option<Instant>,
     ) -> TermAction {
-        if matches!(ev, event::Event::Resize(..)) {
-            self.screen.erase_prompt();
-            *resize_at = Some(Instant::now());
+        if let event::Event::Resize(w, h) = ev {
+            if w != self.last_width || h != self.last_height {
+                self.last_width = w;
+                self.last_height = h;
+                *resize_at = Some(Instant::now());
+            }
         }
 
         if matches!(ev, event::Event::Key(crossterm::event::KeyEvent { code: crossterm::event::KeyCode::Char('c'), modifiers: crossterm::event::KeyModifiers::CONTROL, .. })) {
@@ -642,14 +649,14 @@ impl App {
                 self.screen.mark_dirty();
             }
             Action::Noop => {}
-            Action::Resize(_) => {}
+            Action::Resize { .. } => {}
         }
         TermAction::None
     }
 
     pub fn tick(&mut self, resize_at: &mut Option<Instant>) {
         if let Some(t) = *resize_at {
-            if t.elapsed() >= Duration::from_millis(150) {
+            if t.elapsed() >= Duration::from_millis(render::RESIZE_DEBOUNCE_MS) {
                 self.screen.redraw(true);
                 *resize_at = None;
             } else {

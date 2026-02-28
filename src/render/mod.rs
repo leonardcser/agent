@@ -30,6 +30,9 @@ pub(super) fn crlf(out: &mut io::Stdout) {
 
 const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
 
+/// How long to wait after a resize event before redrawing.
+pub const RESIZE_DEBOUNCE_MS: u64 = 50;
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum ToolStatus {
     Pending,
@@ -456,6 +459,8 @@ impl Screen {
     pub fn mark_dirty(&mut self) {
         self.prompt.dirty = true;
     }
+
+
 
     pub fn flush_blocks(&mut self) {
         let _perf = crate::perf::begin("flush_blocks");

@@ -71,7 +71,7 @@ pub enum Action {
     Submit(String),
     Cancel,
     ToggleMode,
-    Resize(usize),
+    Resize { width: usize, height: usize },
     Noop,
 }
 
@@ -178,7 +178,11 @@ impl InputState {
 
     pub fn open_settings(&mut self, vim_enabled: bool, auto_compact: bool) {
         self.completer = None;
-        self.settings = Some(SettingsMenu { vim_enabled, auto_compact, selected: 0 });
+        self.settings = Some(SettingsMenu {
+            vim_enabled,
+            auto_compact,
+            selected: 0,
+        });
     }
 
     /// Returns the history search query if a history completer is active.
@@ -295,7 +299,11 @@ impl InputState {
                 code: KeyCode::Char('u'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
-            }) if self.vim.as_ref().is_some_and(|v| v.mode() == ViMode::Normal) => {
+            }) if self
+                .vim
+                .as_ref()
+                .is_some_and(|v| v.mode() == ViMode::Normal) =>
+            {
                 let half = render::term_height() / 2;
                 let line = current_line(&self.buf, self.cpos);
                 let target = line.saturating_sub(half);
@@ -306,7 +314,11 @@ impl InputState {
                 code: KeyCode::Char('d'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
-            }) if self.vim.as_ref().is_some_and(|v| v.mode() == ViMode::Normal) => {
+            }) if self
+                .vim
+                .as_ref()
+                .is_some_and(|v| v.mode() == ViMode::Normal) =>
+            {
                 let half = render::term_height() / 2;
                 let line = current_line(&self.buf, self.cpos);
                 let total = self.buf.chars().filter(|&c| c == '\n').count() + 1;
@@ -433,7 +445,10 @@ impl InputState {
                 self.recompute_completer();
                 Action::Redraw
             }
-            Event::Resize(w, _) => Action::Resize(w as usize),
+            Event::Resize(w, h) => Action::Resize {
+                width: w as usize,
+                height: h as usize,
+            },
             _ => Action::Noop,
         }
     }
@@ -442,16 +457,27 @@ impl InputState {
 
     fn handle_settings_event(&mut self, ev: &Event) -> Action {
         match ev {
-            Event::Key(KeyEvent { code: KeyCode::Esc, .. })
-            | Event::Key(KeyEvent { code: KeyCode::Char('q'), .. }) => {
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc, ..
+            })
+            | Event::Key(KeyEvent {
+                code: KeyCode::Char('q'),
+                ..
+            }) => {
                 let s = self.settings.take().unwrap();
                 Action::Submit(format!(
                     "\x00settings:{{\"vim\":{},\"auto_compact\":{}}}",
                     s.vim_enabled, s.auto_compact
                 ))
             }
-            Event::Key(KeyEvent { code: KeyCode::Enter, .. })
-            | Event::Key(KeyEvent { code: KeyCode::Char(' '), .. }) => {
+            Event::Key(KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            })
+            | Event::Key(KeyEvent {
+                code: KeyCode::Char(' '),
+                ..
+            }) => {
                 let s = self.settings.as_mut().unwrap();
                 match s.selected {
                     0 => s.vim_enabled ^= true,
@@ -460,16 +486,31 @@ impl InputState {
                 }
                 Action::Redraw
             }
-            Event::Key(KeyEvent { code: KeyCode::Up, .. })
-            | Event::Key(KeyEvent { code: KeyCode::Char('k'), .. }) => {
+            Event::Key(KeyEvent {
+                code: KeyCode::Up, ..
+            })
+            | Event::Key(KeyEvent {
+                code: KeyCode::Char('k'),
+                ..
+            }) => {
                 let s = self.settings.as_mut().unwrap();
-                if s.selected > 0 { s.selected -= 1; }
+                if s.selected > 0 {
+                    s.selected -= 1;
+                }
                 Action::Redraw
             }
-            Event::Key(KeyEvent { code: KeyCode::Down, .. })
-            | Event::Key(KeyEvent { code: KeyCode::Char('j'), .. }) => {
+            Event::Key(KeyEvent {
+                code: KeyCode::Down,
+                ..
+            })
+            | Event::Key(KeyEvent {
+                code: KeyCode::Char('j'),
+                ..
+            }) => {
                 let s = self.settings.as_mut().unwrap();
-                if s.selected < 1 { s.selected += 1; }
+                if s.selected < 1 {
+                    s.selected += 1;
+                }
                 Action::Redraw
             }
             _ => Action::Noop,
@@ -478,7 +519,10 @@ impl InputState {
 
     /// Try to handle the event as a completer navigation. Returns Some if consumed.
     fn handle_completer_event(&mut self, ev: &Event) -> Option<Action> {
-        let is_history = self.completer.as_ref().is_some_and(|c| c.kind == CompleterKind::History);
+        let is_history = self
+            .completer
+            .as_ref()
+            .is_some_and(|c| c.kind == CompleterKind::History);
 
         match ev {
             Event::Key(KeyEvent {
@@ -607,7 +651,11 @@ impl InputState {
     /// Shows the file or command picker if the cursor is inside an @/slash zone,
     /// hides it otherwise. Never touches a history completer.
     fn recompute_completer(&mut self) {
-        if self.completer.as_ref().is_some_and(|c| c.kind == CompleterKind::History) {
+        if self
+            .completer
+            .as_ref()
+            .is_some_and(|c| c.kind == CompleterKind::History)
+        {
             let query = self.buf.clone();
             self.completer.as_mut().unwrap().update_query(query);
             return;
@@ -618,7 +666,11 @@ impl InputState {
             } else {
                 String::new()
             };
-            if self.completer.as_ref().is_some_and(|c| c.kind == CompleterKind::File && c.anchor == at_pos) {
+            if self
+                .completer
+                .as_ref()
+                .is_some_and(|c| c.kind == CompleterKind::File && c.anchor == at_pos)
+            {
                 self.completer.as_mut().unwrap().update_query(query);
             } else {
                 let mut comp = Completer::files(at_pos);
@@ -630,7 +682,11 @@ impl InputState {
         {
             let end = self.cpos.max(1);
             let query = self.buf[1..end].to_string();
-            if self.completer.as_ref().is_some_and(|c| c.kind == CompleterKind::Command) {
+            if self
+                .completer
+                .as_ref()
+                .is_some_and(|c| c.kind == CompleterKind::Command)
+            {
                 self.completer.as_mut().unwrap().update_query(query);
             } else {
                 let mut comp = Completer::commands(0);
@@ -731,6 +787,7 @@ pub fn read_input(
 ) -> Option<String> {
     let mut out = io::stdout();
     let mut width = render::term_width();
+    let mut height = terminal::size().map(|(_, h)| h as usize).unwrap_or(24);
 
     terminal::enable_raw_mode().ok()?;
     let _ = out.execute(EnableBracketedPaste);
@@ -743,7 +800,7 @@ pub fn read_input(
 
     loop {
         let ev = if resize_pending {
-            match event::poll(Duration::from_millis(150)) {
+            match event::poll(Duration::from_millis(render::RESIZE_DEBOUNCE_MS)) {
                 Ok(true) => match event::read() {
                     Ok(ev) => ev,
                     Err(_) => continue,
@@ -772,7 +829,10 @@ pub fn read_input(
                 ..
             })
         ) && state.history_search_query().is_none()
-            && !state.vim.as_ref().is_some_and(|v| v.mode() == crate::vim::ViMode::Normal)
+            && !state
+                .vim
+                .as_ref()
+                .is_some_and(|v| v.mode() == crate::vim::ViMode::Normal)
         {
             state.open_history_search(history);
             screen.draw_prompt(state, *mode, width);
@@ -892,10 +952,12 @@ pub fn read_input(
                 *mode = mode.toggle();
                 screen.draw_prompt(state, *mode, width);
             }
-            Action::Resize(w) => {
-                width = w;
-                screen.erase_prompt();
-                resize_pending = true;
+            Action::Resize { width: w, height: h } => {
+                if w != width || h != height {
+                    width = w;
+                    height = h;
+                    resize_pending = true;
+                }
             }
             Action::Redraw => {
                 screen.draw_prompt(state, *mode, width);
@@ -932,7 +994,11 @@ fn expand_pastes(buf: &str, pastes: &[String]) -> String {
 }
 
 fn current_line(buf: &str, cpos: usize) -> usize {
-    let end = if buf.is_char_boundary(cpos) { cpos } else { buf.len() };
+    let end = if buf.is_char_boundary(cpos) {
+        cpos
+    } else {
+        buf.len()
+    };
     buf[..end].chars().filter(|&c| c == '\n').count()
 }
 
@@ -959,7 +1025,6 @@ fn cursor_in_at_zone(buf: &str, cpos: usize) -> Option<usize> {
     }
     Some(at_pos)
 }
-
 
 fn find_slash_anchor(buf: &str, cpos: usize) -> Option<usize> {
     // Only valid when `/` is at position 0 and no whitespace in the query.
