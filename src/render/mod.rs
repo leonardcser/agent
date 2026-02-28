@@ -328,7 +328,7 @@ pub struct Screen {
     working: WorkingState,
     context_tokens: Option<u32>,
     /// True once terminal auto-scrolling has pushed content into scrollback.
-    has_scrollback: bool,
+    pub has_scrollback: bool,
     /// Terminal row where block content starts (top of conversation).
     /// Set once when the first block is rendered; reset on purge/clear.
     content_start_row: Option<u16>,
@@ -497,16 +497,10 @@ impl Screen {
         }
     }
 
-    /// Re-render all history blocks after dialogs, resize, etc.
-    /// Only purges scrollback when content has actually overflowed.
-    pub fn redraw_in_place(&mut self) {
-        self.full_redraw(self.has_scrollback);
-    }
-
     /// Re-render all blocks. When `purge` is true, clears scrollback and
-    /// screen first — necessary when content has overflowed the viewport.
+    /// screen first — necessary after resize or when content has overflowed.
     /// When false, redraws over the current viewport (faster, no flash).
-    fn full_redraw(&mut self, purge: bool) {
+    pub fn redraw(&mut self, purge: bool) {
         let mut out = io::stdout();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         if purge {
@@ -578,7 +572,7 @@ impl Screen {
     pub fn truncate_to(&mut self, block_idx: usize) {
         self.history.truncate(block_idx);
         self.active_tool = None;
-        self.full_redraw(self.has_scrollback);
+        self.redraw(self.has_scrollback);
     }
 
     pub fn draw_prompt(&mut self, state: &InputState, mode: super::input::Mode, width: usize) {

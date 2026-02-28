@@ -750,7 +750,7 @@ pub fn read_input(
                 },
                 _ => {
                     resize_pending = false;
-                    screen.redraw_in_place();
+                    screen.redraw(true);
                     screen.draw_prompt(state, *mode, width);
                     continue;
                 }

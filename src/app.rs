@@ -488,7 +488,7 @@ impl App {
         self.render_screen();
         self.screen.erase_prompt();
         let choice = render::show_confirm(tool_name, desc, args);
-        self.screen.redraw_in_place();
+        self.screen.redraw(self.screen.has_scrollback);
 
         match choice {
             ConfirmChoice::Yes => {
@@ -552,11 +552,11 @@ impl App {
                         let _ = reply.send("User cancelled the question.".into());
                         self.screen.finish_tool(ToolStatus::Denied, None);
                         *pending = None;
-                        self.screen.redraw_in_place();
+                        self.screen.redraw(self.screen.has_scrollback);
                         return LoopAction::Cancel;
                     }
                 }
-                self.screen.redraw_in_place();
+                self.screen.redraw(self.screen.has_scrollback);
                 LoopAction::Continue
             }
         }
@@ -650,7 +650,7 @@ impl App {
     pub fn tick(&mut self, resize_at: &mut Option<Instant>) {
         if let Some(t) = *resize_at {
             if t.elapsed() >= Duration::from_millis(150) {
-                self.screen.redraw_in_place();
+                self.screen.redraw(true);
                 *resize_at = None;
             } else {
                 return;
