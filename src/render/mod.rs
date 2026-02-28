@@ -496,10 +496,10 @@ impl Screen {
         }
     }
 
-    /// Purge scrollback, clear screen, and re-render all history blocks.
-    /// Used for resize, after dialogs, etc.
+    /// Re-render all history blocks after dialogs, resize, etc.
+    /// Only purges scrollback when content has actually overflowed.
     pub fn redraw_in_place(&mut self) {
-        self.full_redraw(true);
+        self.full_redraw(self.has_scrollback);
     }
 
     /// Re-render all blocks. When `purge` is true, clears scrollback and
@@ -1232,7 +1232,7 @@ fn render_line_spans(out: &mut io::Stdout, line: &str) {
             let tok_end = after.find(char::is_whitespace).unwrap_or(after.len());
             let token = &rest[pos..pos + 1 + tok_end];
             let path_str = &token[1..];
-            if !path_str.is_empty() {
+            if !path_str.is_empty() && std::path::Path::new(path_str).exists() {
                 let _ = out.queue(SetForegroundColor(theme::ACCENT));
                 let _ = out.queue(Print(token));
                 let _ = out.queue(ResetColor);

@@ -45,24 +45,48 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             let w = width;
             let content_w = w.saturating_sub(1).max(1);
             let logical_lines: Vec<String> = text
-                .trim_start()
+                .trim()
                 .lines()
                 .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
                 .collect();
+            let multiline = logical_lines.len() > 1
+                || logical_lines.first().map_or(false, |l| l.chars().count() > content_w);
+            // For multi-line messages, pad all lines to the same width.
+            let block_w = if multiline {
+                logical_lines
+                    .iter()
+                    .map(|l| l.chars().count().min(content_w))
+                    .max()
+                    .unwrap_or(0)
+            } else {
+                0
+            };
             let mut rows = 0u16;
             for logical_line in &logical_lines {
+                if logical_line.is_empty() {
+                    let fill = if multiline { (block_w + 2).min(content_w + 1) } else { 2 };
+                    let _ = out
+                        .queue(SetBackgroundColor(theme::USER_BG))
+                        .and_then(|o| o.queue(Print(" ".repeat(fill))))
+                        .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
+                        .and_then(|o| o.queue(ResetColor));
+                    crlf(out);
+                    rows += 1;
+                    continue;
+                }
                 let chars: Vec<char> = logical_line.chars().collect();
-                let single_line = chars.len() <= content_w;
                 let mut start = 0;
                 loop {
                     let chunk: String =
                         chars[start..(start + content_w).min(chars.len())].iter().collect();
                     let chunk_len = chunk.chars().count();
-                    let trailing = if single_line {
-                        1
+                    let full_width = chunk_len >= content_w;
+                    let trailing = if full_width {
+                        0
+                    } else if multiline {
+                        block_w.saturating_sub(chunk_len) + 1
                     } else {
-                        content_w.saturating_sub(chunk_len)
+                        1
                     };
                     let _ = out
                         .queue(SetBackgroundColor(theme::USER_BG))
@@ -72,7 +96,10 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
                         })
                         .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
                         .and_then(|o| o.queue(ResetColor));
-                    crlf(out);
+                    let wraps = full_width && start + content_w < chars.len();
+                    if !wraps {
+                        crlf(out);
+                    }
                     rows += 1;
                     start += content_w;
                     if start >= chars.len() {
