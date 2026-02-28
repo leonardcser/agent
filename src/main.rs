@@ -41,6 +41,13 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
+        let _ = std::io::stdout().execute(crossterm::cursor::Show);
+        eprintln!("{info}");
+    }));
+
     let args = Args::parse();
     let cfg = config::Config::load();
 
@@ -99,15 +106,27 @@ async fn main() {
 
     let mut app = App::new(api_base, api_key, model, vim_enabled, auto_compact, shared_session);
 
-    // Fetch context window once at startup. Re-fetch here if model switching is ever added.
-    {
+    // Fetch context window in background so startup isn't blocked by the network call.
+    let mut ctx_rx = {
         let provider = Provider::new(app.api_base.clone(), app.api_key.clone(), app.client.clone());
-        app.context_window = provider.fetch_context_window(&app.model).await;
-    }
+        let model = app.model.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = tx.send(provider.fetch_context_window(&model).await);
+        });
+        Some(rx)
+    };
 
     println!();
     loop {
         app.poll_pending_title();
+        // Check if context window fetch completed.
+        if let Some(ref mut rx) = ctx_rx {
+            if let Ok(result) = rx.try_recv() {
+                app.context_window = result;
+                ctx_rx = None;
+            }
+        }
         let input = if !app.queued_messages.is_empty() {
             let mut parts = std::mem::take(&mut app.queued_messages);
             let buf = std::mem::take(&mut app.input.buf);

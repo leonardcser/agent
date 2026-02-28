@@ -594,7 +594,7 @@ impl Vim {
                 let n = self.take_count();
                 if buf.contains('\n') {
                     let new_pos = move_down(buf, *cpos);
-                    if new_pos == *cpos {
+                    if new_pos == *cpos && n <= 1 {
                         // Clipped at bottom — navigate history forward.
                         self.reset_pending();
                         return Action::HistoryNext;
@@ -617,7 +617,7 @@ impl Vim {
                 let n = self.take_count();
                 if buf.contains('\n') {
                     let new_pos = move_up(buf, *cpos);
-                    if new_pos == *cpos {
+                    if new_pos == *cpos && n <= 1 {
                         // Clipped at top — navigate history backward.
                         self.reset_pending();
                         return Action::HistoryPrev;

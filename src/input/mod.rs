@@ -628,7 +628,8 @@ impl InputState {
         } else if find_slash_anchor(&self.buf, self.cpos).is_some()
             || (self.cpos == 0 && self.buf.starts_with('/'))
         {
-            let query = self.buf[1..self.cpos].to_string();
+            let end = self.cpos.max(1);
+            let query = self.buf[1..end].to_string();
             if self.completer.as_ref().is_some_and(|c| c.kind == CompleterKind::Command) {
                 self.completer.as_mut().unwrap().update_query(query);
             } else {
@@ -931,15 +932,22 @@ fn expand_pastes(buf: &str, pastes: &[String]) -> String {
 }
 
 fn current_line(buf: &str, cpos: usize) -> usize {
-    buf[..cpos].chars().filter(|&c| c == '\n').count()
+    let end = if buf.is_char_boundary(cpos) { cpos } else { buf.len() };
+    buf[..end].chars().filter(|&c| c == '\n').count()
 }
 
 /// Like find_at_anchor but also matches when the cursor is ON the '@' itself.
 fn cursor_in_at_zone(buf: &str, cpos: usize) -> Option<usize> {
+    if !buf.is_char_boundary(cpos) {
+        return None;
+    }
     // Include the char at cpos so the cursor-on-@ case works.
-    let search_end = (cpos + 1).min(buf.len());
-    // Make sure we land on a char boundary.
-    let search_end = buf.char_indices().map(|(i, _)| i).rfind(|&i| i <= search_end).map(|i| i + 1).unwrap_or(search_end);
+    // Find the end of the character at cpos (next char boundary after cpos).
+    let search_end = buf[cpos..]
+        .char_indices()
+        .nth(1)
+        .map(|(i, _)| cpos + i)
+        .unwrap_or(buf.len());
     let at_pos = buf[..search_end].rfind('@')?;
     // @ must be at start or preceded by whitespace.
     if at_pos > 0 && !buf[..at_pos].ends_with(char::is_whitespace) {
@@ -955,7 +963,7 @@ fn cursor_in_at_zone(buf: &str, cpos: usize) -> Option<usize> {
 
 fn find_slash_anchor(buf: &str, cpos: usize) -> Option<usize> {
     // Only valid when `/` is at position 0 and no whitespace in the query.
-    if !buf.starts_with('/') {
+    if !buf.starts_with('/') || !buf.is_char_boundary(cpos) {
         return None;
     }
     if cpos < 1 || buf[1..cpos].contains(char::is_whitespace) {
