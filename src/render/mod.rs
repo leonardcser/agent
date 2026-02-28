@@ -602,7 +602,6 @@ impl Screen {
     }
 
     pub fn draw_prompt(&mut self, state: &InputState, mode: super::input::Mode, width: usize) {
-        self.prompt.dirty = true;
         self.draw_prompt_with_queued(state, mode, width, &[]);
     }
 

@@ -96,6 +96,7 @@ pub struct Provider {
     api_base: String,
     api_key: String,
     client: Client,
+    model_config: crate::config::ModelConfig,
 }
 
 impl Provider {
@@ -104,7 +105,13 @@ impl Provider {
             api_base: api_base.trim_end_matches('/').to_string(),
             api_key,
             client,
+            model_config: Default::default(),
         }
+    }
+
+    pub fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
+        self.model_config = config;
+        self
     }
 
     pub async fn chat(
@@ -120,6 +127,21 @@ impl Provider {
         body.insert("messages", serde_json::to_value(messages).unwrap());
         if !tools.is_empty() {
             body.insert("tools", serde_json::to_value(tools).unwrap());
+        }
+        if let Some(v) = self.model_config.temperature {
+            body.insert("temperature", serde_json::json!(v));
+        }
+        if let Some(v) = self.model_config.top_p {
+            body.insert("top_p", serde_json::json!(v));
+        }
+        if let Some(v) = self.model_config.top_k {
+            body.insert("top_k", serde_json::json!(v));
+        }
+        if let Some(v) = self.model_config.min_p {
+            body.insert("min_p", serde_json::json!(v));
+        }
+        if let Some(v) = self.model_config.repeat_penalty {
+            body.insert("repeat_penalty", serde_json::json!(v));
         }
 
         log::entry(

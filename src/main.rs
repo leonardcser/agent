@@ -27,8 +27,6 @@ use std::sync::{Arc, Mutex};
 #[command(name = "agent", about = "Coding agent TUI")]
 struct Args {
     #[arg(long)]
-    provider: Option<String>,
-    #[arg(long)]
     api_base: Option<String>,
     #[arg(long)]
     api_key_env: Option<String>,
@@ -52,26 +50,25 @@ async fn main() {
     let args = Args::parse();
     let cfg = config::Config::load();
 
-    let provider_name = args.provider.or(cfg.default_provider);
-    let provider_cfg = provider_name
-        .as_deref()
-        .and_then(|name| cfg.providers.get(name))
-        .or_else(|| cfg.providers.values().next())
+    let provider_cfg = cfg
+        .providers
+        .get("openai-compatible")
         .cloned()
         .unwrap_or_default();
 
     let api_base = args
         .api_base
         .or(provider_cfg.api_base)
-        .unwrap_or_else(|| "http://localhost:11434/v1".into());
+        .expect("api_base must be set via --api-base or config file");
     let api_key_env = args
         .api_key_env
         .or(provider_cfg.api_key_env)
         .unwrap_or_default();
     let api_key = std::env::var(&api_key_env).unwrap_or_default();
+    let model_config = provider_cfg.model.unwrap_or_default();
     let model = args
         .model
-        .or(provider_cfg.model)
+        .or(model_config.name.clone())
         .expect("model must be set via --model or config file");
 
     if let Some(level) = log::parse_level(&args.log_level) {
@@ -126,6 +123,7 @@ async fn main() {
         api_base,
         api_key,
         model,
+        model_config,
         vim_enabled,
         auto_compact,
         shared_session,

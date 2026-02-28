@@ -16,12 +16,16 @@ Config file: `~/.config/agent/config.yaml` (respects `$XDG_CONFIG_HOME`)
 
 ```yaml
 providers:
-  openai:
-    api_base: https://api.openai.com/v1
-    model: gpt-4o
-    api_key_env: OPENAI_API_KEY # optional
-
-default_provider: openai
+  openai-compatible:
+    api_base: http://localhost:11434/v1
+    model:
+      name: glm-5
+      temperature: 1.0 # optional
+      top_p: 0.95 # optional
+      top_k: 40 # optional
+      min_p: 0.01 # optional
+      repeat_penalty: 1.0 # optional
+    api_key_env: API_KEY # optional
 
 settings:
   vim_mode: false # default
@@ -45,9 +49,10 @@ permissions:
       allow: ["ls *", "grep *", "find *"]
 ```
 
-All fields are optional except `model` within the active provider, which must be
-set via config or `--model`. If `default_provider` is omitted the first entry in
-`providers` is used.
+The `model` field accepts either a plain string (`model: gpt-4o`) or a dict with
+`name` and optional sampling parameters. `api_base` and `model` must be set via
+config or CLI flags. Only the `openai-compatible` provider is supported for now;
+multiple provider connections will be added in the future.
 
 **Default tool permissions** (when `permissions` is omitted):
 
@@ -66,7 +71,6 @@ Bash commands not matching any rule default to **Ask**. Deny rules always win.
 ## CLI Flags
 
 ```
---provider <NAME>       Provider to use (overrides default_provider)
 --model <MODEL>         Model to use (overrides provider config)
 --api-base <URL>        API base URL (overrides provider config)
 --api-key-env <VAR>     Env var to read the API key from (overrides provider config)

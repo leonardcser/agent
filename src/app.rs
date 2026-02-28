@@ -28,6 +28,7 @@ pub struct App {
     pub api_base: String,
     pub api_key: String,
     pub model: String,
+    pub model_config: crate::config::ModelConfig,
     pub client: reqwest::Client,
     pub mode: Mode,
     pub permissions: permissions::Permissions,
@@ -87,6 +88,7 @@ impl App {
         api_base: String,
         api_key: String,
         model: String,
+        model_config: crate::config::ModelConfig,
         vim_from_config: bool,
         auto_compact: bool,
         shared_session: Arc<Mutex<Option<Session>>>,
@@ -102,6 +104,7 @@ impl App {
             api_base,
             api_key,
             model,
+            model_config,
             client: reqwest::Client::new(),
             mode,
             permissions: permissions::Permissions::load(),
@@ -896,10 +899,11 @@ impl App {
         let api_key = self.api_key.clone();
         let model = self.model.clone();
         let client = self.client.clone();
+        let model_config = self.model_config.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending_title = Some(rx);
         tokio::spawn(async move {
-            let provider = Provider::new(api_base, api_key, client);
+            let provider = Provider::new(api_base, api_key, client).with_model_config(model_config);
             let title = match provider.complete_title(&first, &model).await {
                 Ok(t) if !t.is_empty() => t,
                 _ => {
@@ -964,9 +968,10 @@ impl App {
         let api_key = self.api_key.clone();
         let model = self.model.clone();
         let client = self.client.clone();
+        let model_config = self.model_config.clone();
         let cancel = CancellationToken::new();
         let task = tokio::spawn(async move {
-            let provider = Provider::new(api_base, api_key, client);
+            let provider = Provider::new(api_base, api_key, client).with_model_config(model_config);
             provider.compact(&to_summarize, &model, &cancel).await
         });
 
@@ -1080,12 +1085,13 @@ impl App {
         let api_key = self.api_key.clone();
         let model = self.model.clone();
         let client = self.client.clone();
+        let model_config = self.model_config.clone();
         let mode = self.mode;
         let permissions = self.permissions.clone();
         let history = self.history.clone();
 
         tokio::spawn(async move {
-            let provider = Provider::new(api_base, api_key, client);
+            let provider = Provider::new(api_base, api_key, client).with_model_config(model_config);
             let registry = tools::build_tools();
             run_agent(
                 &provider,

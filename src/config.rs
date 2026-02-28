@@ -1,3 +1,4 @@
+use serde::de::{self, Deserializer};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -26,10 +27,41 @@ fn home_dir() -> PathBuf {
 
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
+pub struct ModelConfig {
+    pub name: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<u32>,
+    pub min_p: Option<f64>,
+    pub repeat_penalty: Option<f64>,
+}
+
+fn deserialize_model<'de, D>(deserializer: D) -> Result<Option<ModelConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value: Option<serde_yml::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(serde_yml::Value::String(s)) => Ok(Some(ModelConfig {
+            name: Some(s),
+            ..Default::default()
+        })),
+        Some(other) => {
+            let cfg: ModelConfig =
+                serde_yml::from_value(other).map_err(de::Error::custom)?;
+            Ok(Some(cfg))
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
 pub struct ProviderConfig {
     pub api_base: Option<String>,
     pub api_key_env: Option<String>,
-    pub model: Option<String>,
+    #[serde(deserialize_with = "deserialize_model", default)]
+    pub model: Option<ModelConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -43,7 +75,6 @@ pub struct SettingsConfig {
 #[serde(default)]
 pub struct Config {
     pub providers: HashMap<String, ProviderConfig>,
-    pub default_provider: Option<String>,
     pub settings: SettingsConfig,
 }
 

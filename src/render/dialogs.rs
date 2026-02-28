@@ -295,6 +295,7 @@ pub fn show_confirm(
 
     let _ = out.queue(cursor::MoveTo(0, bar_row));
     let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+    let _ = out.queue(cursor::Show);
     let _ = out.flush();
 
     choice
