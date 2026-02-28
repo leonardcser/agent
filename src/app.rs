@@ -78,7 +78,6 @@ struct Timers {
     last_esc: Option<Instant>,
     esc_vim_mode: Option<vim::ViMode>,
     last_ctrlc: Option<Instant>,
-    resize_at: Option<Instant>,
 }
 
 // ── App impl ─────────────────────────────────────────────────────────────────
@@ -140,7 +139,6 @@ impl App {
             last_esc: None,
             esc_vim_mode: None,
             last_ctrlc: None,
-            resize_at: None,
         };
 
         'main: loop {
@@ -219,7 +217,7 @@ impl App {
             }
 
             // ── Render ───────────────────────────────────────────────────
-            self.tick(&mut t.resize_at, agent.is_some());
+            self.tick(agent.is_some());
 
             // ── Wait for next event ──────────────────────────────────────
             tokio::select! {
@@ -244,7 +242,7 @@ impl App {
                     }
 
                     // Render immediately after terminal events for responsive typing.
-                    self.tick(&mut t.resize_at, agent.is_some());
+                    self.tick(agent.is_some());
                 }
 
                 Some(ev) = agent_rx.recv(), if agent.is_some() => {
@@ -262,7 +260,7 @@ impl App {
                             self.finish_agent(agent.take().unwrap(), true).await;
                         }
                     }
-                    self.tick(&mut t.resize_at, agent.is_some());
+                    self.tick(agent.is_some());
                 }
 
                 _ = tokio::time::sleep(Duration::from_millis(80)) => {
@@ -355,7 +353,7 @@ impl App {
             if w != self.last_width || h != self.last_height {
                 self.last_width = w;
                 self.last_height = h;
-                t.resize_at = Some(Instant::now());
+                self.screen.redraw(true);
             }
             return EventOutcome::Noop;
         }
@@ -492,7 +490,7 @@ impl App {
                 if w16 != self.last_width || h16 != self.last_height {
                     self.last_width = w16;
                     self.last_height = h16;
-                    t.resize_at = Some(Instant::now());
+                    self.screen.redraw(true);
                 }
                 EventOutcome::Noop
             }
@@ -512,7 +510,7 @@ impl App {
             if w != self.last_width || h != self.last_height {
                 self.last_width = w;
                 self.last_height = h;
-                t.resize_at = Some(Instant::now());
+                self.screen.redraw(true);
             }
             return EventOutcome::Noop;
         }
@@ -1269,15 +1267,7 @@ impl App {
         }
     }
 
-    fn tick(&mut self, resize_at: &mut Option<Instant>, agent_running: bool) {
-        if let Some(t) = *resize_at {
-            if t.elapsed() >= Duration::from_millis(render::RESIZE_DEBOUNCE_MS) {
-                self.screen.redraw(true);
-                *resize_at = None;
-            } else {
-                return;
-            }
-        }
+    fn tick(&mut self, agent_running: bool) {
         if agent_running {
             self.render_screen();
         } else {

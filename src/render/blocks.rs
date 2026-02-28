@@ -50,7 +50,7 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             let multiline = logical_lines.len() > 1
                 || logical_lines
                     .first()
-                    .map_or(false, |l| l.chars().count() > content_w);
+                    .is_some_and(|l| l.chars().count() > content_w);
             // For multi-line messages, pad all lines to the same width.
             let block_w = if multiline {
                 logical_lines
