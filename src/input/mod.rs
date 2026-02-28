@@ -5,16 +5,9 @@ pub use history::History;
 pub use settings::SettingsMenu;
 
 use crate::completer::{Completer, CompleterKind};
-use crate::render::{self, Screen};
+use crate::render;
 use crate::vim::{self, ViMode, Vim};
-use crossterm::{
-    event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
-    },
-    terminal, ExecutableCommand,
-};
-use std::io;
-use std::time::Duration;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 /// Object Replacement Character — inline placeholder for large pastes.
 pub const PASTE_MARKER: char = '\u{FFFC}';
@@ -69,7 +62,7 @@ pub struct InputState {
 pub enum Action {
     Redraw,
     Submit(String),
-    Cancel,
+    Settings { vim: bool, auto_compact: bool },
     ToggleMode,
     Resize { width: usize, height: usize },
     Noop,
@@ -288,7 +281,7 @@ impl InputState {
                     Action::Submit(text)
                 }
             }
-            // Ctrl+C handled in the input loop (double-tap logic).
+            // Ctrl+C: handled by the app event loop (double-tap logic).
             Event::Key(KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
@@ -331,7 +324,7 @@ impl InputState {
                 code: KeyCode::Char('r'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
-            }) => Action::Noop, // handled in read_input
+            }) => Action::Noop, // handled by the app event loop
             Event::Key(KeyEvent {
                 code: KeyCode::Char('j'),
                 modifiers: KeyModifiers::CONTROL,
@@ -465,10 +458,7 @@ impl InputState {
                 ..
             }) => {
                 let s = self.settings.take().unwrap();
-                Action::Submit(format!(
-                    "\x00settings:{{\"vim\":{},\"auto_compact\":{}}}",
-                    s.vim_enabled, s.auto_compact
-                ))
+                Action::Settings { vim: s.vim_enabled, auto_compact: s.auto_compact }
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Enter,
@@ -776,196 +766,6 @@ impl InputState {
     }
 }
 
-// ── Prompt-mode entry point ──────────────────────────────────────────────────
-
-pub fn read_input(
-    screen: &mut Screen,
-    mode: &mut Mode,
-    history: &mut History,
-    state: &mut InputState,
-    auto_compact: bool,
-) -> Option<String> {
-    let mut out = io::stdout();
-    let mut width = render::term_width();
-    let mut height = terminal::size().map(|(_, h)| h as usize).unwrap_or(24);
-
-    terminal::enable_raw_mode().ok()?;
-    let _ = out.execute(EnableBracketedPaste);
-    screen.draw_prompt(state, *mode, width);
-
-    let mut resize_pending = false;
-    let mut last_ctrlc: Option<std::time::Instant> = None;
-    let mut last_esc: Option<std::time::Instant> = None;
-    let mut esc_was_insert = false;
-
-    loop {
-        let ev = if resize_pending {
-            match event::poll(Duration::from_millis(render::RESIZE_DEBOUNCE_MS)) {
-                Ok(true) => match event::read() {
-                    Ok(ev) => ev,
-                    Err(_) => continue,
-                },
-                _ => {
-                    resize_pending = false;
-                    screen.redraw(true);
-                    screen.draw_prompt(state, *mode, width);
-                    continue;
-                }
-            }
-        } else {
-            match event::read() {
-                Ok(ev) => ev,
-                Err(_) => continue,
-            }
-        };
-
-        // Ctrl+R: open history fuzzy search (or cycle if already open).
-        // In vim normal mode, Ctrl+R is redo — let vim handle it.
-        if matches!(
-            ev,
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('r'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            })
-        ) && state.history_search_query().is_none()
-            && !state
-                .vim
-                .as_ref()
-                .is_some_and(|v| v.mode() == crate::vim::ViMode::Normal)
-        {
-            state.open_history_search(history);
-            screen.draw_prompt(state, *mode, width);
-            continue;
-        }
-
-        // Ctrl+C: if empty or double-tap, quit; otherwise clear input.
-        if matches!(
-            ev,
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            })
-        ) {
-            let double_tap =
-                last_ctrlc.is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
-            if state.buf.is_empty() || double_tap {
-                screen.erase_prompt();
-                let _ = out.execute(DisableBracketedPaste);
-                terminal::disable_raw_mode().ok();
-                return None;
-            }
-            last_ctrlc = Some(std::time::Instant::now());
-            state.buf.clear();
-            state.cpos = 0;
-            state.pastes.clear();
-            state.completer = None;
-            screen.draw_prompt(state, *mode, width);
-            continue;
-        }
-
-        // Ctrl+S: toggle stash
-        if matches!(
-            ev,
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('s'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            })
-        ) {
-            state.toggle_stash();
-            screen.draw_prompt(state, *mode, width);
-            continue;
-        }
-
-        // Double-Esc in idle → show rewind menu
-        if matches!(
-            ev,
-            Event::Key(KeyEvent {
-                code: KeyCode::Esc,
-                ..
-            })
-        ) {
-            let in_normal = !state.vim_enabled() || !state.vim_in_insert_mode();
-            if in_normal {
-                let double = last_esc.is_some_and(|t| t.elapsed() < Duration::from_millis(500));
-                if double {
-                    last_esc = None;
-                    let restore_insert = esc_was_insert;
-                    esc_was_insert = false;
-                    let turns = screen.user_turns();
-                    if turns.is_empty() {
-                        // No history to rewind to — double-Esc is a no-op; stay in Normal.
-                        continue;
-                    }
-                    if let Some(block_idx) = render::show_rewind(&turns) {
-                        screen.erase_prompt();
-                        let _ = out.execute(DisableBracketedPaste);
-                        terminal::disable_raw_mode().ok();
-                        return Some(format!("\x00rewind:{}", block_idx));
-                    }
-                    // Rewind cancelled — restore Insert if that's where we started.
-                    if restore_insert {
-                        state.set_vim_mode(crate::vim::ViMode::Insert);
-                    }
-                    screen.draw_prompt(state, *mode, width);
-                    continue;
-                } else {
-                    last_esc = Some(std::time::Instant::now());
-                    esc_was_insert = false;
-                    if !state.vim_enabled() {
-                        // No vim — Esc has no other meaning in idle, just track for double
-                        continue;
-                    }
-                }
-            } else {
-                // vim insert mode — first Esc goes to normal, start timer
-                esc_was_insert = true;
-                last_esc = Some(std::time::Instant::now());
-            }
-        } else {
-            last_esc = None;
-        }
-
-        match state.handle_event(ev, Some(history)) {
-            Action::Submit(text) if text.trim() == "/settings" => {
-                state.buf.clear();
-                state.cpos = 0;
-                state.open_settings(state.vim_enabled(), auto_compact);
-                // Don't restore stash yet — settings is an overlay, restore on close.
-                screen.draw_prompt(state, *mode, width);
-            }
-            Action::Submit(text) => {
-                screen.erase_prompt();
-                let _ = out.execute(DisableBracketedPaste);
-                terminal::disable_raw_mode().ok();
-                return Some(text);
-            }
-            Action::Cancel => {
-                screen.erase_prompt();
-                let _ = out.execute(DisableBracketedPaste);
-                terminal::disable_raw_mode().ok();
-                return None;
-            }
-            Action::ToggleMode => {
-                *mode = mode.toggle();
-                screen.draw_prompt(state, *mode, width);
-            }
-            Action::Resize { width: w, height: h } => {
-                if w != width || h != height {
-                    width = w;
-                    height = h;
-                    resize_pending = true;
-                }
-            }
-            Action::Redraw => {
-                screen.draw_prompt(state, *mode, width);
-            }
-            Action::Noop => {}
-        }
-    }
-}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

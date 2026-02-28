@@ -1,5 +1,5 @@
 use crate::agent::{run_agent, AgentEvent};
-use crate::input::{Action, EscAction, InputState, History, Mode, read_input, resolve_agent_esc};
+use crate::input::{Action, EscAction, InputState, History, Mode, resolve_agent_esc};
 use crate::provider::{Message, Provider, Role};
 use crate::render::{tool_arg_summary, Block, ConfirmChoice, Screen, ToolOutput, ToolStatus, ResumeEntry};
 use crate::session::Session;
@@ -10,12 +10,14 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use crossterm::{
-    event::{self, EnableBracketedPaste, DisableBracketedPaste, EventStream},
+    event::{self, EnableBracketedPaste, DisableBracketedPaste, EventStream, Event, KeyCode, KeyEvent, KeyModifiers},
     terminal, ExecutableCommand,
 };
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tokio::sync::mpsc;
+
+// ── App ──────────────────────────────────────────────────────────────────────
 
 pub struct App {
     pub api_base: String,
@@ -39,6 +41,42 @@ pub struct App {
     last_width: u16,
     last_height: u16,
 }
+
+struct AgentState {
+    cancel: CancellationToken,
+    handle: tokio::task::JoinHandle<Vec<Message>>,
+    steering: Arc<Mutex<Vec<String>>>,
+    pending: Option<PendingTool>,
+    steered_count: usize,
+    _perf: Option<crate::perf::Guard>,
+}
+
+enum EventOutcome {
+    Noop,
+    Redraw,
+    Quit,
+    CancelAgent,
+    Submit(String),
+    Settings { vim: bool, auto_compact: bool },
+    Rewind(usize),
+}
+
+enum InputOutcome {
+    Continue,
+    StartAgent,
+    Compact,
+    Quit,
+}
+
+/// Mutable timer state shared across event handlers.
+struct Timers {
+    last_esc: Option<Instant>,
+    esc_vim_mode: Option<vim::ViMode>,
+    last_ctrlc: Option<Instant>,
+    resize_at: Option<Instant>,
+}
+
+// ── App impl ─────────────────────────────────────────────────────────────────
 
 impl App {
     pub fn new(api_base: String, api_key: String, model: String, vim_from_config: bool, auto_compact: bool, shared_session: Arc<Mutex<Option<Session>>>) -> Self {
@@ -73,12 +111,542 @@ impl App {
         }
     }
 
-    pub fn read_input(&mut self) -> Option<String> {
-        let result = read_input(&mut self.screen, &mut self.mode, &mut self.input_history, &mut self.input, self.auto_compact);
-        self.input.clear();
-        self.input.restore_stash();
-        result
+    // ── Unified event loop ───────────────────────────────────────────────
+
+    pub async fn run(&mut self, mut ctx_rx: Option<tokio::sync::oneshot::Receiver<Option<u32>>>) {
+        terminal::enable_raw_mode().ok();
+        let _ = io::stdout().execute(EnableBracketedPaste);
+
+        self.screen.draw_prompt(&self.input, self.mode, render::term_width());
+
+        let mut term_events = EventStream::new();
+        let mut agent: Option<AgentState> = None;
+        // Dummy receiver — replaced with the real one each time an agent starts.
+        let mut agent_rx: mpsc::UnboundedReceiver<AgentEvent> = mpsc::unbounded_channel().1;
+        let mut t = Timers {
+            last_esc: None,
+            esc_vim_mode: None,
+            last_ctrlc: None,
+            resize_at: None,
+        };
+
+        'main: loop {
+            // ── Background polls ─────────────────────────────────────────
+            self.poll_pending_title();
+            if let Some(ref mut rx) = ctx_rx {
+                if let Ok(result) = rx.try_recv() {
+                    self.context_window = result;
+                    ctx_rx = None;
+                }
+            }
+
+            // ── Drain agent events ───────────────────────────────────────
+            if agent.is_some() {
+                loop {
+                    let ev = match agent_rx.try_recv() {
+                        Ok(ev) => ev,
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            self.finish_agent(agent.take().unwrap(), false).await;
+                            break;
+                        }
+                    };
+                    let action = {
+                        let ag = agent.as_mut().unwrap();
+                        let ctrl = self.handle_agent_event(ev, &mut ag.pending, &mut ag.steered_count);
+                        self.dispatch_control(ctrl, &mut ag.pending)
+                    };
+                    match action {
+                        LoopAction::Continue => {}
+                        LoopAction::Done => {
+                            self.finish_agent(agent.take().unwrap(), false).await;
+                            break;
+                        }
+                        LoopAction::Cancel => {
+                            self.finish_agent(agent.take().unwrap(), true).await;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // ── Sync steering ────────────────────────────────────────────
+            if let Some(ref mut ag) = agent {
+                if self.queued_messages.len() > ag.steered_count {
+                    let new = self.queued_messages[ag.steered_count..].to_vec();
+                    ag.steering.lock().unwrap().extend(new);
+                    ag.steered_count = self.queued_messages.len();
+                }
+            }
+
+            // ── Auto-start from leftover queued messages ─────────────────
+            if agent.is_none() && !self.queued_messages.is_empty() {
+                let mut parts = std::mem::take(&mut self.queued_messages);
+                let buf = std::mem::take(&mut self.input.buf);
+                self.input.cpos = 0;
+                if !buf.trim().is_empty() {
+                    parts.push(buf);
+                }
+                let text = parts.join("\n").trim().to_string();
+                if !text.is_empty() {
+                    self.screen.erase_prompt();
+                    match self.process_input(&text) {
+                        InputOutcome::StartAgent => {
+                            let (rx, ag) = self.begin_agent_turn(&text);
+                            agent_rx = rx;
+                            agent = Some(ag);
+                        }
+                        InputOutcome::Compact => {
+                            self.compact_history().await;
+                        }
+                        InputOutcome::Continue | InputOutcome::Quit => {}
+                    }
+                }
+            }
+
+            // ── Render ───────────────────────────────────────────────────
+            self.tick(&mut t.resize_at, agent.is_some());
+
+            // ── Wait for next event ──────────────────────────────────────
+            tokio::select! {
+                biased;
+
+                Some(Ok(ev)) = term_events.next() => {
+                    if self.dispatch_terminal_event(
+                        ev, &mut agent, &mut agent_rx, &mut t,
+                    ).await {
+                        break 'main;
+                    }
+
+                    // Drain buffered terminal events
+                    while event::poll(Duration::ZERO).unwrap_or(false) {
+                        if let Ok(ev) = event::read() {
+                            if self.dispatch_terminal_event(
+                                ev, &mut agent, &mut agent_rx, &mut t,
+                            ).await {
+                                break 'main;
+                            }
+                        }
+                    }
+
+                    // Render immediately after terminal events for responsive typing.
+                    self.tick(&mut t.resize_at, agent.is_some());
+                }
+
+                Some(ev) = agent_rx.recv(), if agent.is_some() => {
+                    let action = {
+                        let ag = agent.as_mut().unwrap();
+                        let ctrl = self.handle_agent_event(ev, &mut ag.pending, &mut ag.steered_count);
+                        self.dispatch_control(ctrl, &mut ag.pending)
+                    };
+                    match action {
+                        LoopAction::Continue => {}
+                        LoopAction::Done => {
+                            self.finish_agent(agent.take().unwrap(), false).await;
+                        }
+                        LoopAction::Cancel => {
+                            self.finish_agent(agent.take().unwrap(), true).await;
+                        }
+                    }
+                    self.tick(&mut t.resize_at, agent.is_some());
+                }
+
+                _ = tokio::time::sleep(Duration::from_millis(80)) => {
+                    // Timer tick for spinner animation.
+                }
+            }
+
+        }
+
+        // Cleanup
+        if let Some(ag) = agent {
+            self.finish_agent(ag, true).await;
+        }
+        self.save_session();
+
+        let _ = io::stdout().execute(DisableBracketedPaste);
+        terminal::disable_raw_mode().ok();
     }
+
+    // ── Terminal event dispatch ───────────────────────────────────────────
+
+    /// Handle a single terminal event, potentially starting/stopping agents.
+    /// Returns `true` if the app should quit.
+    async fn dispatch_terminal_event(
+        &mut self,
+        ev: Event,
+        agent: &mut Option<AgentState>,
+        agent_rx: &mut mpsc::UnboundedReceiver<AgentEvent>,
+        t: &mut Timers,
+    ) -> bool {
+        let outcome = if agent.is_some() {
+            self.handle_event_running(ev, t)
+        } else {
+            self.handle_event_idle(ev, t)
+        };
+
+        match outcome {
+            EventOutcome::Noop | EventOutcome::Redraw => false,
+            EventOutcome::Quit => {
+                if let Some(ag) = agent.take() {
+                    self.finish_agent(ag, true).await;
+                }
+                true
+            }
+            EventOutcome::CancelAgent => {
+                if let Some(ag) = agent.take() {
+                    self.finish_agent(ag, true).await;
+                }
+                false
+            }
+            EventOutcome::Settings { vim, auto_compact } => {
+                self.input.set_vim_enabled(vim);
+                self.app_state.set_vim_enabled(vim);
+                self.auto_compact = auto_compact;
+                false
+            }
+            EventOutcome::Rewind(block_idx) => {
+                if let Some(text) = self.rewind_to(block_idx) {
+                    self.input.buf = text;
+                    self.input.cpos = self.input.buf.len();
+                }
+                false
+            }
+            EventOutcome::Submit(text) => {
+                let text = text.trim().to_string();
+                if !text.is_empty() {
+                    self.screen.erase_prompt();
+                    match self.process_input(&text) {
+                        InputOutcome::StartAgent => {
+                            let (rx, ag) = self.begin_agent_turn(&text);
+                            *agent_rx = rx;
+                            *agent = Some(ag);
+                        }
+                        InputOutcome::Compact => {
+                            self.compact_history().await;
+                        }
+                        InputOutcome::Continue => {}
+                        InputOutcome::Quit => return true,
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    // ── Idle event handler ───────────────────────────────────────────────
+
+    fn handle_event_idle(&mut self, ev: Event, t: &mut Timers) -> EventOutcome {
+        // Resize
+        if let Event::Resize(w, h) = ev {
+            if w != self.last_width || h != self.last_height {
+                self.last_width = w;
+                self.last_height = h;
+                t.resize_at = Some(Instant::now());
+            }
+            return EventOutcome::Noop;
+        }
+
+        // Ctrl+R: open history fuzzy search (not in vim normal mode).
+        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Char('r'), modifiers: KeyModifiers::CONTROL, .. }))
+            && self.input.history_search_query().is_none()
+            && !self.input.vim_mode().is_some_and(|m| m == vim::ViMode::Normal)
+        {
+            self.input.open_history_search(&self.input_history);
+            self.screen.mark_dirty();
+            return EventOutcome::Redraw;
+        }
+
+        // Ctrl+C: double-tap → quit, single → clear input.
+        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL, .. })) {
+            let double_tap = t.last_ctrlc.is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
+            if self.input.buf.is_empty() || double_tap {
+                return EventOutcome::Quit;
+            }
+            t.last_ctrlc = Some(Instant::now());
+            self.input.buf.clear();
+            self.input.cpos = 0;
+            self.input.pastes.clear();
+            self.input.completer = None;
+            self.screen.mark_dirty();
+            return EventOutcome::Redraw;
+        }
+
+        // Ctrl+S: toggle stash.
+        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Char('s'), modifiers: KeyModifiers::CONTROL, .. })) {
+            self.input.toggle_stash();
+            self.screen.mark_dirty();
+            return EventOutcome::Redraw;
+        }
+
+        // Esc / double-Esc
+        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Esc, .. })) {
+            let in_normal = !self.input.vim_enabled() || !self.input.vim_in_insert_mode();
+            if in_normal {
+                let double = t.last_esc.is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
+                if double {
+                    t.last_esc = None;
+                    let restore_mode = t.esc_vim_mode.take();
+                    let turns = self.screen.user_turns();
+                    if turns.is_empty() {
+                        return EventOutcome::Noop;
+                    }
+                    self.screen.erase_prompt();
+                    if let Some(block_idx) = render::show_rewind(&turns) {
+                        self.screen.redraw(self.screen.has_scrollback);
+                        return EventOutcome::Rewind(block_idx);
+                    }
+                    // Rewind cancelled — restore vim mode if we started from insert.
+                    if restore_mode == Some(vim::ViMode::Insert) {
+                        self.input.set_vim_mode(vim::ViMode::Insert);
+                    }
+                    self.screen.redraw(self.screen.has_scrollback);
+                    return EventOutcome::Redraw;
+                }
+                // Single Esc in normal mode — start timer.
+                t.last_esc = Some(Instant::now());
+                t.esc_vim_mode = self.input.vim_mode();
+                if !self.input.vim_enabled() {
+                    return EventOutcome::Noop;
+                }
+                // Vim normal mode — fall through to handle_event (resets pending op).
+            } else {
+                // Vim insert mode — start double-Esc timer, fall through so
+                // handle_event processes the Esc and switches vim to normal.
+                t.esc_vim_mode = Some(vim::ViMode::Insert);
+                t.last_esc = Some(Instant::now());
+            }
+        } else {
+            t.last_esc = None;
+        }
+
+        // Delegate to InputState::handle_event
+        match self.input.handle_event(ev, Some(&mut self.input_history)) {
+            Action::Submit(text) if text.trim() == "/settings" => {
+                self.input.open_settings(self.input.vim_enabled(), self.auto_compact);
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            Action::Submit(text) => {
+                self.input.restore_stash();
+                EventOutcome::Submit(text)
+            }
+            Action::Settings { vim, auto_compact } => {
+                EventOutcome::Settings { vim, auto_compact }
+            }
+            Action::ToggleMode => {
+                self.mode = self.mode.toggle();
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            Action::Resize { width: w, height: h } => {
+                let (w16, h16) = (w as u16, h as u16);
+                if w16 != self.last_width || h16 != self.last_height {
+                    self.last_width = w16;
+                    self.last_height = h16;
+                    t.resize_at = Some(Instant::now());
+                }
+                EventOutcome::Noop
+            }
+            Action::Redraw => {
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            Action::Noop => EventOutcome::Noop,
+        }
+    }
+
+    // ── Running event handler ────────────────────────────────────────────
+
+    fn handle_event_running(&mut self, ev: Event, t: &mut Timers) -> EventOutcome {
+        // Resize
+        if let Event::Resize(w, h) = ev {
+            if w != self.last_width || h != self.last_height {
+                self.last_width = w;
+                self.last_height = h;
+                t.resize_at = Some(Instant::now());
+            }
+            return EventOutcome::Noop;
+        }
+
+        // Ctrl+C: double-tap → cancel agent, single → clear input + queued.
+        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL, .. })) {
+            let double_tap = t.last_ctrlc.is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
+            if self.input.buf.is_empty() || double_tap {
+                t.last_ctrlc = None;
+                self.screen.mark_dirty();
+                return EventOutcome::CancelAgent;
+            }
+            t.last_ctrlc = Some(Instant::now());
+            self.input.clear();
+            self.queued_messages.clear();
+            self.screen.mark_dirty();
+            return EventOutcome::Noop;
+        }
+
+        // Esc: use resolve_agent_esc for the running-mode logic.
+        if matches!(ev, Event::Key(KeyEvent { code: KeyCode::Esc, .. })) {
+            match resolve_agent_esc(
+                self.input.vim_mode(),
+                !self.queued_messages.is_empty(),
+                &mut t.last_esc,
+                &mut t.esc_vim_mode,
+            ) {
+                EscAction::VimToNormal => {
+                    self.input.handle_event(ev, None);
+                    self.screen.mark_dirty();
+                }
+                EscAction::Unqueue => {
+                    let mut combined = self.queued_messages.join("\n");
+                    if !self.input.buf.is_empty() {
+                        combined.push('\n');
+                        combined.push_str(&self.input.buf);
+                    }
+                    self.input.buf = combined;
+                    self.input.cpos = self.input.buf.len();
+                    self.queued_messages.clear();
+                    self.screen.mark_dirty();
+                }
+                EscAction::Cancel { restore_vim } => {
+                    if let Some(mode) = restore_vim {
+                        self.input.set_vim_mode(mode);
+                    }
+                    self.screen.mark_dirty();
+                    return EventOutcome::CancelAgent;
+                }
+                EscAction::StartTimer => {}
+            }
+            return EventOutcome::Noop;
+        }
+
+        // Everything else → InputState::handle_event (type-ahead, no history).
+        match self.input.handle_event(ev, None) {
+            Action::Submit(text) => {
+                if !text.is_empty() {
+                    self.queued_messages.push(text);
+                }
+                self.screen.mark_dirty();
+            }
+            Action::ToggleMode => {
+                self.mode = self.mode.toggle();
+                self.screen.mark_dirty();
+            }
+            Action::Redraw => {
+                self.screen.mark_dirty();
+            }
+            Action::Settings { .. } | Action::Noop | Action::Resize { .. } => {}
+        }
+        EventOutcome::Noop
+    }
+
+    // ── Input processing (commands, settings, rewind, shell) ─────────────
+
+    fn process_input(&mut self, input: &str) -> InputOutcome {
+        let input = input.trim();
+        if input.is_empty() {
+            return InputOutcome::Continue;
+        }
+
+        self.input_history.push(input.to_string());
+        self.app_state.set_mode(self.mode);
+
+        if !self.handle_command(input) {
+            return InputOutcome::Quit;
+        }
+        if input == "/compact" {
+            return InputOutcome::Compact;
+        }
+        if input.starts_with('/') && crate::completer::Completer::is_command(input) {
+            return InputOutcome::Continue;
+        }
+
+        // Shell command
+        if let Some(cmd) = input.strip_prefix('!') {
+            let cmd = cmd.trim();
+            if !cmd.is_empty() {
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .output()
+                    .map(|o| {
+                        let mut s = String::from_utf8_lossy(&o.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        if !stderr.is_empty() {
+                            if !s.is_empty() { s.push('\n'); }
+                            s.push_str(&stderr);
+                        }
+                        s.truncate(s.trim_end().len());
+                        s
+                    })
+                    .unwrap_or_else(|e| format!("error: {}", e));
+                self.screen.push(Block::Exec { command: cmd.to_string(), output });
+            }
+            return InputOutcome::Continue;
+        }
+
+        // Regular user message → start agent
+        InputOutcome::StartAgent
+    }
+
+    // ── Agent lifecycle ──────────────────────────────────────────────────
+
+    fn begin_agent_turn(&mut self, input: &str) -> (mpsc::UnboundedReceiver<AgentEvent>, AgentState) {
+        self.screen.begin_turn();
+        self.show_user_message(input);
+        if self.session.first_user_message.is_none() {
+            self.session.first_user_message = Some(input.to_string());
+        }
+        self.push_user_message(input.to_string());
+        self.save_session();
+
+        self.screen.set_throbber(render::Throbber::Working);
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let steering: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let handle = self.spawn_agent(tx, cancel.clone(), steering.clone());
+
+        let state = AgentState {
+            cancel,
+            handle,
+            steering,
+            pending: None,
+            steered_count: 0,
+            _perf: crate::perf::begin("agent_turn"),
+        };
+        (rx, state)
+    }
+
+    async fn finish_agent(&mut self, agent: AgentState, cancelled: bool) {
+        self.screen.flush_blocks();
+        if cancelled {
+            self.screen.set_throbber(render::Throbber::Interrupted);
+            let mut leftover: Vec<String> = agent.steering.lock().unwrap().drain(..).collect();
+            leftover.append(&mut self.queued_messages);
+            if !leftover.is_empty() {
+                let mut combined = leftover.join("\n");
+                if !self.input.buf.is_empty() {
+                    combined.push('\n');
+                    combined.push_str(&self.input.buf);
+                }
+                self.input.buf = combined;
+                self.input.cpos = self.input.buf.len();
+            }
+            agent.cancel.cancel();
+            agent.handle.abort();
+        } else {
+            self.screen.set_throbber(render::Throbber::Done);
+            if let Ok(new_messages) = agent.handle.await {
+                self.history = new_messages;
+            }
+        }
+        self.save_session();
+        self.maybe_generate_title();
+        self.app_state.set_mode(self.mode);
+        self.maybe_auto_compact().await;
+    }
+
+    // ── Commands ─────────────────────────────────────────────────────────
 
     pub fn handle_command(&mut self, input: &str) -> bool {
         match input {
@@ -94,7 +662,7 @@ impl App {
                 self.input.set_vim_enabled(enabled);
                 self.app_state.set_vim_enabled(enabled);
             }
-            "/compact" => {} // handled in main loop after handle_command returns
+            "/compact" => {} // handled via InputOutcome::Compact
             "/export" => {
                 self.export_to_clipboard();
             }
@@ -142,7 +710,11 @@ impl App {
                 self.screen.flush_blocks();
             }
         }
+        // show_resume manages its own raw mode — re-enable.
+        terminal::enable_raw_mode().ok();
     }
+
+    // ── History / session ────────────────────────────────────────────────
 
     pub fn rebuild_screen_from_history(&mut self) {
         self.screen.clear();
@@ -265,10 +837,8 @@ impl App {
     }
 
     pub async fn compact_history(&mut self) {
-        // Number of complete turns (user + assistant exchange) to retain verbatim.
         const KEEP_TURNS: usize = 2;
 
-        // Find the cut point: the message index of the (N-from-last)th User message.
         let cut = {
             let mut turns_seen = 0;
             let mut idx = self.history.len();
@@ -302,14 +872,12 @@ impl App {
             provider.compact(&to_summarize, &model, &cancel).await
         });
 
-        terminal::enable_raw_mode().ok();
         self.screen.set_throbber(render::Throbber::Compacting);
         loop {
             self.render_screen();
             if task.is_finished() { break; }
             tokio::time::sleep(Duration::from_millis(80)).await;
         }
-        terminal::disable_raw_mode().ok();
 
         let result = task.await.unwrap_or_else(|_| Err("task panicked".into()));
 
@@ -337,7 +905,6 @@ impl App {
         }
     }
 
-    /// Check if auto-compact should trigger (prompt tokens > 80% of context window).
     pub async fn maybe_auto_compact(&mut self) {
         if !self.auto_compact {
             return;
@@ -349,19 +916,11 @@ impl App {
         }
     }
 
-    /// Rewind conversation to the turn starting at `block_idx`.
-    /// Removes all blocks from `block_idx` onward, truncates history,
-    /// and returns the user message text from the rewound turn.
     pub fn rewind_to(&mut self, block_idx: usize) -> Option<String> {
         let turns = self.screen.user_turns();
-
-        // Find the turn at block_idx and get its text
         let turn_text = turns.iter().find(|(i, _)| *i == block_idx).map(|(_, t)| t.clone());
-
-        // Count how many User blocks exist before block_idx
         let user_turns_to_keep = turns.iter().filter(|(i, _)| *i < block_idx).count();
 
-        // Truncate history: find the Nth user message and cut there
         let mut user_count = 0;
         let mut hist_idx = 0;
         for (i, msg) in self.history.iter().enumerate() {
@@ -381,6 +940,8 @@ impl App {
 
         turn_text
     }
+
+    // ── Agent internals ──────────────────────────────────────────────────
 
     pub fn show_user_message(&mut self, input: &str) {
         self.screen.push(Block::User { text: input.to_string() });
@@ -430,8 +991,6 @@ impl App {
                 SessionControl::Continue
             }
             AgentEvent::Steered { text, count } => {
-                // Remove the injected messages from the display queue and
-                // adjust the sync counter accordingly.
                 let drain_n = count.min(self.queued_messages.len());
                 self.queued_messages.drain(..drain_n);
                 *steered_count = steered_count.saturating_sub(drain_n);
@@ -519,9 +1078,6 @@ impl App {
         }
     }
 
-    /// Dispatch a SessionControl result, handling confirm/ask dialogs.
-    /// Returns LoopAction::Break when the session loop should stop.
-    /// Dispatch a SessionControl result, handling confirm/ask dialogs.
     fn dispatch_control(
         &mut self,
         ctrl: SessionControl,
@@ -566,95 +1122,7 @@ impl App {
         }
     }
 
-    pub fn handle_terminal_event(
-        &mut self,
-        ev: event::Event,
-        last_esc: &mut Option<Instant>,
-        vim_mode_at_esc: &mut Option<vim::ViMode>,
-        last_ctrlc: &mut Option<Instant>,
-        resize_at: &mut Option<Instant>,
-    ) -> TermAction {
-        if let event::Event::Resize(w, h) = ev {
-            if w != self.last_width || h != self.last_height {
-                self.last_width = w;
-                self.last_height = h;
-                *resize_at = Some(Instant::now());
-            }
-        }
-
-        if matches!(ev, event::Event::Key(crossterm::event::KeyEvent { code: crossterm::event::KeyCode::Char('c'), modifiers: crossterm::event::KeyModifiers::CONTROL, .. })) {
-            let double_tap = last_ctrlc.is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
-            if self.input.buf.is_empty() || double_tap {
-                *last_ctrlc = None;
-                self.screen.mark_dirty();
-                return TermAction::Cancel;
-            }
-            *last_ctrlc = Some(Instant::now());
-            self.input.clear();
-            self.queued_messages.clear();
-            self.screen.mark_dirty();
-            return TermAction::None;
-        }
-
-        if matches!(ev, event::Event::Key(crossterm::event::KeyEvent { code: crossterm::event::KeyCode::Esc, .. })) {
-            match resolve_agent_esc(
-                self.input.vim_mode(),
-                !self.queued_messages.is_empty(),
-                last_esc,
-                vim_mode_at_esc,
-            ) {
-                EscAction::VimToNormal => {
-                    self.input.handle_event(ev, None);
-                    self.screen.mark_dirty();
-                }
-                EscAction::Unqueue => {
-                    let mut combined = self.queued_messages.join("\n");
-                    if !self.input.buf.is_empty() {
-                        combined.push('\n');
-                        combined.push_str(&self.input.buf);
-                    }
-                    self.input.buf = combined;
-                    self.input.cpos = self.input.buf.len();
-                    self.queued_messages.clear();
-                    self.screen.mark_dirty();
-                }
-                EscAction::Cancel { restore_vim } => {
-                    if let Some(mode) = restore_vim {
-                        self.input.set_vim_mode(mode);
-                    }
-                    self.screen.mark_dirty();
-                    return TermAction::Cancel;
-                }
-                EscAction::StartTimer => {}
-            }
-            return TermAction::None;
-        }
-
-        match self.input.handle_event(ev, None) {
-            Action::Submit(text) => {
-                if !text.is_empty() {
-                    self.queued_messages.push(text);
-                }
-                self.screen.mark_dirty();
-            }
-            Action::Cancel => {
-                self.screen.erase_prompt();
-                return TermAction::Cancel;
-            }
-            Action::ToggleMode => {
-                self.mode = self.mode.toggle();
-                self.screen.mark_dirty();
-            }
-            Action::Redraw => {
-                self.screen.mark_dirty();
-            }
-            Action::Noop => {}
-            Action::Resize { .. } => {}
-        }
-        TermAction::None
-    }
-
-    pub fn tick(&mut self, resize_at: &mut Option<Instant>) {
+    fn tick(&mut self, resize_at: &mut Option<Instant>, agent_running: bool) {
         if let Some(t) = *resize_at {
             if t.elapsed() >= Duration::from_millis(render::RESIZE_DEBOUNCE_MS) {
                 self.screen.redraw(true);
@@ -663,141 +1131,11 @@ impl App {
                 return;
             }
         }
-        self.render_screen();
-    }
-
-    pub async fn run_session(&mut self) {
-        let _perf = crate::perf::begin("run_session");
-        terminal::enable_raw_mode().ok();
-        let _ = io::stdout().execute(EnableBracketedPaste);
-        self.screen.set_throbber(render::Throbber::Working);
-        self.render_screen();
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let cancel_token = CancellationToken::new();
-        let steering: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let agent_handle = self.spawn_agent(tx, cancel_token.clone(), steering.clone());
-
-        let mut pending: Option<PendingTool> = None;
-        let mut steered_count: usize = 0; // how many queued_messages have been synced to steering
-        let mut agent_done = false;
-        let mut resize_at: Option<Instant> = None;
-        let mut cancelled = false;
-        let mut last_esc: Option<Instant> = None;
-        let mut vim_mode_at_esc: Option<vim::ViMode> = None;
-        let mut last_ctrlc: Option<Instant> = None;
-        let mut term_events = EventStream::new();
-
-        loop {
-            // Drain agent events
-            loop {
-                match rx.try_recv() {
-                    Ok(ev) => {
-                        let ctrl = self.handle_agent_event(ev, &mut pending, &mut steered_count);
-                        match self.dispatch_control(ctrl, &mut pending) {
-                            LoopAction::Continue => {}
-                            LoopAction::Done => { agent_done = true; break; }
-                            LoopAction::Cancel => { cancelled = true; agent_done = true; break; }
-                        }
-                    }
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => { agent_done = true; break; }
-                }
-            }
-
-            if agent_done { break; }
-
-            // Sync any newly queued messages into the steering queue without
-            // removing them from queued_messages — they stay visible in the
-            // prompt until the agent actually injects them (Steered event).
-            if self.queued_messages.len() > steered_count {
-                let new = self.queued_messages[steered_count..].to_vec();
-                steering.lock().unwrap().extend(new);
-                steered_count = self.queued_messages.len();
-            }
-
-            self.tick(&mut resize_at);
-
-            // Wait for the next event: terminal input, agent message, or
-            // a timer tick for spinner animation.  Terminal input wakes us
-            // immediately so typing feels responsive even while the agent
-            // is running.
-            tokio::select! {
-                biased;
-                Some(Ok(ev)) = term_events.next() => {
-                    if let TermAction::Cancel = self.handle_terminal_event(
-                        ev, &mut last_esc, &mut vim_mode_at_esc, &mut last_ctrlc, &mut resize_at,
-                    ) {
-                        cancelled = true;
-                        agent_done = true;
-                    }
-                    // Drain any remaining buffered terminal events
-                    while event::poll(Duration::ZERO).unwrap_or(false) {
-                        if let Ok(ev) = event::read() {
-                            if let TermAction::Cancel = self.handle_terminal_event(
-                                ev, &mut last_esc, &mut vim_mode_at_esc, &mut last_ctrlc, &mut resize_at,
-                            ) {
-                                cancelled = true;
-                                agent_done = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                Some(ev) = rx.recv() => {
-                    let ctrl = self.handle_agent_event(ev, &mut pending, &mut steered_count);
-                    match self.dispatch_control(ctrl, &mut pending) {
-                        LoopAction::Continue => {}
-                        LoopAction::Done => { agent_done = true; }
-                        LoopAction::Cancel => { cancelled = true; agent_done = true; }
-                    }
-                }
-                _ = tokio::time::sleep(Duration::from_millis(80)) => {
-                    // Timer tick — spinner animation refresh
-                }
-            }
-
-            if agent_done { break; }
-        }
-
-        self.finish_session(cancelled, cancel_token, agent_handle, steering).await;
-    }
-
-    async fn finish_session(
-        &mut self,
-        cancelled: bool,
-        cancel_token: CancellationToken,
-        agent_handle: tokio::task::JoinHandle<Vec<Message>>,
-        steering: Arc<Mutex<Vec<String>>>,
-    ) {
-        self.screen.flush_blocks();
-        if cancelled {
-            self.screen.set_throbber(render::Throbber::Interrupted);
-            // Restore any messages that were queued but not yet injected into the
-            // agent back to the input prompt so the user can edit and resend them.
-            let mut leftover: Vec<String> = steering.lock().unwrap().drain(..).collect();
-            leftover.append(&mut self.queued_messages);
-            if !leftover.is_empty() {
-                let mut combined = leftover.join("\n");
-                if !self.input.buf.is_empty() {
-                    combined.push('\n');
-                    combined.push_str(&self.input.buf);
-                }
-                self.input.buf = combined;
-                self.input.cpos = self.input.buf.len();
-            }
-            cancel_token.cancel();
-            agent_handle.abort();
+        if agent_running {
+            self.render_screen();
         } else {
-            self.screen.set_throbber(render::Throbber::Done);
-            if let Ok(new_messages) = agent_handle.await {
-                self.history = new_messages;
-            }
+            self.screen.draw_prompt(&self.input, self.mode, render::term_width());
         }
-        self.render_screen();
-        let _ = io::stdout().execute(DisableBracketedPaste);
-        terminal::disable_raw_mode().ok();
-        self.app_state.set_mode(self.mode);
     }
 
     fn export_to_clipboard(&mut self) {
@@ -851,6 +1189,8 @@ impl App {
     }
 }
 
+// ── Supporting types ─────────────────────────────────────────────────────────
+
 pub enum SessionControl {
     Continue,
     NeedsConfirm { desc: String, args: HashMap<String, serde_json::Value>, reply: tokio::sync::oneshot::Sender<bool> },
@@ -863,17 +1203,9 @@ pub enum ConfirmAction {
     Denied,
 }
 
-/// Whether the session event loop should continue or stop.
 enum LoopAction {
     Continue,
-    /// Agent finished normally.
     Done,
-    /// User denied a tool or cancelled — agent should be aborted.
-    Cancel,
-}
-
-pub enum TermAction {
-    None,
     Cancel,
 }
 

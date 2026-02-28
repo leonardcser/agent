@@ -107,7 +107,7 @@ async fn main() {
     let mut app = App::new(api_base, api_key, model, vim_enabled, auto_compact, shared_session);
 
     // Fetch context window in background so startup isn't blocked by the network call.
-    let mut ctx_rx = {
+    let ctx_rx = {
         let provider = Provider::new(app.api_base.clone(), app.api_key.clone(), app.client.clone());
         let model = app.model.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -118,101 +118,7 @@ async fn main() {
     };
 
     println!();
-    loop {
-        app.poll_pending_title();
-        // Check if context window fetch completed.
-        if let Some(ref mut rx) = ctx_rx {
-            if let Ok(result) = rx.try_recv() {
-                app.context_window = result;
-                ctx_rx = None;
-            }
-        }
-        let input = if !app.queued_messages.is_empty() {
-            let mut parts = std::mem::take(&mut app.queued_messages);
-            let buf = std::mem::take(&mut app.input.buf);
-            app.input.cpos = 0;
-            if !buf.trim().is_empty() {
-                parts.push(buf);
-            }
-            parts.join("\n")
-        } else {
-            match app.read_input() {
-                Some(s) => s,
-                None => break,
-            }
-        };
-        app.app_state.set_mode(app.mode);
-
-        let input = input.trim().to_string();
-        if input.is_empty() { continue; }
-
-        // Handle settings close signal: \x00settings:{json}
-        if let Some(json) = input.strip_prefix("\x00settings:") {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
-                let vim_val = v["vim"].as_bool().unwrap_or(app.input.vim_enabled());
-                let ac_val = v["auto_compact"].as_bool().unwrap_or(app.auto_compact);
-                app.input.set_vim_enabled(vim_val);
-                app.app_state.set_vim_enabled(vim_val);
-                app.auto_compact = ac_val;
-            }
-            continue;
-        }
-
-        // Handle rewind signal from double-Esc menu
-        if let Some(idx_str) = input.strip_prefix("\x00rewind:") {
-            if let Ok(block_idx) = idx_str.parse::<usize>() {
-                if let Some(text) = app.rewind_to(block_idx) {
-                    app.input.buf = text;
-                    app.input.cpos = app.input.buf.len();
-                }
-            }
-            continue;
-        }
-
-        app.input_history.push(input.clone());
-        if !app.handle_command(&input) { break; }
-        if input == "/compact" {
-            app.compact_history().await;
-            continue;
-        }
-        if input.starts_with('/') && crate::completer::Completer::is_command(input.trim()) { continue; }
-
-        if let Some(cmd) = input.strip_prefix('!') {
-            let cmd = cmd.trim();
-            if !cmd.is_empty() {
-                let output = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .output()
-                    .map(|o| {
-                        let mut s = String::from_utf8_lossy(&o.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&o.stderr);
-                        if !stderr.is_empty() {
-                            if !s.is_empty() { s.push('\n'); }
-                            s.push_str(&stderr);
-                        }
-                        s.truncate(s.trim_end().len());
-                        s
-                    })
-                    .unwrap_or_else(|e| format!("error: {}", e));
-                app.screen.push(render::Block::Exec { command: cmd.to_string(), output });
-            }
-            continue;
-        }
-
-        app.screen.begin_turn();
-        app.show_user_message(&input);
-        if app.session.first_user_message.is_none() {
-            app.session.first_user_message = Some(input.clone());
-        }
-        app.push_user_message(input);
-        app.save_session();
-        app.run_session().await;
-        app.save_session();
-        app.maybe_generate_title();
-        app.maybe_auto_compact().await;
-    }
-    app.save_session();
+    app.run(ctx_rx).await;
     perf::print_summary();
 }
 
