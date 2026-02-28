@@ -83,6 +83,7 @@ Press `Shift+Tab` to cycle through modes:
 - **Normal** — default; agent asks before editing files or running commands
 - **Plan** — read-only tools only; agent thinks and plans without making changes
 - **Apply** — agent edits files and runs pre-approved commands without asking
+- **Yolo** — all permissions bypassed; agent runs anything without asking
 
 ## Keybindings
 

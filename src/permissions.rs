@@ -162,19 +162,27 @@ impl Permissions {
     }
 
     pub fn check_tool(&self, mode: Mode, tool_name: &str) -> Decision {
+        if mode == Mode::Yolo {
+            return Decision::Allow;
+        }
         let perms = match mode {
             Mode::Normal => &self.normal,
             Mode::Plan => &self.plan,
             Mode::Apply => &self.apply,
+            Mode::Yolo => unreachable!(),
         };
         perms.tools.get(tool_name).cloned().unwrap_or(Decision::Ask)
     }
 
     pub fn check_bash(&self, mode: Mode, command: &str) -> Decision {
+        if mode == Mode::Yolo {
+            return Decision::Allow;
+        }
         let perms = match mode {
             Mode::Normal => &self.normal,
             Mode::Plan => &self.plan,
             Mode::Apply => &self.apply,
+            Mode::Yolo => unreachable!(),
         };
         // Deny wins
         for pat in &perms.bash.deny {

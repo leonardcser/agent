@@ -21,6 +21,7 @@ pub enum Mode {
     Normal,
     Plan,
     Apply,
+    Yolo,
 }
 
 impl Mode {
@@ -28,7 +29,8 @@ impl Mode {
         match self {
             Mode::Normal => Mode::Plan,
             Mode::Plan => Mode::Apply,
-            Mode::Apply => Mode::Normal,
+            Mode::Apply => Mode::Yolo,
+            Mode::Yolo => Mode::Normal,
         }
     }
 
@@ -37,6 +39,7 @@ impl Mode {
             Mode::Normal => "normal",
             Mode::Plan => "plan",
             Mode::Apply => "apply",
+            Mode::Yolo => "yolo",
         }
     }
 }

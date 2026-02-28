@@ -10,5 +10,6 @@ pub const BAR: Color = Color::AnsiValue(237);
 pub const HEADING: Color = Color::AnsiValue(214); // orange for markdown headings
 pub const MUTED: Color = Color::AnsiValue(244); // light gray for token count and other muted elements
 pub const PLAN: Color = Color::AnsiValue(29); // dark forest green for plan mode
+pub const YOLO: Color = Color::AnsiValue(204); // rose for yolo mode
 pub const EXEC: Color = Color::AnsiValue(197); // red-pink for exec mode
 pub const SUCCESS: Color = Color::AnsiValue(114); // soft green for answered/success

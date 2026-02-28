@@ -38,6 +38,7 @@ impl State {
         match self.mode.as_str() {
             "plan" => Mode::Plan,
             "apply" => Mode::Apply,
+            "yolo" => Mode::Yolo,
             _ => Mode::Normal,
         }
     }

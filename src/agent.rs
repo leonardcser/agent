@@ -51,7 +51,7 @@ fn system_prompt(mode: Mode) -> String {
         .unwrap_or_else(|_| ".".into());
 
     let template = match mode {
-        Mode::Apply => include_str!("prompts/system_apply.txt"),
+        Mode::Apply | Mode::Yolo => include_str!("prompts/system_apply.txt"),
         Mode::Plan => include_str!("prompts/system_plan.txt"),
         Mode::Normal => include_str!("prompts/system.txt"),
     };

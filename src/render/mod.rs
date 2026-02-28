@@ -817,6 +817,7 @@ impl Screen {
         let mode_label = match mode {
             super::input::Mode::Plan => Some(("plan", theme::PLAN)),
             super::input::Mode::Apply => Some(("apply", theme::APPLY)),
+            super::input::Mode::Yolo => Some(("yolo", theme::YOLO)),
             super::input::Mode::Normal => None,
         };
         draw_bar(out, width, None, mode_label, bar_color);
