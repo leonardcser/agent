@@ -103,10 +103,13 @@ pub async fn run_agent(
             }
         }
 
-        if resp.tool_calls.is_empty() {
+        let content = resp.content;
+        let tool_calls = resp.tool_calls;
+
+        if tool_calls.is_empty() {
             messages.push(Message {
                 role: Role::Assistant,
-                content: resp.content,
+                content,
                 tool_calls: None,
                 tool_call_id: None,
             });
@@ -117,12 +120,12 @@ pub async fn run_agent(
 
         messages.push(Message {
             role: Role::Assistant,
-            content: resp.content.clone(),
-            tool_calls: Some(resp.tool_calls.clone()),
+            content,
+            tool_calls: Some(tool_calls.clone()),
             tool_call_id: None,
         });
 
-        for tc in &resp.tool_calls {
+        for tc in &tool_calls {
             let args: HashMap<String, Value> =
                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
 
@@ -222,7 +225,7 @@ pub async fn run_agent(
             } else if tc.function.name == "bash" {
                 execute_bash_streaming(&args, tx).await
             } else {
-                tool.execute(&args)
+                tokio::task::block_in_place(|| tool.execute(&args))
             };
             log::entry(log::Level::Debug, "tool_result", &serde_json::json!({
                 "tool": tc.function.name,
@@ -254,19 +257,12 @@ fn trim_tool_output_for_model(content: &str, max_lines: usize) -> String {
     if content == "no matches found" {
         return content.to_string();
     }
-    let mut lines = content.lines();
-    let total = content.lines().count();
-    if total <= max_lines {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() <= max_lines {
         return content.to_string();
     }
-    let mut out = String::new();
-    for (i, line) in lines.by_ref().take(max_lines).enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        out.push_str(line);
-    }
-    out.push_str(&format!("\n... (trimmed, {} lines total)", total));
+    let mut out = lines[..max_lines].join("\n");
+    out.push_str(&format!("\n... (trimmed, {} lines total)", lines.len()));
     out
 }
 

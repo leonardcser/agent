@@ -49,6 +49,16 @@ impl Session {
             messages: Vec::new(),
         }
     }
+
+    pub fn meta(&self) -> SessionMeta {
+        SessionMeta {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            first_user_message: self.first_user_message.clone(),
+            created_at_ms: self.created_at_ms,
+            updated_at_ms: self.updated_at_ms,
+        }
+    }
 }
 
 pub fn now_ms() -> u64 {
@@ -81,11 +91,23 @@ pub fn time_ago(ts_ms: u64, now_ms: u64) -> String {
 pub fn save(session: &Session) {
     let dir = sessions_dir();
     let _ = fs::create_dir_all(&dir);
+    let ts = now_ms();
+
+    // Write main session file
     let path = dir.join(format!("{}.json", session.id));
-    let tmp = dir.join(format!("{}.{}.tmp", session.id, now_ms()));
+    let tmp = dir.join(format!("{}.{}.tmp", session.id, ts));
     if let Ok(json) = serde_json::to_string_pretty(session) {
         if fs::write(&tmp, json).is_ok() {
             let _ = fs::rename(&tmp, &path);
+        }
+    }
+
+    // Write sidecar metadata file
+    let meta_path = dir.join(format!("{}.meta.json", session.id));
+    let meta_tmp = dir.join(format!("{}.meta.{}.tmp", session.id, ts));
+    if let Ok(json) = serde_json::to_string(&session.meta()) {
+        if fs::write(&meta_tmp, json).is_ok() {
+            let _ = fs::rename(&meta_tmp, &meta_path);
         }
     }
 }
@@ -101,26 +123,40 @@ pub fn list_sessions() -> Vec<SessionMeta> {
     let Ok(entries) = fs::read_dir(&dir) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
+
+    // Collect session IDs from .json files (excluding .meta.json and .tmp)
+    let mut ids: Vec<String> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        if name.ends_with(".meta.json") || name.ends_with(".tmp") || !name.ends_with(".json") {
             continue;
         }
-        let Ok(contents) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let mut meta: SessionMeta = match serde_json::from_str(&contents) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if meta.id.is_empty() {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                meta.id = stem.to_string();
+        let id = name.trim_end_matches(".json").to_string();
+        if !id.is_empty() {
+            ids.push(id);
+        }
+    }
+
+    let mut out = Vec::new();
+    for id in ids {
+        // Try the fast sidecar file first
+        let meta_path = dir.join(format!("{}.meta.json", id));
+        if let Ok(contents) = fs::read_to_string(&meta_path) {
+            if let Ok(meta) = serde_json::from_str::<SessionMeta>(&contents) {
+                out.push(meta);
+                continue;
             }
         }
+        // Fall back to reading the full session file
+        let path = dir.join(format!("{}.json", id));
+        let Ok(contents) = fs::read_to_string(&path) else { continue };
+        let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) else { continue };
         if meta.id.is_empty() {
-            continue;
+            meta.id = id;
         }
         out.push(meta);
     }

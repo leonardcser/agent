@@ -21,6 +21,7 @@ pub struct App {
     pub api_base: String,
     pub api_key: String,
     pub model: String,
+    pub client: reqwest::Client,
     pub mode: Mode,
     pub permissions: permissions::Permissions,
     pub screen: Screen,
@@ -50,6 +51,7 @@ impl App {
             api_base,
             api_key,
             model,
+            client: reqwest::Client::new(),
             mode,
             permissions: permissions::Permissions::load(),
             screen: Screen::new(),
@@ -220,10 +222,11 @@ impl App {
         let api_base = self.api_base.clone();
         let api_key = self.api_key.clone();
         let model = self.model.clone();
+        let client = self.client.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending_title = Some(rx);
         tokio::spawn(async move {
-            let provider = Provider::new(&api_base, &api_key);
+            let provider = Provider::new(api_base, api_key, client);
             let title = match provider.complete_title(&first, &model).await {
                 Ok(t) if !t.is_empty() => t,
                 _ => {
@@ -287,9 +290,10 @@ impl App {
         let api_base = self.api_base.clone();
         let api_key = self.api_key.clone();
         let model = self.model.clone();
+        let client = self.client.clone();
         let cancel = CancellationToken::new();
         let task = tokio::spawn(async move {
-            let provider = Provider::new(&api_base, &api_key);
+            let provider = Provider::new(api_base, api_key, client);
             provider.compact(&to_summarize, &model, &cancel).await
         });
 
@@ -391,12 +395,13 @@ impl App {
         let api_base = self.api_base.clone();
         let api_key = self.api_key.clone();
         let model = self.model.clone();
+        let client = self.client.clone();
         let mode = self.mode;
         let permissions = self.permissions.clone();
         let history = self.history.clone();
 
         tokio::spawn(async move {
-            let provider = Provider::new(&api_base, &api_key);
+            let provider = Provider::new(api_base, api_key, client);
             let registry = tools::build_tools();
             run_agent(&provider, &model, &history, &registry, mode, &permissions, &tx, cancel, steering).await
         })
@@ -505,6 +510,53 @@ impl App {
             ConfirmChoice::No => {
                 let _ = reply.send(false);
                 ConfirmAction::Denied
+            }
+        }
+    }
+
+    /// Dispatch a SessionControl result, handling confirm/ask dialogs.
+    /// Returns LoopAction::Break when the session loop should stop.
+    /// Dispatch a SessionControl result, handling confirm/ask dialogs.
+    fn dispatch_control(
+        &mut self,
+        ctrl: SessionControl,
+        pending: &mut Option<PendingTool>,
+    ) -> LoopAction {
+        match ctrl {
+            SessionControl::Continue => LoopAction::Continue,
+            SessionControl::Done => LoopAction::Done,
+            SessionControl::NeedsConfirm { desc, args, reply } => {
+                let tool_name = pending.as_ref().map(|p| p.name.as_str()).unwrap_or("");
+                match self.handle_confirm(tool_name, &desc, &args, reply) {
+                    ConfirmAction::Approved => {
+                        if let Some(ref mut p) = pending { p.start = Instant::now(); }
+                        LoopAction::Continue
+                    }
+                    ConfirmAction::Denied => {
+                        self.screen.finish_tool(ToolStatus::Denied, None);
+                        *pending = None;
+                        LoopAction::Cancel
+                    }
+                }
+            }
+            SessionControl::NeedsAskQuestion { args, reply } => {
+                self.render_screen();
+                self.screen.erase_prompt();
+                let questions = render::parse_questions(&args);
+                match render::show_ask_question(&questions) {
+                    Some(answer) => {
+                        let _ = reply.send(answer);
+                    }
+                    None => {
+                        let _ = reply.send("User cancelled the question.".into());
+                        self.screen.finish_tool(ToolStatus::Denied, None);
+                        *pending = None;
+                        self.screen.redraw_in_place();
+                        return LoopAction::Cancel;
+                    }
+                }
+                self.screen.redraw_in_place();
+                LoopAction::Continue
             }
         }
     }
@@ -631,44 +683,14 @@ impl App {
             // Drain agent events
             loop {
                 match rx.try_recv() {
-                    Ok(ev) => match self.handle_agent_event(ev, &mut pending, &mut steered_count) {
-                        SessionControl::Continue => {}
-                        SessionControl::NeedsConfirm { desc, args, reply } => {
-                            let tool_name = pending.as_ref().map(|p| p.name.as_str()).unwrap_or("");
-                            match self.handle_confirm(tool_name, &desc, &args, reply) {
-                                ConfirmAction::Approved => {
-                                    if let Some(ref mut p) = pending { p.start = Instant::now(); }
-                                }
-                                ConfirmAction::Denied => {
-                                    self.screen.finish_tool(ToolStatus::Denied, None);
-                                    pending = None;
-                                    cancelled = true;
-                                    agent_done = true;
-                                    break;
-                                }
-                            }
+                    Ok(ev) => {
+                        let ctrl = self.handle_agent_event(ev, &mut pending, &mut steered_count);
+                        match self.dispatch_control(ctrl, &mut pending) {
+                            LoopAction::Continue => {}
+                            LoopAction::Done => { agent_done = true; break; }
+                            LoopAction::Cancel => { cancelled = true; agent_done = true; break; }
                         }
-                        SessionControl::NeedsAskQuestion { args, reply } => {
-                            self.render_screen();
-                            self.screen.erase_prompt();
-                            let questions = render::parse_questions(&args);
-                            match render::show_ask_question(&questions) {
-                                Some(answer) => {
-                                    let _ = reply.send(answer);
-                                }
-                                None => {
-                                    let _ = reply.send("User cancelled the question.".into());
-                                    self.screen.finish_tool(ToolStatus::Denied, None);
-                                    pending = None;
-                                    cancelled = true;
-                                    agent_done = true;
-                                }
-                            }
-                            self.screen.redraw_in_place();
-                            if agent_done { break; }
-                        }
-                        SessionControl::Done => { agent_done = true; break; }
-                    },
+                    }
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => { agent_done = true; break; }
                 }
@@ -714,44 +736,11 @@ impl App {
                     }
                 }
                 Some(ev) = rx.recv() => {
-                    // Put it back for the drain loop at the top to handle
-                    // (channel is unbounded so this won't block).
-                    // We just need to wake up — the drain loop processes it.
-                    match self.handle_agent_event(ev, &mut pending, &mut steered_count) {
-                        SessionControl::Continue => {}
-                        SessionControl::NeedsConfirm { desc, args, reply } => {
-                            let tool_name = pending.as_ref().map(|p| p.name.as_str()).unwrap_or("");
-                            match self.handle_confirm(tool_name, &desc, &args, reply) {
-                                ConfirmAction::Approved => {
-                                    if let Some(ref mut p) = pending { p.start = Instant::now(); }
-                                }
-                                ConfirmAction::Denied => {
-                                    self.screen.finish_tool(ToolStatus::Denied, None);
-                                    pending = None;
-                                    cancelled = true;
-                                    agent_done = true;
-                                }
-                            }
-                        }
-                        SessionControl::NeedsAskQuestion { args, reply } => {
-                            self.render_screen();
-                            self.screen.erase_prompt();
-                            let questions = render::parse_questions(&args);
-                            match render::show_ask_question(&questions) {
-                                Some(answer) => {
-                                    let _ = reply.send(answer);
-                                }
-                                None => {
-                                    let _ = reply.send("User cancelled the question.".into());
-                                    self.screen.finish_tool(ToolStatus::Denied, None);
-                                    pending = None;
-                                    cancelled = true;
-                                    agent_done = true;
-                                }
-                            }
-                            self.screen.redraw_in_place();
-                        }
-                        SessionControl::Done => { agent_done = true; }
+                    let ctrl = self.handle_agent_event(ev, &mut pending, &mut steered_count);
+                    match self.dispatch_control(ctrl, &mut pending) {
+                        LoopAction::Continue => {}
+                        LoopAction::Done => { agent_done = true; }
+                        LoopAction::Cancel => { cancelled = true; agent_done = true; }
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_millis(80)) => {
@@ -762,6 +751,16 @@ impl App {
             if agent_done { break; }
         }
 
+        self.finish_session(cancelled, cancel_token, agent_handle, steering).await;
+    }
+
+    async fn finish_session(
+        &mut self,
+        cancelled: bool,
+        cancel_token: CancellationToken,
+        agent_handle: tokio::task::JoinHandle<Vec<Message>>,
+        steering: Arc<Mutex<Vec<String>>>,
+    ) {
         self.screen.flush_blocks();
         if cancelled {
             self.screen.set_throbber(render::Throbber::Interrupted);
@@ -780,14 +779,13 @@ impl App {
             }
             cancel_token.cancel();
             agent_handle.abort();
-            self.render_screen();
         } else {
             self.screen.set_throbber(render::Throbber::Done);
             if let Ok(new_messages) = agent_handle.await {
                 self.history = new_messages;
             }
-            self.render_screen();
         }
+        self.render_screen();
         let _ = io::stdout().execute(DisableBracketedPaste);
         terminal::disable_raw_mode().ok();
         self.app_state.set_mode(self.mode);
@@ -854,6 +852,15 @@ pub enum SessionControl {
 pub enum ConfirmAction {
     Approved,
     Denied,
+}
+
+/// Whether the session event loop should continue or stop.
+enum LoopAction {
+    Continue,
+    /// Agent finished normally.
+    Done,
+    /// User denied a tool or cancelled — agent should be aborted.
+    Cancel,
 }
 
 pub enum TermAction {

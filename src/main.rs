@@ -16,6 +16,7 @@ pub mod vim;
 pub use app::App;
 
 use clap::Parser;
+use crossterm::ExecutableCommand;
 use provider::Provider;
 use session::Session;
 use std::sync::{Arc, Mutex};
@@ -83,6 +84,8 @@ async fn main() {
                     session::save(s);
                 }
             }
+            let _ = crossterm::terminal::disable_raw_mode();
+            let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
             std::process::exit(0);
         });
     }
@@ -91,7 +94,7 @@ async fn main() {
 
     // Fetch context window once at startup. Re-fetch here if model switching is ever added.
     {
-        let provider = Provider::new(&app.api_base, &app.api_key);
+        let provider = Provider::new(app.api_base.clone(), app.api_key.clone(), app.client.clone());
         app.context_window = provider.fetch_context_window(&app.model).await;
     }
 

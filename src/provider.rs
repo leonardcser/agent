@@ -94,11 +94,11 @@ pub struct Provider {
 }
 
 impl Provider {
-    pub fn new(api_base: &str, api_key: &str) -> Self {
+    pub fn new(api_base: String, api_key: String, client: Client) -> Self {
         Self {
             api_base: api_base.trim_end_matches('/').to_string(),
-            api_key: api_key.to_string(),
-            client: Client::new(),
+            api_key,
+            client,
         }
     }
 
