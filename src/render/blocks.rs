@@ -168,6 +168,7 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             elapsed,
             output,
             args,
+            user_message,
         } => render_tool(
             out,
             name,
@@ -176,6 +177,7 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             *status,
             *elapsed,
             output.as_ref(),
+            user_message.as_deref(),
             width,
         ),
         Block::Confirm { tool, desc, choice } => {
@@ -224,6 +226,7 @@ pub(super) fn render_tool(
     status: ToolStatus,
     elapsed: Option<Duration>,
     output: Option<&ToolOutput>,
+    user_message: Option<&str>,
     width: usize,
 ) -> u16 {
     let color = match status {
@@ -255,6 +258,11 @@ pub(super) fn render_tool(
     };
     print_tool_line(out, name, summary, color, time, tl.as_deref(), width);
     let mut rows = 1u16;
+    if let Some(msg) = user_message {
+        print_dim(out, &format!("   {msg}"));
+        crlf(out);
+        rows += 1;
+    }
     if status != ToolStatus::Denied {
         if let Some(out_data) = output {
             rows += print_tool_output(out, name, &out_data.content, out_data.is_error, args);

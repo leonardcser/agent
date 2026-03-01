@@ -53,6 +53,7 @@ pub struct ActiveTool {
     pub args: HashMap<String, serde_json::Value>,
     pub status: ToolStatus,
     pub output: Option<ToolOutput>,
+    pub user_message: Option<String>,
     pub start_time: Instant,
 }
 
@@ -93,6 +94,7 @@ pub enum Block {
         status: ToolStatus,
         elapsed: Option<Duration>,
         output: Option<ToolOutput>,
+        user_message: Option<String>,
     },
     Confirm {
         tool: String,
@@ -411,6 +413,7 @@ impl Screen {
             args,
             status: ToolStatus::Pending,
             output: None,
+            user_message: None,
             start_time: Instant::now(),
         });
         self.prompt.dirty = true;
@@ -443,6 +446,13 @@ impl Screen {
         }
     }
 
+    pub fn set_active_user_message(&mut self, msg: String) {
+        if let Some(ref mut tool) = self.active_tool {
+            tool.user_message = Some(msg);
+            self.prompt.dirty = true;
+        }
+    }
+
     pub fn finish_tool(&mut self, status: ToolStatus, output: Option<ToolOutput>) {
         if let Some(tool) = self.active_tool.take() {
             let elapsed = tool.elapsed();
@@ -453,6 +463,7 @@ impl Screen {
                 status,
                 elapsed,
                 output,
+                user_message: tool.user_message,
             });
             self.prompt.dirty = true;
         }
@@ -507,6 +518,7 @@ impl Screen {
                 status: ToolStatus::Err,
                 elapsed,
                 output: tool.output,
+                user_message: tool.user_message,
             });
         }
         let mut out = io::stdout();
@@ -683,6 +695,7 @@ impl Screen {
                 tool.status,
                 Some(tool.start_time.elapsed()),
                 tool.output.as_ref(),
+                tool.user_message.as_deref(),
                 width,
             );
             active_rows = tool_gap + rows;

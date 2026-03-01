@@ -31,7 +31,7 @@ pub enum AgentEvent {
         args: HashMap<String, Value>,
         /// Glob pattern for "always allow this domain/pattern" session approval.
         approval_pattern: Option<String>,
-        reply: tokio::sync::oneshot::Sender<bool>,
+        reply: tokio::sync::oneshot::Sender<(bool, Option<String>)>,
     },
     AskQuestion {
         args: HashMap<String, Value>,
@@ -217,6 +217,7 @@ pub async fn run_agent(
             let mode = ctx.shared_mode.load();
             let decision = decide_permission(&ctx.permissions, mode, &tc.function.name, &args);
 
+            let mut confirm_msg: Option<String> = None;
             match decision {
                 Decision::Deny => {
                     push_tool_reply(&mut messages, tx, &tc.id, "The user's permission settings blocked this tool call. Try a different approach or ask the user for guidance.", false);
@@ -234,10 +235,17 @@ pub async fn run_agent(
                         approval_pattern,
                         reply: reply_tx,
                     });
-                    if !reply_rx.await.unwrap_or(false) {
-                        push_tool_reply(&mut messages, tx, &tc.id, "The user denied this tool call. Try a different approach or ask the user for guidance.", false);
+                    let (approved, user_msg) = reply_rx.await.unwrap_or((false, None));
+                    if !approved {
+                        let denial = if let Some(ref msg) = user_msg {
+                            format!("The user denied this tool call with message: {msg}")
+                        } else {
+                            "The user denied this tool call. Try a different approach or ask the user for guidance.".to_string()
+                        };
+                        push_tool_reply(&mut messages, tx, &tc.id, &denial, false);
                         continue;
                     }
+                    confirm_msg = user_msg;
                 }
                 Decision::Allow => {}
             }
@@ -271,10 +279,13 @@ pub async fn run_agent(
                     "content_preview": &content[..content.len().min(500)],
                 }),
             );
-            let model_content = match tc.function.name.as_str() {
+            let mut model_content = match tc.function.name.as_str() {
                 "grep" | "glob" => trim_tool_output_for_model(&content, 200),
                 _ => content.clone(),
             };
+            if let Some(ref msg) = confirm_msg {
+                model_content.push_str(&format!("\n\nUser message: {msg}"));
+            }
             messages.push(Message {
                 role: Role::Tool,
                 content: Some(model_content),

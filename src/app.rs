@@ -95,7 +95,7 @@ enum ActiveDialog {
     Confirm {
         dialog: ConfirmDialog,
         tool_name: String,
-        reply: tokio::sync::oneshot::Sender<bool>,
+        reply: tokio::sync::oneshot::Sender<(bool, Option<String>)>,
     },
     AskQuestion {
         dialog: QuestionDialog,
@@ -110,7 +110,7 @@ enum DeferredDialog {
         desc: String,
         args: HashMap<String, serde_json::Value>,
         approval_pattern: Option<String>,
-        reply: tokio::sync::oneshot::Sender<bool>,
+        reply: tokio::sync::oneshot::Sender<(bool, Option<String>)>,
     },
     AskQuestion {
         args: HashMap<String, serde_json::Value>,
@@ -285,7 +285,7 @@ impl App {
                 if self.mode == Mode::Yolo {
                     if let Some(DeferredDialog::Confirm { reply, .. }) = deferred_dialog.take() {
                         self.screen.set_pending_dialog(false);
-                        let _ = reply.send(true);
+                        let _ = reply.send((true, None));
                     }
                 }
 
@@ -366,7 +366,7 @@ impl App {
                         if let Some(DeferredDialog::Confirm { reply, .. }) = deferred_dialog.take()
                         {
                             self.screen.set_pending_dialog(false);
-                            let _ = reply.send(true);
+                            let _ = reply.send((true, None));
                         }
                     }
 
@@ -458,7 +458,7 @@ impl App {
                 AgentEvent::Confirm { reply, .. } => {
                     // No user to ask — deny. (Allow/Deny are already
                     // resolved by the agent; only Ask reaches here.)
-                    let _ = reply.send(false);
+                    let _ = reply.send((false, None));
                 }
                 AgentEvent::AskQuestion { reply, .. } => {
                     let _ = reply.send("User is not available (headless mode).".into());
@@ -1079,6 +1079,9 @@ impl App {
                 self.rebuild_screen_from_history();
                 self.screen.flush_blocks();
             }
+        } else {
+            // Resume cancelled — restore the screen (show_resume clears it).
+            self.screen.redraw(self.screen.has_scrollback);
         }
         // show_resume manages its own raw mode — re-enable.
         terminal::enable_raw_mode().ok();
@@ -1143,6 +1146,7 @@ impl App {
                                 status,
                                 elapsed: None,
                                 output,
+                                user_message: None,
                             });
                         }
                     }
@@ -1495,20 +1499,30 @@ impl App {
     fn resolve_confirm(
         &mut self,
         (choice, message): (ConfirmChoice, Option<String>),
-        reply: tokio::sync::oneshot::Sender<bool>,
+        reply: tokio::sync::oneshot::Sender<(bool, Option<String>)>,
         tool_name: &str,
         agent: &mut Option<AgentState>,
     ) -> bool {
-        let cancel = match choice {
+        let label = match &choice {
+            ConfirmChoice::Yes => "approved",
+            ConfirmChoice::Always => "always",
+            ConfirmChoice::AlwaysPattern(pat) => pat.as_str(),
+            ConfirmChoice::No => "denied",
+        };
+        if let Some(ref msg) = message {
+            self.screen
+                .set_active_user_message(format!("{label}: {msg}"));
+        }
+        match choice {
             ConfirmChoice::Yes => {
                 self.screen.set_active_status(ToolStatus::Pending);
-                let _ = reply.send(true);
+                let _ = reply.send((true, message));
                 false
             }
             ConfirmChoice::Always => {
                 self.auto_approved.insert(tool_name.to_string(), vec![]);
                 self.screen.set_active_status(ToolStatus::Pending);
-                let _ = reply.send(true);
+                let _ = reply.send((true, message));
                 false
             }
             ConfirmChoice::AlwaysPattern(ref pattern) => {
@@ -1519,22 +1533,18 @@ impl App {
                         .push(compiled);
                 }
                 self.screen.set_active_status(ToolStatus::Pending);
-                let _ = reply.send(true);
+                let _ = reply.send((true, message));
                 false
             }
             ConfirmChoice::No => {
-                let _ = reply.send(false);
+                let _ = reply.send((false, message));
                 self.screen.finish_tool(ToolStatus::Denied, None);
                 if let Some(ref mut ag) = agent {
                     ag.pending = None;
                 }
                 true
             }
-        };
-        if let Some(msg) = message {
-            self.queued_messages.push(msg);
         }
-        cancel
     }
 
     /// Resolve a completed question dialog.
@@ -1581,7 +1591,7 @@ impl App {
             } => {
                 // Yolo mode: auto-approve everything.
                 if self.mode == Mode::Yolo {
-                    let _ = reply.send(true);
+                    let _ = reply.send((true, None));
                     return LoopAction::Continue;
                 }
 
@@ -1590,7 +1600,7 @@ impl App {
                 // Check auto-approvals first (doesn't need UI).
                 if let Some(patterns) = self.auto_approved.get(&tool_name) {
                     if patterns.is_empty() || patterns.iter().any(|p| p.matches(&desc)) {
-                        let _ = reply.send(true);
+                        let _ = reply.send((true, None));
                         return LoopAction::Continue;
                     }
                 }
@@ -1727,7 +1737,7 @@ pub enum SessionControl {
         desc: String,
         args: HashMap<String, serde_json::Value>,
         approval_pattern: Option<String>,
-        reply: tokio::sync::oneshot::Sender<bool>,
+        reply: tokio::sync::oneshot::Sender<(bool, Option<String>)>,
     },
     NeedsAskQuestion {
         args: HashMap<String, serde_json::Value>,

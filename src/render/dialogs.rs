@@ -411,6 +411,14 @@ impl ConfirmDialog {
         self.dirty = true;
         if self.editing {
             match (code, modifiers) {
+                (KeyCode::Enter, _) => {
+                    let msg = if self.textarea.is_empty() {
+                        None
+                    } else {
+                        Some(self.textarea.text())
+                    };
+                    return Some((self.options[self.selected].1.clone(), msg));
+                }
                 (KeyCode::Esc, _) => {
                     self.editing = false;
                 }
@@ -606,7 +614,7 @@ impl ConfirmDialog {
         crlf(&mut out);
         let _ = out.queue(SetAttribute(Attribute::Dim));
         if self.editing {
-            let _ = out.queue(Print(" esc: done  enter: newline"));
+            let _ = out.queue(Print(" enter: send  esc: cancel"));
         } else if !self.textarea.is_empty() {
             let _ = out.queue(Print(" enter: confirm with message  tab: edit"));
         }

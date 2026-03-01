@@ -318,17 +318,20 @@ impl Provider {
         model: &str,
     ) -> Result<String, String> {
         let prompt = format!(
-            "Generate a short session title (3-6 words) for: \"{}\"",
+            "Generate a short session title (3-6 words) for: \"{}\". Reply with only the title.",
             first_user_message.replace('\n', " ")
         );
 
         let body = serde_json::json!({
             "model": model,
-            "prompt": prompt,
-            "max_tokens": 16,
+            "messages": [
+                {"role": "system", "content": "Reasoning: low"},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 512,
             "temperature": 0.2,
-            "n": 1,
             "stop": ["\n"],
+            "chat_template_kwargs": {"enable_thinking": false},
         });
 
         log::entry(
@@ -340,7 +343,7 @@ impl Provider {
             }),
         );
 
-        let url = format!("{}/completions", self.api_base);
+        let url = format!("{}/chat/completions", self.api_base);
         let mut req = self.client.post(&url).json(&body);
         if !self.api_key.is_empty() {
             req = req.bearer_auth(&self.api_key);
@@ -356,8 +359,7 @@ impl Provider {
         let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
         let text = data["choices"]
             .get(0)
-            .and_then(|c| c.get("text"))
-            .and_then(|t| t.as_str())
+            .and_then(|c| c["message"]["content"].as_str())
             .unwrap_or("")
             .to_string();
 
