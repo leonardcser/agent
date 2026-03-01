@@ -1,6 +1,7 @@
 use crate::agent::{run_agent, AgentContext, AgentEvent};
 use crate::input::{
-    resolve_agent_esc, Action, EscAction, History, InputState, MenuResult, Mode, SharedMode,
+    resolve_agent_esc, Action, EscAction, History, InputState, MenuKind, MenuResult, Mode,
+    SharedMode,
 };
 use crate::provider::{Message, Provider, Role};
 use crate::render::{
@@ -664,7 +665,7 @@ impl App {
             return EventOutcome::Redraw;
         }
 
-        // Ctrl+C: double-tap → quit, single → clear input.
+        // Ctrl+C: dismiss the topmost UI element, or quit if nothing is open.
         if matches!(
             ev,
             Event::Key(KeyEvent {
@@ -673,19 +674,46 @@ impl App {
                 ..
             })
         ) {
+            // Menu open → dismiss it.
+            if self.input.menu.is_some() {
+                let ms = self.input.menu.take().unwrap();
+                let result = match ms.kind {
+                    MenuKind::Settings {
+                        vim_enabled,
+                        auto_compact,
+                    } => MenuResult::Settings {
+                        vim: vim_enabled,
+                        auto_compact,
+                    },
+                    MenuKind::Model { .. } => MenuResult::Dismissed,
+                };
+                self.screen.mark_dirty();
+                return EventOutcome::MenuResult(result);
+            }
+            // Completer open → close it.
+            if self.input.completer.is_some() {
+                self.input.completer = None;
+                self.screen.mark_dirty();
+                return EventOutcome::Redraw;
+            }
+            // Non-empty prompt → clear it.
+            if !self.input.buf.is_empty() {
+                t.last_ctrlc = Some(Instant::now());
+                self.input.buf.clear();
+                self.input.cpos = 0;
+                self.input.pastes.clear();
+                self.screen.mark_dirty();
+                return EventOutcome::Redraw;
+            }
+            // Nothing open, empty prompt → quit.
             let double_tap = t
                 .last_ctrlc
                 .is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
-            if self.input.buf.is_empty() || double_tap {
+            if double_tap {
                 return EventOutcome::Quit;
             }
             t.last_ctrlc = Some(Instant::now());
-            self.input.buf.clear();
-            self.input.cpos = 0;
-            self.input.pastes.clear();
-            self.input.completer = None;
-            self.screen.mark_dirty();
-            return EventOutcome::Redraw;
+            return EventOutcome::Quit;
         }
 
         // Ctrl+S: toggle stash.
@@ -831,7 +859,7 @@ impl App {
             t.last_keypress = Some(Instant::now());
         }
 
-        // Ctrl+C: double-tap → cancel agent, single → clear input + queued.
+        // Ctrl+C: dismiss UI elements first, then cancel agent.
         if matches!(
             ev,
             Event::Key(KeyEvent {
@@ -840,19 +868,33 @@ impl App {
                 ..
             })
         ) {
+            // Completer open → close it.
+            if self.input.completer.is_some() {
+                self.input.completer = None;
+                self.screen.mark_dirty();
+                return EventOutcome::Noop;
+            }
+            // Non-empty prompt → clear it + queued messages.
+            if !self.input.buf.is_empty() {
+                t.last_ctrlc = Some(Instant::now());
+                self.input.clear();
+                self.queued_messages.clear();
+                self.screen.mark_dirty();
+                return EventOutcome::Noop;
+            }
+            // Nothing open → double-tap cancel agent, single clears queued.
             let double_tap = t
                 .last_ctrlc
                 .is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
-            if self.input.buf.is_empty() || double_tap {
+            if double_tap {
                 t.last_ctrlc = None;
                 self.screen.mark_dirty();
                 return EventOutcome::CancelAgent;
             }
             t.last_ctrlc = Some(Instant::now());
-            self.input.clear();
             self.queued_messages.clear();
             self.screen.mark_dirty();
-            return EventOutcome::Noop;
+            return EventOutcome::CancelAgent;
         }
 
         // Esc: use resolve_agent_esc for the running-mode logic.
