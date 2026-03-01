@@ -791,14 +791,8 @@ impl Screen {
                 color: theme::MUTED,
                 attr: None,
             });
-            let effort = match state.menu {
-                Some(ref ms) => match ms.kind {
-                    crate::input::MenuKind::Model { reasoning_effort, .. } => reasoning_effort,
-                    _ => self.reasoning_effort,
-                },
-                None => self.reasoning_effort,
-            };
-            if effort != crate::provider::ReasoningEffort::Off {
+            if self.reasoning_effort != crate::provider::ReasoningEffort::Off {
+                let effort = self.reasoning_effort;
                 right_spans.push(BarSpan {
                     text: format!(" {}", effort.label()),
                     color: effort.color(),
@@ -976,7 +970,7 @@ impl Screen {
             let _ = out.queue(Print("\r\n"));
         }
         let comp_rows = if let Some(ref ms) = state.menu {
-            draw_menu(out, ms, comp_rows)
+            draw_menu(out, ms, comp_rows, self.reasoning_effort)
         } else {
             draw_completions(out, state.completer.as_ref(), comp_rows)
         };
@@ -1519,7 +1513,12 @@ fn draw_completions(
     max_rows
 }
 
-fn draw_menu(out: &mut io::Stdout, ms: &crate::input::MenuState, max_rows: usize) -> usize {
+fn draw_menu(
+    out: &mut io::Stdout,
+    ms: &crate::input::MenuState,
+    max_rows: usize,
+    reasoning_effort: crate::provider::ReasoningEffort,
+) -> usize {
     if max_rows == 0 {
         return 0;
     }
@@ -1551,10 +1550,7 @@ fn draw_menu(out: &mut io::Stdout, ms: &crate::input::MenuState, max_rows: usize
             }
             drawn
         }
-        MenuKind::Model {
-            models,
-            reasoning_effort,
-        } => {
+        MenuKind::Model { models } => {
             if models.is_empty() {
                 return 0;
             }

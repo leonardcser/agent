@@ -99,7 +99,6 @@ pub enum MenuKind {
     Model {
         /// (key, model_name, provider_name) for each entry.
         models: Vec<(String, String, String)>,
-        reasoning_effort: crate::provider::ReasoningEffort,
     },
 }
 
@@ -111,6 +110,6 @@ pub struct MenuState {
 /// Domain-specific result returned to the app after a menu closes.
 pub enum MenuResult {
     Settings { vim: bool, auto_compact: bool },
-    ModelSelect(String, crate::provider::ReasoningEffort),
+    ModelSelect(String),
     Dismissed,
 }

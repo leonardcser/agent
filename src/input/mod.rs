@@ -116,7 +116,6 @@ pub enum Action {
     MenuResult(MenuResult),
     ToggleMode,
     CycleReasoning,
-    SetReasoning(crate::provider::ReasoningEffort),
     Resize { width: usize, height: usize },
     Noop,
 }
@@ -237,11 +236,7 @@ impl InputState {
         });
     }
 
-    pub fn open_model_picker(
-        &mut self,
-        models: Vec<(String, String, String)>,
-        reasoning_effort: crate::provider::ReasoningEffort,
-    ) {
+    pub fn open_model_picker(&mut self, models: Vec<(String, String, String)>) {
         let len = models.len();
         self.completer = None;
         self.menu = Some(MenuState {
@@ -250,10 +245,7 @@ impl InputState {
                 len,
                 select_on_enter: true,
             },
-            kind: MenuKind::Model {
-                models,
-                reasoning_effort,
-            },
+            kind: MenuKind::Model { models },
         });
     }
 
@@ -261,12 +253,27 @@ impl InputState {
         self.menu.is_some()
     }
 
+    /// Dismiss the current menu, returning the appropriate result.
+    pub fn dismiss_menu(&mut self) -> Option<MenuResult> {
+        let ms = self.menu.take()?;
+        Some(match ms.kind {
+            MenuKind::Settings {
+                vim_enabled,
+                auto_compact,
+            } => MenuResult::Settings {
+                vim: vim_enabled,
+                auto_compact,
+            },
+            MenuKind::Model { .. } => MenuResult::Dismissed,
+        })
+    }
+
     /// Number of rows the current menu needs (0 if no menu).
     pub fn menu_rows(&self) -> usize {
         match &self.menu {
             Some(ms) => match &ms.kind {
                 MenuKind::Settings { .. } => 2,
-                MenuKind::Model { models, .. } => (models.len() + 2).min(12),
+                MenuKind::Model { models } => (models.len() + 2).min(12),
             },
             None => 0,
         }
@@ -566,13 +573,8 @@ impl InputState {
                 Action::Redraw
             }
             MenuAction::Tab => {
-                if let MenuKind::Model {
-                    ref mut reasoning_effort,
-                    ..
-                } = ms.kind
-                {
-                    *reasoning_effort = reasoning_effort.cycle();
-                    Action::SetReasoning(*reasoning_effort)
+                if matches!(ms.kind, MenuKind::Model { .. }) {
+                    Action::CycleReasoning
                 } else {
                     Action::Redraw
                 }
@@ -580,15 +582,9 @@ impl InputState {
             MenuAction::Select(idx) => {
                 let ms = self.menu.take().unwrap();
                 match ms.kind {
-                    MenuKind::Model {
-                        ref models,
-                        reasoning_effort,
-                    } => {
+                    MenuKind::Model { ref models } => {
                         if let Some((key, _, _)) = models.get(idx) {
-                            Action::MenuResult(MenuResult::ModelSelect(
-                                key.clone(),
-                                reasoning_effort,
-                            ))
+                            Action::MenuResult(MenuResult::ModelSelect(key.clone()))
                         } else {
                             Action::Redraw
                         }
@@ -596,19 +592,7 @@ impl InputState {
                     _ => Action::Redraw,
                 }
             }
-            MenuAction::Dismiss => {
-                let ms = self.menu.take().unwrap();
-                match ms.kind {
-                    MenuKind::Settings {
-                        vim_enabled,
-                        auto_compact,
-                    } => Action::MenuResult(MenuResult::Settings {
-                        vim: vim_enabled,
-                        auto_compact,
-                    }),
-                    MenuKind::Model { .. } => Action::MenuResult(MenuResult::Dismissed),
-                }
-            }
+            MenuAction::Dismiss => Action::MenuResult(self.dismiss_menu().unwrap()),
             MenuAction::Redraw => Action::Redraw,
             MenuAction::Noop => Action::Noop,
         }

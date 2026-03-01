@@ -1,7 +1,6 @@
 use crate::agent::{run_agent, AgentContext, AgentEvent};
 use crate::input::{
-    resolve_agent_esc, Action, EscAction, History, InputState, MenuKind, MenuResult, Mode,
-    SharedMode,
+    resolve_agent_esc, Action, EscAction, History, InputState, MenuResult, Mode, SharedMode,
 };
 use crate::provider::{Message, Provider, Role};
 use crate::render::{
@@ -585,7 +584,7 @@ impl App {
                         self.app_state.set_vim_enabled(vim);
                         self.auto_compact = auto_compact;
                     }
-                    MenuResult::ModelSelect(key, effort) => {
+                    MenuResult::ModelSelect(key) => {
                         if let Some(resolved) = self.available_models.iter().find(|m| m.key == key)
                         {
                             self.model = resolved.model_name.clone();
@@ -595,9 +594,6 @@ impl App {
                             self.screen.set_model_label(resolved.model_name.clone());
                             self.app_state.set_selected_model(key);
                         }
-                        self.reasoning_effort = effort;
-                        self.screen.set_reasoning_effort(effort);
-                        self.app_state.set_reasoning_effort(effort);
                         self.screen.erase_prompt();
                     }
                     MenuResult::Dismissed => {}
@@ -675,18 +671,7 @@ impl App {
             })
         ) {
             // Menu open → dismiss it.
-            if self.input.menu.is_some() {
-                let ms = self.input.menu.take().unwrap();
-                let result = match ms.kind {
-                    MenuKind::Settings {
-                        vim_enabled,
-                        auto_compact,
-                    } => MenuResult::Settings {
-                        vim: vim_enabled,
-                        auto_compact,
-                    },
-                    MenuKind::Model { .. } => MenuResult::Dismissed,
-                };
+            if let Some(result) = self.input.dismiss_menu() {
                 self.screen.mark_dirty();
                 return EventOutcome::MenuResult(result);
             }
@@ -789,7 +774,7 @@ impl App {
                     .map(|m| (m.key.clone(), m.model_name.clone(), m.provider_name.clone()))
                     .collect();
                 if !models.is_empty() {
-                    self.input.open_model_picker(models, self.reasoning_effort);
+                    self.input.open_model_picker(models);
                     self.screen.mark_dirty();
                 }
                 EventOutcome::Redraw
@@ -810,15 +795,7 @@ impl App {
                 EventOutcome::Redraw
             }
             Action::CycleReasoning => {
-                self.reasoning_effort = self.reasoning_effort.cycle();
-                self.screen.set_reasoning_effort(self.reasoning_effort);
-                self.app_state.set_reasoning_effort(self.reasoning_effort);
-                EventOutcome::Redraw
-            }
-            Action::SetReasoning(effort) => {
-                self.reasoning_effort = effort;
-                self.screen.set_reasoning_effort(effort);
-                self.app_state.set_reasoning_effort(effort);
+                self.set_reasoning_effort(self.reasoning_effort.cycle());
                 EventOutcome::Redraw
             }
             Action::Resize {
@@ -953,14 +930,7 @@ impl App {
                 self.screen.mark_dirty();
             }
             Action::CycleReasoning => {
-                self.reasoning_effort = self.reasoning_effort.cycle();
-                self.screen.set_reasoning_effort(self.reasoning_effort);
-                self.app_state.set_reasoning_effort(self.reasoning_effort);
-            }
-            Action::SetReasoning(effort) => {
-                self.reasoning_effort = effort;
-                self.screen.set_reasoning_effort(effort);
-                self.app_state.set_reasoning_effort(effort);
+                self.set_reasoning_effort(self.reasoning_effort.cycle());
             }
             Action::MenuResult(_) | Action::Noop | Action::Resize { .. } => {}
         }
@@ -1476,6 +1446,12 @@ impl App {
         self.mode = self.mode.toggle();
         self.app_state.set_mode(self.mode);
         self.screen.mark_dirty();
+    }
+
+    fn set_reasoning_effort(&mut self, effort: crate::provider::ReasoningEffort) {
+        self.reasoning_effort = effort;
+        self.screen.set_reasoning_effort(effort);
+        self.app_state.set_reasoning_effort(effort);
     }
 
     pub fn render_screen(&mut self) {
