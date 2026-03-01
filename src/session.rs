@@ -1,5 +1,5 @@
 use crate::config;
-use crate::provider::Message;
+use crate::provider::{Message, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -20,6 +20,14 @@ pub struct Session {
     #[serde(default)]
     pub updated_at_ms: u64,
     #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
     pub messages: Vec<Message>,
 }
 
@@ -34,18 +42,33 @@ pub struct SessionMeta {
     pub created_at_ms: u64,
     #[serde(default)]
     pub updated_at_ms: u64,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 impl Session {
     pub fn new() -> Self {
         let now = now_ms();
         let id = new_session_id(now);
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from));
         Self {
             id,
             title: None,
             first_user_message: None,
             created_at_ms: now,
             updated_at_ms: now,
+            mode: None,
+            reasoning_effort: None,
+            model: None,
+            cwd,
             messages: Vec::new(),
         }
     }
@@ -57,6 +80,10 @@ impl Session {
             first_user_message: self.first_user_message.clone(),
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
+            mode: self.mode.clone(),
+            reasoning_effort: self.reasoning_effort,
+            model: self.model.clone(),
+            cwd: self.cwd.clone(),
         }
     }
 }

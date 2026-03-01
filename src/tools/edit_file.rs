@@ -60,15 +60,24 @@ impl Tool for EditFileTool {
             }
         };
 
-        // Check staleness: if we have a stored hash and it doesn't match, the file changed
+        // Check staleness: require read_file before edit, and verify content hasn't changed
         if let Ok(map) = self.hashes.lock() {
-            if let Some(&stored_hash) = map.get(&path) {
-                let current_hash = hash_content(&content);
-                if stored_hash != current_hash {
+            match map.get(&path) {
+                None => {
                     return ToolResult {
-                        content: "File has been modified since last read. You must use read_file to read the current contents before editing.".into(),
+                        content: "You must use read_file before editing. Read the file first."
+                            .into(),
                         is_error: true,
                     };
+                }
+                Some(&stored_hash) => {
+                    let current_hash = hash_content(&content);
+                    if stored_hash != current_hash {
+                        return ToolResult {
+                            content: "File has been modified since last read. You must use read_file to read the current contents before editing.".into(),
+                            is_error: true,
+                        };
+                    }
                 }
             }
         }

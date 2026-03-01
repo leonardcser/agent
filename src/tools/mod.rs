@@ -179,7 +179,9 @@ pub fn build_tools() -> ToolRegistry {
     r.register(Box::new(ReadFileTool {
         hashes: hashes.clone(),
     }));
-    r.register(Box::new(WriteFileTool));
+    r.register(Box::new(WriteFileTool {
+        hashes: hashes.clone(),
+    }));
     r.register(Box::new(EditFileTool {
         hashes: hashes.clone(),
     }));

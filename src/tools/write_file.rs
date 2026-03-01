@@ -1,9 +1,11 @@
-use super::{str_arg, Tool, ToolResult};
+use super::{hash_content, str_arg, FileHashes, Tool, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
-pub struct WriteFileTool;
+pub struct WriteFileTool {
+    pub hashes: FileHashes,
+}
 
 impl Tool for WriteFileTool {
     fn name(&self) -> &str {
@@ -39,6 +41,16 @@ impl Tool for WriteFileTool {
         let path = str_arg(args, "file_path");
         let content = str_arg(args, "content");
 
+        if Path::new(&path).exists() {
+            let has_hash = self.hashes.lock().is_ok_and(|map| map.contains_key(&path));
+            if !has_hash {
+                return ToolResult {
+                    content: "File already exists. Use edit_file to modify existing files, or read_file then write_file to replace.".into(),
+                    is_error: true,
+                };
+            }
+        }
+
         if let Some(parent) = Path::new(&path).parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 return ToolResult {
@@ -49,10 +61,15 @@ impl Tool for WriteFileTool {
         }
 
         match std::fs::write(&path, &content) {
-            Ok(_) => ToolResult {
-                content: format!("wrote {} bytes to {}", content.len(), path),
-                is_error: false,
-            },
+            Ok(_) => {
+                if let Ok(mut map) = self.hashes.lock() {
+                    map.insert(path.clone(), hash_content(&content));
+                }
+                ToolResult {
+                    content: format!("wrote {} bytes to {}", content.len(), path),
+                    is_error: false,
+                }
+            }
             Err(e) => ToolResult {
                 content: e.to_string(),
                 is_error: true,

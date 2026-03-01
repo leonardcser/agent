@@ -46,7 +46,7 @@ fn log_path() -> &'static PathBuf {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        dir.join(format!("{ts}.jsonl"))
+        dir.join(format!("{ts}-{}.jsonl", std::process::id()))
     })
 }
 

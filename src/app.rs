@@ -39,7 +39,6 @@ pub struct App {
     pub screen: Screen,
     pub history: Vec<Message>,
     pub input_history: History,
-    pub app_state: state::State,
     pub input: InputState,
     pub queued_messages: Vec<String>,
     pub auto_approved: HashMap<String, Vec<glob::Pattern>>,
@@ -133,14 +132,14 @@ impl App {
         shared_session: Arc<Mutex<Option<Session>>>,
         available_models: Vec<crate::config::ResolvedModel>,
     ) -> Self {
-        let app_state = state::State::load();
-        let mode = app_state.mode();
-        let vim_enabled = app_state.vim_enabled() || vim_from_config;
+        let saved = state::State::load();
+        let mode = saved.mode();
+        let vim_enabled = saved.vim_enabled() || vim_from_config;
         let mut input = InputState::new();
         if vim_enabled {
             input.set_vim_enabled(true);
         }
-        let reasoning_effort = app_state.reasoning_effort;
+        let reasoning_effort = saved.reasoning_effort;
         let mut screen = Screen::new();
         screen.set_model_label(model.clone());
         screen.set_reasoning_effort(reasoning_effort);
@@ -156,7 +155,6 @@ impl App {
             screen,
             history: Vec::new(),
             input_history: History::load(),
-            app_state,
             input,
             queued_messages: Vec::new(),
             auto_approved: HashMap::new(),
@@ -585,7 +583,7 @@ impl App {
                 match result {
                     MenuResult::Settings { vim, auto_compact } => {
                         self.input.set_vim_enabled(vim);
-                        self.app_state.set_vim_enabled(vim);
+                        state::set_vim_enabled(vim);
                         self.auto_compact = auto_compact;
                     }
                     MenuResult::ModelSelect(key) => {
@@ -596,7 +594,7 @@ impl App {
                             self.api_base = resolved.api_base.clone();
                             self.api_key = std::env::var(&resolved.api_key_env).unwrap_or_default();
                             self.screen.set_model_label(resolved.model_name.clone());
-                            self.app_state.set_selected_model(key);
+                            state::set_selected_model(key);
                         }
                         self.screen.erase_prompt();
                     }
@@ -950,7 +948,7 @@ impl App {
         }
 
         self.input_history.push(trimmed.to_string());
-        self.app_state.set_mode(self.mode);
+        state::set_mode(self.mode);
 
         if !self.handle_command(trimmed) {
             return InputOutcome::Quit;
@@ -1055,7 +1053,7 @@ impl App {
         }
         self.save_session();
         self.maybe_generate_title();
-        self.app_state.set_mode(self.mode);
+        state::set_mode(self.mode);
         self.maybe_auto_compact().await;
     }
 
@@ -1073,7 +1071,7 @@ impl App {
             "/vim" => {
                 let enabled = !self.input.vim_enabled();
                 self.input.set_vim_enabled(enabled);
-                self.app_state.set_vim_enabled(enabled);
+                state::set_vim_enabled(enabled);
             }
             "/compact" => {} // handled via InputOutcome::Compact
             "/export" => {
@@ -1094,6 +1092,30 @@ impl App {
     }
 
     pub fn load_session(&mut self, loaded: session::Session) {
+        // Restore per-session settings
+        if let Some(ref mode_str) = loaded.mode {
+            if let Some(mode) = crate::input::Mode::parse(mode_str) {
+                self.mode = mode;
+            }
+        }
+        if let Some(effort) = loaded.reasoning_effort {
+            self.reasoning_effort = effort;
+            self.screen.set_reasoning_effort(effort);
+        }
+        if let Some(ref model_key) = loaded.model {
+            if let Some(resolved) = self
+                .available_models
+                .iter()
+                .find(|m| m.key == *model_key || m.model_name == *model_key)
+            {
+                self.model = resolved.model_name.clone();
+                self.model_config = resolved.config.clone();
+                self.api_base = resolved.api_base.clone();
+                self.api_key = std::env::var(&resolved.api_key_env).unwrap_or_default();
+                self.screen.set_model_label(resolved.model_name.clone());
+            }
+        }
+
         self.session = loaded;
         self.history = self.session.messages.clone();
         self.auto_approved.clear();
@@ -1239,6 +1261,9 @@ impl App {
         }
         self.session.messages = self.history.clone();
         self.session.updated_at_ms = session::now_ms();
+        self.session.mode = Some(self.mode.as_str().to_string());
+        self.session.reasoning_effort = Some(self.reasoning_effort);
+        self.session.model = Some(self.model.clone());
         session::save(&self.session);
         if let Ok(mut guard) = self.shared_session.lock() {
             *guard = Some(self.session.clone());
@@ -1468,14 +1493,14 @@ impl App {
 
     fn toggle_mode(&mut self) {
         self.mode = self.mode.toggle();
-        self.app_state.set_mode(self.mode);
+        state::set_mode(self.mode);
         self.screen.mark_dirty();
     }
 
     fn set_reasoning_effort(&mut self, effort: crate::provider::ReasoningEffort) {
         self.reasoning_effort = effort;
         self.screen.set_reasoning_effort(effort);
-        self.app_state.set_reasoning_effort(effort);
+        state::set_reasoning_effort(effort);
     }
 
     pub fn render_screen(&mut self) {

@@ -20,8 +20,6 @@ dependencies = [
  "futures-util",
  "glob",
  "htmd",
- "once_cell",
- "redb",
  "reqwest",
  "scraper",
  "serde",
@@ -1722,15 +1720,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
-]
-
-[[package]]
-name = "redb"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae323eb086579a3769daa2c753bb96deb95993c534711e0dbe881b5192906a06"
-dependencies = [
- "libc",
 ]
 
 [[package]]

@@ -43,27 +43,33 @@ impl State {
         Mode::parse(&self.mode).unwrap_or(Mode::Normal)
     }
 
-    pub fn set_mode(&mut self, mode: Mode) {
-        self.mode = mode.as_str().to_string();
-        self.save();
-    }
-
     pub fn vim_enabled(&self) -> bool {
         self.vim_enabled
     }
+}
 
-    pub fn set_vim_enabled(&mut self, enabled: bool) {
-        self.vim_enabled = enabled;
-        self.save();
-    }
+/// Read-modify-write helpers. Each loads state.json fresh, updates one field,
+/// and saves back — preventing parallel instances from clobbering each other.
+pub fn set_mode(mode: Mode) {
+    let mut s = State::load();
+    s.mode = mode.as_str().to_string();
+    s.save();
+}
 
-    pub fn set_selected_model(&mut self, key: String) {
-        self.selected_model = Some(key);
-        self.save();
-    }
+pub fn set_vim_enabled(enabled: bool) {
+    let mut s = State::load();
+    s.vim_enabled = enabled;
+    s.save();
+}
 
-    pub fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
-        self.reasoning_effort = effort;
-        self.save();
-    }
+pub fn set_selected_model(key: String) {
+    let mut s = State::load();
+    s.selected_model = Some(key);
+    s.save();
+}
+
+pub fn set_reasoning_effort(effort: ReasoningEffort) {
+    let mut s = State::load();
+    s.reasoning_effort = effort;
+    s.save();
 }
