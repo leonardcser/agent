@@ -220,7 +220,7 @@ pub(super) fn render_tool(
         ToolStatus::Confirm => theme::ACCENT,
         ToolStatus::Pending => theme::TOOL_PENDING,
     };
-    let time = if name == "bash" && !matches!(status, ToolStatus::Confirm) {
+    let time = if name == "bash" && status != ToolStatus::Confirm {
         elapsed
     } else {
         None

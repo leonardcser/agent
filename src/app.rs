@@ -2,7 +2,8 @@ use crate::agent::{run_agent, AgentEvent};
 use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, Mode};
 use crate::provider::{Message, Provider, Role};
 use crate::render::{
-    tool_arg_summary, Block, ConfirmChoice, ResumeEntry, Screen, ToolOutput, ToolStatus,
+    tool_arg_summary, Block, ConfirmChoice, ConfirmDialog, QuestionDialog, ResumeEntry, Screen,
+    ToolOutput, ToolStatus,
 };
 use crate::session::Session;
 use crate::{permissions, render, session, state, tools, vim};
@@ -79,6 +80,38 @@ struct Timers {
     last_esc: Option<Instant>,
     esc_vim_mode: Option<vim::ViMode>,
     last_ctrlc: Option<Instant>,
+    last_keypress: Option<Instant>,
+}
+
+/// How long after the last keypress before we show a deferred permission dialog.
+const CONFIRM_DEFER_MS: u64 = 1500;
+
+/// A dialog currently being shown (non-blocking).
+enum ActiveDialog {
+    Confirm {
+        dialog: ConfirmDialog,
+        tool_name: String,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    AskQuestion {
+        dialog: QuestionDialog,
+        reply: tokio::sync::oneshot::Sender<String>,
+    },
+}
+
+/// A permission dialog deferred because the user was actively typing.
+enum DeferredDialog {
+    Confirm {
+        tool_name: String,
+        desc: String,
+        args: HashMap<String, serde_json::Value>,
+        approval_pattern: Option<String>,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    AskQuestion {
+        args: HashMap<String, serde_json::Value>,
+        reply: tokio::sync::oneshot::Sender<String>,
+    },
 }
 
 // ── App impl ─────────────────────────────────────────────────────────────────
@@ -142,7 +175,10 @@ impl App {
             last_esc: None,
             esc_vim_mode: None,
             last_ctrlc: None,
+            last_keypress: None,
         };
+        let mut deferred_dialog: Option<DeferredDialog> = None;
+        let mut active_dialog: Option<ActiveDialog> = None;
 
         'main: loop {
             // ── Background polls ─────────────────────────────────────────
@@ -154,8 +190,8 @@ impl App {
                 }
             }
 
-            // ── Drain agent events ───────────────────────────────────────
-            if agent.is_some() {
+            // ── Drain agent events (only when no dialog is showing) ─────
+            if agent.is_some() && active_dialog.is_none() {
                 loop {
                     let ev = match agent_rx.try_recv() {
                         Ok(ev) => ev,
@@ -169,16 +205,18 @@ impl App {
                         let ag = agent.as_mut().unwrap();
                         let ctrl =
                             self.handle_agent_event(ev, &mut ag.pending, &mut ag.steered_count);
-                        self.dispatch_control(ctrl, &mut ag.pending)
+                        self.dispatch_control(
+                            ctrl,
+                            &mut ag.pending,
+                            &mut deferred_dialog,
+                            &mut active_dialog,
+                            t.last_keypress,
+                        )
                     };
                     match action {
                         LoopAction::Continue => {}
                         LoopAction::Done => {
                             self.finish_agent(agent.take().unwrap(), false).await;
-                            break;
-                        }
-                        LoopAction::Cancel => {
-                            self.finish_agent(agent.take().unwrap(), true).await;
                             break;
                         }
                     }
@@ -219,8 +257,52 @@ impl App {
                 }
             }
 
+            // ── Show deferred dialog once user stops typing ──────────────
+            if deferred_dialog.is_some() && active_dialog.is_none() && agent.is_some() {
+                let idle = t
+                    .last_keypress
+                    .map(|lk| lk.elapsed() >= Duration::from_millis(CONFIRM_DEFER_MS))
+                    .unwrap_or(true);
+                if idle {
+                    self.screen.set_pending_dialog(false);
+                    let deferred = deferred_dialog.take().unwrap();
+                    match deferred {
+                        DeferredDialog::Confirm {
+                            tool_name,
+                            desc,
+                            args,
+                            approval_pattern,
+                            reply,
+                        } => {
+                            self.screen.set_active_status(ToolStatus::Confirm);
+                            self.render_screen();
+                            active_dialog = Some(ActiveDialog::Confirm {
+                                dialog: ConfirmDialog::new(
+                                    &tool_name,
+                                    &desc,
+                                    &args,
+                                    approval_pattern.as_deref(),
+                                ),
+                                tool_name,
+                                reply,
+                            });
+                        }
+                        DeferredDialog::AskQuestion { args, reply } => {
+                            self.render_screen();
+                            let questions = render::parse_questions(&args);
+                            active_dialog = Some(ActiveDialog::AskQuestion {
+                                dialog: QuestionDialog::new(questions),
+                                reply,
+                            });
+                        }
+                    }
+                }
+            }
+
             // ── Render ───────────────────────────────────────────────────
-            self.tick(agent.is_some());
+            let has_dialog = active_dialog.is_some();
+            self.tick(agent.is_some(), has_dialog);
+            draw_active_dialog(&active_dialog);
 
             // ── Wait for next event ──────────────────────────────────────
             tokio::select! {
@@ -228,7 +310,7 @@ impl App {
 
                 Some(Ok(ev)) = term_events.next() => {
                     if self.dispatch_terminal_event(
-                        ev, &mut agent, &mut agent_rx, &mut t,
+                        ev, &mut agent, &mut agent_rx, &mut t, &mut active_dialog,
                     ).await {
                         break 'main;
                     }
@@ -237,7 +319,7 @@ impl App {
                     while event::poll(Duration::ZERO).unwrap_or(false) {
                         if let Ok(ev) = event::read() {
                             if self.dispatch_terminal_event(
-                                ev, &mut agent, &mut agent_rx, &mut t,
+                                ev, &mut agent, &mut agent_rx, &mut t, &mut active_dialog,
                             ).await {
                                 break 'main;
                             }
@@ -245,25 +327,31 @@ impl App {
                     }
 
                     // Render immediately after terminal events for responsive typing.
-                    self.tick(agent.is_some());
+                    let has_dialog = active_dialog.is_some();
+                    self.tick(agent.is_some(), has_dialog);
+                    draw_active_dialog(&active_dialog);
                 }
 
-                Some(ev) = agent_rx.recv(), if agent.is_some() => {
+                Some(ev) = agent_rx.recv(), if agent.is_some() && active_dialog.is_none() => {
                     let action = {
                         let ag = agent.as_mut().unwrap();
                         let ctrl = self.handle_agent_event(ev, &mut ag.pending, &mut ag.steered_count);
-                        self.dispatch_control(ctrl, &mut ag.pending)
+                        self.dispatch_control(
+                            ctrl,
+                            &mut ag.pending,
+                            &mut deferred_dialog,
+                            &mut active_dialog,
+                            t.last_keypress,
+                        )
                     };
                     match action {
                         LoopAction::Continue => {}
                         LoopAction::Done => {
                             self.finish_agent(agent.take().unwrap(), false).await;
                         }
-                        LoopAction::Cancel => {
-                            self.finish_agent(agent.take().unwrap(), true).await;
-                        }
                     }
-                    self.tick(agent.is_some());
+                    self.tick(agent.is_some(), active_dialog.is_some());
+                    draw_active_dialog(&active_dialog);
                 }
 
                 _ = tokio::time::sleep(Duration::from_millis(80)) => {
@@ -293,7 +381,49 @@ impl App {
         agent: &mut Option<AgentState>,
         agent_rx: &mut mpsc::UnboundedReceiver<AgentEvent>,
         t: &mut Timers,
+        active_dialog: &mut Option<ActiveDialog>,
     ) -> bool {
+        // Route key events to the active dialog if one is showing.
+        if active_dialog.is_some() {
+            if let Event::Key(KeyEvent {
+                code, modifiers, ..
+            }) = ev
+            {
+                let result = match active_dialog.as_mut().unwrap() {
+                    ActiveDialog::Confirm { dialog, .. } => dialog
+                        .handle_key(code, modifiers)
+                        .map(DialogOutcome::Confirm),
+                    ActiveDialog::AskQuestion { dialog, .. } => dialog
+                        .handle_key(code, modifiers)
+                        .map(DialogOutcome::Question),
+                };
+                if let Some(outcome) = result {
+                    let dlg = active_dialog.take().unwrap();
+                    let should_cancel = match dlg {
+                        ActiveDialog::Confirm {
+                            dialog,
+                            tool_name,
+                            reply,
+                        } => {
+                            dialog.cleanup();
+                            self.resolve_confirm(outcome.into_confirm(), reply, &tool_name, agent)
+                        }
+                        ActiveDialog::AskQuestion { dialog, reply } => {
+                            dialog.cleanup();
+                            self.resolve_question(outcome.into_question(), reply, agent)
+                        }
+                    };
+                    self.screen.redraw(self.screen.has_scrollback);
+                    if should_cancel {
+                        if let Some(ag) = agent.take() {
+                            self.finish_agent(ag, true).await;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
         let outcome = if agent.is_some() {
             self.handle_event_running(ev, t)
         } else {
@@ -517,6 +647,11 @@ impl App {
                 self.screen.redraw(true);
             }
             return EventOutcome::Noop;
+        }
+
+        // Track last keypress for deferring permission dialogs.
+        if matches!(ev, Event::Key(_)) {
+            t.last_keypress = Some(Instant::now());
         }
 
         // Ctrl+C: double-tap → cancel agent, single → clear input + queued.
@@ -1148,10 +1283,7 @@ impl App {
             AgentEvent::ToolCall { name, args } => {
                 let summary = tool_arg_summary(&name, &args);
                 self.screen.start_tool(name.clone(), summary, args);
-                *pending = Some(PendingTool {
-                    name,
-                    start: Instant::now(),
-                });
+                *pending = Some(PendingTool { name });
                 SessionControl::Continue
             }
             AgentEvent::ToolResult { content, is_error } => {
@@ -1194,53 +1326,29 @@ impl App {
         }
     }
 
-    pub fn handle_confirm(
+    /// Resolve a completed confirm dialog choice.
+    /// Returns `true` if the agent should be cancelled.
+    fn resolve_confirm(
         &mut self,
-        tool_name: &str,
-        desc: &str,
-        args: &HashMap<String, serde_json::Value>,
-        approval_pattern: Option<&str>,
+        choice: ConfirmChoice,
         reply: tokio::sync::oneshot::Sender<bool>,
-    ) -> ConfirmAction {
-        // Check session auto-approvals: either tool-level (empty patterns)
-        // or match the description (command/URL) against stored patterns
-        if let Some(patterns) = self.auto_approved.get(tool_name) {
-            if patterns.is_empty() {
-                let _ = reply.send(true);
-                return ConfirmAction::Approved;
-            }
-            // Match the full description against stored patterns.
-            // For bash, glob * can match shell operators, so we match
-            // the complete string — the stored pattern already includes
-            // operators (e.g. "cargo * && cargo *").
-            if patterns.iter().any(|p| p.matches(desc)) {
-                let _ = reply.send(true);
-                return ConfirmAction::Approved;
-            }
-        }
-
-        self.screen.set_active_status(ToolStatus::Confirm);
-        self.render_screen();
-        self.screen.erase_prompt();
-        let choice = render::show_confirm(tool_name, desc, args, approval_pattern);
-        self.screen.redraw(self.screen.has_scrollback);
-
+        tool_name: &str,
+        agent: &mut Option<AgentState>,
+    ) -> bool {
         match choice {
             ConfirmChoice::Yes => {
                 self.screen.set_active_status(ToolStatus::Pending);
                 let _ = reply.send(true);
-                ConfirmAction::Approved
+                false
             }
             ConfirmChoice::Always => {
-                // Tool-level always: approve all future calls to this tool
                 self.auto_approved.insert(tool_name.to_string(), vec![]);
                 self.screen.set_active_status(ToolStatus::Pending);
                 let _ = reply.send(true);
-                ConfirmAction::Approved
+                false
             }
-            ConfirmChoice::AlwaysPattern(pattern) => {
-                // Pattern-level always: approve future calls matching this pattern
-                if let Ok(compiled) = glob::Pattern::new(&pattern) {
+            ConfirmChoice::AlwaysPattern(ref pattern) => {
+                if let Ok(compiled) = glob::Pattern::new(pattern) {
                     self.auto_approved
                         .entry(tool_name.to_string())
                         .or_default()
@@ -1248,17 +1356,46 @@ impl App {
                 }
                 self.screen.set_active_status(ToolStatus::Pending);
                 let _ = reply.send(true);
-                ConfirmAction::Approved
+                false
             }
-            ConfirmChoice::YesWithMessage(msg) => {
+            ConfirmChoice::YesWithMessage(ref msg) => {
                 self.screen.set_active_status(ToolStatus::Pending);
                 let _ = reply.send(true);
-                self.queued_messages.push(msg);
-                ConfirmAction::Approved
+                self.queued_messages.push(msg.clone());
+                false
             }
             ConfirmChoice::No => {
                 let _ = reply.send(false);
-                ConfirmAction::Denied
+                self.screen.finish_tool(ToolStatus::Denied, None);
+                if let Some(ref mut ag) = agent {
+                    ag.pending = None;
+                }
+                true
+            }
+        }
+    }
+
+    /// Resolve a completed question dialog.
+    /// `answer` is `Some(json)` on confirm, `None` on cancel.
+    /// Returns `true` if the agent should be cancelled.
+    fn resolve_question(
+        &mut self,
+        answer: Option<String>,
+        reply: tokio::sync::oneshot::Sender<String>,
+        agent: &mut Option<AgentState>,
+    ) -> bool {
+        match answer {
+            Some(json) => {
+                let _ = reply.send(json);
+                false
+            }
+            None => {
+                let _ = reply.send("User cancelled the question.".into());
+                self.screen.finish_tool(ToolStatus::Denied, None);
+                if let Some(ref mut ag) = agent {
+                    ag.pending = None;
+                }
+                true
             }
         }
     }
@@ -1267,6 +1404,9 @@ impl App {
         &mut self,
         ctrl: SessionControl,
         pending: &mut Option<PendingTool>,
+        deferred_dialog: &mut Option<DeferredDialog>,
+        active_dialog: &mut Option<ActiveDialog>,
+        last_keypress: Option<Instant>,
     ) -> LoopAction {
         match ctrl {
             SessionControl::Continue => LoopAction::Continue,
@@ -1277,50 +1417,75 @@ impl App {
                 approval_pattern,
                 reply,
             } => {
-                let tool_name = pending.as_ref().map(|p| p.name.as_str()).unwrap_or("");
-                match self.handle_confirm(
-                    tool_name,
-                    &desc,
-                    &args,
-                    approval_pattern.as_deref(),
-                    reply,
-                ) {
-                    ConfirmAction::Approved => {
-                        if let Some(ref mut p) = pending {
-                            p.start = Instant::now();
-                        }
-                        LoopAction::Continue
-                    }
-                    ConfirmAction::Denied => {
-                        self.screen.finish_tool(ToolStatus::Denied, None);
-                        *pending = None;
-                        LoopAction::Cancel
+                let tool_name = pending.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+
+                // Check auto-approvals first (doesn't need UI).
+                if let Some(patterns) = self.auto_approved.get(&tool_name) {
+                    if patterns.is_empty() || patterns.iter().any(|p| p.matches(&desc)) {
+                        let _ = reply.send(true);
+                        return LoopAction::Continue;
                     }
                 }
+
+                // If the user is actively typing, defer the dialog.
+                let recently_typed = last_keypress
+                    .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS));
+                if recently_typed && !self.input.buf.is_empty() {
+                    self.screen.set_active_status(ToolStatus::Confirm);
+                    self.screen.set_pending_dialog(true);
+                    *deferred_dialog = Some(DeferredDialog::Confirm {
+                        tool_name,
+                        desc,
+                        args,
+                        approval_pattern,
+                        reply,
+                    });
+                    return LoopAction::Continue;
+                }
+
+                // Show dialog immediately (non-blocking).
+                self.screen.set_active_status(ToolStatus::Confirm);
+                self.render_screen();
+                *active_dialog = Some(ActiveDialog::Confirm {
+                    dialog: ConfirmDialog::new(
+                        &tool_name,
+                        &desc,
+                        &args,
+                        approval_pattern.as_deref(),
+                    ),
+                    tool_name,
+                    reply,
+                });
+                LoopAction::Continue
             }
             SessionControl::NeedsAskQuestion { args, reply } => {
-                self.render_screen();
-                self.screen.erase_prompt();
-                let questions = render::parse_questions(&args);
-                match render::show_ask_question(&questions) {
-                    Some(answer) => {
-                        let _ = reply.send(answer);
-                    }
-                    None => {
-                        let _ = reply.send("User cancelled the question.".into());
-                        self.screen.finish_tool(ToolStatus::Denied, None);
-                        *pending = None;
-                        self.screen.redraw(self.screen.has_scrollback);
-                        return LoopAction::Cancel;
-                    }
+                // If the user is actively typing, defer the dialog.
+                let recently_typed = last_keypress
+                    .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS));
+                if recently_typed && !self.input.buf.is_empty() {
+                    self.screen.set_pending_dialog(true);
+                    *deferred_dialog = Some(DeferredDialog::AskQuestion { args, reply });
+                    return LoopAction::Continue;
                 }
-                self.screen.redraw(self.screen.has_scrollback);
+
+                // Show dialog immediately (non-blocking).
+                self.render_screen();
+                let questions = render::parse_questions(&args);
+                *active_dialog = Some(ActiveDialog::AskQuestion {
+                    dialog: QuestionDialog::new(questions),
+                    reply,
+                });
                 LoopAction::Continue
             }
         }
     }
 
-    fn tick(&mut self, agent_running: bool) {
+    fn tick(&mut self, agent_running: bool, has_dialog: bool) {
+        // Skip prompt/spinner render when a dialog overlay is showing —
+        // the dialog covers the bottom and drawing underneath causes flicker.
+        if has_dialog {
+            return;
+        }
         if agent_running {
             self.render_screen();
         } else {
@@ -1403,18 +1568,42 @@ pub enum SessionControl {
     Done,
 }
 
-pub enum ConfirmAction {
-    Approved,
-    Denied,
-}
-
 enum LoopAction {
     Continue,
     Done,
-    Cancel,
+}
+
+/// Intermediate type for dispatching dialog results in dispatch_terminal_event.
+enum DialogOutcome {
+    Confirm(ConfirmChoice),
+    Question(Option<String>), // Some(json) on confirm, None on cancel
+}
+
+impl DialogOutcome {
+    fn into_confirm(self) -> ConfirmChoice {
+        match self {
+            DialogOutcome::Confirm(c) => c,
+            _ => unreachable!(),
+        }
+    }
+
+    fn into_question(self) -> Option<String> {
+        match self {
+            DialogOutcome::Question(a) => a,
+            _ => unreachable!(),
+        }
+    }
 }
 
 pub struct PendingTool {
     pub name: String,
-    pub start: Instant,
+}
+
+fn draw_active_dialog(dlg: &Option<ActiveDialog>) {
+    if let Some(dlg) = dlg {
+        match dlg {
+            ActiveDialog::Confirm { dialog, .. } => dialog.draw(),
+            ActiveDialog::AskQuestion { dialog, .. } => dialog.draw(),
+        }
+    }
 }

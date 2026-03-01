@@ -3,7 +3,7 @@ mod dialogs;
 mod highlight;
 
 pub use dialogs::{
-    parse_questions, show_ask_question, show_confirm, show_resume, show_rewind, Question,
+    parse_questions, show_resume, show_rewind, ConfirmDialog, Question, QuestionDialog,
     QuestionOption,
 };
 
@@ -346,6 +346,8 @@ pub struct Screen {
     /// Terminal row where block content starts (top of conversation).
     /// Set once when the first block is rendered; reset on purge/clear.
     content_start_row: Option<u16>,
+    /// A permission dialog is waiting for the user to stop typing.
+    pending_dialog: bool,
 }
 
 impl Default for Screen {
@@ -364,6 +366,7 @@ impl Screen {
             context_tokens: None,
             has_scrollback: false,
             content_start_row: None,
+            pending_dialog: false,
         }
     }
 
@@ -433,9 +436,6 @@ impl Screen {
     pub fn set_active_status(&mut self, status: ToolStatus) {
         if let Some(ref mut tool) = self.active_tool {
             tool.status = status;
-            if status == ToolStatus::Pending {
-                tool.start_time = Instant::now();
-            }
             self.prompt.dirty = true;
         }
     }
@@ -476,6 +476,11 @@ impl Screen {
 
     pub fn clear_throbber(&mut self) {
         self.working.clear();
+        self.prompt.dirty = true;
+    }
+
+    pub fn set_pending_dialog(&mut self, pending: bool) {
+        self.pending_dialog = pending;
         self.prompt.dirty = true;
     }
 
@@ -743,7 +748,21 @@ impl Screen {
         let bar_color = if vi_normal { theme::ACCENT } else { theme::BAR };
 
         let tokens_label = self.context_tokens.map(format_tokens);
-        let throbber_spans = self.working.throbber_spans();
+        let mut throbber_spans = self.working.throbber_spans();
+        if self.pending_dialog {
+            if !throbber_spans.is_empty() {
+                throbber_spans.push(BarSpan {
+                    text: " · ".into(),
+                    color: theme::MUTED,
+                    attr: Some(Attribute::Dim),
+                });
+            }
+            throbber_spans.push(BarSpan {
+                text: "permission pending".into(),
+                color: theme::ACCENT,
+                attr: Some(Attribute::Bold),
+            });
+        }
         draw_bar(
             out,
             width,
