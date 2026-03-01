@@ -219,8 +219,7 @@ pub async fn run_agent(
                 if tool_decision == Decision::Deny {
                     Decision::Deny
                 } else {
-                    let pattern_decision =
-                        permissions.check_tool_pattern(mode, "web_fetch", &url);
+                    let pattern_decision = permissions.check_tool_pattern(mode, "web_fetch", &url);
                     match (&tool_decision, &pattern_decision) {
                         (_, Decision::Deny) => Decision::Deny,
                         (_, Decision::Allow) => Decision::Allow,

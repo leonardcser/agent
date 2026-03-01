@@ -48,8 +48,7 @@ where
             ..Default::default()
         })),
         Some(other) => {
-            let cfg: ModelConfig =
-                serde_yml::from_value(other).map_err(de::Error::custom)?;
+            let cfg: ModelConfig = serde_yml::from_value(other).map_err(de::Error::custom)?;
             Ok(Some(cfg))
         }
     }

@@ -10,8 +10,143 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::time::Duration;
 
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+
 use super::highlight::{count_inline_diff_rows, print_inline_diff, print_syntax_file};
 use super::{draw_bar, ConfirmChoice, ResumeEntry};
+
+// ── TextArea ──────────────────────────────────────────────────────────────────
+
+/// Multi-line text editor used in dialog overlays.
+struct TextArea {
+    pub lines: Vec<String>,
+    pub row: usize,
+    pub col: usize, // character index (not byte)
+}
+
+impl TextArea {
+    fn new() -> Self {
+        Self {
+            lines: vec![String::new()],
+            row: 0,
+            col: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lines.len() == 1 && self.lines[0].is_empty()
+    }
+
+    fn text(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    fn line_count(&self) -> u16 {
+        self.lines.len() as u16
+    }
+
+    fn clear(&mut self) {
+        self.lines = vec![String::new()];
+        self.row = 0;
+        self.col = 0;
+    }
+
+    fn insert_char(&mut self, c: char) {
+        let byte = char_to_byte(&self.lines[self.row], self.col);
+        self.lines[self.row].insert(byte, c);
+        self.col += 1;
+    }
+
+    fn insert_newline(&mut self) {
+        let byte = char_to_byte(&self.lines[self.row], self.col);
+        let rest = self.lines[self.row][byte..].to_string();
+        self.lines[self.row].truncate(byte);
+        self.row += 1;
+        self.col = 0;
+        self.lines.insert(self.row, rest);
+    }
+
+    fn backspace(&mut self) {
+        if self.col > 0 {
+            self.col -= 1;
+            let byte = char_to_byte(&self.lines[self.row], self.col);
+            self.lines[self.row].remove(byte);
+        } else if self.row > 0 {
+            let removed = self.lines.remove(self.row);
+            self.row -= 1;
+            self.col = self.lines[self.row].chars().count();
+            self.lines[self.row].push_str(&removed);
+        }
+    }
+
+    fn move_left(&mut self) {
+        if self.col > 0 {
+            self.col -= 1;
+        } else if self.row > 0 {
+            self.row -= 1;
+            self.col = self.lines[self.row].chars().count();
+        }
+    }
+
+    fn move_right(&mut self) {
+        let len = self.lines[self.row].chars().count();
+        if self.col < len {
+            self.col += 1;
+        } else if self.row + 1 < self.lines.len() {
+            self.row += 1;
+            self.col = 0;
+        }
+    }
+
+    fn move_up(&mut self) {
+        if self.row > 0 {
+            self.row -= 1;
+            self.col = self.col.min(self.lines[self.row].chars().count());
+        }
+    }
+
+    fn move_down(&mut self) {
+        if self.row + 1 < self.lines.len() {
+            self.row += 1;
+            self.col = self.col.min(self.lines[self.row].chars().count());
+        }
+    }
+
+    fn move_home(&mut self) {
+        self.col = 0;
+    }
+
+    fn move_end(&mut self) {
+        self.col = self.lines[self.row].chars().count();
+    }
+
+    /// Handle a key event. Returns `true` if the event was consumed.
+    fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        match (code, modifiers) {
+            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => self.insert_char(c),
+            (KeyCode::Enter, _) => self.insert_newline(),
+            (KeyCode::Backspace, _) => self.backspace(),
+            (KeyCode::Left, _) => self.move_left(),
+            (KeyCode::Right, _) => self.move_right(),
+            (KeyCode::Up, _) => self.move_up(),
+            (KeyCode::Down, _) => self.move_down(),
+            (KeyCode::Home, _) => self.move_home(),
+            (KeyCode::End, _) => self.move_end(),
+            _ => return false,
+        }
+        true
+    }
+
+}
+
+fn char_to_byte(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
+}
+
+// ── Dialog types ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct QuestionOption {
@@ -129,14 +264,12 @@ pub fn show_confirm(
         ("no".into(), ConfirmChoice::No),
     ];
     if let Some(pattern) = approval_pattern {
-        let display = pattern
-            .strip_suffix("/*")
-            .unwrap_or(pattern);
-        let display = display
-            .split("://")
-            .nth(1)
-            .unwrap_or(display);
-        options_vec.push((format!("allow {display}"), ConfirmChoice::AlwaysPattern(pattern.to_string())));
+        let display = pattern.strip_suffix("/*").unwrap_or(pattern);
+        let display = display.split("://").nth(1).unwrap_or(display);
+        options_vec.push((
+            format!("allow {display}"),
+            ConfirmChoice::AlwaysPattern(pattern.to_string()),
+        ));
     } else {
         options_vec.push(("always allow".into(), ConfirmChoice::Always));
     }
@@ -146,52 +279,89 @@ pub fn show_confirm(
         .collect();
 
     let total_preview = confirm_preview_row_count(tool_name, args);
-    let fixed_rows: u16 = 8 + options.len() as u16;
-    let max_preview = height.saturating_sub(fixed_rows + 2);
-    let preview_rows = total_preview.min(max_preview);
-    let has_preview = preview_rows > 0;
-    let extra = if has_preview {
-        preview_rows + if total_preview > max_preview { 1 } else { 0 } + 1
-    } else {
-        0
-    };
-    let total_rows = fixed_rows + extra + 1;
-    let bar_row = height.saturating_sub(total_rows);
+
     let mut selected: usize = 0;
-    let mut message = String::new();
+    let mut textarea = TextArea::new();
     let mut editing = false;
 
     let _ = out.queue(cursor::Hide);
     let _ = out.flush();
 
-    let draw = |selected: usize, message: &str, editing: bool| {
+    // The text indent column: "  1. yes, " = 2 + digit + ". " + label + ", "
+    let first_label = options.first().map(|(l, _)| *l).unwrap_or("yes");
+    // "  1. yes, " → indent = 2 (leading) + 1 (digit) + 2 (". ") + label.len + 2 (", ")
+    let text_indent = (2 + 1 + 2 + first_label.len() + 2) as u16;
+
+    // Height is recalculated every draw so the dialog expands with the textarea.
+    let draw = |selected: usize, textarea: &TextArea, editing: bool| {
         let mut out = io::stdout();
+        let (_, height) = terminal::size().unwrap_or((80, 24));
+
+        // Extra lines from the textarea (lines beyond the first are extra rows on option 1)
+        let ta_extra = if editing || !textarea.is_empty() {
+            textarea.line_count().saturating_sub(1)
+        } else {
+            0
+        };
+
+        // rows: bar(1) + title(1) + blank(1) + "Allow?"(1) + options(N) + blank(1) + footer(1)
+        let base_rows: u16 = 6 + options.len() as u16 + ta_extra;
+
+        // preview
+        let max_preview = height.saturating_sub(base_rows + 2);
+        let preview_rows = total_preview.min(max_preview);
+        let has_preview = preview_rows > 0;
+        let preview_extra = if has_preview {
+            preview_rows + u16::from(total_preview > max_preview) + 1
+        } else {
+            0
+        };
+
+        let total_rows = base_rows + preview_extra;
+        let bar_row = height.saturating_sub(total_rows);
+
         let _ = out.queue(cursor::MoveTo(0, bar_row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
+        let mut row = bar_row;
+
         draw_bar(&mut out, w, None, None, theme::ACCENT);
         let _ = out.queue(Print("\r\n"));
+        row += 1;
 
+        // title
         let _ = out.queue(Print(" "));
         let _ = out.queue(SetForegroundColor(theme::ACCENT));
         let _ = out.queue(Print(tool_name));
         let _ = out.queue(ResetColor);
-        let _ = out.queue(Print(format!(": {}", desc)));
+        let _ = out.queue(Print(format!(": {desc}")));
         let _ = out.queue(Print("\r\n"));
+        row += 1;
 
         if has_preview {
             let _ = out.queue(Print("\r\n"));
+            row += 1;
             render_confirm_preview(&mut out, tool_name, args, max_preview);
+            row += preview_rows;
+            if total_preview > max_preview {
+                row += 1; // truncation indicator
+            }
         }
 
+        // blank + "Allow?"
         let _ = out.queue(Print("\r\n"));
-
+        row += 1;
         let _ = out.queue(SetAttribute(Attribute::Dim));
         let _ = out.queue(Print(" Allow?\r\n"));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        row += 1;
+
+        let mut cursor_pos: Option<(u16, u16)> = None;
 
         for (i, (label, _)) in options.iter().enumerate() {
             let _ = out.queue(Print("  "));
-            if !editing && i == selected {
+            let highlighted = if editing { i == 0 } else { i == selected };
+            if highlighted {
                 let _ = out.queue(SetAttribute(Attribute::Dim));
                 let _ = out.queue(Print(format!("{}.", i + 1)));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
@@ -203,45 +373,58 @@ pub fn show_confirm(
                 let _ = out.queue(SetAttribute(Attribute::Dim));
                 let _ = out.queue(Print(format!("{}. ", i + 1)));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
-                let _ = out.queue(Print(label.to_string()));
+                let _ = out.queue(Print(*label));
             }
-            let _ = out.queue(Print("\r\n"));
+
+            // Inline textarea on option 1
+            if i == 0 && (editing || !textarea.is_empty()) {
+                let _ = out.queue(Print(", "));
+                // First line goes inline
+                let _ = out.queue(Print(&textarea.lines[0]));
+                if editing && textarea.row == 0 {
+                    cursor_pos = Some((text_indent + textarea.col as u16, row));
+                }
+                let _ = out.queue(Print("\r\n"));
+                row += 1;
+
+                // Continuation lines indented to the same column
+                let pad: String = " ".repeat(text_indent as usize);
+                for li in 1..textarea.lines.len() {
+                    let _ = out.queue(Print(&pad));
+                    let _ = out.queue(Print(&textarea.lines[li]));
+                    if editing && textarea.row == li {
+                        cursor_pos = Some((text_indent + textarea.col as u16, row));
+                    }
+                    let _ = out.queue(Print("\r\n"));
+                    row += 1;
+                }
+            } else {
+                let _ = out.queue(Print("\r\n"));
+                row += 1;
+            }
         }
 
+        // footer
         let _ = out.queue(Print("\r\n"));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
         if editing {
-            let _ = out.queue(Print("  "));
-            let _ = out.queue(SetForegroundColor(theme::ACCENT));
-            let _ = out.queue(Print("> "));
-            let _ = out.queue(ResetColor);
-            let _ = out.queue(Print(message));
-            let _ = out.flush();
-            let (cursor_col, cursor_row) = cursor::position().unwrap_or((0, 0));
-            let _ = out.queue(Print("\r\n\r\n"));
-            let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(Print(" enter: approve with message  esc: back"));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-            let _ = out.queue(cursor::MoveTo(cursor_col, cursor_row));
+            let _ = out.queue(Print(" esc: done  enter: newline"));
+        } else if !textarea.is_empty() {
+            let _ = out.queue(Print(" enter: approve with message  tab: edit"));
+        }
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+
+        if let Some((col, r)) = cursor_pos {
+            let _ = out.queue(cursor::MoveTo(col, r));
             let _ = out.queue(cursor::Show);
-        } else if !message.is_empty() {
-            let _ = out.queue(Print("  "));
-            let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(Print("> "));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-            let _ = out.queue(Print(message));
-            let _ = out.queue(Print("\r\n\r\n"));
-            let _ = out.queue(cursor::Hide);
         } else {
-            let _ = out.queue(Print("\r\n\r\n"));
             let _ = out.queue(cursor::Hide);
         }
 
         let _ = out.flush();
     };
 
-    draw(selected, &message, editing);
-
-    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+    draw(selected, &textarea, editing);
 
     let choice = loop {
         if let Ok(Event::Key(KeyEvent {
@@ -250,41 +433,34 @@ pub fn show_confirm(
         {
             if editing {
                 match (code, modifiers) {
-                    (KeyCode::Enter, _) => {
-                        break ConfirmChoice::YesWithMessage(message.clone());
-                    }
                     (KeyCode::Esc, _) => {
                         editing = false;
-                        draw(selected, &message, editing);
                     }
                     (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                        message.clear();
+                        if textarea.is_empty() {
+                            break ConfirmChoice::No;
+                        }
+                        textarea.clear();
                         editing = false;
-                        draw(selected, &message, editing);
                     }
-                    (KeyCode::Backspace, _) => {
-                        message.pop();
-                        draw(selected, &message, editing);
+                    _ => {
+                        textarea.handle_key(code, modifiers);
                     }
-                    (KeyCode::Char(c), _) => {
-                        message.push(c);
-                        draw(selected, &message, editing);
-                    }
-                    _ => {}
                 }
+                draw(selected, &textarea, editing);
                 continue;
             }
 
             match (code, modifiers) {
                 (KeyCode::Enter, _) => {
-                    if !message.is_empty() {
-                        break ConfirmChoice::YesWithMessage(message.clone());
+                    if !textarea.is_empty() {
+                        break ConfirmChoice::YesWithMessage(textarea.text());
                     }
                     break options[selected].1.clone();
                 }
                 (KeyCode::Tab, _) => {
                     editing = true;
-                    draw(selected, &message, editing);
+                    draw(selected, &textarea, editing);
                 }
                 (KeyCode::Char(c @ '1'..='9'), _) => {
                     let idx = (c as usize) - ('1' as usize);
@@ -293,7 +469,7 @@ pub fn show_confirm(
                     }
                 }
                 (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                    break ConfirmChoice::No
+                    break ConfirmChoice::No;
                 }
                 (KeyCode::Esc, _) => break ConfirmChoice::No,
                 (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
@@ -302,18 +478,19 @@ pub fn show_confirm(
                     } else {
                         selected - 1
                     };
-                    draw(selected, &message, editing);
+                    draw(selected, &textarea, editing);
                 }
                 (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
                     selected = (selected + 1) % options.len();
-                    draw(selected, &message, editing);
+                    draw(selected, &textarea, editing);
                 }
                 _ => {}
             }
         }
     };
 
-    let _ = out.queue(cursor::MoveTo(0, bar_row));
+    // Clean up: clear the dialog area.
+    let _ = out.queue(cursor::MoveTo(0, height.saturating_sub(1)));
     let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
     let _ = out.queue(cursor::Show);
     let _ = out.flush();
@@ -409,7 +586,6 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
 
     draw(selected, scroll_offset);
 
-    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
     let result = loop {
         if let Ok(Event::Key(KeyEvent {
@@ -549,7 +725,6 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
 
     draw(selected, scroll_offset, &query, &filtered);
 
-    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
     terminal::enable_raw_mode().ok();
     let _ = out.queue(EnableBracketedPaste);
@@ -628,7 +803,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
     }
 
     let mut out = io::stdout();
-    let (width, height) = terminal::size().unwrap_or((80, 24));
+    let (width, _height) = terminal::size().unwrap_or((80, 24));
     let w = width.saturating_sub(1) as usize;
 
     let mut active_tab: usize = 0;
@@ -637,15 +812,13 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
         .iter()
         .map(|q| vec![false; q.options.len() + 1])
         .collect();
-    let mut other_texts: Vec<String> = questions.iter().map(|_| String::new()).collect();
+    let mut other_areas: Vec<TextArea> = questions.iter().map(|_| TextArea::new()).collect();
     let mut editing_other: Vec<bool> = questions.iter().map(|_| false).collect();
     let mut visited: Vec<bool> = questions.iter().map(|_| false).collect();
     let mut answered: Vec<bool> = questions.iter().map(|_| false).collect();
 
     let max_options = questions.iter().map(|q| q.options.len()).max().unwrap_or(0) + 1;
     let has_tabs = questions.len() > 1;
-    let fixed_rows = 1 + (has_tabs as usize) + 3 + max_options + 1 + 1;
-    let bar_row = height.saturating_sub(fixed_rows as u16);
 
     let _ = out.queue(cursor::Hide);
     let _ = out.flush();
@@ -653,24 +826,36 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
     let draw = |active_tab: usize,
                 selections: &[usize],
                 multi_toggles: &[Vec<bool>],
-                other_texts: &[String],
+                other_areas: &[TextArea],
                 editing_other: &[bool],
                 visited: &[bool],
                 answered: &[bool]| {
         let mut out = io::stdout();
+        let (_, height) = terminal::size().unwrap_or((80, 24));
+
+        let ta = &other_areas[active_tab];
+        let ta_visible = editing_other[active_tab] || !ta.is_empty();
+        // Extra rows from textarea continuation lines (first line is inline with "Other")
+        let ta_extra: u16 = if ta_visible {
+            ta.line_count().saturating_sub(1)
+        } else {
+            0
+        };
+
+        // bar(1) + tabs?(1) + blank(1) + question(1) + blank(1) + options(N) + blank(1) + footer(1)
+        let fixed_rows = 1 + (has_tabs as u16) + 3 + max_options as u16 + 2 + ta_extra;
+        let bar_row = height.saturating_sub(fixed_rows);
+
         let _ = out.queue(cursor::MoveTo(0, bar_row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
         let mut row = bar_row;
 
-        let _ = out.queue(cursor::MoveTo(0, row));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         draw_bar(&mut out, w, None, None, theme::ACCENT);
-        row = row.saturating_add(1);
+        let _ = out.queue(Print("\r\n"));
+        row += 1;
 
         if questions.len() > 1 {
-            let _ = out.queue(cursor::MoveTo(0, row));
-            let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
             let _ = out.queue(Print(" "));
             for (i, q) in questions.iter().enumerate() {
                 let bullet = if answered[i] || visited[i] {
@@ -697,7 +882,8 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                     let _ = out.queue(SetAttribute(Attribute::Reset));
                 }
             }
-            row = row.saturating_add(1);
+            let _ = out.queue(Print("\r\n"));
+            row += 1;
         }
 
         let q = &questions[active_tab];
@@ -705,12 +891,9 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
         let is_multi = q.multi_select;
         let other_idx = q.options.len();
 
-        let _ = out.queue(cursor::MoveTo(0, row));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-        row = row.saturating_add(1);
+        let _ = out.queue(Print("\r\n"));
+        row += 1;
 
-        let _ = out.queue(cursor::MoveTo(0, row));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         let _ = out.queue(Print(" "));
         let _ = out.queue(SetAttribute(Attribute::Bold));
         let _ = out.queue(Print(&q.question));
@@ -720,15 +903,13 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
             let _ = out.queue(Print(" (space to toggle)"));
             let _ = out.queue(SetAttribute(Attribute::Reset));
         }
-        row = row.saturating_add(1);
+        let _ = out.queue(Print("\r\n"));
+        row += 1;
 
-        let _ = out.queue(cursor::MoveTo(0, row));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-        row = row.saturating_add(1);
+        let _ = out.queue(Print("\r\n"));
+        row += 1;
 
         for (i, opt) in q.options.iter().enumerate() {
-            let _ = out.queue(cursor::MoveTo(0, row));
-            let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
             let _ = out.queue(Print("  "));
             let is_current = sel == i;
             let is_toggled = is_multi && multi_toggles[active_tab][i];
@@ -765,16 +946,24 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                 let _ = out.queue(Print(format!("  {}", opt.description)));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
             }
-            row = row.saturating_add(1);
+            let _ = out.queue(Print("\r\n"));
+            row += 1;
         }
 
-        let other_row = row;
-        let _ = out.queue(cursor::MoveTo(0, row));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+        // "Other" option with inline textarea
         let _ = out.queue(Print("  "));
         let is_other_current = sel == other_idx;
         let is_other_toggled = is_multi && multi_toggles[active_tab][other_idx];
-        let mut cursor_pos: Option<u16> = None;
+
+        // Calculate the column where text starts after "Other, "
+        let other_text_col: u16 = if is_multi {
+            // "  ◉ Other, " = 2 + 2(check+space) + 5(Other) + 2(", ")
+            2 + 2 + 5 + 2
+        } else {
+            // "  N. Other, " = 2 + digits + 2(". ") + 5("Other") + 2(", ")
+            let digits = format!("{}", other_idx + 1).len();
+            (2 + digits + 2 + 5 + 2) as u16
+        };
 
         if is_multi {
             let check = if is_other_toggled { "◉" } else { "○" };
@@ -801,32 +990,47 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                 let _ = out.queue(Print("Other"));
             }
         }
-        if editing_other[active_tab] || !other_texts[active_tab].is_empty() {
+
+        let mut cursor_pos: Option<(u16, u16)> = None;
+        if ta_visible {
             let _ = out.queue(Print(", "));
-            let _ = out.queue(Print(&other_texts[active_tab]));
-            if editing_other[active_tab] {
-                let _ = out.flush();
-                cursor_pos = cursor::position().ok().map(|(x, _)| x);
+            // First line inline
+            let _ = out.queue(Print(&ta.lines[0]));
+            if editing_other[active_tab] && ta.row == 0 {
+                cursor_pos = Some((other_text_col + ta.col as u16, row));
             }
+            let _ = out.queue(Print("\r\n"));
+            row += 1;
+
+            // Continuation lines aligned to the same column
+            let pad: String = " ".repeat(other_text_col as usize);
+            for li in 1..ta.lines.len() {
+                let _ = out.queue(Print(&pad));
+                let _ = out.queue(Print(&ta.lines[li]));
+                if editing_other[active_tab] && ta.row == li {
+                    cursor_pos = Some((other_text_col + ta.col as u16, row));
+                }
+                let _ = out.queue(Print("\r\n"));
+                row += 1;
+            }
+        } else {
+            let _ = out.queue(Print("\r\n"));
         }
-        row = row.saturating_add(1);
 
-        let _ = out.queue(cursor::MoveTo(0, row));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-        row = row.saturating_add(1);
-
-        let _ = out.queue(cursor::MoveTo(0, row));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+        // Footer
+        let _ = out.queue(Print("\r\n"));
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        if questions.len() > 1 {
+        if editing_other[active_tab] {
+            let _ = out.queue(Print(" esc: done  enter: newline"));
+        } else if questions.len() > 1 {
             let _ = out.queue(Print(" tab: next question  enter: confirm"));
         } else {
             let _ = out.queue(Print(" enter: confirm"));
         }
         let _ = out.queue(SetAttribute(Attribute::Reset));
 
-        if let Some(col) = cursor_pos {
-            let _ = out.queue(cursor::MoveTo(col, other_row));
+        if let Some((col, r)) = cursor_pos {
+            let _ = out.queue(cursor::MoveTo(col, r));
             let _ = out.queue(cursor::Show);
         } else {
             let _ = out.queue(cursor::Hide);
@@ -835,17 +1039,19 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
         let _ = out.flush();
     };
 
-    draw(
+    let redraw = |at, sel: &[usize], mt: &[Vec<bool>], oa: &[TextArea], eo: &[bool], v: &[bool], a: &[bool]| {
+        draw(at, sel, mt, oa, eo, v, a);
+    };
+
+    redraw(
         active_tab,
         &selections,
         &multi_toggles,
-        &other_texts,
+        &other_areas,
         &editing_other,
         &visited,
         &answered,
     );
-
-    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
     let cancelled = loop {
         if let Ok(Event::Key(KeyEvent {
@@ -857,83 +1063,32 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
 
             if editing_other[active_tab] {
                 match (code, modifiers) {
-                    (KeyCode::Enter, _) => {
-                        editing_other[active_tab] = false;
-                        if q.multi_select {
-                            multi_toggles[active_tab][other_idx] = true;
-                            visited[active_tab] = true;
-                        } else {
-                            answered[active_tab] = true;
-                        }
-                        if questions.len() == 1 {
-                            break false;
-                        } else if active_tab + 1 < questions.len() {
-                            active_tab += 1;
-                        }
-                        draw(
-                            active_tab,
-                            &selections,
-                            &multi_toggles,
-                            &other_texts,
-                            &editing_other,
-                            &visited,
-                            &answered,
-                        );
-                    }
                     (KeyCode::Esc, _) => {
                         editing_other[active_tab] = false;
-                        draw(
-                            active_tab,
-                            &selections,
-                            &multi_toggles,
-                            &other_texts,
-                            &editing_other,
-                            &visited,
-                            &answered,
-                        );
                     }
                     (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                        other_texts[active_tab].clear();
+                        if other_areas[active_tab].is_empty() {
+                            break true;
+                        }
+                        other_areas[active_tab].clear();
                         editing_other[active_tab] = false;
                         if q.multi_select {
                             multi_toggles[active_tab][other_idx] = false;
                         }
-                        draw(
-                            active_tab,
-                            &selections,
-                            &multi_toggles,
-                            &other_texts,
-                            &editing_other,
-                            &visited,
-                            &answered,
-                        );
                     }
-                    (KeyCode::Backspace, _) => {
-                        other_texts[active_tab].pop();
-                        draw(
-                            active_tab,
-                            &selections,
-                            &multi_toggles,
-                            &other_texts,
-                            &editing_other,
-                            &visited,
-                            &answered,
-                        );
+                    _ => {
+                        other_areas[active_tab].handle_key(code, modifiers);
                     }
-                    (KeyCode::Char(c), _) => {
-                        other_texts[active_tab].push(c);
-                        draw(
-                            active_tab,
-                            &selections,
-                            &multi_toggles,
-                            &other_texts,
-                            &editing_other,
-                            &visited,
-                            &answered,
-                        );
-                    }
-                    _ => {}
                 }
+                redraw(
+                    active_tab,
+                    &selections,
+                    &multi_toggles,
+                    &other_areas,
+                    &editing_other,
+                    &visited,
+                    &answered,
+                );
                 continue;
             }
 
@@ -944,18 +1099,9 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                     answered[active_tab] = true;
                     if let Some(next) = (0..questions.len()).find(|&i| !answered[i]) {
                         active_tab = next;
-                        draw(
-                            active_tab,
-                            &selections,
-                            &multi_toggles,
-                            &other_texts,
-                            &editing_other,
-                            &visited,
-                            &answered,
-                        );
-                        continue;
+                    } else {
+                        break false;
                     }
-                    break false;
                 }
                 (KeyCode::Tab, _) => {
                     if selections[active_tab] == other_idx {
@@ -963,30 +1109,12 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                         if q.multi_select {
                             multi_toggles[active_tab][other_idx] = true;
                         }
-                        draw(
-                            active_tab,
-                            &selections,
-                            &multi_toggles,
-                            &other_texts,
-                            &editing_other,
-                            &visited,
-                            &answered,
-                        );
                     }
                 }
                 (KeyCode::Right, _) | (KeyCode::Char('l'), _) => {
                     if questions.len() > 1 {
                         visited[active_tab] = true;
                         active_tab = (active_tab + 1) % questions.len();
-                        draw(
-                            active_tab,
-                            &selections,
-                            &multi_toggles,
-                            &other_texts,
-                            &editing_other,
-                            &visited,
-                            &answered,
-                        );
                     }
                 }
                 (KeyCode::BackTab, _) | (KeyCode::Left, _) | (KeyCode::Char('h'), _) => {
@@ -997,15 +1125,6 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                         } else {
                             active_tab - 1
                         };
-                        draw(
-                            active_tab,
-                            &selections,
-                            &multi_toggles,
-                            &other_texts,
-                            &editing_other,
-                            &visited,
-                            &answered,
-                        );
                     }
                 }
                 (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
@@ -1014,44 +1133,17 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                     } else {
                         selections[active_tab] - 1
                     };
-                    draw(
-                        active_tab,
-                        &selections,
-                        &multi_toggles,
-                        &other_texts,
-                        &editing_other,
-                        &visited,
-                        &answered,
-                    );
                 }
                 (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
                     selections[active_tab] = (selections[active_tab] + 1) % (other_idx + 1);
-                    draw(
-                        active_tab,
-                        &selections,
-                        &multi_toggles,
-                        &other_texts,
-                        &editing_other,
-                        &visited,
-                        &answered,
-                    );
                 }
                 (KeyCode::Char(' '), _) if q.multi_select => {
                     let idx = selections[active_tab];
-                    if idx == other_idx && other_texts[active_tab].is_empty() {
+                    if idx == other_idx && other_areas[active_tab].is_empty() {
                         editing_other[active_tab] = true;
                     } else {
                         multi_toggles[active_tab][idx] = !multi_toggles[active_tab][idx];
                     }
-                    draw(
-                        active_tab,
-                        &selections,
-                        &multi_toggles,
-                        &other_texts,
-                        &editing_other,
-                        &visited,
-                        &answered,
-                    );
                 }
                 (KeyCode::Char(c), _) if c.is_ascii_digit() => {
                     let num = c.to_digit(10).unwrap_or(0) as usize;
@@ -1062,23 +1154,24 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                         } else {
                             selections[active_tab] = num - 1;
                         }
-                        draw(
-                            active_tab,
-                            &selections,
-                            &multi_toggles,
-                            &other_texts,
-                            &editing_other,
-                            &visited,
-                            &answered,
-                        );
                     }
                 }
                 _ => {}
             }
+            redraw(
+                active_tab,
+                &selections,
+                &multi_toggles,
+                &other_areas,
+                &editing_other,
+                &visited,
+                &answered,
+            );
         }
     };
 
-    let _ = out.queue(cursor::MoveTo(0, bar_row));
+    let (_, height) = terminal::size().unwrap_or((80, 24));
+    let _ = out.queue(cursor::MoveTo(0, height.saturating_sub(1)));
     let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
     let _ = out.queue(cursor::Show);
     let _ = out.flush();
@@ -1090,12 +1183,13 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
     let mut answers = serde_json::Map::new();
     for (i, q) in questions.iter().enumerate() {
         let other_idx = q.options.len();
+        let other_text = other_areas[i].text();
         let answer = if q.multi_select {
             let mut selected: Vec<String> = Vec::new();
             for (j, toggled) in multi_toggles[i].iter().enumerate() {
                 if *toggled {
                     if j == other_idx {
-                        selected.push(format!("Other: {}", other_texts[i]));
+                        selected.push(format!("Other: {other_text}"));
                     } else {
                         selected.push(q.options[j].label.clone());
                     }
@@ -1103,7 +1197,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
             }
             if selected.is_empty() {
                 if selections[i] == other_idx {
-                    serde_json::Value::String(format!("Other: {}", other_texts[i]))
+                    serde_json::Value::String(format!("Other: {other_text}"))
                 } else {
                     serde_json::Value::String(q.options[selections[i]].label.clone())
                 }
@@ -1116,7 +1210,7 @@ pub fn show_ask_question(questions: &[Question]) -> Option<String> {
                 )
             }
         } else if selections[i] == other_idx {
-            serde_json::Value::String(format!("Other: {}", other_texts[i]))
+            serde_json::Value::String(format!("Other: {other_text}"))
         } else {
             serde_json::Value::String(q.options[selections[i]].label.clone())
         };

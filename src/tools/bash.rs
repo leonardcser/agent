@@ -30,17 +30,10 @@ impl Tool for BashTool {
 
     fn approval_pattern(&self, args: &HashMap<String, Value>) -> Option<String> {
         let cmd = str_arg(args, "command");
-        // Replace each sub-command (split by &&, ||, ;, |) with "binary *"
-        // while preserving the operators between them.
+        let subcmds = crate::permissions::split_shell_commands_with_ops(&cmd);
         let mut result = String::new();
-        let mut rest = cmd.as_str();
-        loop {
-            let trimmed = rest.trim_start();
-            if trimmed.is_empty() {
-                break;
-            }
-            let (cmd_part, op, remaining) = split_next_operator(trimmed);
-            let bin = cmd_part.split_whitespace().next().unwrap_or("");
+        for (subcmd, op) in &subcmds {
+            let bin = subcmd.split_whitespace().next().unwrap_or("");
             if !bin.is_empty() {
                 if !result.is_empty() {
                     result.push(' ');
@@ -50,10 +43,6 @@ impl Tool for BashTool {
             }
             if let Some(op) = op {
                 result.push_str(&format!(" {op}"));
-            }
-            rest = remaining;
-            if remaining.is_empty() {
-                break;
             }
         }
         Some(result)
@@ -128,28 +117,25 @@ mod tests {
             "cd * && rm * | grep * ; echo *"
         );
     }
-}
 
-/// Split at the next shell operator (&&, ||, ;, |).
-fn split_next_operator(s: &str) -> (&str, Option<&str>, &str) {
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'&' if i + 1 < bytes.len() && bytes[i + 1] == b'&' => {
-                return (&s[..i], Some("&&"), &s[i + 2..]);
-            }
-            b'|' if i + 1 < bytes.len() && bytes[i + 1] == b'|' => {
-                return (&s[..i], Some("||"), &s[i + 2..]);
-            }
-            b';' => {
-                return (&s[..i], Some(";"), &s[i + 1..]);
-            }
-            b'|' => {
-                return (&s[..i], Some("|"), &s[i + 1..]);
-            }
-            _ => i += 1,
-        }
+    #[test]
+    fn background_operator() {
+        assert_eq!(pattern("sleep 5 & echo done"), "sleep * & echo *");
     }
-    (s, None, "")
+
+    #[test]
+    fn quoted_operator_not_split() {
+        // && inside quotes is not an operator — single command
+        assert_eq!(pattern(r#"grep "&&" file.txt"#), "grep *");
+    }
+
+    #[test]
+    fn empty_command() {
+        assert_eq!(pattern(""), "");
+    }
+
+    #[test]
+    fn only_whitespace() {
+        assert_eq!(pattern("   "), "");
+    }
 }

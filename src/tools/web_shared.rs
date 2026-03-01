@@ -74,10 +74,7 @@ pub fn extract_text(html: &str) -> String {
         }
     }
 
-    if let Some(body) = doc
-        .select(&Selector::parse("body").unwrap())
-        .next()
-    {
+    if let Some(body) = doc.select(&Selector::parse("body").unwrap()).next() {
         collect(body, &skip, &mut text);
     }
     text
@@ -89,7 +86,8 @@ pub fn html_to_markdown(html: &str) -> String {
 
     // Remove script/style/etc before conversion
     let doc = Html::parse_document(html);
-    let remove = Selector::parse("script, style, noscript, iframe, object, embed, meta, link").unwrap();
+    let remove =
+        Selector::parse("script, style, noscript, iframe, object, embed, meta, link").unwrap();
     let mut cleaned = doc.html();
     for el in doc.select(&remove) {
         cleaned = cleaned.replace(&el.html(), "");
@@ -103,7 +101,9 @@ pub fn extract_title(html: &str) -> Option<String> {
     use scraper::{Html, Selector};
     let doc = Html::parse_document(html);
     let sel = Selector::parse("title").unwrap();
-    doc.select(&sel).next().map(|el| el.text().collect::<String>().trim().to_string())
+    doc.select(&sel)
+        .next()
+        .map(|el| el.text().collect::<String>().trim().to_string())
 }
 
 /// Extract up to 50 deduplicated, canonicalized links from HTML.

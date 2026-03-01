@@ -1167,9 +1167,17 @@ impl App {
                 *pending = None;
                 SessionControl::Continue
             }
-            AgentEvent::Confirm { desc, args, approval_pattern, reply } => {
-                SessionControl::NeedsConfirm { desc, args, approval_pattern, reply }
-            }
+            AgentEvent::Confirm {
+                desc,
+                args,
+                approval_pattern,
+                reply,
+            } => SessionControl::NeedsConfirm {
+                desc,
+                args,
+                approval_pattern,
+                reply,
+            },
             AgentEvent::AskQuestion { args, reply } => {
                 SessionControl::NeedsAskQuestion { args, reply }
             }
@@ -1263,9 +1271,20 @@ impl App {
         match ctrl {
             SessionControl::Continue => LoopAction::Continue,
             SessionControl::Done => LoopAction::Done,
-            SessionControl::NeedsConfirm { desc, args, approval_pattern, reply } => {
+            SessionControl::NeedsConfirm {
+                desc,
+                args,
+                approval_pattern,
+                reply,
+            } => {
                 let tool_name = pending.as_ref().map(|p| p.name.as_str()).unwrap_or("");
-                match self.handle_confirm(tool_name, &desc, &args, approval_pattern.as_deref(), reply) {
+                match self.handle_confirm(
+                    tool_name,
+                    &desc,
+                    &args,
+                    approval_pattern.as_deref(),
+                    reply,
+                ) {
                     ConfirmAction::Approved => {
                         if let Some(ref mut p) = pending {
                             p.start = Instant::now();
