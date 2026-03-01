@@ -9,6 +9,8 @@ pub struct State {
     pub mode: String,
     #[serde(default)]
     pub vim_enabled: bool,
+    #[serde(default)]
+    pub selected_model: Option<String>,
 }
 
 fn state_path() -> PathBuf {
@@ -54,6 +56,11 @@ impl State {
 
     pub fn set_vim_enabled(&mut self, enabled: bool) {
         self.vim_enabled = enabled;
+        self.save();
+    }
+
+    pub fn set_selected_model(&mut self, key: String) {
+        self.selected_model = Some(key);
         self.save();
     }
 }

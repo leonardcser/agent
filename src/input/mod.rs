@@ -2,7 +2,7 @@ mod history;
 mod settings;
 
 pub use history::History;
-pub use settings::SettingsMenu;
+pub use settings::{ModelMenu, SettingsMenu};
 
 use crate::completer::{Completer, CompleterKind};
 use crate::render;
@@ -54,6 +54,7 @@ pub struct InputState {
     pub pastes: Vec<String>,
     pub completer: Option<Completer>,
     pub settings: Option<SettingsMenu>,
+    pub model_menu: Option<ModelMenu>,
     vim: Option<Vim>,
     /// Saved buffer before history search, restored on cancel.
     history_saved_buf: Option<(String, usize)>,
@@ -66,6 +67,7 @@ pub enum Action {
     Redraw,
     Submit(String),
     Settings { vim: bool, auto_compact: bool },
+    ModelSelect(String),
     ToggleMode,
     Resize { width: usize, height: usize },
     Noop,
@@ -85,6 +87,7 @@ impl InputState {
             pastes: Vec::new(),
             completer: None,
             settings: None,
+            model_menu: None,
             vim: None,
             history_saved_buf: None,
             stash: None,
@@ -140,6 +143,7 @@ impl InputState {
         self.pastes.clear();
         self.completer = None;
         self.settings = None;
+        self.model_menu = None;
         self.history_saved_buf = None;
         // Note: stash is intentionally NOT cleared here.
     }
@@ -181,6 +185,15 @@ impl InputState {
         });
     }
 
+    /// Open the model picker with the given list of (key, model_name, provider_name).
+    pub fn open_model_picker(&mut self, models: Vec<(String, String, String)>) {
+        self.completer = None;
+        self.model_menu = Some(ModelMenu {
+            models,
+            selected: 0,
+        });
+    }
+
     /// Returns the history search query if a history completer is active.
     pub fn history_search_query(&self) -> Option<&str> {
         self.completer.as_ref().and_then(|c| {
@@ -212,6 +225,11 @@ impl InputState {
 
     /// Process a terminal event. Returns what the caller should do next.
     pub fn handle_event(&mut self, ev: Event, mut history: Option<&mut History>) -> Action {
+        // Model menu intercepts all keys when open
+        if self.model_menu.is_some() {
+            return self.handle_model_event(&ev);
+        }
+
         // Settings menu intercepts all keys when open
         if self.settings.is_some() {
             return self.handle_settings_event(&ev);
@@ -513,6 +531,60 @@ impl InputState {
         }
     }
 
+    fn handle_model_event(&mut self, ev: &Event) -> Action {
+        match ev {
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc, ..
+            })
+            | Event::Key(KeyEvent {
+                code: KeyCode::Char('q'),
+                ..
+            }) => {
+                self.model_menu = None;
+                Action::Redraw
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            }) => {
+                let m = self.model_menu.take().unwrap();
+                if let Some((key, _, _)) = m.models.get(m.selected) {
+                    Action::ModelSelect(key.clone())
+                } else {
+                    Action::Redraw
+                }
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Up, ..
+            })
+            | Event::Key(KeyEvent {
+                code: KeyCode::Char('k'),
+                ..
+            }) => {
+                let m = self.model_menu.as_mut().unwrap();
+                if m.selected > 0 {
+                    m.selected -= 1;
+                }
+                Action::Redraw
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Down,
+                ..
+            })
+            | Event::Key(KeyEvent {
+                code: KeyCode::Char('j'),
+                ..
+            }) => {
+                let m = self.model_menu.as_mut().unwrap();
+                if m.selected + 1 < m.models.len() {
+                    m.selected += 1;
+                }
+                Action::Redraw
+            }
+            _ => Action::Noop,
+        }
+    }
+
     /// Try to handle the event as a completer navigation. Returns Some if consumed.
     fn handle_completer_event(&mut self, ev: &Event) -> Option<Action> {
         let is_history = self
@@ -538,7 +610,9 @@ impl InputState {
                     let kind = comp.kind;
                     self.accept_completion(&comp);
                     if kind == CompleterKind::Command {
-                        Some(Action::Submit(self.expanded_text()))
+                        let text = self.expanded_text();
+                        self.clear();
+                        Some(Action::Submit(text))
                     } else {
                         // File: accept and keep editing
                         Some(Action::Redraw)

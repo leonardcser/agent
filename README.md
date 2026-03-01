@@ -16,16 +16,26 @@ Config file: `~/.config/agent/config.yaml` (respects `$XDG_CONFIG_HOME`)
 
 ```yaml
 providers:
-  openai-compatible:
+  - name: ollama
+    type: openai-compatible
     api_base: http://localhost:11434/v1
-    model:
-      name: glm-5
-      temperature: 1.0 # optional
-      top_p: 0.95 # optional
-      top_k: 40 # optional
-      min_p: 0.01 # optional
-      repeat_penalty: 1.0 # optional
-    api_key_env: API_KEY # optional
+    models:
+      - glm-5
+      - name: llama3.3:70b
+        temperature: 0.8 # optional per-model overrides
+        top_p: 0.95
+        top_k: 40
+        min_p: 0.01
+        repeat_penalty: 1.0
+
+  - name: anthropic
+    type: openai-compatible
+    api_base: https://api.anthropic.com/v1
+    api_key_env: ANTHROPIC_API_KEY
+    models:
+      - claude-sonnet-4-20250514
+
+default_model: ollama/glm-5 # provider_name/model_name
 
 settings:
   vim_mode: false # default
@@ -52,10 +62,15 @@ permissions:
       allow: ["ls *", "grep *", "find *"]
 ```
 
-The `model` field accepts either a plain string (`model: gpt-4o`) or a dict with
-`name` and optional sampling parameters. `api_base` and `model` must be set via
-config or CLI flags. Only the `openai-compatible` provider is supported for now;
-multiple provider connections will be added in the future.
+Providers is a list of named connections. Each provider has a `type` (currently
+only `openai-compatible`), connection info (`api_base`, `api_key_env`), and a
+`models` list. Models can be plain strings or dicts with `name` and optional
+sampling parameters (`temperature`, `top_p`, `top_k`, `min_p`,
+`repeat_penalty`).
+
+The `default_model` field selects which model to use at startup. It can be a
+`provider_name/model_name` key or just a model name. If omitted, the first model
+in the first provider is used. Use `/model` to switch models at runtime.
 
 **Default tool permissions** (when `permissions` is omitted):
 
@@ -126,6 +141,7 @@ Type `/` to open the command picker:
 | ------------------ | ------------------------------ |
 | `/clear`, `/new`   | Start a new conversation       |
 | `/resume`          | Resume a saved session         |
+| `/model`           | Switch model                   |
 | `/compact`         | Compact conversation history   |
 | `/vim`             | Toggle vim mode                |
 | `/settings`        | Open settings menu             |

@@ -59,6 +59,7 @@ impl Completer {
             ("new", "start new conversation"),
             ("resume", "resume saved session"),
             ("vim", "toggle vim mode"),
+            ("model", "switch model"),
             ("settings", "open settings menu"),
             ("compact", "compact conversation history"),
             ("export", "copy conversation to clipboard"),

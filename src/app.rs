@@ -44,6 +44,7 @@ pub struct App {
     pub shared_session: Arc<Mutex<Option<Session>>>,
     pub context_window: Option<u32>,
     pub auto_compact: bool,
+    pub available_models: Vec<crate::config::ResolvedModel>,
     pending_title: Option<tokio::sync::oneshot::Receiver<String>>,
     last_width: u16,
     last_height: u16,
@@ -65,6 +66,7 @@ enum EventOutcome {
     CancelAgent,
     Submit(String),
     Settings { vim: bool, auto_compact: bool },
+    ModelSelect(String),
     Rewind(usize),
 }
 
@@ -117,6 +119,7 @@ enum DeferredDialog {
 // ── App impl ─────────────────────────────────────────────────────────────────
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         api_base: String,
         api_key: String,
@@ -125,6 +128,7 @@ impl App {
         vim_from_config: bool,
         auto_compact: bool,
         shared_session: Arc<Mutex<Option<Session>>>,
+        available_models: Vec<crate::config::ResolvedModel>,
     ) -> Self {
         let app_state = state::State::load();
         let mode = app_state.mode();
@@ -133,6 +137,8 @@ impl App {
         if vim_enabled {
             input.set_vim_enabled(true);
         }
+        let mut screen = Screen::new();
+        screen.set_model_label(model.clone());
         Self {
             api_base,
             api_key,
@@ -141,7 +147,7 @@ impl App {
             client: reqwest::Client::new(),
             mode,
             permissions: permissions::Permissions::load(),
-            screen: Screen::new(),
+            screen,
             history: Vec::new(),
             input_history: History::load(),
             app_state,
@@ -152,6 +158,7 @@ impl App {
             shared_session,
             context_window: None,
             auto_compact,
+            available_models,
             pending_title: None,
             last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
             last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
@@ -450,6 +457,19 @@ impl App {
                 self.auto_compact = auto_compact;
                 false
             }
+            EventOutcome::ModelSelect(key) => {
+                if let Some(resolved) = self.available_models.iter().find(|m| m.key == key) {
+                    self.model = resolved.model_name.clone();
+                    self.model_config = resolved.config.clone();
+                    self.api_base = resolved.api_base.clone();
+                    self.api_key = std::env::var(&resolved.api_key_env).unwrap_or_default();
+                    self.screen.set_model_label(resolved.model_name.clone());
+                    self.app_state.set_selected_model(key);
+                }
+                self.screen.erase_prompt();
+                self.screen.mark_dirty();
+                false
+            }
             EventOutcome::Rewind(block_idx) => {
                 if let Some(text) = self.rewind_to(block_idx) {
                     self.input.buf = text;
@@ -549,8 +569,9 @@ impl App {
             return EventOutcome::Redraw;
         }
 
-        // Esc / double-Esc
-        if matches!(
+        // Esc / double-Esc (skip when a modal menu is open — let it handle Esc)
+        let has_modal = self.input.settings.is_some() || self.input.model_menu.is_some();
+        if !has_modal && matches!(
             ev,
             Event::Key(KeyEvent {
                 code: KeyCode::Esc,
@@ -599,6 +620,18 @@ impl App {
 
         // Delegate to InputState::handle_event
         match self.input.handle_event(ev, Some(&mut self.input_history)) {
+            Action::Submit(text) if text.trim() == "/model" => {
+                let models: Vec<(String, String, String)> = self
+                    .available_models
+                    .iter()
+                    .map(|m| (m.key.clone(), m.model_name.clone(), m.provider_name.clone()))
+                    .collect();
+                if !models.is_empty() {
+                    self.input.open_model_picker(models);
+                    self.screen.mark_dirty();
+                }
+                EventOutcome::Redraw
+            }
             Action::Submit(text) if text.trim() == "/settings" => {
                 self.input
                     .open_settings(self.input.vim_enabled(), self.auto_compact);
@@ -609,6 +642,7 @@ impl App {
                 self.input.restore_stash();
                 EventOutcome::Submit(text)
             }
+            Action::ModelSelect(key) => EventOutcome::ModelSelect(key),
             Action::Settings { vim, auto_compact } => EventOutcome::Settings { vim, auto_compact },
             Action::ToggleMode => {
                 self.mode = self.mode.toggle();
@@ -735,7 +769,7 @@ impl App {
             Action::Redraw => {
                 self.screen.mark_dirty();
             }
-            Action::Settings { .. } | Action::Noop | Action::Resize { .. } => {}
+            Action::Settings { .. } | Action::ModelSelect(_) | Action::Noop | Action::Resize { .. } => {}
         }
         EventOutcome::Noop
     }

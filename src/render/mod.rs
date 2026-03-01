@@ -7,7 +7,7 @@ pub use dialogs::{
     QuestionOption,
 };
 
-use crate::input::{InputState, SettingsMenu, PASTE_MARKER};
+use crate::input::{InputState, ModelMenu, SettingsMenu, PASTE_MARKER};
 use crate::theme;
 use crossterm::{
     cursor,
@@ -341,6 +341,7 @@ pub struct Screen {
     prompt: PromptState,
     working: WorkingState,
     context_tokens: Option<u32>,
+    model_label: Option<String>,
     /// True once terminal auto-scrolling has pushed content into scrollback.
     pub has_scrollback: bool,
     /// Terminal row where block content starts (top of conversation).
@@ -364,6 +365,7 @@ impl Screen {
             prompt: PromptState::new(),
             working: WorkingState::new(),
             context_tokens: None,
+            model_label: None,
             has_scrollback: false,
             content_start_row: None,
             pending_dialog: false,
@@ -467,6 +469,11 @@ impl Screen {
 
     pub fn context_tokens(&self) -> Option<u32> {
         self.context_tokens
+    }
+
+    pub fn set_model_label(&mut self, label: String) {
+        self.model_label = Some(label);
+        self.prompt.dirty = true;
     }
 
     pub fn set_throbber(&mut self, state: Throbber) {
@@ -747,14 +754,27 @@ impl Screen {
         let vi_normal = state.vim_mode() == Some(crate::vim::ViMode::Normal);
         let bar_color = if vi_normal { theme::ACCENT } else { theme::BAR };
 
-        let tokens_label = self.context_tokens.map(format_tokens);
+        let mut right_spans = Vec::new();
+        if let Some(ref model) = self.model_label {
+            right_spans.push(BarSpan { text: format!(" {}", model), color: theme::MUTED, attr: None });
+        }
+        if let Some(tokens) = self.context_tokens {
+            if !right_spans.is_empty() {
+                right_spans.push(BarSpan { text: " · ".into(), color: bar_color, attr: None });
+            } else {
+                right_spans.push(BarSpan { text: " ".into(), color: theme::MUTED, attr: None });
+            }
+            right_spans.push(BarSpan { text: format!("{} ", format_tokens(tokens)), color: theme::MUTED, attr: None });
+        } else if !right_spans.is_empty() {
+            right_spans.push(BarSpan { text: " ".into(), color: theme::MUTED, attr: None });
+        }
         let mut throbber_spans = self.working.throbber_spans();
         if self.pending_dialog {
             if !throbber_spans.is_empty() {
                 throbber_spans.push(BarSpan {
                     text: " · ".into(),
-                    color: theme::MUTED,
-                    attr: Some(Attribute::Dim),
+                    color: bar_color,
+                    attr: None,
                 });
             }
             throbber_spans.push(BarSpan {
@@ -771,7 +791,11 @@ impl Screen {
             } else {
                 Some(&throbber_spans)
             },
-            tokens_label.as_deref().map(|l| (l, theme::MUTED)),
+            if right_spans.is_empty() {
+                None
+            } else {
+                Some(&right_spans)
+            },
             bar_color,
         );
         let _ = out.queue(Print("\r\n"));
@@ -785,7 +809,9 @@ impl Screen {
         let is_exec = matches!(state.buf.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
         let is_exec_invalid = state.buf == "!";
         let total_content_rows = visual_lines.len();
-        let comp_total = if state.settings.is_some() {
+        let comp_total = if let Some(ref m) = state.model_menu {
+            m.models.len().min(10)
+        } else if state.settings.is_some() {
             2
         } else {
             state
@@ -853,18 +879,20 @@ impl Screen {
             let _ = out.queue(Print("\r\n"));
         }
 
-        let mode_label = match mode {
-            super::input::Mode::Plan => Some(("plan", theme::PLAN)),
-            super::input::Mode::Apply => Some(("apply", theme::APPLY)),
-            super::input::Mode::Yolo => Some(("yolo", theme::YOLO)),
-            super::input::Mode::Normal => None,
+        let mode_spans: Vec<BarSpan> = match mode {
+            super::input::Mode::Plan => vec![BarSpan { text: " plan ".into(), color: theme::PLAN, attr: None }],
+            super::input::Mode::Apply => vec![BarSpan { text: " apply ".into(), color: theme::APPLY, attr: None }],
+            super::input::Mode::Yolo => vec![BarSpan { text: " yolo ".into(), color: theme::YOLO, attr: None }],
+            super::input::Mode::Normal => vec![],
         };
-        draw_bar(out, width, None, mode_label, bar_color);
+        draw_bar(out, width, None, if mode_spans.is_empty() { None } else { Some(&mode_spans) }, bar_color);
 
         if comp_rows > 0 {
             let _ = out.queue(Print("\r\n"));
         }
-        let comp_rows = if state.settings.is_some() {
+        let comp_rows = if state.model_menu.is_some() {
+            draw_model_menu(out, state.model_menu.as_ref(), comp_rows)
+        } else if state.settings.is_some() {
             draw_settings(out, state.settings.as_ref(), comp_rows)
         } else {
             draw_completions(out, state.completer.as_ref(), comp_rows)
@@ -986,17 +1014,33 @@ pub fn erase_prompt_at(row: u16) {
     let _ = out.flush();
 }
 
+fn make_relative(path: &str) -> String {
+    if let Ok(cwd) = std::env::current_dir() {
+        let prefix = cwd.to_string_lossy();
+        if let Some(rest) = path.strip_prefix(prefix.as_ref()) {
+            let rest = rest.strip_prefix('/').unwrap_or(rest);
+            if rest.is_empty() {
+                return ".".into();
+            }
+            return rest.into();
+        }
+    }
+    path.into()
+}
+
 pub fn tool_arg_summary(name: &str, args: &HashMap<String, serde_json::Value>) -> String {
     match name {
         "bash" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
             cmd.lines().next().unwrap_or("").to_string()
         }
-        "read_file" | "write_file" | "edit_file" => args
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .into(),
+        "read_file" | "write_file" | "edit_file" => {
+            let path = args
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            make_relative(path)
+        }
         "glob" => args
             .get("pattern")
             .and_then(|v| v.as_str())
@@ -1005,7 +1049,7 @@ pub fn tool_arg_summary(name: &str, args: &HashMap<String, serde_json::Value>) -
         "grep" => {
             let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             match args.get("path").and_then(|v| v.as_str()) {
-                Some(p) => format!("{} in {}", pattern, p),
+                Some(p) => format!("{} in {}", pattern, make_relative(p)),
                 None => pattern.into(),
             }
         }
@@ -1102,7 +1146,7 @@ pub(super) fn draw_bar(
     out: &mut io::Stdout,
     width: usize,
     left: Option<&[BarSpan]>,
-    right: Option<(&str, Color)>,
+    right: Option<&[BarSpan]>,
     bar_color: Color,
 ) {
     let dash = "\u{2500}";
@@ -1111,7 +1155,9 @@ pub(super) fn draw_bar(
         .map(|spans| 1 + 1 + spans.iter().map(|s| s.text.chars().count()).sum::<usize>() + 1)
         .unwrap_or(0);
     let right_len: usize = right
-        .map(|(text, _)| 1 + text.chars().count() + 1 + 1)
+        .map(|spans| {
+            1 + spans.iter().map(|s| s.text.chars().count()).sum::<usize>() + 1
+        })
         .unwrap_or(0);
     let bar_len = width.saturating_sub(left_len + right_len);
 
@@ -1138,10 +1184,12 @@ pub(super) fn draw_bar(
     let _ = out.queue(Print(dash.repeat(bar_len)));
     let _ = out.queue(ResetColor);
 
-    if let Some((text, color)) = right {
-        let _ = out.queue(SetForegroundColor(color));
-        let _ = out.queue(Print(format!(" {} ", text)));
-        let _ = out.queue(ResetColor);
+    if let Some(spans) = right {
+        for span in spans {
+            let _ = out.queue(SetForegroundColor(span.color));
+            let _ = out.queue(Print(&span.text));
+            let _ = out.queue(ResetColor);
+        }
         let _ = out.queue(SetForegroundColor(bar_color));
         let _ = out.queue(Print(dash));
         let _ = out.queue(ResetColor);
@@ -1410,6 +1458,48 @@ fn draw_settings(out: &mut io::Stdout, settings: Option<&SettingsMenu>, max_rows
             padding,
             if *value { "on" } else { "off" }
         )));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+        drawn += 1;
+    }
+    drawn
+}
+
+fn draw_model_menu(out: &mut io::Stdout, menu: Option<&ModelMenu>, max_rows: usize) -> usize {
+    let Some(m) = menu else {
+        return 0;
+    };
+    if max_rows == 0 || m.models.is_empty() {
+        return 0;
+    }
+    let model_col = m
+        .models
+        .iter()
+        .map(|(_, name, _)| name.len())
+        .max()
+        .unwrap_or(0)
+        + 4;
+    let mut drawn = 0;
+    for (i, (_, model_name, provider_name)) in m.models.iter().enumerate() {
+        if drawn >= max_rows {
+            break;
+        }
+        if drawn > 0 {
+            let _ = out.queue(Print("\r\n"));
+        }
+        let _ = out.queue(Print("  "));
+        if i == m.selected {
+            let _ = out.queue(SetForegroundColor(theme::ACCENT));
+            let _ = out.queue(Print(model_name));
+            let _ = out.queue(ResetColor);
+        } else {
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print(model_name));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+        }
+        let padding = " ".repeat(model_col.saturating_sub(model_name.len()));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(format!("{}{}", padding, provider_name)));
         let _ = out.queue(SetAttribute(Attribute::Reset));
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
         drawn += 1;

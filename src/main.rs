@@ -49,27 +49,35 @@ async fn main() {
 
     let args = Args::parse();
     let cfg = config::Config::load();
+    let app_state = state::State::load();
+    let available_models = cfg.resolve_models();
 
-    let provider_cfg = cfg
-        .providers
-        .get("openai-compatible")
-        .cloned()
-        .unwrap_or_default();
+    // Resolve the active model: CLI flags > cached selection > default_model > first in config
+    let (api_base, api_key, model, model_config) = {
+        let resolved = if let Some(ref cli_model) = args.model {
+            available_models.iter().find(|m| m.model_name == *cli_model || m.key == *cli_model)
+        } else if let Some(ref cached) = app_state.selected_model {
+            available_models.iter().find(|m| m.key == *cached)
+        } else if let Some(ref default) = cfg.default_model {
+            available_models.iter().find(|m| m.key == *default || m.model_name == *default)
+        } else {
+            available_models.first()
+        };
 
-    let api_base = args
-        .api_base
-        .or(provider_cfg.api_base)
-        .expect("api_base must be set via --api-base or config file");
-    let api_key_env = args
-        .api_key_env
-        .or(provider_cfg.api_key_env)
-        .unwrap_or_default();
-    let api_key = std::env::var(&api_key_env).unwrap_or_default();
-    let model_config = provider_cfg.model.unwrap_or_default();
-    let model = args
-        .model
-        .or(model_config.name.clone())
-        .expect("model must be set via --model or config file");
+        if let Some(r) = resolved {
+            let base = args.api_base.clone().unwrap_or_else(|| r.api_base.clone());
+            let key_env = args.api_key_env.clone().unwrap_or_else(|| r.api_key_env.clone());
+            let key = std::env::var(&key_env).unwrap_or_default();
+            (base, key, r.model_name.clone(), r.config.clone())
+        } else {
+            // Fallback: pure CLI flags, no config providers
+            let base = args.api_base.clone().expect("api_base must be set via --api-base or config file");
+            let key_env = args.api_key_env.clone().unwrap_or_default();
+            let key = std::env::var(&key_env).unwrap_or_default();
+            let model = args.model.clone().expect("model must be set via --model or config file");
+            (base, key, model, config::ModelConfig::default())
+        }
+    };
 
     if let Some(level) = log::parse_level(&args.log_level) {
         log::set_level(level);
@@ -127,6 +135,7 @@ async fn main() {
         vim_enabled,
         auto_compact,
         shared_session,
+        available_models,
     );
 
     // Fetch context window in background so startup isn't blocked by the network call.
