@@ -484,14 +484,14 @@ impl ConfirmDialog {
             0
         };
 
-        let base_rows: u16 = 6 + self.options.len() as u16 + ta_extra;
+        let base_rows: u16 = 5 + self.options.len() as u16 + ta_extra;
 
         let max_preview = height.saturating_sub(base_rows + 5);
         let preview_rows = self.total_preview.min(max_preview);
         let has_preview = preview_rows > 0;
         let preview_extra = if has_preview {
-            // 2 (blank + top separator) + content + truncation indicator + 1 (bottom separator)
-            preview_rows + u16::from(self.total_preview > max_preview) + 3
+            // top separator + content + bottom separator
+            preview_rows + 2
         } else {
             0
         };
@@ -544,9 +544,6 @@ impl ConfirmDialog {
                 row += 1;
                 render_confirm_preview(&mut out, &self.tool_name, &self.args, max_preview);
                 row += preview_rows;
-                if self.total_preview > max_preview {
-                    row += 1;
-                }
                 let _ = out.queue(SetForegroundColor(theme::BAR));
                 let _ = out.queue(Print(&separator));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
@@ -554,9 +551,7 @@ impl ConfirmDialog {
                 row += 1;
             }
 
-            // blank + "Allow?"
-            crlf(&mut out);
-            row += 1;
+            // "Allow?"
             let _ = out.queue(SetAttribute(Attribute::Dim));
             let _ = out.queue(Print(" Allow?"));
             let _ = out.queue(SetAttribute(Attribute::Reset));

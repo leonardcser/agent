@@ -49,30 +49,36 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             let text_w = width.saturating_sub(2).max(1);
             let all_lines: Vec<String> = text
                 .lines()
-                .map(|l| l.replace('\t', "    ").trim_end().to_string())
+                .map(|l| l.replace('\t', "    "))
                 .collect();
             // Strip leading/trailing blank lines but preserve internal structure.
             let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
             let end = all_lines.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1);
             let logical_lines: Vec<String> = all_lines[start..end].to_vec();
-            let multiline = logical_lines.len() > 1
-                || logical_lines
-                    .first()
-                    .is_some_and(|l| l.chars().count() > text_w);
-            // For multi-line messages, pad all lines to the same width.
+            let wraps = logical_lines
+                .iter()
+                .any(|l| l.chars().count() > text_w);
+            let multiline = logical_lines.len() > 1 || wraps;
+            // For multi-line messages, pad all rows to the same width.
+            // If any line wraps, that means the longest line is text_w.
             let block_w = if multiline {
-                logical_lines
-                    .iter()
-                    .map(|l| l.chars().count().min(text_w))
-                    .max()
-                    .unwrap_or(0)
+                if wraps {
+                    text_w
+                } else {
+                    logical_lines
+                        .iter()
+                        .map(|l| l.chars().count())
+                        .max()
+                        .unwrap_or(0)
+                        + 1
+                }
             } else {
                 0
             };
             let mut rows = 0u16;
             for logical_line in &logical_lines {
                 if logical_line.is_empty() {
-                    let fill = if multiline { block_w + 1 } else { 2 };
+                    let fill = if block_w > 0 { block_w + 1 } else { 2 };
                     let _ = out
                         .queue(SetBackgroundColor(theme::USER_BG))
                         .and_then(|o| o.queue(Print(" ".repeat(fill))))
@@ -83,10 +89,9 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
                     continue;
                 }
                 let chunks = chunk_line(logical_line, text_w);
-                let last = chunks.len() - 1;
-                for (ci, chunk) in chunks.iter().enumerate() {
+                for chunk in &chunks {
                     let chunk_len = chunk.chars().count();
-                    let trailing = if multiline {
+                    let trailing = if block_w > 0 {
                         block_w.saturating_sub(chunk_len)
                     } else {
                         1
@@ -97,9 +102,7 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
                         .and_then(|o| o.queue(Print(format!(" {}{}", chunk, " ".repeat(trailing)))))
                         .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
                         .and_then(|o| o.queue(ResetColor));
-                    if ci == last {
-                        crlf(out);
-                    }
+                    crlf(out);
                     rows += 1;
                 }
             }

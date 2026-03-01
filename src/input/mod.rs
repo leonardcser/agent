@@ -765,6 +765,10 @@ impl InputState {
     }
 
     fn insert_paste(&mut self, data: String) {
+        // Normalize line endings: terminals (especially macOS) send \r for
+        // newlines in bracketed paste mode.  Convert \r\n and lone \r to \n
+        // so that line counting and display work correctly.
+        let data = data.replace("\r\n", "\n").replace('\r', "\n");
         let lines = data.lines().count();
         let char_threshold = PASTE_LINE_THRESHOLD * (crate::render::term_width().saturating_sub(1));
         if lines >= PASTE_LINE_THRESHOLD || data.len() >= char_threshold {

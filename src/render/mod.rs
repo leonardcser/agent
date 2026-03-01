@@ -710,13 +710,22 @@ impl Screen {
         );
         if scrolled {
             self.has_scrollback = true;
+            self.content_start_row = Some(top_row);
+        } else if self.content_start_row.is_none() {
+            self.content_start_row = Some(top_row);
         }
         self.prompt.prev_rows = (pre_prompt - block_rows) + new_rows;
 
-        if self.content_start_row.is_none() {
-            self.content_start_row = Some(top_row);
+        // redraw_row: where the next frame starts drawing (prompt section).
+        // When blocks overflow, top_row + block_rows overshoots — compute
+        // from the bottom of the viewport instead.
+        let prompt_section_rows = active_rows + gap + new_rows;
+        if scrolled {
+            let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
+            self.prompt.redraw_row = height.saturating_sub(prompt_section_rows);
+        } else {
+            self.prompt.redraw_row = top_row + block_rows;
         }
-        self.prompt.redraw_row = top_row + block_rows;
         self.prompt.drawn = true;
         self.prompt.dirty = false;
 
@@ -959,7 +968,15 @@ impl Screen {
         } else {
             draw_start_row
         };
-        let text_row = top_row + pre_prompt_rows + 1 + extra_rows + cursor_line_visible as u16;
+        // When blocks overflow the screen, `top_row + pre_prompt_rows` overshoots
+        // because pre_prompt_rows counts scrolled-off block rows. Compute the
+        // prompt-section start from the bottom of the viewport instead.
+        let prompt_start = if scrolled {
+            height.saturating_sub(new_rows + rows_below)
+        } else {
+            top_row + pre_prompt_rows
+        };
+        let text_row = prompt_start + 1 + extra_rows + cursor_line_visible as u16;
         let text_col = 1 + cursor_col as u16;
         let _ = out.queue(cursor::MoveTo(text_col, text_row));
 

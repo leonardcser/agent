@@ -2,7 +2,7 @@ use crate::theme;
 use comfy_table::{presets::UTF8_BORDERS_ONLY, ContentArrangement, Table};
 use crossterm::{
     style::{
-        Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+        Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor,
     },
     QueueableCommand,
 };
@@ -76,9 +76,6 @@ pub(super) fn render_highlighted(
         let _ = out.queue(Print("   "));
         print_syntect_regions(out, &regions, max_content, theme::CODE_BG);
         crlf(out);
-    }
-    if limit < lines.len() {
-        print_truncation(out, limit as u16, max_rows);
     }
     limit as u16
 }
@@ -253,7 +250,6 @@ pub(super) fn print_inline_diff(
     }
 
     if rows >= limit {
-        print_truncation(out, rows, limit);
         return limit;
     }
 
@@ -261,7 +257,6 @@ pub(super) fn print_inline_diff(
     let mut new_lineno = dv.start_line;
     for change in changes {
         if rows >= limit {
-            print_truncation(out, rows, limit);
             return limit;
         }
         let text = change.value.trim_end_matches('\n');
@@ -304,7 +299,6 @@ pub(super) fn print_inline_diff(
     }
 
     if rows >= limit {
-        print_truncation(out, rows, limit);
         return limit;
     }
 
@@ -357,13 +351,6 @@ pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &
         rows += dv.view_end - after_start;
     }
     rows as u16
-}
-
-fn print_truncation(out: &mut io::Stdout, _rows: u16, _limit: u16) {
-    let _ = out.queue(SetAttribute(Attribute::Dim));
-    let _ = out.queue(Print("   ..."));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
-    crlf(out);
 }
 
 fn print_diff_lines(
