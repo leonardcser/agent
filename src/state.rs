@@ -37,12 +37,7 @@ impl State {
     }
 
     pub fn mode(&self) -> Mode {
-        match self.mode.as_str() {
-            "plan" => Mode::Plan,
-            "apply" => Mode::Apply,
-            "yolo" => Mode::Yolo,
-            _ => Mode::Normal,
-        }
+        Mode::parse(&self.mode).unwrap_or(Mode::Normal)
     }
 
     pub fn set_mode(&mut self, mode: Mode) {

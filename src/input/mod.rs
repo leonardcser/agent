@@ -36,6 +36,16 @@ impl Mode {
         }
     }
 
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "normal" => Some(Mode::Normal),
+            "plan" => Some(Mode::Plan),
+            "apply" => Some(Mode::Apply),
+            "yolo" => Some(Mode::Yolo),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Mode::Normal => "normal",

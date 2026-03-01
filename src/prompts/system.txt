@@ -28,5 +28,5 @@ Working directory: {cwd}
 - Prefer concrete types over premature interfaces. Start in one file; split only when unwieldy.
 - Match naming to the existing codebase. Descriptive names for important things, short names for locals and loops.
 - Follow idiomatic error handling for each language.
-- Every change should read as if the new implementation was always there. No traces of what came before — no shims, no "changed from X to Y" comments, no commented-out blocks.
+- Every change should read as if the new implementation was always there. No traces of what came before — no shims, no "changed from X to Y" comments, no commented-out blocks, no comments that explain why the code was restructured. Comments should describe what the code does, not what it used to be or why it was changed.
 - Use the package manager's install command for dependencies. Never manually edit dependency files.

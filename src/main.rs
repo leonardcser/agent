@@ -19,7 +19,6 @@ pub use app::App;
 
 use clap::Parser;
 use crossterm::ExecutableCommand;
-use provider::Provider;
 use session::Session;
 use std::sync::{Arc, Mutex};
 
@@ -34,7 +33,11 @@ struct Args {
     api_key_env: Option<String>,
     #[arg(long)]
     model: Option<String>,
-    #[arg(long, value_name = "MODE", help = "Agent mode: normal, plan, apply, yolo")]
+    #[arg(
+        long,
+        value_name = "MODE",
+        help = "Agent mode: normal, plan, apply, yolo"
+    )]
     mode: Option<String>,
     #[arg(long, default_value = "info", value_name = "LEVEL")]
     log_level: String,
@@ -116,16 +119,11 @@ async fn main() {
         std::process::exit(1);
     }
 
-    // Resolve mode: CLI --mode > persisted state
-    let mode_override = args.mode.as_deref().map(|m| match m {
-        "plan" => input::Mode::Plan,
-        "apply" => input::Mode::Apply,
-        "yolo" => input::Mode::Yolo,
-        "normal" => input::Mode::Normal,
-        other => {
-            eprintln!("warning: unknown --mode '{other}', defaulting to normal");
+    let mode_override = args.mode.as_deref().map(|s| {
+        input::Mode::parse(s).unwrap_or_else(|| {
+            eprintln!("warning: unknown --mode '{s}', defaulting to normal");
             input::Mode::Normal
-        }
+        })
     });
 
     let vim_enabled = cfg.settings.vim_mode.unwrap_or(false);
@@ -173,18 +171,13 @@ async fn main() {
         shared_session,
         available_models,
     );
-
     if let Some(mode) = mode_override {
         app.mode = mode;
     }
 
     // Fetch context window in background so startup isn't blocked by the network call.
     let ctx_rx = {
-        let provider = Provider::new(
-            app.api_base.clone(),
-            app.api_key.clone(),
-            app.client.clone(),
-        );
+        let provider = app.build_provider();
         let model = app.model.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {

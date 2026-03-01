@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub enum AgentEvent {
+    Thinking(String),
     Text(String),
     Steered {
         text: String,
@@ -155,6 +156,12 @@ pub async fn run_agent(
             });
         }
 
+        if let Some(ref reasoning) = resp.reasoning_content {
+            if !reasoning.is_empty() {
+                let _ = tx.send(AgentEvent::Thinking(reasoning.clone()));
+            }
+        }
+
         if let Some(ref content) = resp.content {
             if !content.is_empty() {
                 let _ = tx.send(AgentEvent::Text(content.clone()));
@@ -208,8 +215,7 @@ pub async fn run_agent(
 
             // Read current mode live — allows mid-run mode switches (e.g. toggling to yolo).
             let mode = ctx.shared_mode.load();
-            let decision =
-                decide_permission(&ctx.permissions, mode, &tc.function.name, &args);
+            let decision = decide_permission(&ctx.permissions, mode, &tc.function.name, &args);
 
             match decision {
                 Decision::Deny => {

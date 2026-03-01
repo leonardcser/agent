@@ -32,6 +32,8 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
         (Element::Block(Block::ToolCall { .. }), Element::ActiveTool) => 1,
         (Element::Block(Block::Text { .. }), Element::Block(Block::ToolCall { .. })) => 1,
         (Element::Block(Block::Text { .. }), Element::ActiveTool) => 1,
+        (_, Element::Block(Block::Thinking { .. })) => 1,
+        (Element::Block(Block::Thinking { .. }), _) => 1,
         (Element::Block(Block::ToolCall { .. }), Element::Block(Block::Text { .. })) => 1,
         (Element::Block(_), Element::Prompt) => 1,
         (Element::ActiveTool, Element::Prompt) => 1,
@@ -47,17 +49,15 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             // `text_w` is the max content chars per row so the total never reaches
             // the terminal width (which would cause an implicit wrap).
             let text_w = width.saturating_sub(2).max(1);
-            let all_lines: Vec<String> = text
-                .lines()
-                .map(|l| l.replace('\t', "    "))
-                .collect();
+            let all_lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
             // Strip leading/trailing blank lines but preserve internal structure.
             let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
-            let end = all_lines.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1);
-            let logical_lines: Vec<String> = all_lines[start..end].to_vec();
-            let wraps = logical_lines
+            let end = all_lines
                 .iter()
-                .any(|l| l.chars().count() > text_w);
+                .rposition(|l| !l.is_empty())
+                .map_or(0, |i| i + 1);
+            let logical_lines: Vec<String> = all_lines[start..end].to_vec();
+            let wraps = logical_lines.iter().any(|l| l.chars().count() > text_w);
             let multiline = logical_lines.len() > 1 || wraps;
             // For multi-line messages, pad all rows to the same width.
             // If any line wraps, that means the longest line is text_w.
@@ -102,6 +102,22 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
                         .and_then(|o| o.queue(Print(format!(" {}{}", chunk, " ".repeat(trailing)))))
                         .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
                         .and_then(|o| o.queue(ResetColor));
+                    crlf(out);
+                    rows += 1;
+                }
+            }
+            rows
+        }
+        Block::Thinking { content } => {
+            let max_cols = width.saturating_sub(4).max(1); // "│ " prefix + 1 margin
+            let mut rows = 0u16;
+            for line in content.lines() {
+                let segments = wrap_line(line, max_cols);
+                for seg in &segments {
+                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    let _ = out.queue(SetAttribute(Attribute::Italic));
+                    let _ = out.queue(Print(format!(" \u{2502} {}", seg)));
+                    let _ = out.queue(SetAttribute(Attribute::Reset));
                     crlf(out);
                     rows += 1;
                 }

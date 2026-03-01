@@ -80,6 +80,9 @@ pub enum Block {
     User {
         text: String,
     },
+    Thinking {
+        content: String,
+    },
     Text {
         content: String,
     },

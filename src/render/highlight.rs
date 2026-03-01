@@ -1,9 +1,7 @@
 use crate::theme;
 use comfy_table::{presets::UTF8_BORDERS_ONLY, ContentArrangement, Table};
 use crossterm::{
-    style::{
-        Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor,
-    },
+    style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
     QueueableCommand,
 };
 use similar::{ChangeTag, TextDiff};
@@ -63,21 +61,31 @@ pub(super) fn render_highlighted(
         (max_rows as usize).min(lines.len())
     };
 
+    let blank_gutter = " ".repeat(1 + gutter_width + 3);
+    let mut rows = 0u16;
     let mut h = HighlightLines::new(syntax, theme);
     for (i, line) in lines[..limit].iter().enumerate() {
         let line_with_nl = format!("{}\n", line);
         let regions = h
             .highlight_line(&line_with_nl, &SYNTAX_SET)
             .unwrap_or_default();
-        let _ = out.queue(Print(indent));
-        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
-        let _ = out.queue(Print(format!(" {:>w$}", i + 1, w = gutter_width)));
-        let _ = out.queue(ResetColor);
-        let _ = out.queue(Print("   "));
-        print_syntect_regions(out, &regions, max_content, theme::CODE_BG);
-        crlf(out);
+        let visual_rows = split_regions_into_rows(&regions, max_content);
+        for (vi, vrow) in visual_rows.iter().enumerate() {
+            let _ = out.queue(Print(indent));
+            if vi == 0 {
+                let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+                let _ = out.queue(Print(format!(" {:>w$}", i + 1, w = gutter_width)));
+                let _ = out.queue(ResetColor);
+                let _ = out.queue(Print("   "));
+            } else {
+                let _ = out.queue(Print(&blank_gutter));
+            }
+            print_split_regions(out, vrow, theme::CODE_BG);
+            crlf(out);
+        }
+        rows += visual_rows.len() as u16;
     }
-    limit as u16
+    rows
 }
 
 pub(super) fn print_syntax_file(
@@ -322,24 +330,49 @@ pub(super) fn print_inline_diff(
 pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &str) -> u16 {
     let dv = compute_diff_view(old, new, path, anchor);
 
+    let indent = "   ";
+    let max_lineno = dv.view_end;
+    let gutter_width = format!("{}", max_lineno).len().max(2);
+    let prefix_len = indent.len() + 1 + gutter_width + 3;
+    let right_margin = indent.len();
+    let max_content = term_width().saturating_sub(prefix_len + right_margin);
+
+    let file_lines: Vec<&str> = dv.file_content.lines().collect();
+
+    let visual_rows_for = |line: &str| -> usize {
+        let chars = line.chars().count();
+        if max_content == 0 {
+            1
+        } else {
+            chars.div_ceil(max_content)
+        }
+        .max(1)
+    };
+
     let ctx_before_end = dv.start_line.min(dv.first_mod);
     let ctx_before_start = dv.view_start.min(ctx_before_end);
-    let mut rows: usize = ctx_before_end.saturating_sub(ctx_before_start);
+    let mut rows: usize = 0;
+    for i in ctx_before_start..ctx_before_end {
+        if i < file_lines.len() {
+            rows += visual_rows_for(file_lines[i]);
+        }
+    }
 
     let mut new_lineno = dv.start_line;
     for change in &dv.changes {
+        let line = change.value.trim_end_matches('\n');
         match change.tag {
             ChangeTag::Equal => {
                 if new_lineno >= dv.view_start && new_lineno < dv.view_end {
-                    rows += 1;
+                    rows += visual_rows_for(line);
                 }
                 new_lineno += 1;
             }
             ChangeTag::Delete => {
-                rows += 1;
+                rows += visual_rows_for(line);
             }
             ChangeTag::Insert => {
-                rows += 1;
+                rows += visual_rows_for(line);
                 new_lineno += 1;
             }
         }
@@ -347,8 +380,9 @@ pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &
 
     let anchor_lines = anchor.lines().count();
     let after_start = dv.start_line + anchor_lines;
-    if after_start < dv.view_end {
-        rows += dv.view_end - after_start;
+    let after_end = dv.view_end.min(file_lines.len());
+    for line in file_lines.iter().take(after_end).skip(after_start) {
+        rows += visual_rows_for(line);
     }
     rows as u16
 }
@@ -367,67 +401,103 @@ fn print_diff_lines(
         gutter_width,
         max_content,
     } = *layout;
+    let prefix_cols = indent.len() + 1 + gutter_width + 3;
+    let right_margin = indent.len();
+    let blank_gutter = " ".repeat(1 + gutter_width + 3);
+    let mut total_rows = 0u16;
     for (i, line) in lines.iter().enumerate() {
         let lineno = start_line + i + 1;
         let line_with_nl = format!("{}\n", line);
         let regions = h
             .highlight_line(&line_with_nl, &SYNTAX_SET)
             .unwrap_or_default();
-        let _ = out.queue(Print(indent));
-        if let Some((ch, color)) = sign {
-            let _ = out.queue(SetBackgroundColor(bg.unwrap()));
-            let _ = out.queue(SetForegroundColor(Color::DarkGrey));
-            let _ = out.queue(Print(format!(" {:>w$} ", lineno, w = gutter_width)));
-            let _ = out.queue(SetForegroundColor(color));
-            let _ = out.queue(Print(format!("{} ", ch)));
-            let content_cols = print_syntect_regions(out, &regions, max_content, bg);
-            let prefix_cols = indent.len() + 1 + gutter_width + 3;
-            let right_margin = indent.len();
-            let pad = term_width().saturating_sub(prefix_cols + content_cols + right_margin);
-            if pad > 0 {
-                if let Some(bg_color) = bg {
-                    let _ = out.queue(SetBackgroundColor(bg_color));
+        let visual_rows = split_regions_into_rows(&regions, max_content);
+        for (vi, vrow) in visual_rows.iter().enumerate() {
+            let _ = out.queue(Print(indent));
+            if let Some((ch, color)) = sign {
+                let _ = out.queue(SetBackgroundColor(bg.unwrap()));
+                if vi == 0 {
+                    let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+                    let _ = out.queue(Print(format!(" {:>w$} ", lineno, w = gutter_width)));
+                    let _ = out.queue(SetForegroundColor(color));
+                    let _ = out.queue(Print(format!("{} ", ch)));
+                } else {
+                    let _ = out.queue(Print(&blank_gutter));
                 }
-                let _ = out.queue(Print(" ".repeat(pad)));
+                let content_cols = print_split_regions(out, vrow, bg);
+                let pad = term_width().saturating_sub(prefix_cols + content_cols + right_margin);
+                if pad > 0 {
+                    if let Some(bg_color) = bg {
+                        let _ = out.queue(SetBackgroundColor(bg_color));
+                    }
+                    let _ = out.queue(Print(" ".repeat(pad)));
+                }
+                let _ = out.queue(ResetColor);
+            } else {
+                if vi == 0 {
+                    let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+                    let _ = out.queue(Print(format!(" {:>w$}", lineno, w = gutter_width)));
+                    let _ = out.queue(ResetColor);
+                    let _ = out.queue(Print("   "));
+                } else {
+                    let _ = out.queue(Print(&blank_gutter));
+                }
+                print_split_regions(out, vrow, None);
             }
-            let _ = out.queue(ResetColor);
-        } else {
-            let _ = out.queue(SetForegroundColor(Color::DarkGrey));
-            let _ = out.queue(Print(format!(" {:>w$}", lineno, w = gutter_width)));
-            let _ = out.queue(ResetColor);
-            let _ = out.queue(Print("   "));
-            print_syntect_regions(out, &regions, max_content, None);
+            crlf(out);
         }
-        crlf(out);
+        total_rows += visual_rows.len() as u16;
     }
-    lines.len() as u16
+    total_rows
 }
 
-/// Print syntax-highlighted regions, respecting max_width in display columns.
-/// Returns the number of display columns actually printed.
-pub(super) fn print_syntect_regions(
-    out: &mut io::Stdout,
+/// Split syntax regions into visual rows that each fit within `max_width` columns.
+fn split_regions_into_rows(
     regions: &[(Style, &str)],
     max_width: usize,
-    bg: Option<Color>,
-) -> usize {
+) -> Vec<Vec<(Style, String)>> {
+    let mut rows: Vec<Vec<(Style, String)>> = Vec::new();
+    let mut current_row: Vec<(Style, String)> = Vec::new();
     let mut col = 0;
+
     for (style, text) in regions {
         let text = text.trim_end_matches('\n').trim_end_matches('\r');
         if text.is_empty() {
             continue;
         }
-        let remaining = max_width.saturating_sub(col);
-        if remaining == 0 {
-            break;
+        let mut chars = text.chars().peekable();
+        while chars.peek().is_some() {
+            let remaining = max_width.saturating_sub(col);
+            if remaining == 0 {
+                rows.push(std::mem::take(&mut current_row));
+                col = 0;
+                continue;
+            }
+            let chunk: String = chars.by_ref().take(remaining).collect();
+            col += chunk.chars().count();
+            current_row.push((*style, chunk));
         }
-        let char_count = text.chars().count();
-        let display: String = if char_count <= remaining {
-            text.to_string()
-        } else {
-            text.chars().take(remaining).collect()
-        };
-        let display_cols = display.chars().count();
+    }
+    if !current_row.is_empty() {
+        rows.push(current_row);
+    }
+    if rows.is_empty() {
+        rows.push(Vec::new());
+    }
+    rows
+}
+
+/// Print pre-split owned regions. Returns columns printed.
+fn print_split_regions(
+    out: &mut io::Stdout,
+    regions: &[(Style, String)],
+    bg: Option<Color>,
+) -> usize {
+    let mut col = 0;
+    for (style, text) in regions {
+        if text.is_empty() {
+            continue;
+        }
         if let Some(bg_color) = bg {
             let _ = out.queue(SetBackgroundColor(bg_color));
         }
@@ -437,8 +507,8 @@ pub(super) fn print_syntect_regions(
             b: style.foreground.b,
         };
         let _ = out.queue(SetForegroundColor(fg));
-        let _ = out.queue(Print(&display));
-        col += display_cols;
+        let _ = out.queue(Print(text));
+        col += text.chars().count();
     }
     let _ = out.queue(ResetColor);
     col

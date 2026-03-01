@@ -88,6 +88,7 @@ impl ToolDefinition {
 
 pub struct LLMResponse {
     pub content: Option<String>,
+    pub reasoning_content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub prompt_tokens: Option<u32>,
 }
@@ -208,6 +209,7 @@ impl Provider {
             let msg = &choice["message"];
 
             let content = msg["content"].as_str().map(|s| s.to_string());
+            let reasoning_content = msg["reasoning_content"].as_str().map(|s| s.to_string());
 
             let tool_calls: Vec<ToolCall> = if let Some(tcs) = msg.get("tool_calls") {
                 serde_json::from_value(tcs.clone()).unwrap_or_default()
@@ -229,6 +231,7 @@ impl Provider {
 
             return Ok(LLMResponse {
                 content,
+                reasoning_content,
                 tool_calls,
                 prompt_tokens,
             });

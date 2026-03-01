@@ -437,6 +437,9 @@ impl App {
         // Drain events, printing text to stdout.
         while let Some(ev) = rx.recv().await {
             match ev {
+                AgentEvent::Thinking(content) => {
+                    eprintln!("[thinking] {content}");
+                }
                 AgentEvent::Text(content) => {
                     print!("{content}");
                     let _ = io::stdout().flush();
@@ -967,11 +970,7 @@ impl App {
         let cancel = CancellationToken::new();
         let steering: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let shared_mode = SharedMode::new(self.mode);
-        let ctx = self.build_agent_context(
-            cancel.clone(),
-            steering.clone(),
-            shared_mode.clone(),
-        );
+        let ctx = self.build_agent_context(cancel.clone(), steering.clone(), shared_mode.clone());
         let handle = self.spawn_agent(tx, ctx);
 
         let state = AgentState {
@@ -1189,15 +1188,11 @@ impl App {
         let Some(first) = self.session.first_user_message.clone() else {
             return;
         };
-        let api_base = self.api_base.clone();
-        let api_key = self.api_key.clone();
+        let provider = self.build_provider();
         let model = self.model.clone();
-        let client = self.client.clone();
-        let model_config = self.model_config.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending_title = Some(rx);
         tokio::spawn(async move {
-            let provider = Provider::new(api_base, api_key, client).with_model_config(model_config);
             let title = match provider.complete_title(&first, &model).await {
                 Ok(t) if !t.is_empty() => t,
                 _ => {
@@ -1258,14 +1253,10 @@ impl App {
 
         let to_summarize = self.history[..cut].to_vec();
 
-        let api_base = self.api_base.clone();
-        let api_key = self.api_key.clone();
+        let provider = self.build_provider();
         let model = self.model.clone();
-        let client = self.client.clone();
-        let model_config = self.model_config.clone();
         let cancel = CancellationToken::new();
         let task = tokio::spawn(async move {
-            let provider = Provider::new(api_base, api_key, client).with_model_config(model_config);
             provider.compact(&to_summarize, &model, &cancel).await
         });
 
@@ -1369,20 +1360,23 @@ impl App {
         });
     }
 
+    pub fn build_provider(&self) -> Provider {
+        Provider::new(
+            self.api_base.clone(),
+            self.api_key.clone(),
+            self.client.clone(),
+        )
+        .with_model_config(self.model_config.clone())
+    }
+
     fn build_agent_context(
         &self,
         cancel: CancellationToken,
         steering: Arc<Mutex<Vec<String>>>,
         shared_mode: SharedMode,
     ) -> AgentContext {
-        let provider = Provider::new(
-            self.api_base.clone(),
-            self.api_key.clone(),
-            self.client.clone(),
-        )
-        .with_model_config(self.model_config.clone());
         AgentContext {
-            provider,
+            provider: self.build_provider(),
             model: self.model.clone(),
             registry: tools::build_tools(),
             permissions: self.permissions.clone(),
@@ -1440,6 +1434,10 @@ impl App {
                 self.queued_messages.drain(..drain_n);
                 *steered_count = steered_count.saturating_sub(drain_n);
                 self.screen.push(Block::User { text });
+                SessionControl::Continue
+            }
+            AgentEvent::Thinking(content) => {
+                self.screen.push(Block::Thinking { content });
                 SessionControl::Continue
             }
             AgentEvent::Text(content) => {
