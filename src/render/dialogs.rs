@@ -470,14 +470,14 @@ impl ConfirmDialog {
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let _ = out.queue(cursor::Hide);
         let (width, height) = terminal::size().unwrap_or((80, 24));
-        let w = width.saturating_sub(1) as usize;
+        let w = width as usize;
 
         let ta_visible = self.editing || !self.textarea.is_empty();
         // Pre-compute text indent for the selected option to get wrap width
         let (selected_label, _) = &self.options[self.selected];
         let digits = format!("{}", self.selected + 1).len();
         let text_indent = (2 + digits + 2 + selected_label.len() + 2) as u16;
-        let wrap_w = (w as u16).saturating_sub(text_indent) as usize;
+        let wrap_w = width.saturating_sub(text_indent) as usize;
         let ta_extra: u16 = if ta_visible {
             self.textarea.visual_row_count(wrap_w).saturating_sub(1)
         } else {
@@ -649,7 +649,7 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
                 scroll_offset: usize| {
         let mut out = io::stdout();
         let (width, _) = terminal::size().unwrap_or((80, 24));
-        let w = width.saturating_sub(1) as usize;
+        let w = width as usize;
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let clear_from = bar_row.min(last_bar_row);
         let _ = out.queue(cursor::MoveTo(0, clear_from));
@@ -797,7 +797,7 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
                 filtered: &[ResumeEntry]| {
         let mut out = io::stdout();
         let (width, _) = terminal::size().unwrap_or((80, 24));
-        let w = width.saturating_sub(1) as usize;
+        let w = width as usize;
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let _ = out.queue(cursor::MoveTo(0, 0));
         let _ = out.queue(terminal::Clear(terminal::ClearType::All));
@@ -1129,7 +1129,7 @@ impl QuestionDialog {
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let _ = out.queue(cursor::Hide);
         let (width, height) = terminal::size().unwrap_or((80, 24));
-        let w = width.saturating_sub(1) as usize;
+        let w = width as usize;
 
         let ta = &self.other_areas[self.active_tab];
         let ta_visible = self.editing_other[self.active_tab] || !ta.is_empty();
@@ -1140,7 +1140,7 @@ impl QuestionDialog {
             let digits = format!("{}", q_other_idx + 1).len();
             (2 + digits + 2 + 5 + 2) as u16
         };
-        let other_wrap_w = (w as u16).saturating_sub(other_text_col) as usize;
+        let other_wrap_w = width.saturating_sub(other_text_col) as usize;
         let ta_extra: u16 = if ta_visible {
             ta.visual_row_count(other_wrap_w).saturating_sub(1)
         } else {

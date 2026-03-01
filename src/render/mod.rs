@@ -1221,7 +1221,7 @@ pub(super) fn draw_bar(
         .map(|spans| 1 + 1 + spans.iter().map(|s| s.text.chars().count()).sum::<usize>() + 1)
         .unwrap_or(0);
     let right_len: usize = right
-        .map(|spans| 1 + spans.iter().map(|s| s.text.chars().count()).sum::<usize>() + 1)
+        .map(|spans| spans.iter().map(|s| s.text.chars().count()).sum::<usize>() + 1)
         .unwrap_or(0);
     let bar_len = width.saturating_sub(left_len + right_len);
 
