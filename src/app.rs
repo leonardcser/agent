@@ -1,5 +1,7 @@
-use crate::agent::{run_agent, AgentEvent};
-use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, MenuResult, Mode};
+use crate::agent::{run_agent, AgentContext, AgentEvent};
+use crate::input::{
+    resolve_agent_esc, Action, EscAction, History, InputState, MenuResult, Mode, SharedMode,
+};
 use crate::provider::{Message, Provider, Role};
 use crate::render::{
     tool_arg_summary, Block, ConfirmChoice, ConfirmDialog, QuestionDialog, ResumeEntry, Screen,
@@ -54,6 +56,7 @@ struct AgentState {
     cancel: CancellationToken,
     handle: tokio::task::JoinHandle<Vec<Message>>,
     steering: Arc<Mutex<Vec<String>>>,
+    shared_mode: SharedMode,
     pending: Option<PendingTool>,
     steered_count: usize,
     _perf: Option<crate::perf::Guard>,
@@ -166,7 +169,11 @@ impl App {
 
     // ── Unified event loop ───────────────────────────────────────────────
 
-    pub async fn run(&mut self, mut ctx_rx: Option<tokio::sync::oneshot::Receiver<Option<u32>>>) {
+    pub async fn run(
+        &mut self,
+        mut ctx_rx: Option<tokio::sync::oneshot::Receiver<Option<u32>>>,
+        initial_message: Option<String>,
+    ) {
         terminal::enable_raw_mode().ok();
         let _ = io::stdout().execute(EnableBracketedPaste);
 
@@ -177,6 +184,15 @@ impl App {
         let mut agent: Option<AgentState> = None;
         // Dummy receiver — replaced with the real one each time an agent starts.
         let mut agent_rx: mpsc::UnboundedReceiver<AgentEvent> = mpsc::unbounded_channel().1;
+
+        // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
+        if let Some(msg) = initial_message {
+            self.screen.erase_prompt();
+            let (rx, ag) = self.begin_agent_turn(&msg);
+            agent_rx = rx;
+            agent = Some(ag);
+        }
+
         let mut t = Timers {
             last_esc: None,
             esc_vim_mode: None,
@@ -265,11 +281,19 @@ impl App {
 
             // ── Show deferred dialog once user stops typing ──────────────
             if deferred_dialog.is_some() && active_dialog.is_none() && agent.is_some() {
+                // Auto-approve deferred confirms in Yolo mode.
+                if self.mode == Mode::Yolo {
+                    if let Some(DeferredDialog::Confirm { reply, .. }) = deferred_dialog.take() {
+                        self.screen.set_pending_dialog(false);
+                        let _ = reply.send(true);
+                    }
+                }
+
                 let idle = t
                     .last_keypress
                     .map(|lk| lk.elapsed() >= Duration::from_millis(CONFIRM_DEFER_MS))
                     .unwrap_or(true);
-                if idle {
+                if idle && deferred_dialog.is_some() {
                     self.screen.set_pending_dialog(false);
                     let deferred = deferred_dialog.take().unwrap();
                     match deferred {
@@ -332,6 +356,20 @@ impl App {
                         }
                     }
 
+                    // Keep the agent's shared mode in sync with app mode.
+                    if let Some(ag) = agent.as_ref() {
+                        ag.shared_mode.store(self.mode);
+                    }
+
+                    // If we just switched to Yolo, auto-approve any deferred confirm.
+                    if self.mode == Mode::Yolo {
+                        if let Some(DeferredDialog::Confirm { reply, .. }) = deferred_dialog.take()
+                        {
+                            self.screen.set_pending_dialog(false);
+                            let _ = reply.send(true);
+                        }
+                    }
+
                     // Render immediately after terminal events for responsive typing.
                     let has_dialog = active_dialog.is_some();
                     self.tick(agent.is_some(), has_dialog);
@@ -375,6 +413,69 @@ impl App {
         self.screen.move_cursor_past_prompt();
         let _ = io::stdout().execute(DisableBracketedPaste);
         terminal::disable_raw_mode().ok();
+    }
+
+    // ── Headless mode ─────────────────────────────────────────────────────
+
+    /// Run a single message through the agent without any TUI.
+    /// Prints the agent's text output to stdout.
+    pub async fn run_headless(&mut self, message: String) {
+        use std::io::Write;
+
+        self.push_user_message(message.clone());
+        if self.session.first_user_message.is_none() {
+            self.session.first_user_message = Some(message);
+        }
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let steering: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let shared_mode = SharedMode::new(self.mode);
+        let ctx = self.build_agent_context(cancel, steering, shared_mode);
+        let handle = self.spawn_agent(tx, ctx);
+
+        // Drain events, printing text to stdout.
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                AgentEvent::Text(content) => {
+                    print!("{content}");
+                    let _ = io::stdout().flush();
+                }
+                AgentEvent::ToolCall { name, args } => {
+                    let summary = tool_arg_summary(&name, &args);
+                    eprintln!("[tool: {name}] {summary}");
+                }
+                AgentEvent::ToolResult {
+                    content, is_error, ..
+                } => {
+                    if is_error {
+                        eprintln!("[tool error] {content}");
+                    }
+                }
+                AgentEvent::Confirm { reply, .. } => {
+                    // No user to ask — deny. (Allow/Deny are already
+                    // resolved by the agent; only Ask reaches here.)
+                    let _ = reply.send(false);
+                }
+                AgentEvent::AskQuestion { reply, .. } => {
+                    let _ = reply.send("User is not available (headless mode).".into());
+                }
+                AgentEvent::Error(e) => {
+                    eprintln!("[error] {e}");
+                }
+                AgentEvent::Done => break,
+                _ => {}
+            }
+        }
+
+        // Wait for the agent task to finish and collect messages.
+        if let Ok(msgs) = handle.await {
+            self.history = msgs;
+        }
+        self.save_session();
+
+        // Ensure output ends with a newline.
+        println!();
     }
 
     // ── Terminal event dispatch ───────────────────────────────────────────
@@ -667,9 +768,7 @@ impl App {
             }
             Action::MenuResult(result) => EventOutcome::MenuResult(result),
             Action::ToggleMode => {
-                self.mode = self.mode.toggle();
-                self.app_state.set_mode(self.mode);
-                self.screen.mark_dirty();
+                self.toggle_mode();
                 EventOutcome::Redraw
             }
             Action::Resize {
@@ -784,9 +883,7 @@ impl App {
                 self.screen.mark_dirty();
             }
             Action::ToggleMode => {
-                self.mode = self.mode.toggle();
-                self.app_state.set_mode(self.mode);
-                self.screen.mark_dirty();
+                self.toggle_mode();
             }
             Action::Redraw => {
                 self.screen.mark_dirty();
@@ -869,12 +966,19 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let steering: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let handle = self.spawn_agent(tx, cancel.clone(), steering.clone());
+        let shared_mode = SharedMode::new(self.mode);
+        let ctx = self.build_agent_context(
+            cancel.clone(),
+            steering.clone(),
+            shared_mode.clone(),
+        );
+        let handle = self.spawn_agent(tx, ctx);
 
         let state = AgentState {
             cancel,
             handle,
             steering,
+            shared_mode,
             pending: None,
             steered_count: 0,
             _perf: crate::perf::begin("agent_turn"),
@@ -1265,37 +1369,43 @@ impl App {
         });
     }
 
-    pub fn spawn_agent(
+    fn build_agent_context(
         &self,
-        tx: mpsc::UnboundedSender<AgentEvent>,
         cancel: CancellationToken,
         steering: Arc<Mutex<Vec<String>>>,
-    ) -> tokio::task::JoinHandle<Vec<Message>> {
-        let api_base = self.api_base.clone();
-        let api_key = self.api_key.clone();
-        let model = self.model.clone();
-        let client = self.client.clone();
-        let model_config = self.model_config.clone();
-        let mode = self.mode;
-        let permissions = self.permissions.clone();
-        let history = self.history.clone();
+        shared_mode: SharedMode,
+    ) -> AgentContext {
+        let provider = Provider::new(
+            self.api_base.clone(),
+            self.api_key.clone(),
+            self.client.clone(),
+        )
+        .with_model_config(self.model_config.clone());
+        AgentContext {
+            provider,
+            model: self.model.clone(),
+            registry: tools::build_tools(),
+            permissions: self.permissions.clone(),
+            shared_mode,
+            cancel,
+            steering,
+        }
+    }
 
-        tokio::spawn(async move {
-            let provider = Provider::new(api_base, api_key, client).with_model_config(model_config);
-            let registry = tools::build_tools();
-            run_agent(
-                &provider,
-                &model,
-                &history,
-                &registry,
-                mode,
-                &permissions,
-                &tx,
-                cancel,
-                steering,
-            )
-            .await
-        })
+    fn spawn_agent(
+        &self,
+        tx: mpsc::UnboundedSender<AgentEvent>,
+        ctx: AgentContext,
+    ) -> tokio::task::JoinHandle<Vec<Message>> {
+        let mode = self.mode;
+        let history = self.history.clone();
+        tokio::spawn(async move { run_agent(&ctx, mode, &history, &tx).await })
+    }
+
+    fn toggle_mode(&mut self) {
+        self.mode = self.mode.toggle();
+        self.app_state.set_mode(self.mode);
+        self.screen.mark_dirty();
     }
 
     pub fn render_screen(&mut self) {
@@ -1471,6 +1581,12 @@ impl App {
                 approval_pattern,
                 reply,
             } => {
+                // Yolo mode: auto-approve everything.
+                if self.mode == Mode::Yolo {
+                    let _ = reply.send(true);
+                    return LoopAction::Continue;
+                }
+
                 let tool_name = pending.as_ref().map(|p| p.name.clone()).unwrap_or_default();
 
                 // Check auto-approvals first (doesn't need UI).

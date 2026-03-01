@@ -1,4 +1,4 @@
-use crate::input::Mode;
+use crate::input::{Mode, SharedMode};
 use crate::log;
 use crate::permissions::{Decision, Permissions};
 use crate::provider::{Message, Provider, Role, ToolDefinition};
@@ -47,6 +47,17 @@ pub enum AgentEvent {
     Error(String),
 }
 
+/// Shared state the agent task needs to execute tool calls and talk to the LLM.
+pub struct AgentContext {
+    pub provider: Provider,
+    pub model: String,
+    pub registry: ToolRegistry,
+    pub permissions: Permissions,
+    pub shared_mode: SharedMode,
+    pub cancel: CancellationToken,
+    pub steering: Arc<Mutex<Vec<String>>>,
+}
+
 fn system_prompt(mode: Mode) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -73,35 +84,29 @@ fn system_prompt(mode: Mode) -> String {
     prompt
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run_agent(
-    provider: &Provider,
-    model: &str,
+    ctx: &AgentContext,
+    initial_mode: Mode,
     history: &[Message],
-    registry: &ToolRegistry,
-    mode: Mode,
-    permissions: &Permissions,
     tx: &mpsc::UnboundedSender<AgentEvent>,
-    cancel: CancellationToken,
-    steering: Arc<Mutex<Vec<String>>>,
 ) -> Vec<Message> {
     let mut messages = Vec::with_capacity(history.len() + 2);
     messages.push(Message {
         role: Role::System,
-        content: Some(system_prompt(mode)),
+        content: Some(system_prompt(initial_mode)),
         tool_calls: None,
         tool_call_id: None,
     });
     messages.extend_from_slice(history);
 
-    let tool_defs: Vec<ToolDefinition> = registry.definitions(permissions, mode);
+    let tool_defs: Vec<ToolDefinition> = ctx.registry.definitions(&ctx.permissions, initial_mode);
     let mut first = true;
 
     loop {
         // Inject any user-steered messages queued while the agent was working,
         // but skip on the very first iteration (the triggering message is already in history).
         if !first {
-            let pending: Vec<String> = steering.lock().unwrap().drain(..).collect();
+            let pending: Vec<String> = ctx.steering.lock().unwrap().drain(..).collect();
             if !pending.is_empty() {
                 let count = pending.len();
                 let text = pending.join("\n");
@@ -124,8 +129,15 @@ pub async fn run_agent(
         };
         let resp = {
             let _perf = crate::perf::begin("llm_chat");
-            match provider
-                .chat(&messages, &tool_defs, model, &cancel, Some(&on_retry))
+            match ctx
+                .provider
+                .chat(
+                    &messages,
+                    &tool_defs,
+                    &ctx.model,
+                    &ctx.cancel,
+                    Some(&on_retry),
+                )
                 .await
             {
                 Ok(r) => r,
@@ -180,70 +192,28 @@ pub async fn run_agent(
                 args: args.clone(),
             });
 
-            let tool = match registry.get(&tc.function.name) {
+            let tool = match ctx.registry.get(&tc.function.name) {
                 Some(t) => t,
                 None => {
-                    let result = format!("unknown tool: {}", tc.function.name);
-                    messages.push(Message {
-                        role: Role::Tool,
-                        content: Some(result.clone()),
-                        tool_calls: None,
-                        tool_call_id: Some(tc.id.clone()),
-                    });
-                    let _ = tx.send(AgentEvent::ToolResult {
-                        content: result,
-                        is_error: true,
-                    });
+                    push_tool_reply(
+                        &mut messages,
+                        tx,
+                        &tc.id,
+                        &format!("unknown tool: {}", tc.function.name),
+                        true,
+                    );
                     continue;
                 }
             };
 
-            // Check permissions: for bash, check the command pattern; for other tools, check by name
-            let decision = if tc.function.name == "bash" {
-                let cmd = tools::str_arg(&args, "command");
-                let tool_decision = permissions.check_tool(mode, "bash");
-                if tool_decision == Decision::Deny {
-                    Decision::Deny
-                } else {
-                    let bash_decision = permissions.check_bash(mode, &cmd);
-                    // Tool-level deny overrides bash-level allow
-                    match (&tool_decision, &bash_decision) {
-                        (_, Decision::Deny) => Decision::Deny,
-                        (Decision::Allow, Decision::Ask) => Decision::Allow,
-                        _ => bash_decision,
-                    }
-                }
-            } else if tc.function.name == "web_fetch" {
-                let url = tools::str_arg(&args, "url");
-                let tool_decision = permissions.check_tool(mode, "web_fetch");
-                if tool_decision == Decision::Deny {
-                    Decision::Deny
-                } else {
-                    let pattern_decision = permissions.check_tool_pattern(mode, "web_fetch", &url);
-                    match (&tool_decision, &pattern_decision) {
-                        (_, Decision::Deny) => Decision::Deny,
-                        (_, Decision::Allow) => Decision::Allow,
-                        (Decision::Allow, Decision::Ask) => Decision::Ask,
-                        _ => pattern_decision,
-                    }
-                }
-            } else {
-                permissions.check_tool(mode, &tc.function.name)
-            };
+            // Read current mode live — allows mid-run mode switches (e.g. toggling to yolo).
+            let mode = ctx.shared_mode.load();
+            let decision =
+                decide_permission(&ctx.permissions, mode, &tc.function.name, &args);
 
             match decision {
                 Decision::Deny => {
-                    let result = "The user's permission settings blocked this tool call. Try a different approach or ask the user for guidance.".to_string();
-                    messages.push(Message {
-                        role: Role::Tool,
-                        content: Some(result.clone()),
-                        tool_calls: None,
-                        tool_call_id: Some(tc.id.clone()),
-                    });
-                    let _ = tx.send(AgentEvent::ToolResult {
-                        content: result,
-                        is_error: false,
-                    });
+                    push_tool_reply(&mut messages, tx, &tc.id, "The user's permission settings blocked this tool call. Try a different approach or ask the user for guidance.", false);
                     continue;
                 }
                 Decision::Ask => {
@@ -258,19 +228,8 @@ pub async fn run_agent(
                         approval_pattern,
                         reply: reply_tx,
                     });
-                    let confirmed = reply_rx.await.unwrap_or(false);
-                    if !confirmed {
-                        let result = "The user denied this tool call. Try a different approach or ask the user for guidance.".to_string();
-                        messages.push(Message {
-                            role: Role::Tool,
-                            content: Some(result.clone()),
-                            tool_calls: None,
-                            tool_call_id: Some(tc.id.clone()),
-                        });
-                        let _ = tx.send(AgentEvent::ToolResult {
-                            content: result,
-                            is_error: false,
-                        });
+                    if !reply_rx.await.unwrap_or(false) {
+                        push_tool_reply(&mut messages, tx, &tc.id, "The user denied this tool call. Try a different approach or ask the user for guidance.", false);
                         continue;
                     }
                 }
@@ -307,8 +266,7 @@ pub async fn run_agent(
                 }),
             );
             let model_content = match tc.function.name.as_str() {
-                "grep" => trim_tool_output_for_model(&content, 200),
-                "glob" => trim_tool_output_for_model(&content, 200),
+                "grep" | "glob" => trim_tool_output_for_model(&content, 200),
                 _ => content.clone(),
             };
             messages.push(Message {
@@ -320,6 +278,61 @@ pub async fn run_agent(
             let _ = tx.send(AgentEvent::ToolResult { content, is_error });
         }
     }
+}
+
+fn decide_permission(
+    permissions: &Permissions,
+    mode: Mode,
+    tool_name: &str,
+    args: &HashMap<String, Value>,
+) -> Decision {
+    if tool_name == "bash" {
+        let cmd = tools::str_arg(args, "command");
+        let tool_decision = permissions.check_tool(mode, "bash");
+        if tool_decision == Decision::Deny {
+            return Decision::Deny;
+        }
+        let bash_decision = permissions.check_bash(mode, &cmd);
+        match (&tool_decision, &bash_decision) {
+            (_, Decision::Deny) => Decision::Deny,
+            (Decision::Allow, Decision::Ask) => Decision::Allow,
+            _ => bash_decision,
+        }
+    } else if tool_name == "web_fetch" {
+        let url = tools::str_arg(args, "url");
+        let tool_decision = permissions.check_tool(mode, "web_fetch");
+        if tool_decision == Decision::Deny {
+            return Decision::Deny;
+        }
+        let pattern_decision = permissions.check_tool_pattern(mode, "web_fetch", &url);
+        match (&tool_decision, &pattern_decision) {
+            (_, Decision::Deny) => Decision::Deny,
+            (_, Decision::Allow) => Decision::Allow,
+            (Decision::Allow, Decision::Ask) => Decision::Ask,
+            _ => pattern_decision,
+        }
+    } else {
+        permissions.check_tool(mode, tool_name)
+    }
+}
+
+fn push_tool_reply(
+    messages: &mut Vec<Message>,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    tool_call_id: &str,
+    content: &str,
+    is_error: bool,
+) {
+    messages.push(Message {
+        role: Role::Tool,
+        content: Some(content.to_string()),
+        tool_calls: None,
+        tool_call_id: Some(tool_call_id.to_string()),
+    });
+    let _ = tx.send(AgentEvent::ToolResult {
+        content: content.to_string(),
+        is_error,
+    });
 }
 
 fn trim_tool_output_for_model(content: &str, max_lines: usize) -> String {

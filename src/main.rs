@@ -26,16 +26,22 @@ use std::sync::{Arc, Mutex};
 #[derive(Parser)]
 #[command(name = "agent", about = "Coding agent TUI")]
 struct Args {
+    /// Initial message to send (auto-submits on startup)
+    message: Option<String>,
     #[arg(long)]
     api_base: Option<String>,
     #[arg(long)]
     api_key_env: Option<String>,
     #[arg(long)]
     model: Option<String>,
+    #[arg(long, value_name = "MODE", help = "Agent mode: normal, plan, apply, yolo")]
+    mode: Option<String>,
     #[arg(long, default_value = "info", value_name = "LEVEL")]
     log_level: String,
     #[arg(long, help = "Print performance timing summary on exit")]
     bench: bool,
+    #[arg(long, help = "Run headless (no TUI), requires a message argument")]
+    headless: bool,
 }
 
 #[tokio::main]
@@ -105,6 +111,23 @@ async fn main() {
         perf::enable();
     }
 
+    if args.headless && args.message.is_none() {
+        eprintln!("error: --headless requires a message argument");
+        std::process::exit(1);
+    }
+
+    // Resolve mode: CLI --mode > persisted state
+    let mode_override = args.mode.as_deref().map(|m| match m {
+        "plan" => input::Mode::Plan,
+        "apply" => input::Mode::Apply,
+        "yolo" => input::Mode::Yolo,
+        "normal" => input::Mode::Normal,
+        other => {
+            eprintln!("warning: unknown --mode '{other}', defaulting to normal");
+            input::Mode::Normal
+        }
+    });
+
     let vim_enabled = cfg.settings.vim_mode.unwrap_or(false);
     let auto_compact = cfg.settings.auto_compact.unwrap_or(false);
     let shared_session: Arc<Mutex<Option<Session>>> = Arc::new(Mutex::new(None));
@@ -151,6 +174,10 @@ async fn main() {
         available_models,
     );
 
+    if let Some(mode) = mode_override {
+        app.mode = mode;
+    }
+
     // Fetch context window in background so startup isn't blocked by the network call.
     let ctx_rx = {
         let provider = Provider::new(
@@ -166,8 +193,12 @@ async fn main() {
         Some(rx)
     };
 
-    println!();
-    app.run(ctx_rx).await;
+    if args.headless {
+        app.run_headless(args.message.unwrap()).await;
+    } else {
+        println!();
+        app.run(ctx_rx, args.message).await;
+    }
     perf::print_summary();
 }
 
