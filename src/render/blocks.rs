@@ -47,12 +47,14 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             // `text_w` is the max content chars per row so the total never reaches
             // the terminal width (which would cause an implicit wrap).
             let text_w = width.saturating_sub(2).max(1);
-            let logical_lines: Vec<String> = text
-                .trim()
+            let all_lines: Vec<String> = text
                 .lines()
                 .map(|l| l.replace('\t', "    ").trim_end().to_string())
-                .filter(|l| !l.is_empty())
                 .collect();
+            // Strip leading/trailing blank lines but preserve internal structure.
+            let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
+            let end = all_lines.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1);
+            let logical_lines: Vec<String> = all_lines[start..end].to_vec();
             let multiline = logical_lines.len() > 1
                 || logical_lines
                     .first()
