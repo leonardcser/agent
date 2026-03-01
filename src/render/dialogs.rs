@@ -639,6 +639,7 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
     let mut max_visible = (height as usize).saturating_sub(6).min(turns.len());
     let mut total_rows = (max_visible + 5) as u16;
     let mut bar_row = height.saturating_sub(total_rows);
+    let mut last_bar_row = bar_row;
     let mut selected: usize = turns.len() - 1;
     let mut scroll_offset: usize = turns.len().saturating_sub(max_visible);
 
@@ -646,13 +647,18 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
     let _ = out.queue(cursor::Hide);
     let _ = out.flush();
 
-    let draw = |bar_row: u16, max_visible: usize, selected: usize, scroll_offset: usize| {
+    let draw = |bar_row: u16,
+                last_bar_row: u16,
+                max_visible: usize,
+                selected: usize,
+                scroll_offset: usize| {
         let mut out = io::stdout();
         let (width, _) = terminal::size().unwrap_or((80, 24));
         let w = width.saturating_sub(1) as usize;
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
-        let _ = out.queue(cursor::MoveTo(0, 0));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::All));
+        let clear_from = bar_row.min(last_bar_row);
+        let _ = out.queue(cursor::MoveTo(0, clear_from));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
         let _ = out.queue(cursor::MoveTo(0, bar_row));
 
         let mut row = bar_row;
@@ -717,7 +723,8 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
         let _ = out.flush();
     };
 
-    draw(bar_row, max_visible, selected, scroll_offset);
+    draw(bar_row, last_bar_row, max_visible, selected, scroll_offset);
+    last_bar_row = bar_row;
 
     let result = loop {
         match event::read() {
@@ -726,7 +733,8 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
                 total_rows = (max_visible + 5) as u16;
                 bar_row = h.saturating_sub(total_rows);
                 scroll_offset = scroll_offset.min(turns.len().saturating_sub(max_visible));
-                draw(bar_row, max_visible, selected, scroll_offset);
+                draw(bar_row, last_bar_row, max_visible, selected, scroll_offset);
+                last_bar_row = bar_row;
             }
             Ok(Event::Key(KeyEvent {
                 code, modifiers, ..
@@ -740,7 +748,7 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
                         if selected < scroll_offset {
                             scroll_offset = selected;
                         }
-                        draw(bar_row, max_visible, selected, scroll_offset);
+                        draw(bar_row, last_bar_row, max_visible, selected, scroll_offset);
                     }
                 }
                 (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
@@ -749,7 +757,7 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
                         if selected >= scroll_offset + max_visible {
                             scroll_offset = selected + 1 - max_visible;
                         }
-                        draw(bar_row, max_visible, selected, scroll_offset);
+                        draw(bar_row, last_bar_row, max_visible, selected, scroll_offset);
                     }
                 }
                 _ => {}
@@ -758,10 +766,7 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
         }
     };
 
-    let _ = out.queue(cursor::MoveTo(0, bar_row));
-    let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-    let _ = out.queue(cursor::Show);
-    let _ = out.flush();
+    dialog_cleanup(last_bar_row);
 
     result
 }
