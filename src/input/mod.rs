@@ -2,7 +2,7 @@ mod history;
 mod settings;
 
 pub use history::History;
-pub use settings::{ModelMenu, SettingsMenu};
+pub use settings::{Menu, MenuAction, MenuKind, MenuResult, MenuState};
 
 use crate::completer::{Completer, CompleterKind};
 use crate::render;
@@ -53,8 +53,7 @@ pub struct InputState {
     pub cpos: usize,
     pub pastes: Vec<String>,
     pub completer: Option<Completer>,
-    pub settings: Option<SettingsMenu>,
-    pub model_menu: Option<ModelMenu>,
+    pub menu: Option<MenuState>,
     vim: Option<Vim>,
     /// Saved buffer before history search, restored on cancel.
     history_saved_buf: Option<(String, usize)>,
@@ -66,8 +65,7 @@ pub struct InputState {
 pub enum Action {
     Redraw,
     Submit(String),
-    Settings { vim: bool, auto_compact: bool },
-    ModelSelect(String),
+    MenuResult(MenuResult),
     ToggleMode,
     Resize { width: usize, height: usize },
     Noop,
@@ -86,8 +84,7 @@ impl InputState {
             cpos: 0,
             pastes: Vec::new(),
             completer: None,
-            settings: None,
-            model_menu: None,
+            menu: None,
             vim: None,
             history_saved_buf: None,
             stash: None,
@@ -142,8 +139,7 @@ impl InputState {
         self.cpos = 0;
         self.pastes.clear();
         self.completer = None;
-        self.settings = None;
-        self.model_menu = None;
+        self.menu = None;
         self.history_saved_buf = None;
         // Note: stash is intentionally NOT cleared here.
     }
@@ -178,20 +174,45 @@ impl InputState {
 
     pub fn open_settings(&mut self, vim_enabled: bool, auto_compact: bool) {
         self.completer = None;
-        self.settings = Some(SettingsMenu {
-            vim_enabled,
-            auto_compact,
-            selected: 0,
+        self.menu = Some(MenuState {
+            nav: Menu {
+                selected: 0,
+                len: 2,
+                select_on_enter: false,
+            },
+            kind: MenuKind::Settings {
+                vim_enabled,
+                auto_compact,
+            },
         });
     }
 
-    /// Open the model picker with the given list of (key, model_name, provider_name).
     pub fn open_model_picker(&mut self, models: Vec<(String, String, String)>) {
+        let len = models.len();
         self.completer = None;
-        self.model_menu = Some(ModelMenu {
-            models,
-            selected: 0,
+        self.menu = Some(MenuState {
+            nav: Menu {
+                selected: 0,
+                len,
+                select_on_enter: true,
+            },
+            kind: MenuKind::Model { models },
         });
+    }
+
+    pub fn has_modal(&self) -> bool {
+        self.menu.is_some()
+    }
+
+    /// Number of rows the current menu needs (0 if no menu).
+    pub fn menu_rows(&self) -> usize {
+        match &self.menu {
+            Some(ms) => match &ms.kind {
+                MenuKind::Settings { .. } => 2,
+                MenuKind::Model { models } => models.len().min(10),
+            },
+            None => 0,
+        }
     }
 
     /// Returns the history search query if a history completer is active.
@@ -225,14 +246,9 @@ impl InputState {
 
     /// Process a terminal event. Returns what the caller should do next.
     pub fn handle_event(&mut self, ev: Event, mut history: Option<&mut History>) -> Action {
-        // Model menu intercepts all keys when open
-        if self.model_menu.is_some() {
-            return self.handle_model_event(&ev);
-        }
-
-        // Settings menu intercepts all keys when open
-        if self.settings.is_some() {
-            return self.handle_settings_event(&ev);
+        // Menu intercepts all keys when open
+        if self.menu.is_some() {
+            return self.handle_menu_event(&ev);
         }
 
         // Completer intercepts navigation keys when active
@@ -469,119 +485,51 @@ impl InputState {
 
     // ── Completer ────────────────────────────────────────────────────────
 
-    fn handle_settings_event(&mut self, ev: &Event) -> Action {
-        match ev {
-            Event::Key(KeyEvent {
-                code: KeyCode::Esc, ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Char('q'),
-                ..
-            }) => {
-                let s = self.settings.take().unwrap();
-                Action::Settings {
-                    vim: s.vim_enabled,
-                    auto_compact: s.auto_compact,
-                }
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Enter,
-                ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Char(' '),
-                ..
-            }) => {
-                let s = self.settings.as_mut().unwrap();
-                match s.selected {
-                    0 => s.vim_enabled ^= true,
-                    1 => s.auto_compact ^= true,
-                    _ => {}
+    fn handle_menu_event(&mut self, ev: &Event) -> Action {
+        let ms = self.menu.as_mut().unwrap();
+        match ms.nav.handle_event(ev) {
+            MenuAction::Toggle(idx) => {
+                if let MenuKind::Settings {
+                    ref mut vim_enabled,
+                    ref mut auto_compact,
+                } = ms.kind
+                {
+                    match idx {
+                        0 => *vim_enabled ^= true,
+                        1 => *auto_compact ^= true,
+                        _ => {}
+                    }
                 }
                 Action::Redraw
             }
-            Event::Key(KeyEvent {
-                code: KeyCode::Up, ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Char('k'),
-                ..
-            }) => {
-                let s = self.settings.as_mut().unwrap();
-                if s.selected > 0 {
-                    s.selected -= 1;
-                }
-                Action::Redraw
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Down,
-                ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Char('j'),
-                ..
-            }) => {
-                let s = self.settings.as_mut().unwrap();
-                if s.selected < 1 {
-                    s.selected += 1;
-                }
-                Action::Redraw
-            }
-            _ => Action::Noop,
-        }
-    }
-
-    fn handle_model_event(&mut self, ev: &Event) -> Action {
-        match ev {
-            Event::Key(KeyEvent {
-                code: KeyCode::Esc, ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Char('q'),
-                ..
-            }) => {
-                self.model_menu = None;
-                Action::Redraw
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Enter,
-                ..
-            }) => {
-                let m = self.model_menu.take().unwrap();
-                if let Some((key, _, _)) = m.models.get(m.selected) {
-                    Action::ModelSelect(key.clone())
-                } else {
-                    Action::Redraw
+            MenuAction::Select(idx) => {
+                let ms = self.menu.take().unwrap();
+                match ms.kind {
+                    MenuKind::Model { ref models } => {
+                        if let Some((key, _, _)) = models.get(idx) {
+                            Action::MenuResult(MenuResult::ModelSelect(key.clone()))
+                        } else {
+                            Action::Redraw
+                        }
+                    }
+                    _ => Action::Redraw,
                 }
             }
-            Event::Key(KeyEvent {
-                code: KeyCode::Up, ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Char('k'),
-                ..
-            }) => {
-                let m = self.model_menu.as_mut().unwrap();
-                if m.selected > 0 {
-                    m.selected -= 1;
+            MenuAction::Dismiss => {
+                let ms = self.menu.take().unwrap();
+                match ms.kind {
+                    MenuKind::Settings {
+                        vim_enabled,
+                        auto_compact,
+                    } => Action::MenuResult(MenuResult::Settings {
+                        vim: vim_enabled,
+                        auto_compact,
+                    }),
+                    MenuKind::Model { .. } => Action::MenuResult(MenuResult::Dismissed),
                 }
-                Action::Redraw
             }
-            Event::Key(KeyEvent {
-                code: KeyCode::Down,
-                ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Char('j'),
-                ..
-            }) => {
-                let m = self.model_menu.as_mut().unwrap();
-                if m.selected + 1 < m.models.len() {
-                    m.selected += 1;
-                }
-                Action::Redraw
-            }
-            _ => Action::Noop,
+            MenuAction::Redraw => Action::Redraw,
+            MenuAction::Noop => Action::Noop,
         }
     }
 

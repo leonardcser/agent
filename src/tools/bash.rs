@@ -55,6 +55,7 @@ impl Tool for BashTool {
         let child = std::process::Command::new("sh")
             .arg("-c")
             .arg(&command)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn();

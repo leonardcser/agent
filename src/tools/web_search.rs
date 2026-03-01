@@ -60,17 +60,19 @@ impl Tool for WebSearchTool {
                 .redirect(reqwest::redirect::Policy::limited(10))
                 .build()?;
 
-            let encoded = url::form_urlencoded::Serializer::new(String::new())
+            let body = url::form_urlencoded::Serializer::new(String::new())
                 .append_pair("q", &search_query)
                 .append_pair("kl", "us-en")
                 .finish();
 
-            let url = format!("https://html.duckduckgo.com/html/?{encoded}");
-
             let response = client
-                .get(&url)
+                .post("https://html.duckduckgo.com/html/")
+                .header("Content-Type", "application/x-www-form-urlencoded")
                 .header("Accept", "text/html")
                 .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Referer", "https://html.duckduckgo.com/html/")
+                .header("Origin", "https://html.duckduckgo.com")
+                .body(body)
                 .send()?;
 
             if !response.status().is_success() {

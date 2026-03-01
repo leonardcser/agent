@@ -13,7 +13,7 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
 use super::highlight::{count_inline_diff_rows, print_inline_diff, print_syntax_file};
-use super::{draw_bar, ConfirmChoice, ResumeEntry};
+use super::{chunk_line, crlf, draw_bar, ConfirmChoice, ResumeEntry};
 
 // ── TextArea ──────────────────────────────────────────────────────────────────
 
@@ -41,8 +41,46 @@ impl TextArea {
         self.lines.join("\n")
     }
 
-    fn line_count(&self) -> u16 {
-        self.lines.len() as u16
+    /// Total visual rows when wrapping at the given width.
+    fn visual_row_count(&self, wrap_w: usize) -> u16 {
+        self.lines
+            .iter()
+            .map(|l| chunk_line(l, wrap_w).len() as u16)
+            .sum()
+    }
+
+    /// Wrap content into visual lines and compute cursor position.
+    fn wrap(&self, wrap_w: usize) -> (Vec<String>, (usize, usize)) {
+        let mut visual = Vec::new();
+        let mut cursor = (0, 0);
+
+        for (li, line) in self.lines.iter().enumerate() {
+            let vis_start = visual.len();
+            let chunks = chunk_line(line, wrap_w);
+            visual.extend(chunks);
+
+            if li == self.row {
+                let char_count = line.chars().count();
+                let col = self.col.min(char_count);
+                if char_count == 0 || wrap_w == 0 {
+                    cursor = (vis_start, col);
+                } else {
+                    let vis_offset = col / wrap_w;
+                    let vis_col = col % wrap_w;
+                    let num_vis = visual.len() - vis_start;
+                    if vis_offset >= num_vis {
+                        cursor = (
+                            vis_start + num_vis - 1,
+                            visual[vis_start + num_vis - 1].chars().count(),
+                        );
+                    } else {
+                        cursor = (vis_start + vis_offset, vis_col);
+                    }
+                }
+            }
+        }
+
+        (visual, cursor)
     }
 
     fn clear(&mut self) {
@@ -143,6 +181,61 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(i, _)| i)
         .unwrap_or(s.len())
+}
+
+/// Render an inline textarea after an option label, tracking cursor position.
+///
+/// Prints `, <text>` on the first visual line and pads subsequent wrapped lines
+/// to `text_col`. Returns the updated row and optional cursor (col, row) if
+/// `editing` is true.
+fn render_inline_textarea(
+    out: &mut io::Stdout,
+    ta: &TextArea,
+    editing: bool,
+    text_col: u16,
+    wrap_w: usize,
+    mut row: u16,
+) -> (u16, Option<(u16, u16)>) {
+    let (vis_lines, vis_cursor) = ta.wrap(wrap_w);
+    let pad: String = " ".repeat(text_col as usize);
+    let mut cursor_pos = None;
+    for (vi, vl) in vis_lines.iter().enumerate() {
+        if vi == 0 {
+            let _ = out.queue(Print(", "));
+        } else {
+            let _ = out.queue(Print(&pad));
+        }
+        let _ = out.queue(Print(vl));
+        if editing && vi == vis_cursor.0 {
+            cursor_pos = Some((text_col + vis_cursor.1 as u16, row));
+        }
+        crlf(out);
+        row += 1;
+    }
+    (row, cursor_pos)
+}
+
+/// Finish a dialog frame: optionally show cursor, end synchronized update, flush.
+fn finish_dialog_frame(out: &mut io::Stdout, cursor_pos: Option<(u16, u16)>, editing: bool) {
+    if editing {
+        if let Some((col, r)) = cursor_pos {
+            let _ = out.queue(cursor::MoveTo(col, r));
+        }
+        let _ = out.queue(cursor::Show);
+    }
+    let _ = out.queue(terminal::EndSynchronizedUpdate);
+    let _ = out.flush();
+}
+
+/// Clear a dialog area and restore the cursor.
+fn dialog_cleanup(last_bar_row: u16) {
+    let mut out = io::stdout();
+    let (_, height) = terminal::size().unwrap_or((80, 24));
+    let clear_from = last_bar_row.min(height.saturating_sub(1));
+    let _ = out.queue(cursor::MoveTo(0, clear_from));
+    let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+    let _ = out.queue(cursor::Show);
+    let _ = out.flush();
 }
 
 // ── Dialog types ──────────────────────────────────────────────────────────────
@@ -257,7 +350,12 @@ pub struct ConfirmDialog {
     selected: usize,
     textarea: TextArea,
     editing: bool,
-    text_indent: u16,
+    dirty: bool,
+    last_bar_row: u16,
+    /// Row where the options section begins (used for partial redraws).
+    options_row: u16,
+    /// Total dialog rows from the previous frame (used to detect height changes).
+    last_total_rows: u16,
 }
 
 impl ConfirmDialog {
@@ -284,9 +382,6 @@ impl ConfirmDialog {
 
         let total_preview = confirm_preview_row_count(tool_name, args);
 
-        let first_label = options.first().map(|(l, _)| l.as_str()).unwrap_or("yes");
-        let text_indent = (2 + 1 + 2 + first_label.len() + 2) as u16;
-
         Self {
             tool_name: tool_name.to_string(),
             desc: desc.to_string(),
@@ -296,12 +391,24 @@ impl ConfirmDialog {
             selected: 0,
             textarea: TextArea::new(),
             editing: false,
-            text_indent,
+            last_bar_row: u16::MAX,
+            options_row: 0,
+            last_total_rows: 0,
+            dirty: true,
         }
     }
 
-    /// Process a key event. Returns `Some(choice)` when the dialog is done.
-    pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<ConfirmChoice> {
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Process a key event. Returns `Some((choice, optional_message))` when done.
+    pub fn handle_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Option<(ConfirmChoice, Option<String>)> {
+        self.dirty = true;
         if self.editing {
             match (code, modifiers) {
                 (KeyCode::Esc, _) => {
@@ -309,7 +416,7 @@ impl ConfirmDialog {
                 }
                 (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
                     if self.textarea.is_empty() {
-                        return Some(ConfirmChoice::No);
+                        return Some((ConfirmChoice::No, None));
                     }
                     self.textarea.clear();
                     self.editing = false;
@@ -323,24 +430,20 @@ impl ConfirmDialog {
 
         match (code, modifiers) {
             (KeyCode::Enter, _) => {
-                if !self.textarea.is_empty() {
-                    return Some(ConfirmChoice::YesWithMessage(self.textarea.text()));
-                }
-                return Some(self.options[self.selected].1.clone());
+                let msg = if self.textarea.is_empty() {
+                    None
+                } else {
+                    Some(self.textarea.text())
+                };
+                return Some((self.options[self.selected].1.clone(), msg));
             }
             (KeyCode::Tab, _) => {
                 self.editing = true;
             }
-            (KeyCode::Char(c @ '1'..='9'), _) => {
-                let idx = (c as usize) - ('1' as usize);
-                if idx < self.options.len() {
-                    return Some(self.options[idx].1.clone());
-                }
-            }
             (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                return Some(ConfirmChoice::No);
+                return Some((ConfirmChoice::No, None));
             }
-            (KeyCode::Esc, _) => return Some(ConfirmChoice::No),
+            (KeyCode::Esc, _) => return Some((ConfirmChoice::No, None)),
             (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
                 self.selected = if self.selected == 0 {
                     self.options.len() - 1
@@ -357,13 +460,26 @@ impl ConfirmDialog {
     }
 
     /// Render the dialog overlay at the bottom of the terminal.
-    pub fn draw(&self) {
+    pub fn draw(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+
         let mut out = io::stdout();
+        let _ = out.queue(terminal::BeginSynchronizedUpdate);
+        let _ = out.queue(cursor::Hide);
         let (width, height) = terminal::size().unwrap_or((80, 24));
         let w = width.saturating_sub(1) as usize;
 
-        let ta_extra = if self.editing || !self.textarea.is_empty() {
-            self.textarea.line_count().saturating_sub(1)
+        let ta_visible = self.editing || !self.textarea.is_empty();
+        // Pre-compute text indent for the selected option to get wrap width
+        let (selected_label, _) = &self.options[self.selected];
+        let digits = format!("{}", self.selected + 1).len();
+        let text_indent = (2 + digits + 2 + selected_label.len() + 2) as u16;
+        let wrap_w = (w as u16).saturating_sub(text_indent) as usize;
+        let ta_extra: u16 = if ta_visible {
+            self.textarea.visual_row_count(wrap_w).saturating_sub(1)
         } else {
             0
         };
@@ -383,60 +499,79 @@ impl ConfirmDialog {
         let total_rows = base_rows + preview_extra;
         let bar_row = height.saturating_sub(total_rows);
 
-        let _ = out.queue(cursor::MoveTo(0, bar_row));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+        // Partial redraw: when editing and the dialog height hasn't changed,
+        // skip re-rendering the static top portion (bar, title, preview, header)
+        // and only redraw from the options row down.
+        let partial = self.editing
+            && self.last_total_rows == total_rows
+            && self.options_row > 0
+            && self.options_row >= bar_row;
 
-        let mut row = bar_row;
+        let mut row;
+        if partial {
+            row = self.options_row;
+            let _ = out.queue(cursor::MoveTo(0, row));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+        } else {
+            let clear_from = bar_row.min(self.last_bar_row);
+            self.last_bar_row = bar_row;
 
-        draw_bar(&mut out, w, None, None, theme::ACCENT);
-        let _ = out.queue(Print("\r\n"));
-        row += 1;
+            let _ = out.queue(cursor::MoveTo(0, clear_from));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+            let _ = out.queue(cursor::MoveTo(0, bar_row));
 
-        // title
-        let _ = out.queue(Print(" "));
-        let _ = out.queue(SetForegroundColor(theme::ACCENT));
-        let _ = out.queue(Print(&self.tool_name));
-        let _ = out.queue(ResetColor);
-        let _ = out.queue(Print(format!(": {}", self.desc)));
-        let _ = out.queue(Print("\r\n"));
-        row += 1;
+            row = bar_row;
 
-        if has_preview {
-            let separator: String = "╌".repeat(w);
-            let _ = out.queue(Print("\r\n"));
-            let _ = out.queue(SetForegroundColor(theme::BAR));
-            let _ = out.queue(Print(&separator));
+            draw_bar(&mut out, w, None, None, theme::ACCENT);
+            crlf(&mut out);
+            row += 1;
+
+            // title
+            let _ = out.queue(Print(" "));
+            let _ = out.queue(SetForegroundColor(theme::ACCENT));
+            let _ = out.queue(Print(&self.tool_name));
             let _ = out.queue(ResetColor);
-            let _ = out.queue(Print("\r\n"));
-            row += 2;
-            render_confirm_preview(&mut out, &self.tool_name, &self.args, max_preview);
-            row += preview_rows;
-            if self.total_preview > max_preview {
+            let _ = out.queue(Print(format!(": {}", self.desc)));
+            crlf(&mut out);
+            row += 1;
+
+            if has_preview {
+                let separator: String = "╌".repeat(w);
+                let _ = out.queue(SetForegroundColor(theme::BAR));
+                let _ = out.queue(Print(&separator));
+                let _ = out.queue(ResetColor);
+                crlf(&mut out);
+                row += 1;
+                render_confirm_preview(&mut out, &self.tool_name, &self.args, max_preview);
+                row += preview_rows;
+                if self.total_preview > max_preview {
+                    row += 1;
+                }
+                let _ = out.queue(SetForegroundColor(theme::BAR));
+                let _ = out.queue(Print(&separator));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                crlf(&mut out);
                 row += 1;
             }
+
+            // blank + "Allow?"
+            crlf(&mut out);
+            row += 1;
             let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(Print(&separator));
+            let _ = out.queue(Print(" Allow?"));
             let _ = out.queue(SetAttribute(Attribute::Reset));
+            crlf(&mut out);
             row += 1;
         }
 
-        // blank + "Allow?"
-        let _ = out.queue(Print("\r\n"));
-        row += 1;
-        let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(" Allow?\r\n"));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
-        row += 1;
+        self.options_row = row;
+        self.last_total_rows = total_rows;
 
         let mut cursor_pos: Option<(u16, u16)> = None;
 
         for (i, (label, _)) in self.options.iter().enumerate() {
             let _ = out.queue(Print("  "));
-            let highlighted = if self.editing {
-                i == 0
-            } else {
-                i == self.selected
-            };
+            let highlighted = i == self.selected;
             if highlighted {
                 let _ = out.queue(SetAttribute(Attribute::Dim));
                 let _ = out.queue(Print(format!("{}.", i + 1)));
@@ -452,59 +587,43 @@ impl ConfirmDialog {
                 let _ = out.queue(Print(label));
             }
 
-            if i == 0 && (self.editing || !self.textarea.is_empty()) {
-                let _ = out.queue(Print(", "));
-                let _ = out.queue(Print(&self.textarea.lines[0]));
-                if self.editing && self.textarea.row == 0 {
-                    cursor_pos = Some((self.text_indent + self.textarea.col as u16, row));
-                }
-                let _ = out.queue(Print("\r\n"));
-                row += 1;
-
-                let pad: String = " ".repeat(self.text_indent as usize);
-                for li in 1..self.textarea.lines.len() {
-                    let _ = out.queue(Print(&pad));
-                    let _ = out.queue(Print(&self.textarea.lines[li]));
-                    if self.editing && self.textarea.row == li {
-                        cursor_pos = Some((self.text_indent + self.textarea.col as u16, row));
-                    }
-                    let _ = out.queue(Print("\r\n"));
-                    row += 1;
-                }
+            if i == self.selected && ta_visible {
+                let digits = format!("{}", i + 1).len();
+                let text_col = (2 + digits + 2 + label.len() + 2) as u16;
+                let wrap_w = (w as u16).saturating_sub(text_col) as usize;
+                let (new_row, cpos) = render_inline_textarea(
+                    &mut out,
+                    &self.textarea,
+                    self.editing,
+                    text_col,
+                    wrap_w,
+                    row,
+                );
+                row = new_row;
+                cursor_pos = cpos;
             } else {
-                let _ = out.queue(Print("\r\n"));
+                crlf(&mut out);
                 row += 1;
             }
         }
 
         // footer
-        let _ = out.queue(Print("\r\n"));
+        crlf(&mut out);
         let _ = out.queue(SetAttribute(Attribute::Dim));
         if self.editing {
             let _ = out.queue(Print(" esc: done  enter: newline"));
         } else if !self.textarea.is_empty() {
-            let _ = out.queue(Print(" enter: approve with message  tab: edit"));
+            let _ = out.queue(Print(" enter: confirm with message  tab: edit"));
         }
         let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
-        if let Some((col, r)) = cursor_pos {
-            let _ = out.queue(cursor::MoveTo(col, r));
-            let _ = out.queue(cursor::Show);
-        } else {
-            let _ = out.queue(cursor::Hide);
-        }
-
-        let _ = out.flush();
+        finish_dialog_frame(&mut out, cursor_pos, self.editing);
     }
 
     /// Clear the dialog area and restore cursor.
     pub fn cleanup(&self) {
-        let mut out = io::stdout();
-        let (_, height) = terminal::size().unwrap_or((80, 24));
-        let _ = out.queue(cursor::MoveTo(0, height.saturating_sub(1)));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-        let _ = out.queue(cursor::Show);
-        let _ = out.flush();
+        dialog_cleanup(self.last_bar_row);
     }
 }
 
@@ -515,12 +634,11 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
     }
 
     let mut out = io::stdout();
-    let (width, height) = terminal::size().unwrap_or((80, 24));
-    let w = width.saturating_sub(1) as usize;
+    let (_, height) = terminal::size().unwrap_or((80, 24));
 
-    let max_visible = (height as usize).saturating_sub(6).min(turns.len());
-    let total_rows = (max_visible + 5) as u16;
-    let bar_row = height.saturating_sub(total_rows);
+    let mut max_visible = (height as usize).saturating_sub(6).min(turns.len());
+    let mut total_rows = (max_visible + 5) as u16;
+    let mut bar_row = height.saturating_sub(total_rows);
     let mut selected: usize = turns.len() - 1;
     let mut scroll_offset: usize = turns.len().saturating_sub(max_visible);
 
@@ -528,10 +646,14 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
     let _ = out.queue(cursor::Hide);
     let _ = out.flush();
 
-    let draw = |selected: usize, scroll_offset: usize| {
+    let draw = |bar_row: u16, max_visible: usize, selected: usize, scroll_offset: usize| {
         let mut out = io::stdout();
+        let (width, _) = terminal::size().unwrap_or((80, 24));
+        let w = width.saturating_sub(1) as usize;
+        let _ = out.queue(terminal::BeginSynchronizedUpdate);
+        let _ = out.queue(cursor::MoveTo(0, 0));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::All));
         let _ = out.queue(cursor::MoveTo(0, bar_row));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
         let mut row = bar_row;
 
@@ -591,17 +713,24 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
             row = row.saturating_add(1);
         }
 
+        let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
     };
 
-    draw(selected, scroll_offset);
+    draw(bar_row, max_visible, selected, scroll_offset);
 
     let result = loop {
-        if let Ok(Event::Key(KeyEvent {
-            code, modifiers, ..
-        })) = event::read()
-        {
-            match (code, modifiers) {
+        match event::read() {
+            Ok(Event::Resize(_, h)) => {
+                max_visible = (h as usize).saturating_sub(6).min(turns.len());
+                total_rows = (max_visible + 5) as u16;
+                bar_row = h.saturating_sub(total_rows);
+                scroll_offset = scroll_offset.min(turns.len().saturating_sub(max_visible));
+                draw(bar_row, max_visible, selected, scroll_offset);
+            }
+            Ok(Event::Key(KeyEvent {
+                code, modifiers, ..
+            })) => match (code, modifiers) {
                 (KeyCode::Enter, _) => break Some(turns[selected].0),
                 (KeyCode::Esc, _) => break None,
                 (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break None,
@@ -611,7 +740,7 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
                         if selected < scroll_offset {
                             scroll_offset = selected;
                         }
-                        draw(selected, scroll_offset);
+                        draw(bar_row, max_visible, selected, scroll_offset);
                     }
                 }
                 (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
@@ -620,11 +749,12 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
                         if selected >= scroll_offset + max_visible {
                             scroll_offset = selected + 1 - max_visible;
                         }
-                        draw(selected, scroll_offset);
+                        draw(bar_row, max_visible, selected, scroll_offset);
                     }
                 }
                 _ => {}
-            }
+            },
+            _ => {}
         }
     };
 
@@ -643,13 +773,12 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
     }
 
     let mut out = io::stdout();
-    let (width, height) = terminal::size().unwrap_or((80, 24));
-    let w = width.saturating_sub(1) as usize;
-    let max_visible = (height as usize)
+    let (_, height) = terminal::size().unwrap_or((80, 24));
+    let mut max_visible = (height as usize)
         .saturating_sub(7)
         .min(entries.len().max(1));
-    let total_rows = (max_visible + 6) as u16;
-    let bar_row = height.saturating_sub(total_rows);
+    let mut total_rows = (max_visible + 6) as u16;
+    let mut bar_row = height.saturating_sub(total_rows);
 
     let mut query = String::new();
     let mut filtered = filter_resume_entries(entries, &query);
@@ -660,10 +789,19 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
     let _ = out.queue(cursor::Hide);
     let _ = out.flush();
 
-    let draw = |selected: usize, scroll_offset: usize, query: &str, filtered: &[ResumeEntry]| {
+    let draw = |bar_row: u16,
+                max_visible: usize,
+                selected: usize,
+                scroll_offset: usize,
+                query: &str,
+                filtered: &[ResumeEntry]| {
         let mut out = io::stdout();
+        let (width, _) = terminal::size().unwrap_or((80, 24));
+        let w = width.saturating_sub(1) as usize;
+        let _ = out.queue(terminal::BeginSynchronizedUpdate);
+        let _ = out.queue(cursor::MoveTo(0, 0));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::All));
         let _ = out.queue(cursor::MoveTo(0, bar_row));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
         let mut row = bar_row;
         let now_ms = session::now_ms();
@@ -729,10 +867,18 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
             row = row.saturating_add(1);
         }
 
+        let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
     };
 
-    draw(selected, scroll_offset, &query, &filtered);
+    draw(
+        bar_row,
+        max_visible,
+        selected,
+        scroll_offset,
+        &query,
+        &filtered,
+    );
 
     terminal::enable_raw_mode().ok();
     let _ = out.queue(EnableBracketedPaste);
@@ -741,57 +887,80 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
     let result = loop {
         let has_event = event::poll(Duration::from_millis(500)).unwrap_or(false);
         if has_event {
-            if let Ok(Event::Key(KeyEvent {
-                code, modifiers, ..
-            })) = event::read()
-            {
-                match (code, modifiers) {
-                    (KeyCode::Enter, _) => {
-                        if let Some(entry) = filtered.get(selected) {
-                            break Some(entry.id.clone());
-                        }
+            match event::read() {
+                Ok(Event::Resize(_, h)) => {
+                    max_visible = (h as usize).saturating_sub(7).min(entries.len().max(1));
+                    total_rows = (max_visible + 6) as u16;
+                    bar_row = h.saturating_sub(total_rows);
+                    if filtered.is_empty() {
+                        selected = 0;
+                        scroll_offset = 0;
+                    } else {
+                        selected = selected.min(filtered.len().saturating_sub(1));
+                        scroll_offset =
+                            scroll_offset.min(filtered.len().saturating_sub(max_visible));
                     }
-                    (KeyCode::Esc, _) => break None,
-                    (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break None,
-                    (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
-                        query.clear();
-                    }
-                    (KeyCode::Backspace, _) => {
-                        query.pop();
-                    }
-                    (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
-                        if selected > 0 {
-                            selected -= 1;
-                            if selected < scroll_offset {
-                                scroll_offset = selected;
-                            }
-                        }
-                    }
-                    (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                        if selected + 1 < filtered.len() {
-                            selected += 1;
-                            if selected >= scroll_offset + max_visible {
-                                scroll_offset = selected + 1 - max_visible;
-                            }
-                        }
-                    }
-                    (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                        query.push(c);
-                    }
-                    _ => {}
                 }
+                Ok(Event::Key(KeyEvent {
+                    code, modifiers, ..
+                })) => {
+                    match (code, modifiers) {
+                        (KeyCode::Enter, _) => {
+                            if let Some(entry) = filtered.get(selected) {
+                                break Some(entry.id.clone());
+                            }
+                        }
+                        (KeyCode::Esc, _) => break None,
+                        (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break None,
+                        (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
+                            query.clear();
+                        }
+                        (KeyCode::Backspace, _) => {
+                            query.pop();
+                        }
+                        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                            if selected > 0 {
+                                selected -= 1;
+                                if selected < scroll_offset {
+                                    scroll_offset = selected;
+                                }
+                            }
+                        }
+                        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                            if selected + 1 < filtered.len() {
+                                selected += 1;
+                                if selected >= scroll_offset + max_visible {
+                                    scroll_offset = selected + 1 - max_visible;
+                                }
+                            }
+                        }
+                        (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                            query.push(c);
+                        }
+                        _ => {}
+                    }
 
-                filtered = filter_resume_entries(entries, &query);
-                if filtered.is_empty() {
-                    selected = 0;
-                    scroll_offset = 0;
-                } else {
-                    selected = selected.min(filtered.len().saturating_sub(1));
-                    scroll_offset = scroll_offset.min(filtered.len().saturating_sub(max_visible));
+                    filtered = filter_resume_entries(entries, &query);
+                    if filtered.is_empty() {
+                        selected = 0;
+                        scroll_offset = 0;
+                    } else {
+                        selected = selected.min(filtered.len().saturating_sub(1));
+                        scroll_offset =
+                            scroll_offset.min(filtered.len().saturating_sub(max_visible));
+                    }
                 }
+                _ => {}
             }
         }
-        draw(selected, scroll_offset, &query, &filtered);
+        draw(
+            bar_row,
+            max_visible,
+            selected,
+            scroll_offset,
+            &query,
+            &filtered,
+        );
     };
 
     let _ = out.queue(cursor::MoveTo(0, bar_row));
@@ -816,6 +985,8 @@ pub struct QuestionDialog {
     editing_other: Vec<bool>,
     visited: Vec<bool>,
     answered: Vec<bool>,
+    dirty: bool,
+    last_bar_row: u16,
 }
 
 impl QuestionDialog {
@@ -837,12 +1008,19 @@ impl QuestionDialog {
             editing_other: vec![false; n],
             visited: vec![false; n],
             answered: vec![false; n],
+            dirty: true,
+            last_bar_row: u16::MAX,
         }
     }
 
     /// Process a key event. Returns `Some(answer_json)` on confirm, `None` to keep going.
     /// Returns `Some(None)` on cancel (Esc/Ctrl+C).
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Option<String>> {
+        self.dirty = true;
         let q = &self.questions[self.active_tab];
         let other_idx = q.options.len();
 
@@ -941,29 +1119,47 @@ impl QuestionDialog {
     }
 
     /// Render the dialog overlay at the bottom of the terminal.
-    pub fn draw(&self) {
+    pub fn draw(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+
         let mut out = io::stdout();
+        let _ = out.queue(terminal::BeginSynchronizedUpdate);
+        let _ = out.queue(cursor::Hide);
         let (width, height) = terminal::size().unwrap_or((80, 24));
         let w = width.saturating_sub(1) as usize;
 
         let ta = &self.other_areas[self.active_tab];
         let ta_visible = self.editing_other[self.active_tab] || !ta.is_empty();
+        let q_other_idx = self.questions[self.active_tab].options.len();
+        let other_text_col: u16 = if self.questions[self.active_tab].multi_select {
+            2 + 2 + 5 + 2
+        } else {
+            let digits = format!("{}", q_other_idx + 1).len();
+            (2 + digits + 2 + 5 + 2) as u16
+        };
+        let other_wrap_w = (w as u16).saturating_sub(other_text_col) as usize;
         let ta_extra: u16 = if ta_visible {
-            ta.line_count().saturating_sub(1)
+            ta.visual_row_count(other_wrap_w).saturating_sub(1)
         } else {
             0
         };
 
         let fixed_rows = 1 + (self.has_tabs as u16) + 3 + self.max_options as u16 + 2 + ta_extra;
         let bar_row = height.saturating_sub(fixed_rows);
+        let clear_from = bar_row.min(self.last_bar_row);
+        self.last_bar_row = bar_row;
 
-        let _ = out.queue(cursor::MoveTo(0, bar_row));
+        let _ = out.queue(cursor::MoveTo(0, clear_from));
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+        let _ = out.queue(cursor::MoveTo(0, bar_row));
 
         let mut row = bar_row;
 
         draw_bar(&mut out, w, None, None, theme::ACCENT);
-        let _ = out.queue(Print("\r\n"));
+        crlf(&mut out);
         row += 1;
 
         if self.has_tabs {
@@ -993,7 +1189,7 @@ impl QuestionDialog {
                     let _ = out.queue(SetAttribute(Attribute::Reset));
                 }
             }
-            let _ = out.queue(Print("\r\n"));
+            crlf(&mut out);
             row += 1;
         }
 
@@ -1002,7 +1198,7 @@ impl QuestionDialog {
         let is_multi = q.multi_select;
         let other_idx = q.options.len();
 
-        let _ = out.queue(Print("\r\n"));
+        crlf(&mut out);
         row += 1;
 
         let _ = out.queue(Print(" "));
@@ -1014,10 +1210,10 @@ impl QuestionDialog {
             let _ = out.queue(Print(" (space to toggle)"));
             let _ = out.queue(SetAttribute(Attribute::Reset));
         }
-        let _ = out.queue(Print("\r\n"));
+        crlf(&mut out);
         row += 1;
 
-        let _ = out.queue(Print("\r\n"));
+        crlf(&mut out);
         row += 1;
 
         for (i, opt) in q.options.iter().enumerate() {
@@ -1057,7 +1253,7 @@ impl QuestionDialog {
                 let _ = out.queue(Print(format!("  {}", opt.description)));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
             }
-            let _ = out.queue(Print("\r\n"));
+            crlf(&mut out);
             row += 1;
         }
 
@@ -1065,13 +1261,6 @@ impl QuestionDialog {
         let _ = out.queue(Print("  "));
         let is_other_current = sel == other_idx;
         let is_other_toggled = is_multi && self.multi_toggles[self.active_tab][other_idx];
-
-        let other_text_col: u16 = if is_multi {
-            2 + 2 + 5 + 2
-        } else {
-            let digits = format!("{}", other_idx + 1).len();
-            (2 + digits + 2 + 5 + 2) as u16
-        };
 
         if is_multi {
             let check = if is_other_toggled { "◉" } else { "○" };
@@ -1099,34 +1288,22 @@ impl QuestionDialog {
             }
         }
 
-        let mut cursor_pos: Option<(u16, u16)> = None;
+        let editing = self.editing_other[self.active_tab];
+        let mut cursor_pos = None;
         if ta_visible {
-            let _ = out.queue(Print(", "));
-            let _ = out.queue(Print(&ta.lines[0]));
-            if self.editing_other[self.active_tab] && ta.row == 0 {
-                cursor_pos = Some((other_text_col + ta.col as u16, row));
-            }
-            let _ = out.queue(Print("\r\n"));
-            row += 1;
-
-            let pad: String = " ".repeat(other_text_col as usize);
-            for li in 1..ta.lines.len() {
-                let _ = out.queue(Print(&pad));
-                let _ = out.queue(Print(&ta.lines[li]));
-                if self.editing_other[self.active_tab] && ta.row == li {
-                    cursor_pos = Some((other_text_col + ta.col as u16, row));
-                }
-                let _ = out.queue(Print("\r\n"));
-                row += 1;
-            }
+            let (new_row, cpos) =
+                render_inline_textarea(&mut out, ta, editing, other_text_col, other_wrap_w, row);
+            row = new_row;
+            cursor_pos = cpos;
         } else {
-            let _ = out.queue(Print("\r\n"));
+            crlf(&mut out);
         }
+        let _ = row;
 
         // Footer
-        let _ = out.queue(Print("\r\n"));
+        crlf(&mut out);
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        if self.editing_other[self.active_tab] {
+        if editing {
             let _ = out.queue(Print(" esc: done  enter: newline"));
         } else if self.has_tabs {
             let _ = out.queue(Print(" tab: next question  enter: confirm"));
@@ -1134,25 +1311,14 @@ impl QuestionDialog {
             let _ = out.queue(Print(" enter: confirm"));
         }
         let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
-        if let Some((col, r)) = cursor_pos {
-            let _ = out.queue(cursor::MoveTo(col, r));
-            let _ = out.queue(cursor::Show);
-        } else {
-            let _ = out.queue(cursor::Hide);
-        }
-
-        let _ = out.flush();
+        finish_dialog_frame(&mut out, cursor_pos, editing);
     }
 
     /// Clear the dialog area and restore cursor.
     pub fn cleanup(&self) {
-        let mut out = io::stdout();
-        let (_, height) = terminal::size().unwrap_or((80, 24));
-        let _ = out.queue(cursor::MoveTo(0, height.saturating_sub(1)));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-        let _ = out.queue(cursor::Show);
-        let _ = out.flush();
+        dialog_cleanup(self.last_bar_row);
     }
 
     fn build_answer(&self) -> String {

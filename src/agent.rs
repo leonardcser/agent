@@ -233,7 +233,7 @@ pub async fn run_agent(
 
             match decision {
                 Decision::Deny => {
-                    let result = "denied by permissions".to_string();
+                    let result = "The user's permission settings blocked this tool call. Try a different approach or ask the user for guidance.".to_string();
                     messages.push(Message {
                         role: Role::Tool,
                         content: Some(result.clone()),
@@ -260,7 +260,7 @@ pub async fn run_agent(
                     });
                     let confirmed = reply_rx.await.unwrap_or(false);
                     if !confirmed {
-                        let result = "denied by user".to_string();
+                        let result = "The user denied this tool call. Try a different approach or ask the user for guidance.".to_string();
                         messages.push(Message {
                             role: Role::Tool,
                             content: Some(result.clone()),
@@ -345,6 +345,7 @@ async fn execute_bash_streaming(
     let mut child = match tokio::process::Command::new("sh")
         .arg("-c")
         .arg(&command)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

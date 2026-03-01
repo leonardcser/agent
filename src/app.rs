@@ -1,5 +1,5 @@
 use crate::agent::{run_agent, AgentEvent};
-use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, Mode};
+use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, MenuResult, Mode};
 use crate::provider::{Message, Provider, Role};
 use crate::render::{
     tool_arg_summary, Block, ConfirmChoice, ConfirmDialog, QuestionDialog, ResumeEntry, Screen,
@@ -65,8 +65,7 @@ enum EventOutcome {
     Quit,
     CancelAgent,
     Submit(String),
-    Settings { vim: bool, auto_compact: bool },
-    ModelSelect(String),
+    MenuResult(MenuResult),
     Rewind(usize),
 }
 
@@ -247,8 +246,8 @@ impl App {
                 if !buf.trim().is_empty() {
                     parts.push(buf);
                 }
-                let text = parts.join("\n").trim().to_string();
-                if !text.is_empty() {
+                let text = parts.join("\n");
+                if !text.trim().is_empty() {
                     self.screen.erase_prompt();
                     match self.process_input(&text) {
                         InputOutcome::StartAgent => {
@@ -309,7 +308,7 @@ impl App {
             // ── Render ───────────────────────────────────────────────────
             let has_dialog = active_dialog.is_some();
             self.tick(agent.is_some(), has_dialog);
-            draw_active_dialog(&active_dialog);
+            draw_active_dialog(&mut active_dialog);
 
             // ── Wait for next event ──────────────────────────────────────
             tokio::select! {
@@ -336,7 +335,7 @@ impl App {
                     // Render immediately after terminal events for responsive typing.
                     let has_dialog = active_dialog.is_some();
                     self.tick(agent.is_some(), has_dialog);
-                    draw_active_dialog(&active_dialog);
+                    draw_active_dialog(&mut active_dialog);
                 }
 
                 Some(ev) = agent_rx.recv(), if agent.is_some() && active_dialog.is_none() => {
@@ -358,7 +357,7 @@ impl App {
                         }
                     }
                     self.tick(agent.is_some(), active_dialog.is_some());
-                    draw_active_dialog(&active_dialog);
+                    draw_active_dialog(&mut active_dialog);
                 }
 
                 _ = tokio::time::sleep(Duration::from_millis(80)) => {
@@ -390,8 +389,27 @@ impl App {
         t: &mut Timers,
         active_dialog: &mut Option<ActiveDialog>,
     ) -> bool {
-        // Route key events to the active dialog if one is showing.
+        // Route events to the active dialog if one is showing.
         if active_dialog.is_some() {
+            // Terminal resize: full clear + redraw screen + redraw dialog.
+            if let Event::Resize(w, h) = ev {
+                if w != self.last_width || h != self.last_height {
+                    self.last_width = w;
+                    self.last_height = h;
+                    self.screen.redraw(true);
+                }
+                match active_dialog.as_mut().unwrap() {
+                    ActiveDialog::Confirm { dialog, .. } => {
+                        dialog.mark_dirty();
+                        dialog.draw();
+                    }
+                    ActiveDialog::AskQuestion { dialog, .. } => {
+                        dialog.mark_dirty();
+                        dialog.draw();
+                    }
+                }
+                return false;
+            }
             if let Event::Key(KeyEvent {
                 code, modifiers, ..
             }) = ev
@@ -399,7 +417,7 @@ impl App {
                 let result = match active_dialog.as_mut().unwrap() {
                     ActiveDialog::Confirm { dialog, .. } => dialog
                         .handle_key(code, modifiers)
-                        .map(DialogOutcome::Confirm),
+                        .map(|(c, m)| DialogOutcome::Confirm(c, m)),
                     ActiveDialog::AskQuestion { dialog, .. } => dialog
                         .handle_key(code, modifiers)
                         .map(DialogOutcome::Question),
@@ -451,22 +469,27 @@ impl App {
                 }
                 false
             }
-            EventOutcome::Settings { vim, auto_compact } => {
-                self.input.set_vim_enabled(vim);
-                self.app_state.set_vim_enabled(vim);
-                self.auto_compact = auto_compact;
-                false
-            }
-            EventOutcome::ModelSelect(key) => {
-                if let Some(resolved) = self.available_models.iter().find(|m| m.key == key) {
-                    self.model = resolved.model_name.clone();
-                    self.model_config = resolved.config.clone();
-                    self.api_base = resolved.api_base.clone();
-                    self.api_key = std::env::var(&resolved.api_key_env).unwrap_or_default();
-                    self.screen.set_model_label(resolved.model_name.clone());
-                    self.app_state.set_selected_model(key);
+            EventOutcome::MenuResult(result) => {
+                match result {
+                    MenuResult::Settings { vim, auto_compact } => {
+                        self.input.set_vim_enabled(vim);
+                        self.app_state.set_vim_enabled(vim);
+                        self.auto_compact = auto_compact;
+                    }
+                    MenuResult::ModelSelect(key) => {
+                        if let Some(resolved) = self.available_models.iter().find(|m| m.key == key)
+                        {
+                            self.model = resolved.model_name.clone();
+                            self.model_config = resolved.config.clone();
+                            self.api_base = resolved.api_base.clone();
+                            self.api_key = std::env::var(&resolved.api_key_env).unwrap_or_default();
+                            self.screen.set_model_label(resolved.model_name.clone());
+                            self.app_state.set_selected_model(key);
+                        }
+                        self.screen.erase_prompt();
+                    }
+                    MenuResult::Dismissed => {}
                 }
-                self.screen.erase_prompt();
                 self.screen.mark_dirty();
                 false
             }
@@ -478,8 +501,7 @@ impl App {
                 false
             }
             EventOutcome::Submit(text) => {
-                let text = text.trim().to_string();
-                if !text.is_empty() {
+                if !text.trim().is_empty() {
                     self.screen.erase_prompt();
                     match self.process_input(&text) {
                         InputOutcome::StartAgent => {
@@ -570,14 +592,15 @@ impl App {
         }
 
         // Esc / double-Esc (skip when a modal menu is open — let it handle Esc)
-        let has_modal = self.input.settings.is_some() || self.input.model_menu.is_some();
-        if !has_modal && matches!(
-            ev,
-            Event::Key(KeyEvent {
-                code: KeyCode::Esc,
-                ..
-            })
-        ) {
+        if !self.input.has_modal()
+            && matches!(
+                ev,
+                Event::Key(KeyEvent {
+                    code: KeyCode::Esc,
+                    ..
+                })
+            )
+        {
             let in_normal = !self.input.vim_enabled() || !self.input.vim_in_insert_mode();
             if in_normal {
                 let double = t
@@ -642,8 +665,7 @@ impl App {
                 self.input.restore_stash();
                 EventOutcome::Submit(text)
             }
-            Action::ModelSelect(key) => EventOutcome::ModelSelect(key),
-            Action::Settings { vim, auto_compact } => EventOutcome::Settings { vim, auto_compact },
+            Action::MenuResult(result) => EventOutcome::MenuResult(result),
             Action::ToggleMode => {
                 self.mode = self.mode.toggle();
                 self.app_state.set_mode(self.mode);
@@ -769,7 +791,7 @@ impl App {
             Action::Redraw => {
                 self.screen.mark_dirty();
             }
-            Action::Settings { .. } | Action::ModelSelect(_) | Action::Noop | Action::Resize { .. } => {}
+            Action::MenuResult(_) | Action::Noop | Action::Resize { .. } => {}
         }
         EventOutcome::Noop
     }
@@ -777,26 +799,26 @@ impl App {
     // ── Input processing (commands, settings, rewind, shell) ─────────────
 
     fn process_input(&mut self, input: &str) -> InputOutcome {
-        let input = input.trim();
-        if input.is_empty() {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
             return InputOutcome::Continue;
         }
 
-        self.input_history.push(input.to_string());
+        self.input_history.push(trimmed.to_string());
         self.app_state.set_mode(self.mode);
 
-        if !self.handle_command(input) {
+        if !self.handle_command(trimmed) {
             return InputOutcome::Quit;
         }
-        if input == "/compact" {
+        if trimmed == "/compact" {
             return InputOutcome::Compact;
         }
-        if input.starts_with('/') && crate::completer::Completer::is_command(input) {
+        if trimmed.starts_with('/') && crate::completer::Completer::is_command(trimmed) {
             return InputOutcome::Continue;
         }
 
         // Shell command
-        if let Some(cmd) = input.strip_prefix('!') {
+        if let Some(cmd) = trimmed.strip_prefix('!') {
             let cmd = cmd.trim();
             if !cmd.is_empty() {
                 let output = std::process::Command::new("sh")
@@ -1364,12 +1386,12 @@ impl App {
     /// Returns `true` if the agent should be cancelled.
     fn resolve_confirm(
         &mut self,
-        choice: ConfirmChoice,
+        (choice, message): (ConfirmChoice, Option<String>),
         reply: tokio::sync::oneshot::Sender<bool>,
         tool_name: &str,
         agent: &mut Option<AgentState>,
     ) -> bool {
-        match choice {
+        let cancel = match choice {
             ConfirmChoice::Yes => {
                 self.screen.set_active_status(ToolStatus::Pending);
                 let _ = reply.send(true);
@@ -1392,12 +1414,6 @@ impl App {
                 let _ = reply.send(true);
                 false
             }
-            ConfirmChoice::YesWithMessage(ref msg) => {
-                self.screen.set_active_status(ToolStatus::Pending);
-                let _ = reply.send(true);
-                self.queued_messages.push(msg.clone());
-                false
-            }
             ConfirmChoice::No => {
                 let _ = reply.send(false);
                 self.screen.finish_tool(ToolStatus::Denied, None);
@@ -1406,7 +1422,11 @@ impl App {
                 }
                 true
             }
+        };
+        if let Some(msg) = message {
+            self.queued_messages.push(msg);
         }
+        cancel
     }
 
     /// Resolve a completed question dialog.
@@ -1609,14 +1629,14 @@ enum LoopAction {
 
 /// Intermediate type for dispatching dialog results in dispatch_terminal_event.
 enum DialogOutcome {
-    Confirm(ConfirmChoice),
+    Confirm(ConfirmChoice, Option<String>),
     Question(Option<String>), // Some(json) on confirm, None on cancel
 }
 
 impl DialogOutcome {
-    fn into_confirm(self) -> ConfirmChoice {
+    fn into_confirm(self) -> (ConfirmChoice, Option<String>) {
         match self {
-            DialogOutcome::Confirm(c) => c,
+            DialogOutcome::Confirm(c, m) => (c, m),
             _ => unreachable!(),
         }
     }
@@ -1633,7 +1653,7 @@ pub struct PendingTool {
     pub name: String,
 }
 
-fn draw_active_dialog(dlg: &Option<ActiveDialog>) {
+fn draw_active_dialog(dlg: &mut Option<ActiveDialog>) {
     if let Some(dlg) = dlg {
         match dlg {
             ActiveDialog::Confirm { dialog, .. } => dialog.draw(),

@@ -55,26 +55,39 @@ async fn main() {
     // Resolve the active model: CLI flags > cached selection > default_model > first in config
     let (api_base, api_key, model, model_config) = {
         let resolved = if let Some(ref cli_model) = args.model {
-            available_models.iter().find(|m| m.model_name == *cli_model || m.key == *cli_model)
+            available_models
+                .iter()
+                .find(|m| m.model_name == *cli_model || m.key == *cli_model)
         } else if let Some(ref cached) = app_state.selected_model {
             available_models.iter().find(|m| m.key == *cached)
         } else if let Some(ref default) = cfg.default_model {
-            available_models.iter().find(|m| m.key == *default || m.model_name == *default)
+            available_models
+                .iter()
+                .find(|m| m.key == *default || m.model_name == *default)
         } else {
             available_models.first()
         };
 
         if let Some(r) = resolved {
             let base = args.api_base.clone().unwrap_or_else(|| r.api_base.clone());
-            let key_env = args.api_key_env.clone().unwrap_or_else(|| r.api_key_env.clone());
+            let key_env = args
+                .api_key_env
+                .clone()
+                .unwrap_or_else(|| r.api_key_env.clone());
             let key = std::env::var(&key_env).unwrap_or_default();
             (base, key, r.model_name.clone(), r.config.clone())
         } else {
             // Fallback: pure CLI flags, no config providers
-            let base = args.api_base.clone().expect("api_base must be set via --api-base or config file");
+            let base = args
+                .api_base
+                .clone()
+                .expect("api_base must be set via --api-base or config file");
             let key_env = args.api_key_env.clone().unwrap_or_default();
             let key = std::env::var(&key_env).unwrap_or_default();
-            let model = args.model.clone().expect("model must be set via --model or config file");
+            let model = args
+                .model
+                .clone()
+                .expect("model must be set via --model or config file");
             (base, key, model, config::ModelConfig::default())
         }
     };

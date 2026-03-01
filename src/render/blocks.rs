@@ -12,7 +12,7 @@ use std::time::Duration;
 use super::highlight::{
     print_inline_diff, print_syntax_file, render_code_block, render_markdown_table,
 };
-use super::{crlf, truncate_str, Block, ConfirmChoice, ToolOutput, ToolStatus};
+use super::{chunk_line, crlf, truncate_str, Block, ConfirmChoice, ToolOutput, ToolStatus};
 
 /// Element types for spacing calculation.
 pub(super) enum Element<'a> {
@@ -43,19 +43,25 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
     let _perf = crate::perf::begin("render_block");
     match block {
         Block::User { text } => {
-            let w = width;
-            let content_w = w.saturating_sub(1).max(1);
-            let logical_lines: Vec<String> =
-                text.trim().lines().map(|l| l.trim().to_string()).collect();
+            // Each rendered row is: " " (1-char prefix) + content + trailing padding.
+            // `text_w` is the max content chars per row so the total never reaches
+            // the terminal width (which would cause an implicit wrap).
+            let text_w = width.saturating_sub(2).max(1);
+            let logical_lines: Vec<String> = text
+                .trim()
+                .lines()
+                .map(|l| l.replace('\t', "    ").trim_end().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
             let multiline = logical_lines.len() > 1
                 || logical_lines
                     .first()
-                    .is_some_and(|l| l.chars().count() > content_w);
+                    .is_some_and(|l| l.chars().count() > text_w);
             // For multi-line messages, pad all lines to the same width.
             let block_w = if multiline {
                 logical_lines
                     .iter()
-                    .map(|l| l.chars().count().min(content_w))
+                    .map(|l| l.chars().count().min(text_w))
                     .max()
                     .unwrap_or(0)
             } else {
@@ -64,11 +70,7 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             let mut rows = 0u16;
             for logical_line in &logical_lines {
                 if logical_line.is_empty() {
-                    let fill = if multiline {
-                        (block_w + 2).min(content_w + 1)
-                    } else {
-                        2
-                    };
+                    let fill = if multiline { block_w + 1 } else { 2 };
                     let _ = out
                         .queue(SetBackgroundColor(theme::USER_BG))
                         .and_then(|o| o.queue(Print(" ".repeat(fill))))
@@ -78,18 +80,12 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
                     rows += 1;
                     continue;
                 }
-                let chars: Vec<char> = logical_line.chars().collect();
-                let mut start = 0;
-                loop {
-                    let chunk: String = chars[start..(start + content_w).min(chars.len())]
-                        .iter()
-                        .collect();
+                let chunks = chunk_line(logical_line, text_w);
+                let last = chunks.len() - 1;
+                for (ci, chunk) in chunks.iter().enumerate() {
                     let chunk_len = chunk.chars().count();
-                    let full_width = chunk_len >= content_w;
-                    let trailing = if full_width {
-                        0
-                    } else if multiline {
-                        block_w.saturating_sub(chunk_len) + 1
+                    let trailing = if multiline {
+                        block_w.saturating_sub(chunk_len)
                     } else {
                         1
                     };
@@ -99,15 +95,10 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
                         .and_then(|o| o.queue(Print(format!(" {}{}", chunk, " ".repeat(trailing)))))
                         .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
                         .and_then(|o| o.queue(ResetColor));
-                    let wraps = full_width && start + content_w < chars.len();
-                    if !wraps {
+                    if ci == last {
                         crlf(out);
                     }
                     rows += 1;
-                    start += content_w;
-                    if start >= chars.len() {
-                        break;
-                    }
                 }
             }
             rows
@@ -273,7 +264,7 @@ fn render_confirm_result(
         rows += 1;
         let _ = out.queue(Print("   "));
         match c {
-            ConfirmChoice::Yes | ConfirmChoice::YesWithMessage(_) => {
+            ConfirmChoice::Yes => {
                 print_dim(out, "approved");
             }
             ConfirmChoice::Always => {
@@ -336,7 +327,27 @@ fn print_tool_output(
     args: &HashMap<String, serde_json::Value>,
 ) -> u16 {
     match name {
-        "read_file" | "glob" | "grep" | "web_fetch" | "web_search" if !is_error => {
+        "web_search" if !is_error => {
+            let mut count = 0u16;
+            for line in content.lines() {
+                if let Some(pos) = line.find(". ") {
+                    let prefix = &line[..pos];
+                    if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
+                        let title = &line[pos + 2..];
+                        print_dim(out, &format!("   {title}"));
+                        crlf(out);
+                        count += 1;
+                    }
+                }
+            }
+            if count == 0 {
+                print_dim(out, "   No results found");
+                crlf(out);
+                return 1;
+            }
+            count
+        }
+        "read_file" | "glob" | "grep" | "web_fetch" if !is_error => {
             let (s, p) = match name {
                 "glob" => ("file", "files"),
                 "grep" => ("match", "matches"),
