@@ -182,6 +182,20 @@ fn sessions_dir() -> PathBuf {
     config::state_dir().join("sessions")
 }
 
+pub fn print_resume_hint(session_id: &str) {
+    use crossterm::style::{Attribute, Print, SetAttribute};
+    use crossterm::QueueableCommand;
+    use std::io::Write;
+
+    let mut out = std::io::stdout();
+    let _ = out.queue(SetAttribute(Attribute::Dim));
+    let _ = out.queue(Print(format!(
+        "\nresume with:\nagent --resume {session_id}\n\n"
+    )));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    let _ = out.flush();
+}
+
 fn new_session_id(now_ms: u64) -> String {
     let counter = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();

@@ -45,6 +45,8 @@ struct Args {
     bench: bool,
     #[arg(long, help = "Run headless (no TUI), requires a message argument")]
     headless: bool,
+    #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION_ID")]
+    resume: Option<String>,
 }
 
 #[tokio::main]
@@ -132,6 +134,7 @@ async fn main() {
 
     {
         let shared = shared_session.clone();
+        let is_headless = args.headless;
         tokio::spawn(async move {
             #[cfg(unix)]
             {
@@ -149,14 +152,28 @@ async fn main() {
             {
                 tokio::signal::ctrl_c().await.ok();
             }
-            if let Ok(guard) = shared.lock() {
+            let session_id = if let Ok(guard) = shared.lock() {
                 if let Some(ref s) = *guard {
                     session::save(s);
+                    if !s.messages.is_empty() {
+                        Some(s.id.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 }
-            }
+            } else {
+                None
+            };
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
             println!();
+            if !is_headless {
+                if let Some(id) = session_id {
+                    session::print_resume_hint(&id);
+                }
+            }
             std::process::exit(0);
         });
     }
@@ -186,11 +203,25 @@ async fn main() {
         Some(rx)
     };
 
+    if let Some(ref resume_val) = args.resume {
+        if resume_val.is_empty() {
+            app.resume_session_before_run();
+        } else if let Some(loaded) = session::load(resume_val) {
+            app.load_session(loaded);
+        } else {
+            eprintln!("error: session '{}' not found", resume_val);
+            std::process::exit(1);
+        }
+    }
+
     if args.headless {
         app.run_headless(args.message.unwrap()).await;
     } else {
         println!();
         app.run(ctx_rx, args.message).await;
+        if !app.session.messages.is_empty() {
+            session::print_resume_hint(&app.session.id);
+        }
     }
     perf::print_summary();
 }

@@ -181,6 +181,10 @@ impl App {
         terminal::enable_raw_mode().ok();
         let _ = io::stdout().execute(EnableBracketedPaste);
 
+        if !self.history.is_empty() {
+            self.rebuild_screen_from_history();
+            self.screen.flush_blocks();
+        }
         self.screen
             .draw_prompt(&self.input, self.mode, render::term_width());
 
@@ -1089,9 +1093,17 @@ impl App {
         self.session = session::Session::new();
     }
 
+    pub fn load_session(&mut self, loaded: session::Session) {
+        self.session = loaded;
+        self.history = self.session.messages.clone();
+        self.auto_approved.clear();
+        self.queued_messages.clear();
+        self.input.clear();
+    }
+
     pub fn resume_session(&mut self) {
-        let sessions = session::list_sessions();
-        if sessions.is_empty() {
+        let entries = self.resume_entries();
+        if entries.is_empty() {
             self.screen.push(Block::Error {
                 message: "no saved sessions".into(),
             });
@@ -1099,24 +1111,9 @@ impl App {
             return;
         }
 
-        let entries: Vec<ResumeEntry> = sessions
-            .into_iter()
-            .map(|s| ResumeEntry {
-                id: s.id,
-                title: s.title.unwrap_or_default(),
-                subtitle: s.first_user_message,
-                updated_at_ms: s.updated_at_ms,
-                created_at_ms: s.created_at_ms,
-            })
-            .collect();
-
         if let Some(id) = render::show_resume(&entries) {
             if let Some(loaded) = session::load(&id) {
-                self.session = loaded;
-                self.history = self.session.messages.clone();
-                self.auto_approved.clear();
-                self.queued_messages.clear();
-                self.input.clear();
+                self.load_session(loaded);
                 self.rebuild_screen_from_history();
                 self.screen.flush_blocks();
             }
@@ -1126,6 +1123,33 @@ impl App {
         }
         // show_resume manages its own raw mode — re-enable.
         terminal::enable_raw_mode().ok();
+    }
+
+    pub fn resume_session_before_run(&mut self) {
+        let entries = self.resume_entries();
+        if entries.is_empty() {
+            eprintln!("no saved sessions");
+            return;
+        }
+
+        if let Some(id) = render::show_resume(&entries) {
+            if let Some(loaded) = session::load(&id) {
+                self.load_session(loaded);
+            }
+        }
+    }
+
+    fn resume_entries(&self) -> Vec<ResumeEntry> {
+        session::list_sessions()
+            .into_iter()
+            .map(|s| ResumeEntry {
+                id: s.id,
+                title: s.title.unwrap_or_default(),
+                subtitle: s.first_user_message,
+                updated_at_ms: s.updated_at_ms,
+                created_at_ms: s.created_at_ms,
+            })
+            .collect()
     }
 
     // ── History / session ────────────────────────────────────────────────
