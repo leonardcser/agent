@@ -5,6 +5,46 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    #[default]
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::Low,
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::Off,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn color(self) -> crossterm::style::Color {
+        use crate::theme;
+        match self {
+            Self::Off => theme::REASON_OFF,
+            Self::Low => theme::REASON_LOW,
+            Self::Medium => theme::REASON_MED,
+            Self::High => theme::REASON_HIGH,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -98,6 +138,7 @@ pub struct Provider {
     api_key: String,
     client: Client,
     model_config: crate::config::ModelConfig,
+    reasoning_effort: ReasoningEffort,
 }
 
 impl Provider {
@@ -107,11 +148,17 @@ impl Provider {
             api_key,
             client,
             model_config: Default::default(),
+            reasoning_effort: ReasoningEffort::Off,
         }
     }
 
     pub fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
         self.model_config = config;
+        self
+    }
+
+    pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = effort;
         self
     }
 
@@ -143,6 +190,17 @@ impl Provider {
         }
         if let Some(v) = self.model_config.repeat_penalty {
             body.insert("repeat_penalty", serde_json::json!(v));
+        }
+        if self.reasoning_effort != ReasoningEffort::Off {
+            let effort = self.reasoning_effort.label();
+            body.insert("reasoning_effort", serde_json::json!(effort));
+            body.insert(
+                "chat_template_kwargs",
+                serde_json::json!({
+                    "enable_thinking": true,
+                    "reasoning_effort": effort,
+                }),
+            );
         }
 
         log::entry(

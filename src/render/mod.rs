@@ -345,6 +345,7 @@ pub struct Screen {
     working: WorkingState,
     context_tokens: Option<u32>,
     model_label: Option<String>,
+    reasoning_effort: crate::provider::ReasoningEffort,
     /// True once terminal auto-scrolling has pushed content into scrollback.
     pub has_scrollback: bool,
     /// Terminal row where block content starts (top of conversation).
@@ -369,6 +370,7 @@ impl Screen {
             working: WorkingState::new(),
             context_tokens: None,
             model_label: None,
+            reasoning_effort: Default::default(),
             has_scrollback: false,
             content_start_row: None,
             pending_dialog: false,
@@ -485,6 +487,11 @@ impl Screen {
 
     pub fn set_model_label(&mut self, label: String) {
         self.model_label = Some(label);
+        self.prompt.dirty = true;
+    }
+
+    pub fn set_reasoning_effort(&mut self, effort: crate::provider::ReasoningEffort) {
+        self.reasoning_effort = effort;
         self.prompt.dirty = true;
     }
 
@@ -784,6 +791,20 @@ impl Screen {
                 color: theme::MUTED,
                 attr: None,
             });
+            let effort = match state.menu {
+                Some(ref ms) => match ms.kind {
+                    crate::input::MenuKind::Model { reasoning_effort, .. } => reasoning_effort,
+                    _ => self.reasoning_effort,
+                },
+                None => self.reasoning_effort,
+            };
+            if effort != crate::provider::ReasoningEffort::Off {
+                right_spans.push(BarSpan {
+                    text: format!(" {}", effort.label()),
+                    color: effort.color(),
+                    attr: None,
+                });
+            }
         }
         if let Some(tokens) = self.context_tokens {
             if !right_spans.is_empty() {
@@ -1530,7 +1551,10 @@ fn draw_menu(out: &mut io::Stdout, ms: &crate::input::MenuState, max_rows: usize
             }
             drawn
         }
-        MenuKind::Model { models } => {
+        MenuKind::Model {
+            models,
+            reasoning_effort,
+        } => {
             if models.is_empty() {
                 return 0;
             }
@@ -1549,6 +1573,20 @@ fn draw_menu(out: &mut io::Stdout, ms: &crate::input::MenuState, max_rows: usize
                     let _ = out.queue(Print("\r\n"));
                 }
                 draw_menu_row(out, model_name, provider_name, col, idx == selected);
+                drawn += 1;
+            }
+            if drawn > 0 && drawn + 2 <= max_rows {
+                let _ = out.queue(Print("\r\n"));
+                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+                drawn += 1;
+                let _ = out.queue(Print("\r\n"));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print("  thinking: "));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                let _ = out.queue(SetForegroundColor(reasoning_effort.color()));
+                let _ = out.queue(Print(reasoning_effort.label()));
+                let _ = out.queue(ResetColor);
+                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
                 drawn += 1;
             }
             drawn

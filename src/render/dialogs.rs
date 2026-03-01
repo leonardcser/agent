@@ -640,7 +640,7 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
     let (_, height) = terminal::size().unwrap_or((80, 24));
 
     let mut max_visible = (height as usize).saturating_sub(6).min(turns.len());
-    let mut total_rows = (max_visible + 5) as u16;
+    let mut total_rows = (max_visible + 4) as u16;
     let mut bar_row = height.saturating_sub(total_rows);
     let mut last_bar_row = bar_row;
     let mut selected: usize = turns.len() - 1;
@@ -716,11 +716,16 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
             row = row.saturating_add(1);
         }
 
-        for _ in 0..3 {
-            let _ = out.queue(cursor::MoveTo(0, row));
-            let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-            row = row.saturating_add(1);
-        }
+        let _ = out.queue(cursor::MoveTo(0, row));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+        row = row.saturating_add(1);
+
+        let _ = out.queue(cursor::MoveTo(0, row));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(" enter: select  esc: cancel"));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
         let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
@@ -733,7 +738,7 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
         match event::read() {
             Ok(Event::Resize(_, h)) => {
                 max_visible = (h as usize).saturating_sub(6).min(turns.len());
-                total_rows = (max_visible + 5) as u16;
+                total_rows = (max_visible + 4) as u16;
                 bar_row = h.saturating_sub(total_rows);
                 scroll_offset = scroll_offset.min(turns.len().saturating_sub(max_visible));
                 draw(bar_row, last_bar_row, max_visible, selected, scroll_offset);
@@ -785,7 +790,7 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
     let mut max_visible = (height as usize)
         .saturating_sub(7)
         .min(entries.len().max(1));
-    let mut total_rows = (max_visible + 6) as u16;
+    let mut total_rows = (max_visible + 4) as u16;
     let mut bar_row = height.saturating_sub(total_rows);
 
     let mut query = String::new();
@@ -869,11 +874,16 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
             }
         }
 
-        for _ in 0..3 {
-            let _ = out.queue(cursor::MoveTo(0, row));
-            let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-            row = row.saturating_add(1);
-        }
+        let _ = out.queue(cursor::MoveTo(0, row));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+        row = row.saturating_add(1);
+
+        let _ = out.queue(cursor::MoveTo(0, row));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(" enter: select  esc: cancel  type to filter"));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
         let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
@@ -898,7 +908,7 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
             match event::read() {
                 Ok(Event::Resize(_, h)) => {
                     max_visible = (h as usize).saturating_sub(7).min(entries.len().max(1));
-                    total_rows = (max_visible + 6) as u16;
+                    total_rows = (max_visible + 4) as u16;
                     bar_row = h.saturating_sub(total_rows);
                     if filtered.is_empty() {
                         selected = 0;

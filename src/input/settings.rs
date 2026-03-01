@@ -6,6 +6,8 @@ pub enum MenuAction {
     Toggle(usize),
     /// Item was selected, menu should close.
     Select(usize),
+    /// Tab was pressed (cycle auxiliary state).
+    Tab,
     /// Menu was dismissed via Esc/q.
     Dismiss,
     /// Navigation happened, redraw needed.
@@ -46,6 +48,14 @@ impl Menu {
                 code: KeyCode::Char(' '),
                 ..
             }) if !self.select_on_enter => MenuAction::Toggle(self.selected),
+            Event::Key(KeyEvent {
+                code: KeyCode::Tab, ..
+            }) => MenuAction::Tab,
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('t'),
+                modifiers: crossterm::event::KeyModifiers::CONTROL,
+                ..
+            }) => MenuAction::Tab,
             Event::Key(KeyEvent {
                 code: KeyCode::Up, ..
             })
@@ -89,6 +99,7 @@ pub enum MenuKind {
     Model {
         /// (key, model_name, provider_name) for each entry.
         models: Vec<(String, String, String)>,
+        reasoning_effort: crate::provider::ReasoningEffort,
     },
 }
 
@@ -100,6 +111,6 @@ pub struct MenuState {
 /// Domain-specific result returned to the app after a menu closes.
 pub enum MenuResult {
     Settings { vim: bool, auto_compact: bool },
-    ModelSelect(String),
+    ModelSelect(String, crate::provider::ReasoningEffort),
     Dismissed,
 }

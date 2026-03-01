@@ -32,6 +32,7 @@ pub struct App {
     pub api_key: String,
     pub model: String,
     pub model_config: crate::config::ModelConfig,
+    pub reasoning_effort: crate::provider::ReasoningEffort,
     pub client: reqwest::Client,
     pub mode: Mode,
     pub permissions: permissions::Permissions,
@@ -139,13 +140,16 @@ impl App {
         if vim_enabled {
             input.set_vim_enabled(true);
         }
+        let reasoning_effort = app_state.reasoning_effort;
         let mut screen = Screen::new();
         screen.set_model_label(model.clone());
+        screen.set_reasoning_effort(reasoning_effort);
         Self {
             api_base,
             api_key,
             model,
             model_config,
+            reasoning_effort,
             client: reqwest::Client::new(),
             mode,
             permissions: permissions::Permissions::load(),
@@ -580,7 +584,7 @@ impl App {
                         self.app_state.set_vim_enabled(vim);
                         self.auto_compact = auto_compact;
                     }
-                    MenuResult::ModelSelect(key) => {
+                    MenuResult::ModelSelect(key, effort) => {
                         if let Some(resolved) = self.available_models.iter().find(|m| m.key == key)
                         {
                             self.model = resolved.model_name.clone();
@@ -590,6 +594,9 @@ impl App {
                             self.screen.set_model_label(resolved.model_name.clone());
                             self.app_state.set_selected_model(key);
                         }
+                        self.reasoning_effort = effort;
+                        self.screen.set_reasoning_effort(effort);
+                        self.app_state.set_reasoning_effort(effort);
                         self.screen.erase_prompt();
                     }
                     MenuResult::Dismissed => {}
@@ -754,7 +761,7 @@ impl App {
                     .map(|m| (m.key.clone(), m.model_name.clone(), m.provider_name.clone()))
                     .collect();
                 if !models.is_empty() {
-                    self.input.open_model_picker(models);
+                    self.input.open_model_picker(models, self.reasoning_effort);
                     self.screen.mark_dirty();
                 }
                 EventOutcome::Redraw
@@ -772,6 +779,18 @@ impl App {
             Action::MenuResult(result) => EventOutcome::MenuResult(result),
             Action::ToggleMode => {
                 self.toggle_mode();
+                EventOutcome::Redraw
+            }
+            Action::CycleReasoning => {
+                self.reasoning_effort = self.reasoning_effort.cycle();
+                self.screen.set_reasoning_effort(self.reasoning_effort);
+                self.app_state.set_reasoning_effort(self.reasoning_effort);
+                EventOutcome::Redraw
+            }
+            Action::SetReasoning(effort) => {
+                self.reasoning_effort = effort;
+                self.screen.set_reasoning_effort(effort);
+                self.app_state.set_reasoning_effort(effort);
                 EventOutcome::Redraw
             }
             Action::Resize {
@@ -890,6 +909,16 @@ impl App {
             }
             Action::Redraw => {
                 self.screen.mark_dirty();
+            }
+            Action::CycleReasoning => {
+                self.reasoning_effort = self.reasoning_effort.cycle();
+                self.screen.set_reasoning_effort(self.reasoning_effort);
+                self.app_state.set_reasoning_effort(self.reasoning_effort);
+            }
+            Action::SetReasoning(effort) => {
+                self.reasoning_effort = effort;
+                self.screen.set_reasoning_effort(effort);
+                self.app_state.set_reasoning_effort(effort);
             }
             Action::MenuResult(_) | Action::Noop | Action::Resize { .. } => {}
         }
@@ -1371,6 +1400,7 @@ impl App {
             self.client.clone(),
         )
         .with_model_config(self.model_config.clone())
+        .with_reasoning_effort(self.reasoning_effort)
     }
 
     fn build_agent_context(

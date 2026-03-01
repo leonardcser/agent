@@ -194,7 +194,7 @@ impl Vim {
         // Ctrl+C / Ctrl+D always pass through for cancel.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('c' | 'd' | 'u') => return Action::Passthrough,
+                KeyCode::Char('c' | 'd' | 'u' | 't') => return Action::Passthrough,
                 KeyCode::Char('r') => {
                     self.redo(buf, cpos);
                     return Action::Consumed;

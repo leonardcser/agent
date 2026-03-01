@@ -1,5 +1,6 @@
 use crate::config;
 use crate::input::Mode;
+use crate::provider::ReasoningEffort;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -11,6 +12,8 @@ pub struct State {
     pub vim_enabled: bool,
     #[serde(default)]
     pub selected_model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: ReasoningEffort,
 }
 
 fn state_path() -> PathBuf {
@@ -56,6 +59,11 @@ impl State {
 
     pub fn set_selected_model(&mut self, key: String) {
         self.selected_model = Some(key);
+        self.save();
+    }
+
+    pub fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+        self.reasoning_effort = effort;
         self.save();
     }
 }

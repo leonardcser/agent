@@ -115,6 +115,8 @@ pub enum Action {
     Submit(String),
     MenuResult(MenuResult),
     ToggleMode,
+    CycleReasoning,
+    SetReasoning(crate::provider::ReasoningEffort),
     Resize { width: usize, height: usize },
     Noop,
 }
@@ -235,7 +237,11 @@ impl InputState {
         });
     }
 
-    pub fn open_model_picker(&mut self, models: Vec<(String, String, String)>) {
+    pub fn open_model_picker(
+        &mut self,
+        models: Vec<(String, String, String)>,
+        reasoning_effort: crate::provider::ReasoningEffort,
+    ) {
         let len = models.len();
         self.completer = None;
         self.menu = Some(MenuState {
@@ -244,7 +250,10 @@ impl InputState {
                 len,
                 select_on_enter: true,
             },
-            kind: MenuKind::Model { models },
+            kind: MenuKind::Model {
+                models,
+                reasoning_effort,
+            },
         });
     }
 
@@ -257,7 +266,7 @@ impl InputState {
         match &self.menu {
             Some(ms) => match &ms.kind {
                 MenuKind::Settings { .. } => 2,
-                MenuKind::Model { models } => models.len().min(10),
+                MenuKind::Model { models, .. } => (models.len() + 2).min(12),
             },
             None => 0,
         }
@@ -366,6 +375,12 @@ impl InputState {
                     Action::Submit(text)
                 }
             }
+            // Ctrl+T: cycle reasoning effort.
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('t'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }) => Action::CycleReasoning,
             // Ctrl+C: handled by the app event loop (double-tap logic).
             Event::Key(KeyEvent {
                 code: KeyCode::Char('c'),
@@ -550,12 +565,30 @@ impl InputState {
                 }
                 Action::Redraw
             }
+            MenuAction::Tab => {
+                if let MenuKind::Model {
+                    ref mut reasoning_effort,
+                    ..
+                } = ms.kind
+                {
+                    *reasoning_effort = reasoning_effort.cycle();
+                    Action::SetReasoning(*reasoning_effort)
+                } else {
+                    Action::Redraw
+                }
+            }
             MenuAction::Select(idx) => {
                 let ms = self.menu.take().unwrap();
                 match ms.kind {
-                    MenuKind::Model { ref models } => {
+                    MenuKind::Model {
+                        ref models,
+                        reasoning_effort,
+                    } => {
                         if let Some((key, _, _)) = models.get(idx) {
-                            Action::MenuResult(MenuResult::ModelSelect(key.clone()))
+                            Action::MenuResult(MenuResult::ModelSelect(
+                                key.clone(),
+                                reasoning_effort,
+                            ))
                         } else {
                             Action::Redraw
                         }
