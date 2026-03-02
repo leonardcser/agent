@@ -305,20 +305,14 @@ pub(super) fn print_inline_diff(
                 if visible[ci] {
                     in_ellipsis = false;
                     if new_lineno >= dv.view_start && new_lineno < dv.view_end {
-                        print_diff_lines(
-                            out, &mut h_new, &[text], new_lineno, None, None, &layout,
-                        );
+                        print_diff_lines(out, &mut h_new, &[text], new_lineno, None, None, &layout);
                         rows += 1;
                     }
                 } else if !in_ellipsis {
                     in_ellipsis = true;
                     let _ = out.queue(Print(indent));
                     let _ = out.queue(SetForegroundColor(Color::DarkGrey));
-                    let _ = out.queue(Print(format!(
-                        " {:>w$}   ...",
-                        " ",
-                        w = gutter_width
-                    )));
+                    let _ = out.queue(Print(format!(" {:>w$}   ...", " ", w = gutter_width)));
                     let _ = out.queue(ResetColor);
                     crlf(out);
                     rows += 1;

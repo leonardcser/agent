@@ -833,9 +833,8 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
     let mut scroll_offset: usize = 0;
 
     // 4 = bar + header + blank + hint; 3 = top breathing room
-    let resume_max_visible = |h: u16, count: usize| -> usize {
-        (h as usize).saturating_sub(7).min(count.max(1))
-    };
+    let resume_max_visible =
+        |h: u16, count: usize| -> usize { (h as usize).saturating_sub(7).min(count.max(1)) };
     let mut max_visible = resume_max_visible(height, filtered.len());
     let mut bar_row = height.saturating_sub((max_visible + 4) as u16);
     let mut last_bar_row = bar_row;
@@ -1016,8 +1015,7 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
                         _ => {}
                     }
 
-                    filtered =
-                        filter_resume_entries(entries, &query, workspace_only, current_cwd);
+                    filtered = filter_resume_entries(entries, &query, workspace_only, current_cwd);
                     max_visible = resume_max_visible(height, filtered.len());
                     bar_row = height.saturating_sub((max_visible + 4) as u16);
                     if filtered.is_empty() {
@@ -1225,7 +1223,11 @@ impl QuestionDialog {
         };
 
         let q = &self.questions[self.active_tab];
-        let suffix_len = if q.multi_select { " (space to toggle)".len() } else { 0 };
+        let suffix_len = if q.multi_select {
+            " (space to toggle)".len()
+        } else {
+            0
+        };
         let q_rows = wrap_line(&q.question, w.saturating_sub(1 + suffix_len)).len() as u16;
         // 1=bar, 1=blank, q_rows=question, 1=blank, 2=other+bottom
         let fixed_rows =

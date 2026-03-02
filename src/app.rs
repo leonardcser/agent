@@ -67,9 +67,52 @@ enum EventOutcome {
     Redraw,
     Quit,
     CancelAgent,
+    CancelAndClear,
     Submit(String),
     MenuResult(MenuResult),
     Rewind(usize),
+}
+
+enum RunningCommandResult {
+    Executed,
+    Blocked(String),
+    Quit,
+    Cancel,
+    NotACommand,
+}
+
+/// Classify input for when the agent is running. Pure function, no side effects.
+fn classify_running_command(input: &str) -> RunningCommandResult {
+    match input {
+        "/vim" | "/export" => RunningCommandResult::Executed,
+        "/exit" | "/quit" => RunningCommandResult::Quit,
+        "/clear" | "/new" => RunningCommandResult::Cancel,
+        "/compact" => RunningCommandResult::Blocked("cannot compact while agent is working".into()),
+        "/resume" => RunningCommandResult::Blocked("cannot resume while agent is working".into()),
+        "/settings" => {
+            RunningCommandResult::Blocked("cannot open settings while agent is working".into())
+        }
+        "/model" => {
+            RunningCommandResult::Blocked("cannot switch model while agent is working".into())
+        }
+        _ if input.starts_with('!') => RunningCommandResult::Executed,
+        _ => RunningCommandResult::NotACommand,
+    }
+}
+
+/// Classify input received as a CLI startup argument.
+/// Returns `None` if it's a normal message that should go to the agent.
+fn classify_startup_command(input: &str) -> Option<&'static str> {
+    if input.starts_with('!') {
+        return None; // handled separately (execute shell)
+    }
+    if !input.starts_with('/') || !crate::completer::Completer::is_command(input) {
+        return None; // normal message
+    }
+    match input {
+        "/resume" | "/settings" => None, // open their respective UI
+        _ => Some("has no effect as a startup argument"),
+    }
 }
 
 enum InputOutcome {
@@ -194,10 +237,26 @@ impl App {
 
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
         if let Some(msg) = initial_message {
-            self.screen.erase_prompt();
-            let (rx, ag) = self.begin_agent_turn(&msg);
-            agent_rx = rx;
-            agent = Some(ag);
+            let trimmed = msg.trim();
+            if let Some(cmd) = trimmed.strip_prefix('!') {
+                self.run_shell_escape(cmd);
+            } else if trimmed == "/resume" {
+                self.resume_session();
+            } else if trimmed == "/settings" {
+                self.input
+                    .open_settings(self.input.vim_enabled(), self.auto_compact);
+                self.screen.mark_dirty();
+            } else if let Some(reason) = classify_startup_command(trimmed) {
+                self.screen.push(Block::Error {
+                    message: format!("\"{}\" {}", trimmed, reason),
+                });
+                self.screen.flush_blocks();
+            } else {
+                self.screen.erase_prompt();
+                let (rx, ag) = self.begin_agent_turn(&msg);
+                agent_rx = rx;
+                agent = Some(ag);
+            }
         }
 
         let mut t = Timers {
@@ -279,7 +338,14 @@ impl App {
                             agent = Some(ag);
                         }
                         InputOutcome::Compact => {
-                            self.compact_history().await;
+                            if self.history.is_empty() {
+                                self.screen.push(Block::Error {
+                                    message: "nothing to compact".into(),
+                                });
+                                self.screen.flush_blocks();
+                            } else {
+                                self.compact_history().await;
+                            }
                         }
                         InputOutcome::Continue | InputOutcome::Quit => {}
                     }
@@ -430,6 +496,30 @@ impl App {
     /// Prints the agent's text output to stdout.
     pub async fn run_headless(&mut self, message: String) {
         use std::io::Write;
+
+        let trimmed = message.trim();
+
+        // Shell escape: execute and print output.
+        if let Some(cmd) = trimmed.strip_prefix('!') {
+            let cmd = cmd.trim();
+            if !cmd.is_empty() {
+                let output = std::process::Command::new("sh").arg("-c").arg(cmd).output();
+                match output {
+                    Ok(o) => {
+                        let _ = io::stdout().write_all(&o.stdout);
+                        let _ = io::stderr().write_all(&o.stderr);
+                    }
+                    Err(e) => eprintln!("error: {e}"),
+                }
+            }
+            return;
+        }
+
+        // Slash commands require interactive mode.
+        if trimmed.starts_with('/') && crate::completer::Completer::is_command(trimmed) {
+            eprintln!("\"{}\" requires interactive mode", trimmed);
+            std::process::exit(1);
+        }
 
         self.push_user_message(message.clone());
         if self.session.first_user_message.is_none() {
@@ -582,6 +672,13 @@ impl App {
                 }
                 false
             }
+            EventOutcome::CancelAndClear => {
+                if let Some(ag) = agent.take() {
+                    self.finish_agent(ag, true).await;
+                }
+                self.reset_session();
+                false
+            }
             EventOutcome::MenuResult(result) => {
                 match result {
                     MenuResult::Settings { vim, auto_compact } => {
@@ -623,7 +720,14 @@ impl App {
                             *agent = Some(ag);
                         }
                         InputOutcome::Compact => {
-                            self.compact_history().await;
+                            if self.history.is_empty() {
+                                self.screen.push(Block::Error {
+                                    message: "nothing to compact".into(),
+                                });
+                                self.screen.flush_blocks();
+                            } else {
+                                self.compact_history().await;
+                            }
                         }
                         InputOutcome::Continue => {}
                         InputOutcome::Quit => return true,
@@ -923,8 +1027,24 @@ impl App {
         // Everything else → InputState::handle_event (type-ahead, no history).
         match self.input.handle_event(ev, None) {
             Action::Submit(text) => {
-                if !text.is_empty() {
-                    self.queued_messages.push(text);
+                let trimmed = text.trim();
+                match self.try_command_while_running(trimmed) {
+                    RunningCommandResult::Executed => {}
+                    RunningCommandResult::Blocked(reason) => {
+                        self.screen.push(Block::Error { message: reason });
+                        self.screen.flush_blocks();
+                    }
+                    RunningCommandResult::Quit => {
+                        return EventOutcome::Quit;
+                    }
+                    RunningCommandResult::Cancel => {
+                        return EventOutcome::CancelAndClear;
+                    }
+                    RunningCommandResult::NotACommand => {
+                        if !text.is_empty() {
+                            self.queued_messages.push(text);
+                        }
+                    }
                 }
                 self.screen.mark_dirty();
             }
@@ -965,30 +1085,7 @@ impl App {
 
         // Shell command
         if let Some(cmd) = trimmed.strip_prefix('!') {
-            let cmd = cmd.trim();
-            if !cmd.is_empty() {
-                let output = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .output()
-                    .map(|o| {
-                        let mut s = String::from_utf8_lossy(&o.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&o.stderr);
-                        if !stderr.is_empty() {
-                            if !s.is_empty() {
-                                s.push('\n');
-                            }
-                            s.push_str(&stderr);
-                        }
-                        s.truncate(s.trim_end().len());
-                        s
-                    })
-                    .unwrap_or_else(|e| format!("error: {}", e));
-                self.screen.push(Block::Exec {
-                    command: cmd.to_string(),
-                    output,
-                });
-            }
+            self.run_shell_escape(cmd);
             return InputOutcome::Continue;
         }
 
@@ -1083,6 +1180,57 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    fn try_command_while_running(&mut self, input: &str) -> RunningCommandResult {
+        let result = classify_running_command(input);
+        // Execute side effects for the Executed variants.
+        if matches!(result, RunningCommandResult::Executed) {
+            match input {
+                "/vim" => {
+                    let enabled = !self.input.vim_enabled();
+                    self.input.set_vim_enabled(enabled);
+                    state::set_vim_enabled(enabled);
+                }
+                "/export" => {
+                    self.export_to_clipboard();
+                }
+                _ if input.starts_with('!') => {
+                    self.run_shell_escape(&input[1..]);
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+
+    fn run_shell_escape(&mut self, raw: &str) {
+        let cmd = raw.trim();
+        if cmd.is_empty() {
+            return;
+        }
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+            .map(|o| {
+                let mut s = String::from_utf8_lossy(&o.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                if !stderr.is_empty() {
+                    if !s.is_empty() {
+                        s.push('\n');
+                    }
+                    s.push_str(&stderr);
+                }
+                s.truncate(s.trim_end().len());
+                s
+            })
+            .unwrap_or_else(|e| format!("error: {}", e));
+        self.screen.push(Block::Exec {
+            command: cmd.to_string(),
+            output,
+        });
+        self.screen.flush_blocks();
     }
 
     pub fn reset_session(&mut self) {
@@ -1362,9 +1510,8 @@ impl App {
         let provider = self.build_provider();
         let model = self.model.clone();
         let cancel = CancellationToken::new();
-        let task = tokio::spawn(async move {
-            provider.compact(&to_summarize, &model, &cancel).await
-        });
+        let task =
+            tokio::spawn(async move { provider.compact(&to_summarize, &model, &cancel).await });
 
         self.screen.set_throbber(render::Throbber::Compacting);
         loop {
@@ -1898,5 +2045,158 @@ fn draw_active_dialog(dlg: &mut Option<ActiveDialog>) {
             ActiveDialog::Confirm { dialog, .. } => dialog.draw(),
             ActiveDialog::AskQuestion { dialog, .. } => dialog.draw(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── classify_running_command ──────────────────────────────────────
+
+    #[test]
+    fn running_vim_is_executed() {
+        assert!(matches!(
+            classify_running_command("/vim"),
+            RunningCommandResult::Executed
+        ));
+    }
+
+    #[test]
+    fn running_export_is_executed() {
+        assert!(matches!(
+            classify_running_command("/export"),
+            RunningCommandResult::Executed
+        ));
+    }
+
+    #[test]
+    fn running_exit_is_quit() {
+        assert!(matches!(
+            classify_running_command("/exit"),
+            RunningCommandResult::Quit
+        ));
+        assert!(matches!(
+            classify_running_command("/quit"),
+            RunningCommandResult::Quit
+        ));
+    }
+
+    #[test]
+    fn running_clear_is_cancel() {
+        assert!(matches!(
+            classify_running_command("/clear"),
+            RunningCommandResult::Cancel
+        ));
+        assert!(matches!(
+            classify_running_command("/new"),
+            RunningCommandResult::Cancel
+        ));
+    }
+
+    #[test]
+    fn running_compact_is_blocked() {
+        assert!(matches!(
+            classify_running_command("/compact"),
+            RunningCommandResult::Blocked(_)
+        ));
+    }
+
+    #[test]
+    fn running_resume_is_blocked() {
+        assert!(matches!(
+            classify_running_command("/resume"),
+            RunningCommandResult::Blocked(_)
+        ));
+    }
+
+    #[test]
+    fn running_settings_is_blocked() {
+        assert!(matches!(
+            classify_running_command("/settings"),
+            RunningCommandResult::Blocked(_)
+        ));
+    }
+
+    #[test]
+    fn running_model_is_blocked() {
+        assert!(matches!(
+            classify_running_command("/model"),
+            RunningCommandResult::Blocked(_)
+        ));
+    }
+
+    #[test]
+    fn running_shell_escape_is_executed() {
+        assert!(matches!(
+            classify_running_command("!ls"),
+            RunningCommandResult::Executed
+        ));
+        assert!(matches!(
+            classify_running_command("!cargo build && cargo test"),
+            RunningCommandResult::Executed
+        ));
+    }
+
+    #[test]
+    fn running_normal_message_is_not_a_command() {
+        assert!(matches!(
+            classify_running_command("fix the bug"),
+            RunningCommandResult::NotACommand
+        ));
+        assert!(matches!(
+            classify_running_command("use /tmp/foo as output"),
+            RunningCommandResult::NotACommand
+        ));
+    }
+
+    // ── classify_startup_command ──────────────────────────────────────
+
+    #[test]
+    fn startup_normal_message_is_none() {
+        assert!(classify_startup_command("fix the bug").is_none());
+    }
+
+    #[test]
+    fn startup_shell_escape_is_none() {
+        assert!(classify_startup_command("!ls -la").is_none());
+    }
+
+    #[test]
+    fn startup_resume_is_none() {
+        // /resume opens its UI, not blocked
+        assert!(classify_startup_command("/resume").is_none());
+    }
+
+    #[test]
+    fn startup_settings_is_none() {
+        // /settings opens its UI, not blocked
+        assert!(classify_startup_command("/settings").is_none());
+    }
+
+    #[test]
+    fn startup_vim_is_blocked() {
+        assert!(classify_startup_command("/vim").is_some());
+    }
+
+    #[test]
+    fn startup_exit_is_blocked() {
+        assert!(classify_startup_command("/exit").is_some());
+    }
+
+    #[test]
+    fn startup_compact_is_blocked() {
+        assert!(classify_startup_command("/compact").is_some());
+    }
+
+    #[test]
+    fn startup_clear_is_blocked() {
+        assert!(classify_startup_command("/clear").is_some());
+    }
+
+    #[test]
+    fn startup_unknown_slash_not_a_command() {
+        // Not a recognized command — should pass through as a message
+        assert!(classify_startup_command("/unknown").is_none());
     }
 }

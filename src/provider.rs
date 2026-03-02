@@ -372,10 +372,7 @@ impl Provider {
 
     /// Fire-and-forget short completion: low reasoning, no thinking, stops on
     /// newline.  Used for titles, command descriptions, and similar one-liners.
-    async fn complete_raw(
-        &self,
-        body: serde_json::Value,
-    ) -> Result<String, String> {
+    async fn complete_raw(&self, body: serde_json::Value) -> Result<String, String> {
         let url = format!("{}/chat/completions", self.api_base);
         let mut req = self.client.post(&url).json(&body);
         if !self.api_key.is_empty() {
@@ -427,11 +424,7 @@ impl Provider {
         Ok(normalize_short(&text))
     }
 
-    pub async fn describe_command(
-        &self,
-        command: &str,
-        model: &str,
-    ) -> Result<String, String> {
+    pub async fn describe_command(&self, command: &str, model: &str) -> Result<String, String> {
         let prompt = format!(
             "Describe what this shell command does in a short sentence (max 10 words). \
              Reply with only the description, no quotes.\n\n{command}"
