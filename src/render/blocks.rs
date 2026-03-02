@@ -204,12 +204,15 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             crlf(out);
             let mut rows = 1u16;
             if !output.is_empty() {
+                let max_cols = w.saturating_sub(3);
                 for line in output.lines() {
-                    let _ = out.queue(SetForegroundColor(theme::MUTED));
-                    let _ = out.queue(Print(format!("  {}", line)));
-                    let _ = out.queue(ResetColor);
-                    crlf(out);
-                    rows += 1;
+                    for seg in &wrap_line(line, max_cols) {
+                        let _ = out.queue(SetForegroundColor(theme::MUTED));
+                        let _ = out.queue(Print(format!("  {}", seg)));
+                        let _ = out.queue(ResetColor);
+                        crlf(out);
+                        rows += 1;
+                    }
                 }
             }
             rows
@@ -274,7 +277,7 @@ pub(super) fn render_tool(
     }
     if status != ToolStatus::Denied {
         if let Some(out_data) = output {
-            rows += print_tool_output(out, name, &out_data.content, out_data.is_error, args);
+            rows += print_tool_output(out, name, &out_data.content, out_data.is_error, args, width);
         }
     }
     rows
@@ -374,6 +377,7 @@ fn print_tool_output(
     content: &str,
     is_error: bool,
     args: &HashMap<String, serde_json::Value>,
+    width: usize,
 ) -> u16 {
     match name {
         "web_search" if !is_error => {
@@ -406,10 +410,10 @@ fn print_tool_output(
         }
         "edit_file" if !is_error => render_edit_output(out, args),
         "write_file" if !is_error => render_write_output(out, args),
-        "ask_user_question" if !is_error => render_question_output(out, content),
+        "ask_user_question" if !is_error => render_question_output(out, content, width),
         "bash" if content.is_empty() => 0,
-        "bash" => render_bash_output(out, content, is_error),
-        _ => render_default_output(out, content, is_error),
+        "bash" => render_bash_output(out, content, is_error, width),
+        _ => render_default_output(out, content, is_error, width),
     }
 }
 
@@ -448,7 +452,8 @@ fn render_write_output(out: &mut io::Stdout, args: &HashMap<String, serde_json::
     print_syntax_file(out, content, path, 0)
 }
 
-fn render_question_output(out: &mut io::Stdout, content: &str) -> u16 {
+fn render_question_output(out: &mut io::Stdout, content: &str, width: usize) -> u16 {
+    let max_cols = width.saturating_sub(4);
     let mut rows = 0u16;
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(content) {
         for (question, answer) in &map {
@@ -461,21 +466,26 @@ fn render_question_output(out: &mut io::Stdout, content: &str) -> u16 {
                     .join(", "),
                 other => other.to_string(),
             };
-            print_dim(out, &format!("   {} ", question));
-            let _ = out.queue(Print(&answer_str));
+            let combined = format!("{} {}", question, answer_str);
+            for seg in &wrap_line(&combined, max_cols) {
+                print_dim(out, &format!("   {}", seg));
+                crlf(out);
+                rows += 1;
+            }
+        }
+    } else {
+        for seg in &wrap_line(content, max_cols) {
+            print_dim(out, &format!("   {}", seg));
             crlf(out);
             rows += 1;
         }
-    } else {
-        print_dim(out, &format!("   {}", content));
-        crlf(out);
-        rows += 1;
     }
     rows
 }
 
-fn render_bash_output(out: &mut io::Stdout, content: &str, is_error: bool) -> u16 {
+fn render_bash_output(out: &mut io::Stdout, content: &str, is_error: bool, width: usize) -> u16 {
     const MAX_LINES: usize = 20;
+    let max_cols = width.saturating_sub(4); // "   " prefix + 1 margin
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
     let mut rows = 0u16;
@@ -491,30 +501,38 @@ fn render_bash_output(out: &mut io::Stdout, content: &str, is_error: bool) -> u1
         &lines[..]
     };
     for line in visible {
+        let segments = wrap_line(line, max_cols);
+        for seg in &segments {
+            if is_error {
+                let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
+                let _ = out.queue(Print(format!("   {}", seg)));
+                let _ = out.queue(ResetColor);
+            } else {
+                print_dim(out, &format!("   {}", seg));
+            }
+            crlf(out);
+            rows += 1;
+        }
+    }
+    rows
+}
+
+fn render_default_output(out: &mut io::Stdout, content: &str, is_error: bool, width: usize) -> u16 {
+    let preview = result_preview(content, 3);
+    let max_cols = width.saturating_sub(4);
+    let mut rows = 0u16;
+    for seg in &wrap_line(&preview, max_cols) {
         if is_error {
             let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
-            let _ = out.queue(Print(format!("   {}", line)));
+            let _ = out.queue(Print(format!("   {}", seg)));
             let _ = out.queue(ResetColor);
         } else {
-            print_dim(out, &format!("   {}", line));
+            print_dim(out, &format!("   {}", seg));
         }
         crlf(out);
         rows += 1;
     }
     rows
-}
-
-fn render_default_output(out: &mut io::Stdout, content: &str, is_error: bool) -> u16 {
-    let preview = result_preview(content, 3);
-    if is_error {
-        let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
-        let _ = out.queue(Print(format!("   {}", preview)));
-        let _ = out.queue(ResetColor);
-    } else {
-        print_dim(out, &format!("   {}", preview));
-    }
-    crlf(out);
-    preview.lines().count() as u16
 }
 
 fn pluralize(count: usize, singular: &str, plural: &str) -> String {

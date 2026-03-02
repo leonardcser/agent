@@ -1024,8 +1024,8 @@ impl App {
             return EventOutcome::Noop;
         }
 
-        // Everything else → InputState::handle_event (type-ahead, no history).
-        match self.input.handle_event(ev, None) {
+        // Everything else → InputState::handle_event (type-ahead with history).
+        match self.input.handle_event(ev, Some(&mut self.input_history)) {
             Action::Submit(text) => {
                 let trimmed = text.trim();
                 match self.try_command_while_running(trimmed) {
