@@ -270,15 +270,6 @@ pub(super) fn render_tool(
             }
         }
     }
-    if name == "bash" {
-        if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
-            for seg in &wrap_line(desc, width.saturating_sub(3)) {
-                print_dim(out, &format!("   {seg}"));
-                crlf(out);
-                rows += 1;
-            }
-        }
-    }
     if let Some(msg) = user_message {
         print_dim(out, &format!("   {msg}"));
         crlf(out);
