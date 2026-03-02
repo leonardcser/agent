@@ -2,7 +2,6 @@ use crate::session;
 use crate::theme;
 use crossterm::{
     cursor,
-    event::{DisableBracketedPaste, EnableBracketedPaste},
     style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal, QueueableCommand,
 };
@@ -825,12 +824,7 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
     }
 
     let mut out = io::stdout();
-    let (_, height) = terminal::size().unwrap_or((80, 24));
-    let mut max_visible = (height as usize)
-        .saturating_sub(7)
-        .min(entries.len().max(1));
-    let mut total_rows = (max_visible + 4) as u16;
-    let mut bar_row = height.saturating_sub(total_rows);
+    let (_, mut height) = terminal::size().unwrap_or((80, 24));
 
     let mut query = String::new();
     let mut workspace_only = true;
@@ -838,11 +832,20 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
     let mut selected: usize = 0;
     let mut scroll_offset: usize = 0;
 
+    // 4 = bar + header + blank + hint; 3 = top breathing room
+    let resume_max_visible = |h: u16, count: usize| -> usize {
+        (h as usize).saturating_sub(7).min(count.max(1))
+    };
+    let mut max_visible = resume_max_visible(height, filtered.len());
+    let mut bar_row = height.saturating_sub((max_visible + 4) as u16);
+    let mut last_bar_row = bar_row;
+
     let _ = out.flush();
     let _ = out.queue(cursor::Hide);
     let _ = out.flush();
 
     let draw = |bar_row: u16,
+                last_bar_row: u16,
                 max_visible: usize,
                 selected: usize,
                 scroll_offset: usize,
@@ -853,8 +856,9 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
         let (width, _) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
-        let _ = out.queue(cursor::MoveTo(0, 0));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::All));
+        let clear_from = bar_row.min(last_bar_row);
+        let _ = out.queue(cursor::MoveTo(0, clear_from));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
         let _ = out.queue(cursor::MoveTo(0, bar_row));
 
         let mut row = bar_row;
@@ -940,6 +944,7 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
 
     draw(
         bar_row,
+        last_bar_row,
         max_visible,
         selected,
         scroll_offset,
@@ -947,9 +952,9 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
         workspace_only,
         &filtered,
     );
+    last_bar_row = bar_row;
 
     terminal::enable_raw_mode().ok();
-    let _ = out.queue(EnableBracketedPaste);
     let _ = out.flush();
 
     let result = loop {
@@ -957,9 +962,9 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
         if has_event {
             match event::read() {
                 Ok(Event::Resize(_, h)) => {
-                    max_visible = (h as usize).saturating_sub(7).min(entries.len().max(1));
-                    total_rows = (max_visible + 4) as u16;
-                    bar_row = h.saturating_sub(total_rows);
+                    height = h;
+                    max_visible = resume_max_visible(height, filtered.len());
+                    bar_row = height.saturating_sub((max_visible + 4) as u16);
                     if filtered.is_empty() {
                         selected = 0;
                         scroll_offset = 0;
@@ -1013,6 +1018,8 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
 
                     filtered =
                         filter_resume_entries(entries, &query, workspace_only, current_cwd);
+                    max_visible = resume_max_visible(height, filtered.len());
+                    bar_row = height.saturating_sub((max_visible + 4) as u16);
                     if filtered.is_empty() {
                         selected = 0;
                         scroll_offset = 0;
@@ -1027,6 +1034,7 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
         }
         draw(
             bar_row,
+            last_bar_row,
             max_visible,
             selected,
             scroll_offset,
@@ -1034,14 +1042,10 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
             workspace_only,
             &filtered,
         );
+        last_bar_row = bar_row;
     };
 
-    let _ = out.queue(cursor::MoveTo(0, bar_row));
-    let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-    let _ = out.queue(cursor::Show);
-    let _ = out.queue(DisableBracketedPaste);
-    let _ = out.flush();
-    terminal::disable_raw_mode().ok();
+    dialog_cleanup(last_bar_row);
 
     result
 }
