@@ -74,6 +74,7 @@ pub struct ResumeEntry {
     pub subtitle: Option<String>,
     pub updated_at_ms: u64,
     pub created_at_ms: u64,
+    pub cwd: Option<String>,
 }
 
 #[derive(Clone)]

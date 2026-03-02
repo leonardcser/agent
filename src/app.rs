@@ -1136,7 +1136,11 @@ impl App {
             return;
         }
 
-        if let Some(id) = render::show_resume(&entries) {
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_default();
+        if let Some(id) = render::show_resume(&entries, &cwd) {
             if let Some(loaded) = session::load(&id) {
                 self.load_session(loaded);
                 self.rebuild_screen_from_history();
@@ -1157,7 +1161,11 @@ impl App {
             return;
         }
 
-        if let Some(id) = render::show_resume(&entries) {
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_default();
+        if let Some(id) = render::show_resume(&entries, &cwd) {
             if let Some(loaded) = session::load(&id) {
                 self.load_session(loaded);
             }
@@ -1173,6 +1181,7 @@ impl App {
                 subtitle: s.first_user_message,
                 updated_at_ms: s.updated_at_ms,
                 created_at_ms: s.created_at_ms,
+                cwd: s.cwd,
             })
             .collect()
     }

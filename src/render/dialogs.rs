@@ -819,7 +819,7 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
 }
 
 /// Show a resume menu listing saved sessions. Returns the selected session id.
-pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
+pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String> {
     if entries.is_empty() {
         return None;
     }
@@ -833,7 +833,8 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
     let mut bar_row = height.saturating_sub(total_rows);
 
     let mut query = String::new();
-    let mut filtered = filter_resume_entries(entries, &query);
+    let mut workspace_only = true;
+    let mut filtered = filter_resume_entries(entries, &query, workspace_only, current_cwd);
     let mut selected: usize = 0;
     let mut scroll_offset: usize = 0;
 
@@ -846,6 +847,7 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
                 selected: usize,
                 scroll_offset: usize,
                 query: &str,
+                workspace_only: bool,
                 filtered: &[ResumeEntry]| {
         let mut out = io::stdout();
         let (width, _) = terminal::size().unwrap_or((80, 24));
@@ -866,7 +868,11 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
         let _ = out.queue(cursor::MoveTo(0, row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(" Resume:"));
+        if workspace_only {
+            let _ = out.queue(Print(" Resume (workspace):"));
+        } else {
+            let _ = out.queue(Print(" Resume (all):"));
+        }
         let _ = out.queue(SetAttribute(Attribute::Reset));
         let _ = out.queue(Print(" "));
         let _ = out.queue(Print(query));
@@ -881,27 +887,23 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
             row = row.saturating_add(1);
         } else {
             let end = (scroll_offset + max_visible).min(filtered.len());
-            let num_width = end.to_string().len();
             for (i, entry) in filtered.iter().enumerate().take(end).skip(scroll_offset) {
                 let title = resume_title(entry);
                 let time_ago = session::time_ago(resume_ts(entry), now_ms);
                 let time_len = time_ago.chars().count() + 1;
-                let prefix_len = 2 + num_width + 2;
+                let prefix_len = 4;
                 let max_label = w.saturating_sub(time_len + prefix_len);
                 let truncated = truncate_str_local(&title, max_label);
-                let num_str = format!("{:>width$}. ", i + 1, width = num_width);
 
                 let _ = out.queue(cursor::MoveTo(0, row));
                 let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-                let _ = out.queue(Print("  "));
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print(&num_str));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
                 if i == selected {
+                    let _ = out.queue(Print("  "));
                     let _ = out.queue(SetForegroundColor(theme::ACCENT));
                     let _ = out.queue(Print(&truncated));
                     let _ = out.queue(ResetColor);
                 } else {
+                    let _ = out.queue(Print("  "));
                     let _ = out.queue(Print(&truncated));
                 }
 
@@ -920,7 +922,15 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
         let _ = out.queue(cursor::MoveTo(0, row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(" enter: select  esc: cancel  type to filter"));
+        if workspace_only {
+            let _ = out.queue(Print(
+                " enter: select  esc: cancel  ctrl+w: all sessions  type to filter",
+            ));
+        } else {
+            let _ = out.queue(Print(
+                " enter: select  esc: cancel  ctrl+w: this workspace  type to filter",
+            ));
+        }
         let _ = out.queue(SetAttribute(Attribute::Reset));
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
@@ -934,6 +944,7 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
         selected,
         scroll_offset,
         &query,
+        workspace_only,
         &filtered,
     );
 
@@ -969,6 +980,9 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
                         }
                         (KeyCode::Esc, _) => break None,
                         (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break None,
+                        (KeyCode::Char('w'), m) if m.contains(KeyModifiers::CONTROL) => {
+                            workspace_only = !workspace_only;
+                        }
                         (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
                             query.clear();
                         }
@@ -997,7 +1011,8 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
                         _ => {}
                     }
 
-                    filtered = filter_resume_entries(entries, &query);
+                    filtered =
+                        filter_resume_entries(entries, &query, workspace_only, current_cwd);
                     if filtered.is_empty() {
                         selected = 0;
                         scroll_offset = 0;
@@ -1016,6 +1031,7 @@ pub fn show_resume(entries: &[ResumeEntry]) -> Option<String> {
             selected,
             scroll_offset,
             &query,
+            workspace_only,
             &filtered,
         );
     };
@@ -1466,14 +1482,29 @@ fn resume_ts(entry: &ResumeEntry) -> u64 {
     }
 }
 
-fn filter_resume_entries(entries: &[ResumeEntry], query: &str) -> Vec<ResumeEntry> {
-    if query.is_empty() {
-        return entries.to_vec();
-    }
+fn filter_resume_entries(
+    entries: &[ResumeEntry],
+    query: &str,
+    workspace_only: bool,
+    current_cwd: &str,
+) -> Vec<ResumeEntry> {
     let q = query.to_lowercase();
     entries
         .iter()
         .filter(|e| {
+            if workspace_only {
+                match e.cwd {
+                    Some(ref cwd) => cwd == current_cwd,
+                    None => false,
+                }
+            } else {
+                true
+            }
+        })
+        .filter(|e| {
+            if q.is_empty() {
+                return true;
+            }
             let mut hay = resume_title(e);
             if let Some(ref subtitle) = e.subtitle {
                 hay.push(' ');
