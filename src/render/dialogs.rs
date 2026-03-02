@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
+use super::blocks::wrap_line;
 use super::highlight::{count_inline_diff_rows, print_inline_diff, print_syntax_file};
 use super::{chunk_line, crlf, draw_bar, ConfirmChoice, ResumeEntry};
 
@@ -495,9 +496,16 @@ impl ConfirmDialog {
             0
         };
 
-        let summary_rows: u16 = if self.summary.is_some() { 1 } else { 0 };
-        // +1 for the blank line before "Allow?"
-        let base_rows: u16 = 5 + summary_rows + 1 + self.options.len() as u16 + ta_extra;
+        let prefix_len = 1 + self.tool_name.len() + 2; // " tool: "
+        let title_rows = wrap_line(&self.desc, w.saturating_sub(prefix_len)).len() as u16;
+        let summary_rows: u16 = self
+            .summary
+            .as_ref()
+            .map(|s| wrap_line(s, w.saturating_sub(1)).len() as u16)
+            .unwrap_or(0);
+        // 4 = bar + blank-before-allow + allow-label + bottom-pad; title_rows replaces the old fixed 1
+        let base_rows: u16 =
+            4 + title_rows + summary_rows + 1 + self.options.len() as u16 + ta_extra;
 
         let max_preview = height.saturating_sub(base_rows + 5);
         let preview_rows = self.total_preview.min(max_preview);
@@ -539,23 +547,35 @@ impl ConfirmDialog {
             crlf(&mut out);
             row += 1;
 
-            // title
-            let _ = out.queue(Print(" "));
-            let _ = out.queue(SetForegroundColor(theme::ACCENT));
-            let _ = out.queue(Print(&self.tool_name));
-            let _ = out.queue(ResetColor);
-            let _ = out.queue(Print(format!(": {}", self.desc)));
-            crlf(&mut out);
-            row += 1;
+            // title — wrap long commands with a leading space on continuation lines
+            let prefix_len = 1 + self.tool_name.len() + 2; // " tool: "
+            let segments = wrap_line(&self.desc, w.saturating_sub(prefix_len));
+            for (i, seg) in segments.iter().enumerate() {
+                if i == 0 {
+                    let _ = out.queue(Print(" "));
+                    let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                    let _ = out.queue(Print(&self.tool_name));
+                    let _ = out.queue(ResetColor);
+                    let _ = out.queue(Print(format!(": {seg}")));
+                } else {
+                    let _ = out.queue(Print(format!(" {seg}")));
+                }
+                crlf(&mut out);
+                row += 1;
+            }
 
             // summary
             if let Some(ref summary) = self.summary {
-                let _ = out.queue(Print(" "));
-                let _ = out.queue(SetForegroundColor(theme::MUTED));
-                let _ = out.queue(Print(summary));
-                let _ = out.queue(ResetColor);
-                crlf(&mut out);
-                row += 1;
+                let max_cols = w.saturating_sub(1);
+                let segments = wrap_line(summary, max_cols);
+                for seg in &segments {
+                    let _ = out.queue(Print(" "));
+                    let _ = out.queue(SetForegroundColor(theme::MUTED));
+                    let _ = out.queue(Print(seg));
+                    let _ = out.queue(ResetColor);
+                    crlf(&mut out);
+                    row += 1;
+                }
             }
 
             if has_preview {
@@ -1184,7 +1204,12 @@ impl QuestionDialog {
             0
         };
 
-        let fixed_rows = 1 + (self.has_tabs as u16) + 3 + self.max_options as u16 + 2 + ta_extra;
+        let q = &self.questions[self.active_tab];
+        let suffix_len = if q.multi_select { " (space to toggle)".len() } else { 0 };
+        let q_rows = wrap_line(&q.question, w.saturating_sub(1 + suffix_len)).len() as u16;
+        // 1=bar, 1=blank, q_rows=question, 1=blank, 2=other+bottom
+        let fixed_rows =
+            1 + (self.has_tabs as u16) + 1 + q_rows + 1 + self.max_options as u16 + 2 + ta_extra;
         let bar_row = height.saturating_sub(fixed_rows);
         let clear_from = bar_row.min(self.last_bar_row);
         self.last_bar_row = bar_row;
@@ -1230,7 +1255,6 @@ impl QuestionDialog {
             row += 1;
         }
 
-        let q = &self.questions[self.active_tab];
         let sel = self.selections[self.active_tab];
         let is_multi = q.multi_select;
         let other_idx = q.options.len();
@@ -1238,17 +1262,22 @@ impl QuestionDialog {
         crlf(&mut out);
         row += 1;
 
-        let _ = out.queue(Print(" "));
-        let _ = out.queue(SetAttribute(Attribute::Bold));
-        let _ = out.queue(Print(&q.question));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
-        if is_multi {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(Print(" (space to toggle)"));
+        let suffix = if is_multi { " (space to toggle)" } else { "" };
+        let q_max = w.saturating_sub(1 + suffix.len());
+        let segments = wrap_line(&q.question, q_max);
+        for (i, seg) in segments.iter().enumerate() {
+            let _ = out.queue(Print(" "));
+            let _ = out.queue(SetAttribute(Attribute::Bold));
+            let _ = out.queue(Print(seg));
             let _ = out.queue(SetAttribute(Attribute::Reset));
+            if i == 0 && !suffix.is_empty() {
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(suffix));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+            }
+            crlf(&mut out);
+            row += 1;
         }
-        crlf(&mut out);
-        row += 1;
 
         crlf(&mut out);
         row += 1;
@@ -1285,10 +1314,20 @@ impl QuestionDialog {
                 }
             }
 
-            if is_current {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print(format!("  {}", opt.description)));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+            if is_current && !opt.description.is_empty() {
+                let prefix_len = if is_multi {
+                    2 + 2 // "  ◉ "
+                } else {
+                    2 + format!("{}.", i + 1).len() + 1 // "  N. "
+                };
+                let used = prefix_len + opt.label.chars().count() + 2; // "  " gap
+                let remaining = w.saturating_sub(used);
+                if remaining > 3 {
+                    let desc: String = opt.description.chars().take(remaining).collect();
+                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    let _ = out.queue(Print(format!("  {desc}")));
+                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                }
             }
             crlf(&mut out);
             row += 1;

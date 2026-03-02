@@ -181,7 +181,7 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             width,
         ),
         Block::Confirm { tool, desc, choice } => {
-            render_confirm_result(out, tool, desc, choice.clone())
+            render_confirm_result(out, tool, desc, choice.clone(), width)
         }
         Block::Error { message } => {
             print_error(out, message);
@@ -276,6 +276,7 @@ fn render_confirm_result(
     tool: &str,
     desc: &str,
     choice: Option<ConfirmChoice>,
+    width: usize,
 ) -> u16 {
     let mut rows = 2u16;
 
@@ -285,9 +286,19 @@ fn render_confirm_result(
     print_dim(out, tool);
     crlf(out);
 
-    print_dim(out, "   \u{2502} ");
-    let _ = out.queue(Print(desc));
-    crlf(out);
+    let prefix = "   \u{2502} ";
+    let prefix_len = prefix.chars().count();
+    let segments = wrap_line(desc, width.saturating_sub(prefix_len));
+    for (i, seg) in segments.iter().enumerate() {
+        if i == 0 {
+            print_dim(out, prefix);
+        } else {
+            let _ = out.queue(Print(" ".repeat(prefix_len)));
+        }
+        let _ = out.queue(Print(seg));
+        crlf(out);
+    }
+    rows += segments.len().saturating_sub(1) as u16;
 
     if let Some(c) = choice {
         rows += 1;
