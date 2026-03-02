@@ -185,6 +185,35 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
     }
 }
 
+/// For each change, decide whether it should be shown or collapsed.
+/// Equal lines within `ctx` of a non-Equal change are visible; the rest are collapsed.
+fn compute_change_visibility(changes: &[DiffChange], ctx: usize) -> Vec<bool> {
+    let n = changes.len();
+    // Forward pass: set visible based on distance from previous non-Equal.
+    let mut visible = vec![false; n];
+    let mut d = usize::MAX;
+    for i in 0..n {
+        if changes[i].tag != ChangeTag::Equal {
+            d = 0;
+            visible[i] = true;
+        } else {
+            visible[i] = d <= ctx;
+        }
+        d = d.saturating_add(1);
+    }
+    // Backward pass: also mark Equal lines near a following non-Equal.
+    d = usize::MAX;
+    for i in (0..n).rev() {
+        if changes[i].tag != ChangeTag::Equal {
+            d = 0;
+        } else if d <= ctx {
+            visible[i] = true;
+        }
+        d = d.saturating_add(1);
+    }
+    visible
+}
+
 /// Render a syntax-highlighted inline diff.
 pub(super) fn print_inline_diff(
     out: &mut io::Stdout,
@@ -261,23 +290,48 @@ pub(super) fn print_inline_diff(
         return limit;
     }
 
+    let ctx = 3usize;
+    let visible = compute_change_visibility(changes, ctx);
     let mut old_lineno = dv.start_line;
     let mut new_lineno = dv.start_line;
-    for change in changes {
+    let mut in_ellipsis = false;
+    for (ci, change) in changes.iter().enumerate() {
         if rows >= limit {
             return limit;
         }
         let text = change.value.trim_end_matches('\n');
         match change.tag {
             ChangeTag::Equal => {
-                if new_lineno >= dv.view_start && new_lineno < dv.view_end {
-                    print_diff_lines(out, &mut h_new, &[text], new_lineno, None, None, &layout);
+                if visible[ci] {
+                    in_ellipsis = false;
+                    if new_lineno >= dv.view_start && new_lineno < dv.view_end {
+                        print_diff_lines(
+                            out, &mut h_new, &[text], new_lineno, None, None, &layout,
+                        );
+                        rows += 1;
+                    }
+                } else if !in_ellipsis {
+                    in_ellipsis = true;
+                    let _ = out.queue(Print(indent));
+                    let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+                    let _ = out.queue(Print(format!(
+                        " {:>w$}   ...",
+                        " ",
+                        w = gutter_width
+                    )));
+                    let _ = out.queue(ResetColor);
+                    crlf(out);
                     rows += 1;
                 }
                 let _ = h_old.highlight_line(&format!("{}\n", text), &SYNTAX_SET);
+                // Advance h_new through skipped lines to keep highlighting in sync
+                if !visible[ci] {
+                    let _ = h_new.highlight_line(&format!("{}\n", text), &SYNTAX_SET);
+                }
                 new_lineno += 1;
             }
             ChangeTag::Delete => {
+                in_ellipsis = false;
                 print_diff_lines(
                     out,
                     &mut h_old,
@@ -291,6 +345,7 @@ pub(super) fn print_inline_diff(
                 rows += 1;
             }
             ChangeTag::Insert => {
+                in_ellipsis = false;
                 print_diff_lines(
                     out,
                     &mut h_new,
@@ -358,20 +413,31 @@ pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &
         }
     }
 
+    let ctx = 3usize;
+    let visible = compute_change_visibility(&dv.changes, ctx);
     let mut new_lineno = dv.start_line;
-    for change in &dv.changes {
+    let mut in_ellipsis = false;
+    for (ci, change) in dv.changes.iter().enumerate() {
         let line = change.value.trim_end_matches('\n');
         match change.tag {
             ChangeTag::Equal => {
-                if new_lineno >= dv.view_start && new_lineno < dv.view_end {
-                    rows += visual_rows_for(line);
+                if visible[ci] {
+                    in_ellipsis = false;
+                    if new_lineno >= dv.view_start && new_lineno < dv.view_end {
+                        rows += visual_rows_for(line);
+                    }
+                } else if !in_ellipsis {
+                    in_ellipsis = true;
+                    rows += 1; // the "..." line
                 }
                 new_lineno += 1;
             }
             ChangeTag::Delete => {
+                in_ellipsis = false;
                 rows += visual_rows_for(line);
             }
             ChangeTag::Insert => {
+                in_ellipsis = false;
                 rows += visual_rows_for(line);
                 new_lineno += 1;
             }
