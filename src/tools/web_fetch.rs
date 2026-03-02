@@ -32,7 +32,7 @@ impl Tool for WebFetchTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch a URL and return its content as markdown (default), plain text, or raw HTML. Supports caching, link extraction, and image detection."
+        "Fetch a URL and extract relevant content using the given prompt. The page is fetched, converted to markdown, then an isolated LLM call extracts only what the prompt asks for."
     }
 
     fn parameters(&self) -> Value {
@@ -42,6 +42,10 @@ impl Tool for WebFetchTool {
                 "url": {
                     "type": "string",
                     "description": "The URL to fetch (must start with http:// or https://)"
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "What to extract or answer from the page content"
                 },
                 "format": {
                     "type": "string",
@@ -53,7 +57,7 @@ impl Tool for WebFetchTool {
                     "description": "Timeout in seconds (max 120). Default: 30"
                 }
             },
-            "required": ["url"]
+            "required": ["url", "prompt"]
         })
     }
 

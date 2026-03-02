@@ -372,25 +372,10 @@ impl Provider {
 
     /// Fire-and-forget short completion: low reasoning, no thinking, stops on
     /// newline.  Used for titles, command descriptions, and similar one-liners.
-    async fn complete_short(
+    async fn complete_raw(
         &self,
-        prompt: &str,
-        model: &str,
-        max_tokens: u32,
-        temperature: f32,
+        body: serde_json::Value,
     ) -> Result<String, String> {
-        let body = serde_json::json!({
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "Reasoning: low"},
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stop": ["\n"],
-            "chat_template_kwargs": {"enable_thinking": false},
-        });
-
         let url = format!("{}/chat/completions", self.api_base);
         let mut req = self.client.post(&url).json(&body);
         if !self.api_key.is_empty() {
@@ -409,14 +394,37 @@ impl Provider {
             .get(0)
             .and_then(|c| c["message"]["content"].as_str())
             .unwrap_or("")
+            .trim()
             .to_string();
 
-        let text = normalize_short(&text);
         if text.is_empty() {
             Err("empty response".into())
         } else {
             Ok(text)
         }
+    }
+
+    async fn complete_short(
+        &self,
+        prompt: &str,
+        model: &str,
+        max_tokens: u32,
+        temperature: f32,
+    ) -> Result<String, String> {
+        let text = self
+            .complete_raw(serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "Reasoning: low"},
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stop": ["\n"],
+                "chat_template_kwargs": {"enable_thinking": false},
+            }))
+            .await?;
+        Ok(normalize_short(&text))
     }
 
     pub async fn describe_command(
@@ -429,6 +437,31 @@ impl Provider {
              Reply with only the description, no quotes.\n\n{command}"
         );
         self.complete_short(&prompt, model, 128, 0.0).await
+    }
+
+    pub async fn extract_web_content(
+        &self,
+        content: &str,
+        prompt: &str,
+        model: &str,
+    ) -> Result<String, String> {
+        self.complete_raw(serde_json::json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Answer the user's question based solely on the provided web page content. Be concise and direct."
+                },
+                {
+                    "role": "user",
+                    "content": format!("<content>\n{content}\n</content>\n\n{prompt}"),
+                },
+            ],
+            "max_tokens": 4096,
+            "temperature": 0.0,
+            "chat_template_kwargs": {"enable_thinking": false},
+        }))
+        .await
     }
 
     pub async fn complete_title(

@@ -235,7 +235,7 @@ pub(super) fn render_tool(
         ToolStatus::Confirm => theme::ACCENT,
         ToolStatus::Pending => theme::TOOL_PENDING,
     };
-    let time = if name == "bash" && status != ToolStatus::Confirm {
+    let time = if matches!(name, "bash" | "web_fetch") && status != ToolStatus::Confirm {
         elapsed
     } else {
         None
@@ -258,6 +258,15 @@ pub(super) fn render_tool(
     };
     print_tool_line(out, name, summary, color, time, tl.as_deref(), width);
     let mut rows = 1u16;
+    if name == "web_fetch" {
+        if let Some(prompt) = args.get("prompt").and_then(|v| v.as_str()) {
+            for seg in &wrap_line(prompt, width.saturating_sub(3)) {
+                print_dim(out, &format!("   {seg}"));
+                crlf(out);
+                rows += 1;
+            }
+        }
+    }
     if let Some(msg) = user_message {
         print_dim(out, &format!("   {msg}"));
         crlf(out);

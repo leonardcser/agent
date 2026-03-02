@@ -283,6 +283,25 @@ pub async fn run_agent(
             } else if tc.function.name == "bash" {
                 let _perf = crate::perf::begin("tool_bash");
                 execute_bash_streaming(&args, tx).await
+            } else if tc.function.name == "web_fetch" {
+                let _perf = crate::perf::begin("tool_web_fetch");
+                let raw = tokio::task::block_in_place(|| tool.execute(&args));
+                if raw.is_error {
+                    raw
+                } else {
+                    let prompt = tools::str_arg(&args, "prompt");
+                    match ctx
+                        .provider
+                        .extract_web_content(&raw.content, &prompt, &ctx.model)
+                        .await
+                    {
+                        Ok(extracted) => ToolResult {
+                            content: extracted,
+                            is_error: false,
+                        },
+                        Err(_) => raw,
+                    }
+                }
             } else {
                 let _perf = crate::perf::begin("tool_sync");
                 tokio::task::block_in_place(|| tool.execute(&args))

@@ -59,7 +59,7 @@ pub struct ActiveTool {
 
 impl ActiveTool {
     fn elapsed(&self) -> Option<Duration> {
-        if self.name == "bash" {
+        if matches!(self.name.as_str(), "bash" | "web_fetch") {
             Some(self.start_time.elapsed())
         } else {
             None
@@ -1148,6 +1148,7 @@ pub fn tool_arg_summary(name: &str, args: &HashMap<String, serde_json::Value>) -
                 None => pattern.into(),
             }
         }
+        "web_fetch" => args.get("url").and_then(|v| v.as_str()).unwrap_or("").into(),
         "ask_user_question" => {
             let count = args
                 .get("questions")
