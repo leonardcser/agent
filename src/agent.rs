@@ -31,6 +31,8 @@ pub enum AgentEvent {
         args: HashMap<String, Value>,
         /// Glob pattern for "always allow this domain/pattern" session approval.
         approval_pattern: Option<String>,
+        /// Short LLM-generated description of what the command does.
+        summary: Option<String>,
         reply: tokio::sync::oneshot::Sender<(bool, Option<String>)>,
     },
     AskQuestion {
@@ -228,11 +230,28 @@ pub async fn run_agent(
                         .needs_confirm(&args)
                         .unwrap_or_else(|| tc.function.name.clone());
                     let approval_pattern = tool.approval_pattern(&args);
+
+                    let summary = if tc.function.name == "bash" {
+                        let cmd = tools::str_arg(&args, "command");
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(3),
+                            ctx.provider.describe_command(&cmd, &ctx.model),
+                        )
+                        .await
+                        {
+                            Ok(Ok(s)) => Some(s),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = tx.send(AgentEvent::Confirm {
                         desc,
                         args: args.clone(),
                         approval_pattern,
+                        summary,
                         reply: reply_tx,
                     });
                     let (approved, user_msg) = reply_rx.await.unwrap_or((false, None));

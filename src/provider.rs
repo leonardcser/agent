@@ -370,36 +370,26 @@ impl Provider {
         Ok(summary)
     }
 
-    pub async fn complete_title(
+    /// Fire-and-forget short completion: low reasoning, no thinking, stops on
+    /// newline.  Used for titles, command descriptions, and similar one-liners.
+    async fn complete_short(
         &self,
-        first_user_message: &str,
+        prompt: &str,
         model: &str,
+        max_tokens: u32,
+        temperature: f32,
     ) -> Result<String, String> {
-        let prompt = format!(
-            "Generate a short session title (3-6 words) for: \"{}\". Reply with only the title.",
-            first_user_message.replace('\n', " ")
-        );
-
         let body = serde_json::json!({
             "model": model,
             "messages": [
                 {"role": "system", "content": "Reasoning: low"},
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 512,
-            "temperature": 0.2,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
             "stop": ["\n"],
             "chat_template_kwargs": {"enable_thinking": false},
         });
-
-        log::entry(
-            log::Level::Debug,
-            "title_request",
-            &serde_json::json!({
-                "model": model,
-                "prompt_len": first_user_message.len(),
-            }),
-        );
 
         let url = format!("{}/chat/completions", self.api_base);
         let mut req = self.client.post(&url).json(&body);
@@ -421,24 +411,58 @@ impl Provider {
             .unwrap_or("")
             .to_string();
 
-        let title = normalize_title(&text);
+        let text = normalize_short(&text);
+        if text.is_empty() {
+            Err("empty response".into())
+        } else {
+            Ok(text)
+        }
+    }
+
+    pub async fn describe_command(
+        &self,
+        command: &str,
+        model: &str,
+    ) -> Result<String, String> {
+        let prompt = format!(
+            "Describe what this shell command does in a short sentence (max 10 words). \
+             Reply with only the description, no quotes.\n\n{command}"
+        );
+        self.complete_short(&prompt, model, 128, 0.0).await
+    }
+
+    pub async fn complete_title(
+        &self,
+        first_user_message: &str,
+        model: &str,
+    ) -> Result<String, String> {
+        let prompt = format!(
+            "Generate a short session title (3-6 words) for: \"{}\". Reply with only the title.",
+            first_user_message.replace('\n', " ")
+        );
+
         log::entry(
             log::Level::Debug,
-            "title_response",
+            "title_request",
             &serde_json::json!({
-                "title": title,
+                "model": model,
+                "prompt_len": first_user_message.len(),
             }),
         );
 
-        if title.is_empty() {
-            Err("empty title".into())
-        } else {
-            Ok(title)
-        }
+        let title = self.complete_short(&prompt, model, 512, 0.2).await?;
+
+        log::entry(
+            log::Level::Debug,
+            "title_response",
+            &serde_json::json!({ "title": title }),
+        );
+
+        Ok(title)
     }
 }
 
-fn normalize_title(raw: &str) -> String {
+fn normalize_short(raw: &str) -> String {
     let mut t = raw.trim().trim_matches('"').trim_matches('\'').to_string();
     t = t.split_whitespace().collect::<Vec<_>>().join(" ");
     if t.len() > 64 {

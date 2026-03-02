@@ -344,6 +344,7 @@ fn render_confirm_preview(
 pub struct ConfirmDialog {
     tool_name: String,
     desc: String,
+    summary: Option<String>,
     args: HashMap<String, serde_json::Value>,
     options: Vec<(String, ConfirmChoice)>,
     total_preview: u16,
@@ -364,6 +365,7 @@ impl ConfirmDialog {
         desc: &str,
         args: &HashMap<String, serde_json::Value>,
         approval_pattern: Option<&str>,
+        summary: Option<&str>,
     ) -> Self {
         let mut options: Vec<(String, ConfirmChoice)> = vec![
             ("yes".into(), ConfirmChoice::Yes),
@@ -385,6 +387,7 @@ impl ConfirmDialog {
         Self {
             tool_name: tool_name.to_string(),
             desc: desc.to_string(),
+            summary: summary.map(|s| s.to_string()),
             args: args.clone(),
             options,
             total_preview,
@@ -492,7 +495,9 @@ impl ConfirmDialog {
             0
         };
 
-        let base_rows: u16 = 5 + self.options.len() as u16 + ta_extra;
+        let summary_rows: u16 = if self.summary.is_some() { 1 } else { 0 };
+        // +1 for the blank line before "Allow?"
+        let base_rows: u16 = 5 + summary_rows + 1 + self.options.len() as u16 + ta_extra;
 
         let max_preview = height.saturating_sub(base_rows + 5);
         let preview_rows = self.total_preview.min(max_preview);
@@ -543,6 +548,16 @@ impl ConfirmDialog {
             crlf(&mut out);
             row += 1;
 
+            // summary
+            if let Some(ref summary) = self.summary {
+                let _ = out.queue(Print(" "));
+                let _ = out.queue(SetForegroundColor(theme::MUTED));
+                let _ = out.queue(Print(summary));
+                let _ = out.queue(ResetColor);
+                crlf(&mut out);
+                row += 1;
+            }
+
             if has_preview {
                 let separator: String = "╌".repeat(w);
                 let _ = out.queue(SetForegroundColor(theme::BAR));
@@ -558,6 +573,10 @@ impl ConfirmDialog {
                 crlf(&mut out);
                 row += 1;
             }
+
+            // blank line before "Allow?"
+            crlf(&mut out);
+            row += 1;
 
             // "Allow?"
             let _ = out.queue(SetAttribute(Attribute::Dim));

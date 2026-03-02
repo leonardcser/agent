@@ -110,6 +110,7 @@ enum DeferredDialog {
         desc: String,
         args: HashMap<String, serde_json::Value>,
         approval_pattern: Option<String>,
+        summary: Option<String>,
         reply: tokio::sync::oneshot::Sender<(bool, Option<String>)>,
     },
     AskQuestion {
@@ -308,6 +309,7 @@ impl App {
                             desc,
                             args,
                             approval_pattern,
+                            summary,
                             reply,
                         } => {
                             self.screen.set_active_status(ToolStatus::Confirm);
@@ -318,6 +320,7 @@ impl App {
                                     &desc,
                                     &args,
                                     approval_pattern.as_deref(),
+                                    summary.as_deref(),
                                 ),
                                 tool_name,
                                 reply,
@@ -1568,11 +1571,13 @@ impl App {
                 desc,
                 args,
                 approval_pattern,
+                summary,
                 reply,
             } => SessionControl::NeedsConfirm {
                 desc,
                 args,
                 approval_pattern,
+                summary,
                 reply,
             },
             AgentEvent::AskQuestion { args, reply } => {
@@ -1684,6 +1689,7 @@ impl App {
                 desc,
                 args,
                 approval_pattern,
+                summary,
                 reply,
             } => {
                 // Yolo mode: auto-approve everything.
@@ -1713,6 +1719,7 @@ impl App {
                         desc,
                         args,
                         approval_pattern,
+                        summary,
                         reply,
                     });
                     return LoopAction::Continue;
@@ -1727,6 +1734,7 @@ impl App {
                         &desc,
                         &args,
                         approval_pattern.as_deref(),
+                        summary.as_deref(),
                     ),
                     tool_name,
                     reply,
@@ -1834,6 +1842,7 @@ pub enum SessionControl {
         desc: String,
         args: HashMap<String, serde_json::Value>,
         approval_pattern: Option<String>,
+        summary: Option<String>,
         reply: tokio::sync::oneshot::Sender<(bool, Option<String>)>,
     },
     NeedsAskQuestion {
