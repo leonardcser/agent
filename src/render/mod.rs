@@ -777,10 +777,11 @@ impl Screen {
             .unwrap_or(24)
             .saturating_sub(pre_prompt_rows as usize);
         let stash_rows = if state.stash.is_some() { 1 } else { 0 };
-        let queued_rows = queued.len();
 
         let mut extra_rows = render_stash(out, &state.stash, usable);
-        extra_rows += render_queued(out, queued, usable);
+        let queued_visual = render_queued(out, queued, usable);
+        extra_rows += queued_visual;
+        let queued_rows = queued_visual as usize;
 
         let vi_normal = state.vim_mode() == Some(crate::vim::ViMode::Normal);
         let bar_color = if vi_normal { theme::ACCENT } else { theme::BAR };
@@ -1057,19 +1058,63 @@ fn render_stash(
 }
 
 fn render_queued(out: &mut io::Stdout, queued: &[String], usable: usize) -> u16 {
+    // Mirrors Block::User rendering (blocks.rs) but with a 2-char indent
+    // and no stripping of leading/trailing blank lines.
+    let indent = 2usize;
+    let text_w = usable.saturating_sub(indent + 1).max(1);
     let mut rows = 0u16;
     for msg in queued {
-        let indent = 2usize;
-        let display: String = msg.chars().take(usable.saturating_sub(indent)).collect();
-        let _ = out.queue(Print(" ".repeat(indent)));
-        let _ = out.queue(SetBackgroundColor(theme::USER_BG));
-        let _ = out.queue(SetAttribute(Attribute::Bold));
-        let _ = out.queue(Print(format!(" {} ", display)));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
-        let _ = out.queue(ResetColor);
-        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-        let _ = out.queue(Print("\r\n"));
-        rows += 1;
+        let all_lines: Vec<String> = msg.lines().map(|l| l.replace('\t', "    ")).collect();
+        let wraps = all_lines.iter().any(|l| l.chars().count() > text_w);
+        let multiline = all_lines.len() > 1 || wraps;
+        let block_w = if multiline {
+            if wraps {
+                text_w
+            } else {
+                all_lines
+                    .iter()
+                    .map(|l| l.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    + 1
+            }
+        } else {
+            0
+        };
+        for line in &all_lines {
+            if line.is_empty() {
+                let fill = if block_w > 0 { block_w + 1 } else { 2 };
+                let _ = out.queue(Print(" ".repeat(indent)));
+                let _ = out
+                    .queue(SetBackgroundColor(theme::USER_BG))
+                    .and_then(|o| o.queue(Print(" ".repeat(fill))))
+                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
+                    .and_then(|o| o.queue(ResetColor));
+                crlf(out);
+                rows += 1;
+                continue;
+            }
+            let chunks = chunk_line(line, text_w);
+            for chunk in &chunks {
+                let chunk_len = chunk.chars().count();
+                let trailing = if block_w > 0 {
+                    block_w.saturating_sub(chunk_len)
+                } else {
+                    1
+                };
+                let _ = out.queue(Print(" ".repeat(indent)));
+                let _ = out
+                    .queue(SetBackgroundColor(theme::USER_BG))
+                    .and_then(|o| o.queue(SetAttribute(Attribute::Bold)))
+                    .and_then(|o| {
+                        o.queue(Print(format!(" {}{}", chunk, " ".repeat(trailing))))
+                    })
+                    .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
+                    .and_then(|o| o.queue(ResetColor));
+                crlf(out);
+                rows += 1;
+            }
+        }
     }
     rows
 }
