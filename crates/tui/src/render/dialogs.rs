@@ -30,7 +30,7 @@ fn max_dialog_items(start_row: u16, height: u16) -> usize {
 fn max_dialog_height(start_row: u16, height: u16) -> usize {
     let space_below = height.saturating_sub(start_row) as usize;
     let max_push = start_row.min(height / 2) as usize;
-    space_below + max_push
+    (space_below + max_push).min(height as usize)
 }
 
 // ── TextArea ──────────────────────────────────────────────────────────────────
@@ -1742,15 +1742,18 @@ fn is_junk_title(s: &str) -> bool {
 }
 
 fn resume_title(entry: &ResumeEntry) -> String {
-    if !is_junk_title(&entry.title) {
-        return entry.title.clone();
-    }
-    if let Some(ref sub) = entry.subtitle {
+    let raw = if !is_junk_title(&entry.title) {
+        &entry.title
+    } else if let Some(ref sub) = entry.subtitle {
         if !is_junk_title(sub) {
-            return sub.clone();
+            sub
+        } else {
+            return "Untitled".into();
         }
-    }
-    "Untitled".into()
+    } else {
+        return "Untitled".into();
+    };
+    raw.lines().next().unwrap_or("Untitled").trim().to_string()
 }
 
 fn resume_ts(entry: &ResumeEntry) -> u64 {
