@@ -37,6 +37,7 @@ impl Tool for AskUserQuestionTool {
                                 "type": "array",
                                 "minItems": 2,
                                 "maxItems": 4,
+                                "description": "The available choices. An 'Other' option with free-text input is automatically appended by the UI — do NOT include one yourself.",
                                 "items": {
                                     "type": "object",
                                     "properties": {
