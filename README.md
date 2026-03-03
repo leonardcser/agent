@@ -7,6 +7,8 @@ analysis, and assistance.
 ## Installation
 
 ```bash
+cargo install --git https://github.com/leonardcser/agent.git
+# or locally
 cargo install --path .
 ```
 

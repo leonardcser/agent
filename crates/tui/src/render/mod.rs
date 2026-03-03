@@ -251,6 +251,7 @@ struct WorkingState {
     throbber: Option<Throbber>,
     last_spinner_frame: usize,
     retry_deadline: Option<Instant>,
+    tps_samples: Vec<f64>,
 }
 
 impl WorkingState {
@@ -261,6 +262,7 @@ impl WorkingState {
             throbber: None,
             last_spinner_frame: usize::MAX,
             retry_deadline: None,
+            tps_samples: Vec::new(),
         }
     }
 
@@ -272,6 +274,7 @@ impl WorkingState {
         if is_active && self.since.is_none() {
             self.since = Some(Instant::now());
             self.final_elapsed = None;
+            self.tps_samples.clear();
         }
         if !is_active {
             self.final_elapsed = self.since.map(|s| s.elapsed());
@@ -284,13 +287,26 @@ impl WorkingState {
         self.throbber = Some(state);
     }
 
+    fn record_tokens_per_sec(&mut self, tps: f64) {
+        self.tps_samples.push(tps);
+    }
+
+    fn avg_tokens_per_sec(&self) -> Option<f64> {
+        if self.tps_samples.is_empty() {
+            return None;
+        }
+        let sum: f64 = self.tps_samples.iter().sum();
+        Some(sum / self.tps_samples.len() as f64)
+    }
+
     fn clear(&mut self) {
         self.throbber = None;
         self.since = None;
         self.final_elapsed = None;
+        self.tps_samples.clear();
     }
 
-    fn throbber_spans(&self) -> Vec<BarSpan> {
+    fn throbber_spans(&self, show_speed: bool) -> Vec<BarSpan> {
         let Some(state) = self.throbber else {
             return vec![];
         };
@@ -337,6 +353,20 @@ impl WorkingState {
                         attr: Some(Attribute::Dim),
                     },
                 ];
+                if show_speed {
+                    if let Some(avg) = self.avg_tokens_per_sec() {
+                        spans.push(BarSpan {
+                            text: " · ".into(),
+                            color: theme::MUTED,
+                            attr: Some(Attribute::Dim),
+                        });
+                        spans.push(BarSpan {
+                            text: format!("{:.1} tok/s", avg),
+                            color: theme::MUTED,
+                            attr: Some(Attribute::Dim),
+                        });
+                    }
+                }
                 if let Throbber::Retrying { delay, attempt } = state {
                     let remaining = self
                         .retry_deadline
@@ -352,11 +382,26 @@ impl WorkingState {
             }
             Throbber::Done => {
                 let secs = self.final_elapsed.map(|d| d.as_secs()).unwrap_or(0);
-                vec![BarSpan {
+                let mut spans = vec![BarSpan {
                     text: format!("done {}", format_duration(secs)),
                     color: theme::MUTED,
                     attr: Some(Attribute::Dim),
-                }]
+                }];
+                if show_speed {
+                    if let Some(avg) = self.avg_tokens_per_sec() {
+                        spans.push(BarSpan {
+                            text: " · ".into(),
+                            color: theme::MUTED,
+                            attr: Some(Attribute::Dim),
+                        });
+                        spans.push(BarSpan {
+                            text: format!("{:.1} tok/s", avg),
+                            color: theme::MUTED,
+                            attr: Some(Attribute::Dim),
+                        });
+                    }
+                }
+                spans
             }
             Throbber::Interrupted => {
                 vec![BarSpan {
@@ -385,6 +430,7 @@ pub struct Screen {
     /// A permission dialog is waiting for the user to stop typing.
     pending_dialog: bool,
     running_procs: usize,
+    show_speed: bool,
 }
 
 impl Default for Screen {
@@ -407,7 +453,13 @@ impl Screen {
             content_start_row: None,
             pending_dialog: false,
             running_procs: 0,
+            show_speed: true,
         }
+    }
+
+    pub fn set_show_speed(&mut self, show: bool) {
+        self.show_speed = show;
+        self.prompt.dirty = true;
     }
 
     pub fn set_running_procs(&mut self, count: usize) {
@@ -579,6 +631,11 @@ impl Screen {
 
     pub fn set_throbber(&mut self, state: Throbber) {
         self.working.set_throbber(state);
+        self.prompt.dirty = true;
+    }
+
+    pub fn record_tokens_per_sec(&mut self, tps: f64) {
+        self.working.record_tokens_per_sec(tps);
         self.prompt.dirty = true;
     }
 
@@ -991,7 +1048,7 @@ impl Screen {
                 attr: None,
             });
         }
-        let mut throbber_spans = self.working.throbber_spans();
+        let mut throbber_spans = self.working.throbber_spans(self.show_speed);
         if self.pending_dialog {
             if !throbber_spans.is_empty() {
                 throbber_spans.push(BarSpan {
@@ -1732,9 +1789,13 @@ fn draw_menu(
         MenuKind::Settings {
             vim_enabled,
             auto_compact,
+            show_speed,
         } => {
-            let rows: &[(&str, bool)] =
-                &[("vim mode", *vim_enabled), ("auto compact", *auto_compact)];
+            let rows: &[(&str, bool)] = &[
+                ("vim mode", *vim_enabled),
+                ("auto compact", *auto_compact),
+                ("show speed", *show_speed),
+            ];
             let col = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0) + 4;
             let mut drawn = 0;
             for (idx, (label, value)) in rows.iter().enumerate() {

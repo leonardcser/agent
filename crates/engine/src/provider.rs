@@ -45,6 +45,7 @@ pub struct LLMResponse {
     pub tool_calls: Vec<ToolCall>,
     pub prompt_tokens: Option<u32>,
     pub completion_tokens: Option<u32>,
+    pub tokens_per_sec: Option<f64>,
 }
 
 pub struct Provider {
@@ -198,6 +199,7 @@ impl Provider {
             let completion_tokens = data["usage"]["completion_tokens"]
                 .as_u64()
                 .map(|n| n as u32);
+            let tokens_per_sec = data["timings"]["predicted_per_second"].as_f64();
 
             log::entry(
                 log::Level::Debug,
@@ -215,6 +217,7 @@ impl Provider {
                 tool_calls,
                 prompt_tokens,
                 completion_tokens,
+                tokens_per_sec,
             });
         }
 

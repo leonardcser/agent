@@ -116,6 +116,7 @@ async fn main() {
 
     let vim_enabled = cfg.settings.vim_mode.unwrap_or(false);
     let auto_compact = cfg.settings.auto_compact.unwrap_or(false);
+    let show_speed = cfg.settings.show_speed.unwrap_or(true);
     let shared_session: Arc<Mutex<Option<tui::session::Session>>> = Arc::new(Mutex::new(None));
 
     // Signal handler for graceful shutdown
@@ -220,6 +221,7 @@ async fn main() {
         engine_handle,
         vim_enabled,
         auto_compact,
+        show_speed,
         shared_session,
         available_models,
     );

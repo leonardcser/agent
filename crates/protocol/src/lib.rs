@@ -221,6 +221,7 @@ pub enum EngineEvent {
     TokenUsage {
         prompt_tokens: u32,
         completion_tokens: Option<u32>,
+        tokens_per_sec: Option<f64>,
     },
 
     /// LLM call failed, engine is retrying.

@@ -39,6 +39,7 @@ pub struct App {
     pub shared_session: Arc<Mutex<Option<Session>>>,
     pub context_window: Option<u32>,
     pub auto_compact: bool,
+    pub show_speed: bool,
     pub available_models: Vec<crate::config::ResolvedModel>,
     pub engine: EngineHandle,
     pending_title: bool,
@@ -265,6 +266,7 @@ impl App {
         engine: EngineHandle,
         vim_from_config: bool,
         auto_compact: bool,
+        show_speed: bool,
         shared_session: Arc<Mutex<Option<Session>>>,
         available_models: Vec<crate::config::ResolvedModel>,
     ) -> Self {
@@ -279,6 +281,7 @@ impl App {
         let mut screen = Screen::new();
         screen.set_model_label(model.clone());
         screen.set_reasoning_effort(reasoning_effort);
+        screen.set_show_speed(show_speed);
         Self {
             model,
             api_base,
@@ -295,6 +298,7 @@ impl App {
             shared_session,
             context_window: None,
             auto_compact,
+            show_speed,
             available_models,
             engine,
             pending_title: false,
@@ -336,7 +340,7 @@ impl App {
                 }
             } else if trimmed == "/settings" {
                 self.input
-                    .open_settings(self.input.vim_enabled(), self.auto_compact);
+                    .open_settings(self.input.vim_enabled(), self.auto_compact, self.show_speed);
                 self.screen.mark_dirty();
             } else if let Some(reason) = classify_startup_command(trimmed) {
                 self.screen.push(Block::Error {
@@ -891,10 +895,12 @@ impl App {
             }
             EventOutcome::MenuResult(result) => {
                 match result {
-                    MenuResult::Settings { vim, auto_compact } => {
+                    MenuResult::Settings { vim, auto_compact, show_speed } => {
                         self.input.set_vim_enabled(vim);
                         state::set_vim_enabled(vim);
                         self.auto_compact = auto_compact;
+                        self.show_speed = show_speed;
+                        self.screen.set_show_speed(show_speed);
                     }
                     MenuResult::ModelSelect(key) => {
                         if let Some(resolved) = self.available_models.iter().find(|m| m.key == key)
@@ -1117,7 +1123,7 @@ impl App {
             }
             Action::Submit { ref content, .. } if content.as_text().trim() == "/settings" => {
                 self.input
-                    .open_settings(self.input.vim_enabled(), self.auto_compact);
+                    .open_settings(self.input.vim_enabled(), self.auto_compact, self.show_speed);
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
@@ -1874,9 +1880,13 @@ impl App {
             EngineEvent::TokenUsage {
                 prompt_tokens,
                 completion_tokens,
+                tokens_per_sec,
             } => {
                 if prompt_tokens > 0 {
                     self.screen.set_context_tokens(prompt_tokens);
+                }
+                if let Some(tps) = tokens_per_sec {
+                    self.screen.record_tokens_per_sec(tps);
                 }
                 crate::metrics::append(&crate::metrics::MetricsEntry {
                     timestamp_ms: std::time::SystemTime::now()

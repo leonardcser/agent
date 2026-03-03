@@ -247,6 +247,7 @@ async fn run_turn(
             let _ = event_tx.send(EngineEvent::TokenUsage {
                 prompt_tokens: tokens,
                 completion_tokens: resp.completion_tokens,
+                tokens_per_sec: resp.tokens_per_sec,
             });
         }
 

@@ -200,17 +200,18 @@ impl InputState {
         self.attachments = attachments;
     }
 
-    pub fn open_settings(&mut self, vim_enabled: bool, auto_compact: bool) {
+    pub fn open_settings(&mut self, vim_enabled: bool, auto_compact: bool, show_speed: bool) {
         self.completer = None;
         self.menu = Some(MenuState {
             nav: Menu {
                 selected: 0,
-                len: 2,
+                len: 3,
                 select_on_enter: false,
             },
             kind: MenuKind::Settings {
                 vim_enabled,
                 auto_compact,
+                show_speed,
             },
         });
     }
@@ -251,9 +252,11 @@ impl InputState {
             MenuKind::Settings {
                 vim_enabled,
                 auto_compact,
+                show_speed,
             } => MenuResult::Settings {
                 vim: vim_enabled,
                 auto_compact,
+                show_speed,
             },
             MenuKind::Model { .. } => MenuResult::Dismissed,
             MenuKind::Stats { .. } => MenuResult::Stats,
@@ -264,7 +267,7 @@ impl InputState {
     pub fn menu_rows(&self) -> usize {
         match &self.menu {
             Some(ms) => match &ms.kind {
-                MenuKind::Settings { .. } => 2,
+                MenuKind::Settings { .. } => 3,
                 MenuKind::Model { models } => (models.len() + 2).min(12),
                 MenuKind::Stats { lines } => lines
                     .iter()
@@ -682,11 +685,13 @@ impl InputState {
                 if let MenuKind::Settings {
                     ref mut vim_enabled,
                     ref mut auto_compact,
+                    ref mut show_speed,
                 } = ms.kind
                 {
                     match idx {
                         0 => *vim_enabled ^= true,
                         1 => *auto_compact ^= true,
+                        2 => *show_speed ^= true,
                         _ => {}
                     }
                 }

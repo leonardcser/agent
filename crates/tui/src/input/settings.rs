@@ -95,6 +95,7 @@ pub enum MenuKind {
     Settings {
         vim_enabled: bool,
         auto_compact: bool,
+        show_speed: bool,
     },
     Model {
         /// (key, model_name, provider_name) for each entry.
@@ -112,7 +113,7 @@ pub struct MenuState {
 
 /// Domain-specific result returned to the app after a menu closes.
 pub enum MenuResult {
-    Settings { vim: bool, auto_compact: bool },
+    Settings { vim: bool, auto_compact: bool, show_speed: bool },
     ModelSelect(String),
     Stats,
     Dismissed,

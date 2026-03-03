@@ -69,6 +69,7 @@ pub struct ProviderConfig {
 pub struct SettingsConfig {
     pub vim_mode: Option<bool>,
     pub auto_compact: Option<bool>,
+    pub show_speed: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
