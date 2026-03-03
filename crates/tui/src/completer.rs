@@ -188,7 +188,7 @@ fn fuzzy_match(path: &str, query: &str) -> bool {
     true
 }
 
-/// Get tracked + untracked (but not ignored) files via git.
+/// Get tracked + untracked (but not ignored) files and directories via git.
 fn git_files() -> Vec<String> {
     let output = Command::new("git")
         .args(["ls-files", "--cached", "--others", "--exclude-standard"])
@@ -196,13 +196,29 @@ fn git_files() -> Vec<String> {
     match output {
         Ok(o) => {
             let s = String::from_utf8_lossy(&o.stdout);
-            let mut files: Vec<String> = s
+            let mut dirs = std::collections::HashSet::new();
+            let mut entries: Vec<String> = s
                 .lines()
                 .filter(|l| !l.is_empty())
-                .map(String::from)
+                .flat_map(|l| {
+                    let mut parts = Vec::new();
+                    // Collect parent directories.
+                    let mut prefix = String::new();
+                    for component in std::path::Path::new(l).parent().into_iter().flat_map(|p| p.components()) {
+                        if !prefix.is_empty() {
+                            prefix.push('/');
+                        }
+                        prefix.push_str(&component.as_os_str().to_string_lossy());
+                        if dirs.insert(prefix.clone()) {
+                            parts.push(prefix.clone());
+                        }
+                    }
+                    parts.push(l.to_string());
+                    parts
+                })
                 .collect();
-            files.sort();
-            files
+            entries.sort();
+            entries
         }
         Err(_) => Vec::new(),
     }

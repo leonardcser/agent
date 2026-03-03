@@ -1019,9 +1019,10 @@ impl Screen {
 
         let spans = build_display_spans(&state.buf, &state.pastes);
         let display_buf = spans_to_string(&spans);
+        let char_kinds = build_char_kinds(&spans);
         let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
         let (visual_lines, cursor_line, cursor_col) =
-            wrap_and_locate_cursor(&display_buf, display_cursor, usable);
+            wrap_and_locate_cursor(&display_buf, &char_kinds, display_cursor, usable);
         let is_command = crate::completer::Completer::is_command(state.buf.trim());
         let is_exec = matches!(state.buf.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
         let is_exec_invalid = state.buf == "!";
@@ -1069,7 +1070,7 @@ impl Screen {
             .saturating_sub(scroll_offset)
             .min(content_rows.saturating_sub(1));
 
-        for (li, line) in visual_lines
+        for (li, (line, kinds)) in visual_lines
             .iter()
             .skip(scroll_offset)
             .take(content_rows)
@@ -1087,9 +1088,9 @@ impl Screen {
                 let _ = out.queue(Print("!"));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
                 let _ = out.queue(ResetColor);
-                render_line_spans(out, &line[1..]);
+                render_styled_chars(out, &line[1..], &kinds[1..]);
             } else {
-                render_line_spans(out, line);
+                render_styled_chars(out, line, kinds);
             }
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             let _ = out.queue(Print("\r\n"));
@@ -1391,10 +1392,11 @@ fn format_tokens(n: u32) -> String {
 
 fn wrap_and_locate_cursor(
     buf: &str,
+    char_kinds: &[SpanKind],
     cursor_char: usize,
     usable: usize,
-) -> (Vec<String>, usize, usize) {
-    let mut visual_lines: Vec<String> = Vec::new();
+) -> (Vec<(String, Vec<SpanKind>)>, usize, usize) {
+    let mut visual_lines: Vec<(String, Vec<SpanKind>)> = Vec::new();
     let mut cursor_line = 0;
     let mut cursor_col = 0;
     let mut chars_seen = 0usize;
@@ -1408,7 +1410,7 @@ fn wrap_and_locate_cursor(
                 cursor_col = 0;
                 cursor_set = true;
             }
-            visual_lines.push(String::new());
+            visual_lines.push((String::new(), Vec::new()));
         } else {
             let chunks: Vec<_> = chars.chunks(usable.max(1)).collect();
             for (ci, chunk) in chunks.iter().enumerate() {
@@ -1423,14 +1425,18 @@ fn wrap_and_locate_cursor(
                     cursor_col = cursor_char - line_start;
                     cursor_set = true;
                 }
+                let kinds = char_kinds
+                    .get(line_start..line_start + chunk.len())
+                    .unwrap_or_default()
+                    .to_vec();
                 chars_seen += chunk.len();
-                visual_lines.push(chunk.iter().collect());
+                visual_lines.push((chunk.iter().collect(), kinds));
             }
         }
-        chars_seen += 1;
+        chars_seen += 1; // for the '\n'
     }
     if visual_lines.is_empty() {
-        visual_lines.push(String::new());
+        visual_lines.push((String::new(), Vec::new()));
     }
     (visual_lines, cursor_line, cursor_col)
 }
@@ -1499,6 +1505,26 @@ enum Span {
     AtRef(String),
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum SpanKind {
+    Plain,
+    Paste,
+    AtRef,
+}
+
+fn build_char_kinds(spans: &[Span]) -> Vec<SpanKind> {
+    let mut kinds = Vec::new();
+    for span in spans {
+        let (text, kind) = match span {
+            Span::Plain(t) => (t.as_str(), SpanKind::Plain),
+            Span::Paste(t) => (t.as_str(), SpanKind::Paste),
+            Span::AtRef(t) => (t.as_str(), SpanKind::AtRef),
+        };
+        kinds.extend(std::iter::repeat(kind).take(text.chars().count()));
+    }
+    kinds
+}
+
 fn build_display_spans(buf: &str, pastes: &[String]) -> Vec<Span> {
     let mut spans = Vec::new();
     let mut plain = String::new();
@@ -1530,10 +1556,15 @@ fn build_display_spans(buf: &str, pastes: &[String]) -> Vec<Span> {
                 }
                 if end > i + 1 {
                     let token: String = chars[i..end].iter().collect();
-                    spans.push(Span::AtRef(token));
+                    let path_str = &token[1..];
+                    if std::path::Path::new(path_str).exists() {
+                        spans.push(Span::AtRef(token));
+                    } else {
+                        spans.push(Span::Plain(token));
+                    }
                     i = end;
                 } else {
-                    spans.push(Span::AtRef("@".to_string()));
+                    spans.push(Span::Plain("@".to_string()));
                     i += 1;
                 }
             } else {
@@ -1595,60 +1626,27 @@ fn map_cursor(raw_cursor: usize, raw_buf: &str, spans: &[Span]) -> usize {
     display_pos
 }
 
-fn render_line_spans(out: &mut io::Stdout, line: &str) {
-    let mut rest = line;
-    while !rest.is_empty() {
-        let paste_pos = rest.find("[pasted ");
-        let at_pos = rest.find('@');
-
-        let next = match (paste_pos, at_pos) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        };
-
-        let Some(pos) = next else {
-            let _ = out.queue(Print(rest));
-            break;
-        };
-
-        if pos > 0 {
-            let _ = out.queue(Print(&rest[..pos]));
-        }
-
-        if paste_pos == Some(pos) {
-            if let Some(end) = rest[pos..].find(']') {
-                let label = &rest[pos..pos + end + 1];
-                if label.ends_with(" lines]") {
-                    let _ = out.queue(SetForegroundColor(theme::ACCENT));
-                    let _ = out.queue(Print(label));
-                    let _ = out.queue(ResetColor);
-                    rest = &rest[pos + end + 1..];
-                    continue;
-                }
-            }
-            let _ = out.queue(Print(&rest[pos..pos + 1]));
-            rest = &rest[pos + 1..];
-        } else if at_pos == Some(pos) {
-            let after = &rest[pos + 1..];
-            let tok_end = after.find(char::is_whitespace).unwrap_or(after.len());
-            let token = &rest[pos..pos + 1 + tok_end];
-            let path_str = &token[1..];
-            if !path_str.is_empty() && std::path::Path::new(path_str).exists() {
-                let _ = out.queue(SetForegroundColor(theme::ACCENT));
-                let _ = out.queue(Print(token));
+/// Render a line using pre-computed per-character span kinds.
+fn render_styled_chars(out: &mut io::Stdout, line: &str, kinds: &[SpanKind]) {
+    let mut current = SpanKind::Plain;
+    for (i, ch) in line.chars().enumerate() {
+        let kind = kinds.get(i).copied().unwrap_or(SpanKind::Plain);
+        if kind != current {
+            if current != SpanKind::Plain {
                 let _ = out.queue(ResetColor);
-            } else {
-                let _ = out.queue(Print(token));
             }
-            rest = &rest[pos + 1 + tok_end..];
-        } else {
-            let _ = out.queue(Print(&rest[pos..pos + 1]));
-            rest = &rest[pos + 1..];
+            if kind == SpanKind::AtRef || kind == SpanKind::Paste {
+                let _ = out.queue(SetForegroundColor(theme::ACCENT));
+            }
+            current = kind;
         }
+        let _ = out.queue(Print(ch));
+    }
+    if current != SpanKind::Plain {
+        let _ = out.queue(ResetColor);
     }
 }
+
 
 fn draw_completions(
     out: &mut io::Stdout,

@@ -43,7 +43,17 @@ pub fn expand_at_refs(input: &str) -> String {
 
     let mut result = input.to_string();
     for path in &refs {
-        if let Ok(contents) = std::fs::read_to_string(path) {
+        let p = std::path::Path::new(path);
+        if p.is_dir() {
+            if let Ok(output) = std::process::Command::new("ls").arg("-1").arg(path).output() {
+                let listing = String::from_utf8_lossy(&output.stdout);
+                result.push_str(&format!(
+                    "\n\nDirectory listing of {}:\n```\n{}\n```",
+                    path,
+                    listing.trim_end()
+                ));
+            }
+        } else if let Ok(contents) = std::fs::read_to_string(path) {
             result.push_str(&format!(
                 "\n\nContents of {}:\n```\n{}\n```",
                 path, contents
