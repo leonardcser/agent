@@ -68,7 +68,7 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             // If any line wraps, that means the longest line is text_w.
             let block_w = if multiline {
                 if wraps {
-                    text_w
+                    text_w + 1
                 } else {
                     logical_lines
                         .iter()
