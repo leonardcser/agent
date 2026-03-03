@@ -95,7 +95,8 @@ confirmation dialog offers three approval levels:
 
 1. **yes** — approve this single request
 2. **no** — deny this request
-3. **allow \<domain\>** — approve all future fetches to this domain for the session
+3. **allow \<domain\>** — approve all future fetches to this domain for the
+   session
 
 ## CLI Flags
 
@@ -146,6 +147,8 @@ Type `/` to open the command picker:
 | `/vim`             | Toggle vim mode                |
 | `/settings`        | Open settings menu             |
 | `/export`          | Copy conversation to clipboard |
+| `/stats`           | Show token usage statistics    |
+| `/ps`              | Manage background processes    |
 | `/exit` or `/quit` | Exit                           |
 
 ## File References
