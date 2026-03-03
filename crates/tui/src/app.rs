@@ -277,6 +277,9 @@ impl App {
         if vim_enabled {
             input.set_vim_enabled(true);
         }
+        if let Some(accent) = saved.accent_color {
+            crate::theme::set_accent(accent);
+        }
         let reasoning_effort = saved.reasoning_effort;
         let mut screen = Screen::new();
         screen.set_model_label(model.clone());
@@ -920,6 +923,10 @@ impl App {
                         }
                         self.screen.erase_prompt();
                     }
+                    MenuResult::ThemeSelect(value) => {
+                        state::set_accent(value);
+                        self.screen.redraw(true);
+                    }
                     MenuResult::Stats | MenuResult::Dismissed => {}
                 }
                 self.screen.mark_dirty();
@@ -1134,6 +1141,11 @@ impl App {
                     self.auto_compact,
                     self.show_speed,
                 );
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            Action::Submit { ref content, .. } if content.as_text().trim() == "/theme" => {
+                self.input.open_theme_picker();
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }

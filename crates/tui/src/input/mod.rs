@@ -241,6 +241,26 @@ impl InputState {
         });
     }
 
+    pub fn open_theme_picker(&mut self) {
+        let presets: Vec<_> = crate::theme::PRESETS.to_vec();
+        let len = presets.len();
+        let original = crate::theme::accent_value();
+        // Pre-select current theme
+        let selected = presets
+            .iter()
+            .position(|(_, _, v)| *v == original)
+            .unwrap_or(0);
+        self.completer = None;
+        self.menu = Some(MenuState {
+            nav: Menu {
+                selected,
+                len,
+                select_on_enter: true,
+            },
+            kind: MenuKind::Theme { presets, original },
+        });
+    }
+
     pub fn has_modal(&self) -> bool {
         self.menu.is_some()
     }
@@ -259,6 +279,11 @@ impl InputState {
                 show_speed,
             },
             MenuKind::Model { .. } => MenuResult::Dismissed,
+            MenuKind::Theme { original, .. } => {
+                // Restore original accent on dismiss
+                crate::theme::set_accent(original);
+                MenuResult::Dismissed
+            }
             MenuKind::Stats { .. } => MenuResult::Stats,
         })
     }
@@ -269,6 +294,7 @@ impl InputState {
             Some(ms) => match &ms.kind {
                 MenuKind::Settings { .. } => 3,
                 MenuKind::Model { models } => (models.len() + 2).min(12),
+                MenuKind::Theme { presets, .. } => presets.len().min(14),
                 MenuKind::Stats { lines } => lines
                     .iter()
                     .map(|l| match l {
@@ -713,11 +739,29 @@ impl InputState {
                             Action::Redraw
                         }
                     }
+                    MenuKind::Theme { ref presets, .. } => {
+                        if let Some(&(_, _, value)) = presets.get(idx) {
+                            crate::theme::set_accent(value);
+                            Action::MenuResult(MenuResult::ThemeSelect(value))
+                        } else {
+                            Action::Redraw
+                        }
+                    }
                     _ => Action::Redraw,
                 }
             }
             MenuAction::Dismiss => Action::MenuResult(self.dismiss_menu().unwrap()),
-            MenuAction::Redraw => Action::Redraw,
+            MenuAction::Redraw => {
+                // Live-preview theme color while scrolling
+                if let Some(ref ms) = self.menu {
+                    if let MenuKind::Theme { ref presets, .. } = ms.kind {
+                        if let Some(&(_, _, value)) = presets.get(ms.nav.selected) {
+                            crate::theme::set_accent(value);
+                        }
+                    }
+                }
+                Action::Redraw
+            }
             MenuAction::Noop => Action::Noop,
         }
     }

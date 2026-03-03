@@ -63,12 +63,15 @@ impl Menu {
                 code: KeyCode::Char('k'),
                 ..
             }) => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                    MenuAction::Redraw
-                } else {
-                    MenuAction::Noop
+                if self.len == 0 {
+                    return MenuAction::Noop;
                 }
+                self.selected = if self.selected > 0 {
+                    self.selected - 1
+                } else {
+                    self.len - 1
+                };
+                MenuAction::Redraw
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Down,
@@ -78,12 +81,15 @@ impl Menu {
                 code: KeyCode::Char('j'),
                 ..
             }) => {
-                if self.selected + 1 < self.len {
-                    self.selected += 1;
-                    MenuAction::Redraw
-                } else {
-                    MenuAction::Noop
+                if self.len == 0 {
+                    return MenuAction::Noop;
                 }
+                self.selected = if self.selected + 1 < self.len {
+                    self.selected + 1
+                } else {
+                    0
+                };
+                MenuAction::Redraw
             }
             _ => MenuAction::Noop,
         }
@@ -104,6 +110,12 @@ pub enum MenuKind {
     Stats {
         lines: Vec<crate::metrics::StatsLine>,
     },
+    Theme {
+        /// (name, detail, ansi_value)
+        presets: Vec<(&'static str, &'static str, u8)>,
+        /// Original accent value to restore on dismiss.
+        original: u8,
+    },
 }
 
 pub struct MenuState {
@@ -119,6 +131,7 @@ pub enum MenuResult {
         show_speed: bool,
     },
     ModelSelect(String),
+    ThemeSelect(u8),
     Stats,
     Dismissed,
 }

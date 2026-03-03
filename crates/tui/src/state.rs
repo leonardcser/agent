@@ -13,6 +13,8 @@ pub struct State {
     pub selected_model: Option<String>,
     #[serde(default)]
     pub reasoning_effort: ReasoningEffort,
+    #[serde(default)]
+    pub accent_color: Option<u8>,
 }
 
 fn state_path() -> PathBuf {
@@ -70,5 +72,11 @@ pub fn set_selected_model(key: String) {
 pub fn set_reasoning_effort(effort: ReasoningEffort) {
     let mut s = State::load();
     s.reasoning_effort = effort;
+    s.save();
+}
+
+pub fn set_accent(value: u8) {
+    let mut s = State::load();
+    s.accent_color = Some(value);
     s.save();
 }

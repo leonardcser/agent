@@ -65,6 +65,7 @@ impl Completer {
             ("export", "copy conversation to clipboard"),
             ("fork", "fork current session"),
             ("stats", "show token usage statistics"),
+            ("theme", "change accent color"),
             ("ps", "manage background processes"),
             ("exit", "exit the app"),
             ("quit", "exit the app"),

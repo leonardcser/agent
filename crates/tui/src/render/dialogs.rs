@@ -584,7 +584,7 @@ impl ConfirmDialog {
 
             row = bar_row;
 
-            draw_bar(&mut out, w, None, None, theme::ACCENT);
+            draw_bar(&mut out, w, None, None, theme::accent());
             crlf(&mut out);
             row += 1;
 
@@ -594,7 +594,7 @@ impl ConfirmDialog {
             for (i, seg) in segments.iter().enumerate() {
                 if i == 0 {
                     let _ = out.queue(Print(" "));
-                    let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                    let _ = out.queue(SetForegroundColor(theme::accent()));
                     let _ = out.queue(Print(&self.tool_name));
                     let _ = out.queue(ResetColor);
                     let _ = out.queue(Print(format!(": {seg}")));
@@ -660,7 +660,7 @@ impl ConfirmDialog {
                 let _ = out.queue(Print(format!("{}.", i + 1)));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
                 let _ = out.queue(Print(" "));
-                let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                let _ = out.queue(SetForegroundColor(theme::accent()));
                 let _ = out.queue(Print(label));
                 let _ = out.queue(ResetColor);
             } else {
@@ -801,7 +801,7 @@ impl RewindDialog {
 
         begin_dialog_draw(&mut out, start_row);
 
-        draw_bar(&mut out, w, None, None, theme::ACCENT);
+        draw_bar(&mut out, w, None, None, theme::accent());
         crlf(&mut out);
 
         let _ = out.queue(SetAttribute(Attribute::Dim));
@@ -827,7 +827,7 @@ impl RewindDialog {
                 let _ = out.queue(Print(format!("{}.", num)));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
                 let _ = out.queue(Print(" "));
-                let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                let _ = out.queue(SetForegroundColor(theme::accent()));
                 let _ = out.queue(Print(&truncated));
                 let _ = out.queue(ResetColor);
             } else {
@@ -1072,7 +1072,7 @@ impl ResumeDialog {
 
         let now_ms = session::now_ms();
 
-        draw_bar(&mut out, w, None, None, theme::ACCENT);
+        draw_bar(&mut out, w, None, None, theme::accent());
         crlf(&mut out);
 
         let _ = out.queue(SetAttribute(Attribute::Dim));
@@ -1109,7 +1109,7 @@ impl ResumeDialog {
                 let truncated = truncate_str_local(&title, max_label);
                 if i == self.selected {
                     let _ = out.queue(Print(&indent_str));
-                    let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                    let _ = out.queue(SetForegroundColor(theme::accent()));
                     let _ = out.queue(Print(&truncated));
                     let _ = out.queue(ResetColor);
                 } else {
@@ -1275,7 +1275,7 @@ impl PsDialog {
 
         begin_dialog_draw(&mut out, start_row);
 
-        draw_bar(&mut out, w, None, None, theme::ACCENT);
+        draw_bar(&mut out, w, None, None, theme::accent());
         crlf(&mut out);
 
         let _ = out.queue(SetAttribute(Attribute::Dim));
@@ -1304,7 +1304,7 @@ impl PsDialog {
                 let cmd_display = truncate_str_local(&proc.command, max_cmd);
                 if i == self.selected {
                     let _ = out.queue(Print("  "));
-                    let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                    let _ = out.queue(SetForegroundColor(theme::accent()));
                     let _ = out.queue(Print(&cmd_display));
                     let _ = out.queue(ResetColor);
                 } else {
@@ -1517,7 +1517,7 @@ impl QuestionDialog {
 
         let mut row = bar_row;
 
-        draw_bar(&mut out, w, None, None, theme::ACCENT);
+        draw_bar(&mut out, w, None, None, theme::accent());
         crlf(&mut out);
         row += 1;
 
@@ -1530,7 +1530,7 @@ impl QuestionDialog {
                     "□"
                 };
                 if i == self.active_tab {
-                    let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                    let _ = out.queue(SetForegroundColor(theme::accent()));
                     let _ = out.queue(SetAttribute(Attribute::Bold));
                     let _ = out.queue(Print(format!(" {} {} ", bullet, q.header)));
                     let _ = out.queue(SetAttribute(Attribute::Reset));
@@ -1587,7 +1587,7 @@ impl QuestionDialog {
             if is_multi {
                 let check = if is_toggled { "◉" } else { "○" };
                 if is_current {
-                    let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                    let _ = out.queue(SetForegroundColor(theme::accent()));
                     let _ = out.queue(Print(format!("{} ", check)));
                     let _ = out.queue(Print(&opt.label));
                     let _ = out.queue(ResetColor);
@@ -1603,7 +1603,7 @@ impl QuestionDialog {
                 let _ = out.queue(SetAttribute(Attribute::Reset));
                 let _ = out.queue(Print(" "));
                 if is_current {
-                    let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                    let _ = out.queue(SetForegroundColor(theme::accent()));
                     let _ = out.queue(Print(&opt.label));
                     let _ = out.queue(ResetColor);
                 } else {
@@ -1638,7 +1638,7 @@ impl QuestionDialog {
         if is_multi {
             let check = if is_other_toggled { "◉" } else { "○" };
             if is_other_current {
-                let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                let _ = out.queue(SetForegroundColor(theme::accent()));
                 let _ = out.queue(Print(format!("{} Other", check)));
                 let _ = out.queue(ResetColor);
             } else {
@@ -1653,7 +1653,7 @@ impl QuestionDialog {
             let _ = out.queue(SetAttribute(Attribute::Reset));
             let _ = out.queue(Print(" "));
             if is_other_current {
-                let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                let _ = out.queue(SetForegroundColor(theme::accent()));
                 let _ = out.queue(Print("Other"));
                 let _ = out.queue(ResetColor);
             } else {
@@ -1905,7 +1905,7 @@ impl HelpDialog {
 
         begin_dialog_draw(&mut out, start_row);
 
-        draw_bar(&mut out, w, None, None, super::theme::ACCENT);
+        draw_bar(&mut out, w, None, None, super::theme::accent());
         crlf(&mut out);
 
         let _ = out.queue(SetAttribute(Attribute::Dim));

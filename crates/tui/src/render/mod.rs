@@ -322,11 +322,13 @@ impl WorkingState {
                         text: format!("{} compacting", SPINNER_FRAMES[idx]),
                         color: Color::Reset,
                         attr: Some(Attribute::Bold),
+                        priority: 0,
                     },
                     BarSpan {
                         text: format!(" {}", format_duration(elapsed.as_secs())),
                         color: theme::MUTED,
                         attr: Some(Attribute::Dim),
+                        priority: 0,
                     },
                 ]
             }
@@ -346,11 +348,13 @@ impl WorkingState {
                         text: format!("{} working", SPINNER_FRAMES[idx]),
                         color: spinner_color,
                         attr: Some(Attribute::Bold),
+                        priority: 0,
                     },
                     BarSpan {
                         text: format!(" {}", format_duration(elapsed.as_secs())),
                         color: theme::MUTED,
                         attr: Some(Attribute::Dim),
+                        priority: 0,
                     },
                 ];
                 if show_speed {
@@ -359,11 +363,13 @@ impl WorkingState {
                             text: " · ".into(),
                             color: theme::MUTED,
                             attr: Some(Attribute::Dim),
+                            priority: 3, // drop first
                         });
                         spans.push(BarSpan {
                             text: format!("{:.1} tok/s", avg),
                             color: theme::MUTED,
                             attr: Some(Attribute::Dim),
+                            priority: 3, // drop first
                         });
                     }
                 }
@@ -376,6 +382,7 @@ impl WorkingState {
                         text: format!(" (retrying in {}s #{})", remaining.as_secs(), attempt),
                         color: theme::MUTED,
                         attr: Some(Attribute::Dim),
+                        priority: 0,
                     });
                 }
                 spans
@@ -386,6 +393,7 @@ impl WorkingState {
                     text: format!("done {}", format_duration(secs)),
                     color: theme::MUTED,
                     attr: Some(Attribute::Dim),
+                    priority: 0,
                 }];
                 if show_speed {
                     if let Some(avg) = self.avg_tokens_per_sec() {
@@ -393,11 +401,13 @@ impl WorkingState {
                             text: " · ".into(),
                             color: theme::MUTED,
                             attr: Some(Attribute::Dim),
+                            priority: 3,
                         });
                         spans.push(BarSpan {
                             text: format!("{:.1} tok/s", avg),
                             color: theme::MUTED,
                             attr: Some(Attribute::Dim),
+                            priority: 3,
                         });
                     }
                 }
@@ -408,6 +418,7 @@ impl WorkingState {
                     text: "interrupted".into(),
                     color: theme::MUTED,
                     attr: Some(Attribute::Dim),
+                    priority: 0,
                 }]
             }
         }
@@ -985,7 +996,12 @@ impl Screen {
         let queued_rows = queued_visual as usize;
 
         let vi_normal = state.vim_mode() == Some(crate::vim::ViMode::Normal);
-        let bar_color = if vi_normal { theme::ACCENT } else { theme::BAR };
+        let bar_color = if vi_normal { theme::accent() } else { theme::BAR };
+
+        // Build all bar spans with priorities. draw_bar drops highest
+        // priority first until everything fits.
+        // Priorities: 0 = always, 1 = context tokens, 2 = model, 3 = tok/s
+        let mut throbber_spans = self.working.throbber_spans(self.show_speed);
 
         let mut right_spans = Vec::new();
         if let Some(ref model) = self.model_label {
@@ -993,6 +1009,7 @@ impl Screen {
                 text: format!(" {}", model),
                 color: theme::MUTED,
                 attr: None,
+                priority: 2,
             });
             if self.reasoning_effort != protocol::ReasoningEffort::Off {
                 let effort = self.reasoning_effort;
@@ -1000,43 +1017,38 @@ impl Screen {
                     text: format!(" {}", effort.label()),
                     color: reasoning_color(effort),
                     attr: None,
+                    priority: 2,
                 });
             }
         }
         if let Some(tokens) = self.context_tokens {
-            if !right_spans.is_empty() {
-                right_spans.push(BarSpan {
-                    text: " · ".into(),
-                    color: bar_color,
-                    attr: None,
-                });
-            } else {
-                right_spans.push(BarSpan {
-                    text: " ".into(),
-                    color: theme::MUTED,
-                    attr: None,
-                });
-            }
+            right_spans.push(BarSpan {
+                text: " · ".into(),
+                color: bar_color,
+                attr: None,
+                priority: 1,
+            });
             right_spans.push(BarSpan {
                 text: format!("{} ", format_tokens(tokens)),
                 color: theme::MUTED,
                 attr: None,
+                priority: 1,
             });
         } else if !right_spans.is_empty() {
             right_spans.push(BarSpan {
                 text: " ".into(),
                 color: theme::MUTED,
                 attr: None,
+                priority: 0,
             });
         }
         if self.running_procs > 0 {
-            if !right_spans.is_empty() {
-                right_spans.push(BarSpan {
-                    text: " · ".into(),
-                    color: bar_color,
-                    attr: None,
-                });
-            }
+            right_spans.push(BarSpan {
+                text: " · ".into(),
+                color: bar_color,
+                attr: None,
+                priority: 0,
+            });
             let label = if self.running_procs == 1 {
                 "1 proc".to_string()
             } else {
@@ -1044,23 +1056,25 @@ impl Screen {
             };
             right_spans.push(BarSpan {
                 text: format!("{label} "),
-                color: theme::ACCENT,
+                color: theme::accent(),
                 attr: None,
+                priority: 0,
             });
         }
-        let mut throbber_spans = self.working.throbber_spans(self.show_speed);
         if self.pending_dialog {
             if !throbber_spans.is_empty() {
                 throbber_spans.push(BarSpan {
                     text: " · ".into(),
                     color: bar_color,
                     attr: None,
+                    priority: 0,
                 });
             }
             throbber_spans.push(BarSpan {
                 text: "permission pending".into(),
-                color: theme::ACCENT,
+                color: theme::accent(),
                 attr: Some(Attribute::Bold),
+                priority: 0,
             });
         }
         draw_bar(
@@ -1142,7 +1156,7 @@ impl Screen {
             let abs_idx = scroll_offset + li;
             let _ = out.queue(Print(" "));
             if is_command {
-                let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                let _ = out.queue(SetForegroundColor(theme::accent()));
                 let _ = out.queue(Print(line));
                 let _ = out.queue(ResetColor);
             } else if (is_exec || is_exec_invalid) && abs_idx == 0 && line.starts_with('!') {
@@ -1164,16 +1178,19 @@ impl Screen {
                 text: " plan ".into(),
                 color: theme::PLAN,
                 attr: None,
+                priority: 0,
             }],
             protocol::Mode::Apply => vec![BarSpan {
                 text: " apply ".into(),
                 color: theme::APPLY,
                 attr: None,
+                priority: 0,
             }],
             protocol::Mode::Yolo => vec![BarSpan {
                 text: " yolo ".into(),
                 color: theme::YOLO,
                 attr: None,
+                priority: 0,
             }],
             protocol::Mode::Normal => vec![],
         };
@@ -1505,6 +1522,8 @@ pub(super) struct BarSpan {
     text: String,
     color: Color,
     attr: Option<Attribute>,
+    /// Priority for responsive dropping. 0 = always show, higher = drop first.
+    priority: u8,
 }
 
 pub(super) fn draw_bar(
@@ -1515,21 +1534,72 @@ pub(super) fn draw_bar(
     bar_color: Color,
 ) {
     let dash = "\u{2500}";
+    let min_dashes = 4;
 
-    let left_len: usize = left
-        .map(|spans| 1 + 1 + spans.iter().map(|s| s.text.chars().count()).sum::<usize>() + 1)
-        .unwrap_or(0);
-    let right_len: usize = right
-        .map(|spans| spans.iter().map(|s| s.text.chars().count()).sum::<usize>() + 1)
-        .unwrap_or(0);
+    // Find the max priority we need to drop to fit.
+    let max_priority = {
+        let all_priorities: Vec<u8> = left
+            .into_iter()
+            .chain(right)
+            .flat_map(|spans| spans.iter().map(|s| s.priority))
+            .collect();
+        *all_priorities.iter().max().unwrap_or(&0)
+    };
+
+    let mut drop_above = max_priority + 1; // start by showing everything
+    loop {
+        let left_chars: usize = left
+            .map(|spans| {
+                let inner: usize = spans
+                    .iter()
+                    .filter(|s| s.priority < drop_above)
+                    .map(|s| s.text.chars().count())
+                    .sum();
+                if inner > 0 { 1 + 1 + inner + 1 } else { 0 } // dash + space + spans + space
+            })
+            .unwrap_or(0);
+        let right_chars: usize = right
+            .map(|spans| {
+                let inner: usize = spans
+                    .iter()
+                    .filter(|s| s.priority < drop_above)
+                    .map(|s| s.text.chars().count())
+                    .sum();
+                if inner > 0 { inner + 1 } else { 0 } // spans + trailing dash
+            })
+            .unwrap_or(0);
+        let total = left_chars + min_dashes + right_chars;
+        if total <= width || drop_above == 1 {
+            break;
+        }
+        drop_above -= 1;
+    }
+
+    let left_filtered: Vec<&BarSpan> = left
+        .map(|spans| spans.iter().filter(|s| s.priority < drop_above).collect())
+        .unwrap_or_default();
+    let right_filtered: Vec<&BarSpan> = right
+        .map(|spans| spans.iter().filter(|s| s.priority < drop_above).collect())
+        .unwrap_or_default();
+
+    let left_len: usize = if left_filtered.is_empty() {
+        0
+    } else {
+        1 + 1 + left_filtered.iter().map(|s| s.text.chars().count()).sum::<usize>() + 1
+    };
+    let right_len: usize = if right_filtered.is_empty() {
+        0
+    } else {
+        right_filtered.iter().map(|s| s.text.chars().count()).sum::<usize>() + 1
+    };
     let bar_len = width.saturating_sub(left_len + right_len);
 
-    if let Some(spans) = left {
+    if !left_filtered.is_empty() {
         let _ = out.queue(SetForegroundColor(bar_color));
         let _ = out.queue(Print(dash));
         let _ = out.queue(ResetColor);
         let _ = out.queue(Print(" "));
-        for span in spans {
+        for span in &left_filtered {
             if let Some(attr) = span.attr {
                 let _ = out.queue(SetAttribute(attr));
             }
@@ -1547,8 +1617,8 @@ pub(super) fn draw_bar(
     let _ = out.queue(Print(dash.repeat(bar_len)));
     let _ = out.queue(ResetColor);
 
-    if let Some(spans) = right {
-        for span in spans {
+    if !right_filtered.is_empty() {
+        for span in &right_filtered {
             let _ = out.queue(SetForegroundColor(span.color));
             let _ = out.queue(Print(&span.text));
             let _ = out.queue(ResetColor);
@@ -1696,7 +1766,7 @@ fn render_styled_chars(out: &mut io::Stdout, line: &str, kinds: &[SpanKind]) {
                 let _ = out.queue(ResetColor);
             }
             if kind == SpanKind::AtRef || kind == SpanKind::Attachment {
-                let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                let _ = out.queue(SetForegroundColor(theme::accent()));
             }
             current = kind;
         }
@@ -1748,7 +1818,7 @@ fn draw_completions(
         let raw = format!("{}{}", prefix, item.label);
         let label: String = raw.chars().take(avail).collect();
         if idx == comp.selected {
-            let _ = out.queue(SetForegroundColor(theme::ACCENT));
+            let _ = out.queue(SetForegroundColor(theme::accent()));
             let _ = out.queue(Print(&label));
             if let Some(ref desc) = item.description {
                 let pad = max_label - label.len() + 2;
@@ -1816,6 +1886,41 @@ fn draw_menu(
             }
             drawn
         }
+        MenuKind::Theme { presets, .. } => {
+            let col = presets
+                .iter()
+                .map(|(name, _, _)| name.len())
+                .max()
+                .unwrap_or(0)
+                + 4;
+            let mut drawn = 0;
+            for (idx, (name, detail, ansi)) in presets.iter().enumerate() {
+                if drawn >= max_rows {
+                    break;
+                }
+                if drawn > 0 {
+                    let _ = out.queue(Print("\r\n"));
+                }
+                let _ = out.queue(Print("  "));
+                if idx == selected {
+                    let _ = out.queue(SetForegroundColor(Color::AnsiValue(*ansi)));
+                    let _ = out.queue(Print(format!("● {name}")));
+                    let _ = out.queue(ResetColor);
+                } else {
+                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    let _ = out.queue(Print(format!("  {name}")));
+                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                }
+                let label_len = name.len() + 2; // account for "● " or "  "
+                let padding = " ".repeat(col.saturating_sub(label_len - 2));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(format!("{padding}{detail}")));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+                drawn += 1;
+            }
+            drawn
+        }
         MenuKind::Stats { lines } => draw_stats(out, lines, max_rows),
         MenuKind::Model { models } => {
             if models.is_empty() {
@@ -1860,7 +1965,7 @@ fn draw_menu(
 fn draw_menu_row(out: &mut io::Stdout, label: &str, detail: &str, col: usize, selected: bool) {
     let _ = out.queue(Print("  "));
     if selected {
-        let _ = out.queue(SetForegroundColor(theme::ACCENT));
+        let _ = out.queue(SetForegroundColor(theme::accent()));
         let _ = out.queue(Print(label));
         let _ = out.queue(ResetColor);
     } else {
@@ -1920,7 +2025,7 @@ fn draw_stats(out: &mut io::Stdout, lines: &[crate::metrics::StatsLine], max_row
             }
             StatsLine::Sparkline { bars, legend } => {
                 let _ = out.queue(Print("  "));
-                let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                let _ = out.queue(SetForegroundColor(theme::accent()));
                 let _ = out.queue(Print(bars));
                 let _ = out.queue(ResetColor);
                 let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));

@@ -247,7 +247,7 @@ pub(super) fn render_tool(
     let color = match status {
         ToolStatus::Ok => theme::TOOL_OK,
         ToolStatus::Err | ToolStatus::Denied => theme::TOOL_ERR,
-        ToolStatus::Confirm => theme::ACCENT,
+        ToolStatus::Confirm => theme::accent(),
         ToolStatus::Pending => theme::TOOL_PENDING,
     };
     let time = if matches!(
@@ -693,7 +693,7 @@ pub(super) fn print_styled(out: &mut io::Stdout, text: &str) {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
-            let _ = out.queue(SetForegroundColor(theme::ACCENT));
+            let _ = out.queue(SetForegroundColor(theme::accent()));
             let _ = out.queue(Print(&word));
             let _ = out.queue(ResetColor);
             if i < len {
