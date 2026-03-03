@@ -124,6 +124,9 @@ pub enum UiCommand {
     /// Change the active mode while the engine is running.
     SetMode { mode: Mode },
 
+    /// Change reasoning effort while the engine is running.
+    SetReasoningEffort { effort: ReasoningEffort },
+
     /// Compact conversation history.
     Compact {
         keep_turns: usize,

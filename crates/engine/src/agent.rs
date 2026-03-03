@@ -46,7 +46,7 @@ pub async fn engine_task(
                         ).await;
                     }
                     UiCommand::Compact { keep_turns, history } => {
-                        let provider = build_provider(&config, &client, ReasoningEffort::Off);
+                        let provider = build_provider(&config, &client);
                         let cancel = tokio_util::sync::CancellationToken::new();
                         match compact_history(&provider, &history, keep_turns, &last_model, &cancel).await {
                             Ok(messages) => {
@@ -58,7 +58,7 @@ pub async fn engine_task(
                         }
                     }
                     UiCommand::GenerateTitle { first_message } => {
-                        let provider = build_provider(&config, &client, ReasoningEffort::Off);
+                        let provider = build_provider(&config, &client);
                         match provider.complete_title(&first_message, &last_model).await {
                             Ok(title) => {
                                 let _ = event_tx.send(EngineEvent::TitleGenerated { title });
@@ -86,24 +86,18 @@ pub async fn engine_task(
     let _ = event_tx.send(EngineEvent::Shutdown { reason: None });
 }
 
-fn build_provider(
-    config: &EngineConfig,
-    client: &reqwest::Client,
-    reasoning_effort: ReasoningEffort,
-) -> Provider {
+fn build_provider(config: &EngineConfig, client: &reqwest::Client) -> Provider {
     Provider::new(
         config.api_base.clone(),
         config.api_key.clone(),
         client.clone(),
     )
     .with_model_config(config.model_config.clone())
-    .with_reasoning_effort(reasoning_effort)
 }
 
 fn build_provider_with_overrides(
     config: &EngineConfig,
     client: &reqwest::Client,
-    reasoning_effort: ReasoningEffort,
     api_base: Option<&str>,
     api_key: Option<&str>,
 ) -> Provider {
@@ -113,7 +107,6 @@ fn build_provider_with_overrides(
         client.clone(),
     )
     .with_model_config(config.model_config.clone())
-    .with_reasoning_effort(reasoning_effort)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -129,7 +122,7 @@ async fn run_turn(
     input: String,
     mut mode: Mode,
     model: &str,
-    reasoning_effort: ReasoningEffort,
+    mut reasoning_effort: ReasoningEffort,
     history: Vec<Message>,
     api_base_override: Option<String>,
     api_key_override: Option<String>,
@@ -137,7 +130,6 @@ async fn run_turn(
     let provider = build_provider_with_overrides(
         config,
         client,
-        reasoning_effort,
         api_base_override.as_deref(),
         api_key_override.as_deref(),
     );
@@ -187,6 +179,9 @@ async fn run_turn(
                     Ok(UiCommand::SetMode { mode: new_mode }) => {
                         mode = new_mode;
                     }
+                    Ok(UiCommand::SetReasoningEffort { effort }) => {
+                        reasoning_effort = effort;
+                    }
                     Ok(UiCommand::Cancel) => {
                         cancel.cancel();
                     }
@@ -211,7 +206,7 @@ async fn run_turn(
         };
 
         let resp = match provider
-            .chat(&messages, &tool_defs, model, &cancel, Some(&on_retry))
+            .chat(&messages, &tool_defs, model, reasoning_effort, &cancel, Some(&on_retry))
             .await
         {
             Ok(r) => r,
@@ -350,7 +345,7 @@ async fn run_turn(
                     });
 
                     let (approved, user_msg) =
-                        wait_for_permission(cmd_rx, request_id, &mut mode).await;
+                        wait_for_permission(cmd_rx, request_id, &mut mode, &mut reasoning_effort).await;
                     if !approved {
                         let denial = if let Some(ref msg) = user_msg {
                             format!("The user denied this tool call with message: {msg}")
@@ -371,7 +366,7 @@ async fn run_turn(
                     request_id,
                     args: args.clone(),
                 });
-                let answer = wait_for_answer(cmd_rx, request_id, &mut mode).await;
+                let answer = wait_for_answer(cmd_rx, request_id, &mut mode, &mut reasoning_effort).await;
                 ToolResult {
                     content: answer.unwrap_or_else(|| "no response".into()),
                     is_error: false,
@@ -508,6 +503,7 @@ async fn wait_for_permission(
     cmd_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     request_id: u64,
     mode: &mut Mode,
+    reasoning_effort: &mut ReasoningEffort,
 ) -> (bool, Option<String>) {
     loop {
         match cmd_rx.recv().await {
@@ -519,6 +515,7 @@ async fn wait_for_permission(
                 return (approved, message);
             }
             Some(UiCommand::SetMode { mode: new_mode }) => *mode = new_mode,
+            Some(UiCommand::SetReasoningEffort { effort }) => *reasoning_effort = effort,
             Some(UiCommand::Cancel) => return (false, None),
             None => return (false, None),
             _ => {}
@@ -531,6 +528,7 @@ async fn wait_for_answer(
     cmd_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     request_id: u64,
     mode: &mut Mode,
+    reasoning_effort: &mut ReasoningEffort,
 ) -> Option<String> {
     loop {
         match cmd_rx.recv().await {
@@ -539,6 +537,7 @@ async fn wait_for_answer(
                 answer,
             }) if id == request_id => return answer,
             Some(UiCommand::SetMode { mode: new_mode }) => *mode = new_mode,
+            Some(UiCommand::SetReasoningEffort { effort }) => *reasoning_effort = effort,
             Some(UiCommand::Cancel) => return None,
             None => return None,
             _ => {}

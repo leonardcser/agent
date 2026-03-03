@@ -51,7 +51,6 @@ pub struct Provider {
     api_key: String,
     client: Client,
     model_config: crate::config::ModelConfig,
-    reasoning_effort: ReasoningEffort,
 }
 
 impl Provider {
@@ -61,7 +60,6 @@ impl Provider {
             api_key,
             client,
             model_config: Default::default(),
-            reasoning_effort: ReasoningEffort::Off,
         }
     }
 
@@ -70,16 +68,12 @@ impl Provider {
         self
     }
 
-    pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
-        self.reasoning_effort = effort;
-        self
-    }
-
     pub async fn chat(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         model: &str,
+        reasoning_effort: ReasoningEffort,
         cancel: &CancellationToken,
         on_retry: Option<&(dyn Fn(Duration, u32) + Send + Sync)>,
     ) -> Result<LLMResponse, String> {
@@ -115,8 +109,8 @@ impl Provider {
         if let Some(v) = self.model_config.repeat_penalty {
             body.insert("repeat_penalty", serde_json::json!(v));
         }
-        if self.reasoning_effort != ReasoningEffort::Off {
-            let effort = self.reasoning_effort.label();
+        if reasoning_effort != ReasoningEffort::Off {
+            let effort = reasoning_effort.label();
             body.insert("reasoning_effort", serde_json::json!(effort));
             body.insert(
                 "chat_template_kwargs",
@@ -288,7 +282,9 @@ impl Provider {
             tool_calls: None,
             tool_call_id: None,
         };
-        let resp = self.chat(&[system, user], &[], model, cancel, None).await?;
+        let resp = self
+            .chat(&[system, user], &[], model, ReasoningEffort::Off, cancel, None)
+            .await?;
         let summary = resp.content.unwrap_or_default();
         if summary.trim().is_empty() {
             return Err("empty summary".into());

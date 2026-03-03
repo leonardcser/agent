@@ -1660,6 +1660,7 @@ impl App {
         self.reasoning_effort = effort;
         self.screen.set_reasoning_effort(effort);
         state::set_reasoning_effort(effort);
+        self.engine.send(UiCommand::SetReasoningEffort { effort });
     }
 
     pub fn render_screen(&mut self) {
