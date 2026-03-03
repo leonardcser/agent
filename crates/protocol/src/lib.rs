@@ -7,7 +7,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub enum ContentPart {
     Text { text: String },
-    ImageUrl { url: String },
+    ImageUrl { url: String, label: Option<String> },
 }
 
 impl Serialize for ContentPart {
@@ -20,10 +20,14 @@ impl Serialize for ContentPart {
                 map.serialize_entry("text", text)?;
                 map.end()
             }
-            ContentPart::ImageUrl { url } => {
-                let mut map = s.serialize_map(Some(2))?;
+            ContentPart::ImageUrl { url, label } => {
+                let entries = 2 + usize::from(label.is_some());
+                let mut map = s.serialize_map(Some(entries))?;
                 map.serialize_entry("type", "image_url")?;
                 map.serialize_entry("image_url", &serde_json::json!({"url": url}))?;
+                if let Some(label) = label {
+                    map.serialize_entry("label", label)?;
+                }
                 map.end()
             }
         }
@@ -40,7 +44,8 @@ impl<'de> Deserialize<'de> for ContentPart {
             }
             Some("image_url") => {
                 let url = v["image_url"]["url"].as_str().unwrap_or("").to_string();
-                Ok(ContentPart::ImageUrl { url })
+                let label = v.get("label").and_then(|l| l.as_str()).map(String::from);
+                Ok(ContentPart::ImageUrl { url, label })
             }
             _ => Err(serde::de::Error::custom("unknown content part type")),
         }
@@ -50,7 +55,6 @@ impl<'de> Deserialize<'de> for ContentPart {
 /// Message content: either a plain string or an array of typed parts.
 ///
 /// Serializes as a JSON string when `Text`, or a JSON array when `Parts`.
-/// Backward-compatible: deserializing a plain JSON string produces `Text`.
 #[derive(Debug, Clone)]
 pub enum Content {
     Text(String),
@@ -62,14 +66,17 @@ impl Content {
         Content::Text(s.into())
     }
 
-    /// Construct multipart content from text + image data URLs.
-    pub fn with_images(text: String, images: Vec<String>) -> Self {
+    /// Construct multipart content from text + labelled image data URLs.
+    pub fn with_images(text: String, images: Vec<(String, String)>) -> Self {
         if images.is_empty() {
             return Content::Text(text);
         }
         let mut parts = vec![ContentPart::Text { text }];
-        for url in images {
-            parts.push(ContentPart::ImageUrl { url });
+        for (label, url) in images {
+            parts.push(ContentPart::ImageUrl {
+                url,
+                label: Some(label),
+            });
         }
         Content::Parts(parts)
     }
@@ -142,23 +149,10 @@ impl<'de> Deserialize<'de> for Content {
                     .collect::<Result<_, _>>()?;
                 Ok(Content::Parts(parts))
             }
-            serde_json::Value::Null => Ok(Content::Text(String::new())),
             _ => Err(serde::de::Error::custom(
                 "expected string or array for content",
             )),
         }
-    }
-}
-
-impl From<String> for Content {
-    fn from(s: String) -> Self {
-        Content::Text(s)
-    }
-}
-
-impl From<&str> for Content {
-    fn from(s: &str) -> Self {
-        Content::Text(s.to_string())
     }
 }
 

@@ -131,7 +131,7 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
         .entry("exit_plan_mode".to_string())
         .or_insert(default_exit_plan);
 
-    const DEFAULT_BASH_ALLOW: &[&str] = &["ls *", "grep *", "find *"];
+    const DEFAULT_BASH_ALLOW: &[&str] = &["ls *", "grep *", "find *", "cat *", "tail *", "head *"];
     let mut bash_allow = compile_patterns(&raw.bash.allow);
     if bash_allow.is_empty() {
         bash_allow = compile_patterns(

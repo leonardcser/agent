@@ -94,7 +94,7 @@ impl Tool for ReadFileTool {
             .enumerate()
             .map(|(i, line)| {
                 let truncated = if line.len() > 2000 {
-                    &line[..2000]
+                    &line[..line.floor_char_boundary(2000)]
                 } else {
                     line
                 };

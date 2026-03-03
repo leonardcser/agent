@@ -49,7 +49,7 @@ permissions:
       ask: [edit_file, write_file]
       deny: []
     bash:
-      allow: ["ls *", "grep *", "find *"]
+      allow: ["ls *", "grep *", "find *", "cat *", "tail *", "head *"]
       ask: []
       deny: []
     web_fetch:
@@ -59,7 +59,7 @@ permissions:
     tools:
       allow: [read_file, glob, grep, edit_file, write_file]
     bash:
-      allow: ["ls *", "grep *", "find *"]
+      allow: ["ls *", "grep *", "find *", "cat *", "tail *", "head *"]
 ```
 
 Providers is a list of named connections. Each provider has a `type` (currently

@@ -430,7 +430,7 @@ fn normalize_short(raw: &str) -> String {
     let mut t = raw.trim().trim_matches('"').trim_matches('\'').to_string();
     t = t.split_whitespace().collect::<Vec<_>>().join(" ");
     if t.len() > 64 {
-        t.truncate(64);
+        t.truncate(t.floor_char_boundary(64));
         t = t.trim().to_string();
     }
     t

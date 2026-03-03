@@ -58,7 +58,7 @@ enum EventOutcome {
     Quit,
     CancelAgent,
     CancelAndClear,
-    Submit(Content),
+    Submit { content: Content, display: String },
     MenuResult(MenuResult),
     OpenDialog(Box<ActiveDialog>),
 }
@@ -430,7 +430,7 @@ impl App {
                     parts.push(buf);
                 }
                 let text = parts.join("\n");
-                if !text.trim().is_empty() {
+                if !text.is_empty() {
                     self.screen.erase_prompt();
                     match self.process_input(&text) {
                         InputOutcome::StartAgent => {
@@ -761,9 +761,8 @@ impl App {
                         let restore = d.restore_vim_insert;
                         if let Some(maybe_idx) = d.handle_key(code, modifiers) {
                             if let Some(idx) = maybe_idx {
-                                if let Some(text) = self.rewind_to(idx) {
-                                    self.input.buf = text;
-                                    self.input.cpos = self.input.buf.len();
+                                if let Some((text, images)) = self.rewind_to(idx) {
+                                    self.input.restore_from_rewind(text, images);
                                 }
                             } else if restore {
                                 self.input.set_vim_mode(vim::ViMode::Insert);
@@ -906,13 +905,20 @@ impl App {
                 *active_dialog = Some(*dlg);
                 false
             }
-            EventOutcome::Submit(content) => {
+            EventOutcome::Submit { content, display } => {
                 let text = content.text_content();
-                if !text.trim().is_empty() || content.image_count() > 0 {
+                let has_images = content.image_count() > 0;
+                if !text.is_empty() || has_images {
                     self.screen.erase_prompt();
-                    match self.process_input(&text) {
+                    let outcome = if has_images && text.trim().is_empty() {
+                        // Image-only submission — skip command processing.
+                        InputOutcome::StartAgent
+                    } else {
+                        self.process_input(&text)
+                    };
+                    match outcome {
                         InputOutcome::StartAgent => {
-                            *agent = Some(self.begin_agent_turn(&text, content));
+                            *agent = Some(self.begin_agent_turn(&display, content));
                         }
                         InputOutcome::Compact => {
                             if self.history.is_empty() {
@@ -993,7 +999,7 @@ impl App {
                 t.last_ctrlc = Some(Instant::now());
                 self.input.buf.clear();
                 self.input.cpos = 0;
-                self.input.pastes.clear();
+                self.input.attachments.clear();
                 self.screen.mark_dirty();
                 return EventOutcome::Redraw;
             }
@@ -1069,7 +1075,7 @@ impl App {
 
         // Delegate to InputState::handle_event
         match self.input.handle_event(ev, Some(&mut self.input_history)) {
-            Action::Submit(ref c) if c.as_text().trim() == "/model" => {
+            Action::Submit { ref content, .. } if content.as_text().trim() == "/model" => {
                 let models: Vec<(String, String, String)> = self
                     .available_models
                     .iter()
@@ -1081,22 +1087,22 @@ impl App {
                 }
                 EventOutcome::Redraw
             }
-            Action::Submit(ref c) if c.as_text().trim() == "/settings" => {
+            Action::Submit { ref content, .. } if content.as_text().trim() == "/settings" => {
                 self.input
                     .open_settings(self.input.vim_enabled(), self.auto_compact);
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
-            Action::Submit(ref c) if c.as_text().trim() == "/stats" => {
+            Action::Submit { ref content, .. } if content.as_text().trim() == "/stats" => {
                 let entries = crate::metrics::load();
                 let lines = crate::metrics::render_stats(&entries);
                 self.input.open_stats(lines);
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
-            Action::Submit(content) => {
+            Action::Submit { content, display } => {
                 self.input.restore_stash();
-                EventOutcome::Submit(content)
+                EventOutcome::Submit { content, display }
             }
             Action::MenuResult(result) => EventOutcome::MenuResult(result),
             Action::ToggleMode => {
@@ -1226,7 +1232,7 @@ impl App {
 
         // Everything else → InputState::handle_event (type-ahead with history).
         match self.input.handle_event(ev, Some(&mut self.input_history)) {
-            Action::Submit(content) => {
+            Action::Submit { content, .. } => {
                 let text = content.text_content();
                 if let Some(outcome) = self.try_command_while_running(text.trim()) {
                     return outcome;
@@ -1254,12 +1260,12 @@ impl App {
     // ── Input processing (commands, settings, rewind, shell) ─────────────
 
     fn process_input(&mut self, input: &str) -> InputOutcome {
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
+        if input.is_empty() {
             return InputOutcome::Continue;
         }
 
-        self.input_history.push(trimmed.to_string());
+        let trimmed = input.trim();
+        self.input_history.push(input.to_string());
         state::set_mode(self.mode);
 
         match self.handle_command(trimmed) {
@@ -1279,29 +1285,19 @@ impl App {
 
     // ── Agent lifecycle ──────────────────────────────────────────────────
 
-    fn begin_agent_turn(&mut self, input: &str, content: Content) -> TurnState {
+    fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
         self.screen.begin_turn();
-        let display = if content.image_count() > 0 {
-            let n = content.image_count();
-            let suffix = if n == 1 {
-                " [1 image]".to_string()
-            } else {
-                format!(" [{n} images]")
-            };
-            format!("{input}{suffix}")
-        } else {
-            input.to_string()
-        };
-        self.show_user_message(&display);
+        self.show_user_message(display);
+        let text = content.text_content();
         if self.session.first_user_message.is_none() {
-            self.session.first_user_message = Some(input.to_string());
+            self.session.first_user_message = Some(text.clone());
         }
         self.push_user_message(content);
         self.save_session();
         self.screen.set_throbber(render::Throbber::Working);
 
         self.engine.send(UiCommand::StartTurn {
-            input: input.to_string(),
+            input: text.clone(),
             mode: self.mode,
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort,
@@ -1724,7 +1720,10 @@ impl App {
         }
     }
 
-    pub fn rewind_to(&mut self, block_idx: usize) -> Option<String> {
+    pub fn rewind_to(
+        &mut self,
+        block_idx: usize,
+    ) -> Option<(String, Vec<crate::input::Attachment>)> {
         let turns = self.screen.user_turns();
         let turn_text = turns
             .iter()
@@ -1744,12 +1743,38 @@ impl App {
             }
             hist_idx = i + 1;
         }
+
+        // Extract image attachments from the target message before truncating.
+        let images = self
+            .history
+            .get(hist_idx)
+            .and_then(|msg| msg.content.as_ref())
+            .map(|content| {
+                use crate::input::Attachment;
+                match content {
+                    Content::Parts(parts) => parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            protocol::ContentPart::ImageUrl { url, label } => {
+                                Some(Attachment::Image {
+                                    label: label.clone().unwrap_or_else(|| "image".into()),
+                                    data_url: url.clone(),
+                                })
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            })
+            .unwrap_or_default();
+
         self.history.truncate(hist_idx);
         self.screen.truncate_to(block_idx);
         self.screen.clear_context_tokens();
         self.auto_approved.clear();
 
-        turn_text
+        turn_text.map(|t| (t, images))
     }
 
     // ── Agent internals ──────────────────────────────────────────────────

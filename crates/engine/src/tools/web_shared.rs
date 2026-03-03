@@ -156,7 +156,7 @@ pub fn truncate_output(text: &str, max_lines: usize, max_bytes: usize) -> String
 
     let mut result = lines.join("\n");
     if result.len() > max_bytes {
-        result.truncate(max_bytes);
+        result.truncate(result.floor_char_boundary(max_bytes));
         truncated = true;
     }
 

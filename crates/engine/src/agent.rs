@@ -68,7 +68,7 @@ pub async fn engine_task(
                             Err(_) => {
                                 let fallback = first_message.lines().next().unwrap_or("Untitled");
                                 let mut title = fallback.to_string();
-                                if title.len() > 48 { title.truncate(48); }
+                                if title.len() > 48 { title.truncate(title.floor_char_boundary(48)); }
                                 let _ = event_tx.send(EngineEvent::TitleGenerated {
                                     title: title.trim().to_string(),
                                 });
@@ -494,7 +494,7 @@ async fn run_turn(
                     "id": tc.id,
                     "is_error": is_error,
                     "content_len": content.len(),
-                    "content_preview": &content[..content.len().min(500)],
+                    "content_preview": &content[..content.floor_char_boundary(500)],
                 }),
             );
 

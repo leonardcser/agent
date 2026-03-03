@@ -7,7 +7,7 @@ pub use dialogs::{
     ResumeDialog, RewindDialog,
 };
 
-use crate::input::{InputState, MenuKind, PASTE_MARKER};
+use crate::input::{Attachment, InputSnapshot, InputState, MenuKind, ATTACHMENT_MARKER};
 use crate::theme;
 use crate::utils::format_duration;
 use crossterm::{
@@ -992,26 +992,6 @@ impl Screen {
             });
         }
         let mut throbber_spans = self.working.throbber_spans();
-        let image_count = state.image_count();
-        if image_count > 0 {
-            if !throbber_spans.is_empty() {
-                throbber_spans.push(BarSpan {
-                    text: " · ".into(),
-                    color: bar_color,
-                    attr: None,
-                });
-            }
-            let label = if image_count == 1 {
-                "1 image".to_string()
-            } else {
-                format!("{image_count} images")
-            };
-            throbber_spans.push(BarSpan {
-                text: label,
-                color: theme::ACCENT,
-                attr: Some(Attribute::Bold),
-            });
-        }
         if self.pending_dialog {
             if !throbber_spans.is_empty() {
                 throbber_spans.push(BarSpan {
@@ -1043,7 +1023,7 @@ impl Screen {
         );
         let _ = out.queue(Print("\r\n"));
 
-        let spans = build_display_spans(&state.buf, &state.pastes);
+        let spans = build_display_spans(&state.buf, &state.attachments);
         let display_buf = spans_to_string(&spans);
         let char_kinds = build_char_kinds(&spans);
         let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
@@ -1213,16 +1193,13 @@ impl Screen {
     }
 }
 
-fn render_stash(
-    out: &mut io::Stdout,
-    stash: &Option<(String, usize, Vec<String>, Vec<String>)>,
-    usable: usize,
-) -> u16 {
-    let Some((ref stash_buf, _, _, _)) = stash else {
+fn render_stash(out: &mut io::Stdout, stash: &Option<InputSnapshot>, usable: usize) -> u16 {
+    let Some(ref snap) = stash else {
         return 0;
     };
-    let first_line = stash_buf.lines().next().unwrap_or("");
-    let line_count = stash_buf.lines().count();
+    let full_display = spans_to_string(&build_display_spans(&snap.buf, &snap.attachments));
+    let first_line = full_display.lines().next().unwrap_or("");
+    let line_count = full_display.lines().count();
     let max_chars = usable.saturating_sub(2);
     let display: String = first_line.chars().take(max_chars).collect();
     let suffix = if display.chars().count() < first_line.chars().count() || line_count > 1 {
@@ -1527,14 +1504,14 @@ pub(super) fn draw_bar(
 
 enum Span {
     Plain(String),
-    Paste(String),
+    Attachment(String),
     AtRef(String),
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum SpanKind {
     Plain,
-    Paste,
+    Attachment,
     AtRef,
 }
 
@@ -1543,7 +1520,7 @@ fn build_char_kinds(spans: &[Span]) -> Vec<SpanKind> {
     for span in spans {
         let (text, kind) = match span {
             Span::Plain(t) => (t.as_str(), SpanKind::Plain),
-            Span::Paste(t) => (t.as_str(), SpanKind::Paste),
+            Span::Attachment(t) => (t.as_str(), SpanKind::Attachment),
             Span::AtRef(t) => (t.as_str(), SpanKind::AtRef),
         };
         kinds.extend(std::iter::repeat_n(kind, text.chars().count()));
@@ -1551,24 +1528,24 @@ fn build_char_kinds(spans: &[Span]) -> Vec<SpanKind> {
     kinds
 }
 
-fn build_display_spans(buf: &str, pastes: &[String]) -> Vec<Span> {
+fn build_display_spans(buf: &str, attachments: &[Attachment]) -> Vec<Span> {
     let mut spans = Vec::new();
     let mut plain = String::new();
-    let mut paste_idx = 0;
+    let mut att_idx = 0;
 
     let chars: Vec<char> = buf.chars().collect();
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == PASTE_MARKER {
+        if chars[i] == ATTACHMENT_MARKER {
             if !plain.is_empty() {
                 spans.push(Span::Plain(std::mem::take(&mut plain)));
             }
-            let lines = pastes
-                .get(paste_idx)
-                .map(|p| p.lines().count().max(1))
-                .unwrap_or(1);
-            spans.push(Span::Paste(format!("[pasted {} lines]", lines)));
-            paste_idx += 1;
+            let label = attachments
+                .get(att_idx)
+                .map(|a| a.display_label())
+                .unwrap_or_else(|| "[?]".into());
+            spans.push(Span::Attachment(label));
+            att_idx += 1;
             i += 1;
         } else if chars[i] == '@' {
             let at_start = i == 0 || chars[i - 1].is_whitespace();
@@ -1612,7 +1589,7 @@ fn spans_to_string(spans: &[Span]) -> String {
     let mut s = String::new();
     for span in spans {
         match span {
-            Span::Plain(t) | Span::Paste(t) | Span::AtRef(t) => s.push_str(t),
+            Span::Plain(t) | Span::Attachment(t) | Span::AtRef(t) => s.push_str(t),
         }
     }
     s
@@ -1631,7 +1608,7 @@ fn map_cursor(raw_cursor: usize, raw_buf: &str, spans: &[Span]) -> usize {
                 raw_pos += chars;
                 display_pos += chars;
             }
-            Span::Paste(label) => {
+            Span::Attachment(label) => {
                 if raw_cursor == raw_pos {
                     return display_pos;
                 }
@@ -1661,7 +1638,7 @@ fn render_styled_chars(out: &mut io::Stdout, line: &str, kinds: &[SpanKind]) {
             if current != SpanKind::Plain {
                 let _ = out.queue(ResetColor);
             }
-            if kind == SpanKind::AtRef || kind == SpanKind::Paste {
+            if kind == SpanKind::AtRef || kind == SpanKind::Attachment {
                 let _ = out.queue(SetForegroundColor(theme::ACCENT));
             }
             current = kind;

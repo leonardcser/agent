@@ -10,32 +10,72 @@ use crate::vim::{self, ViMode, Vim};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use protocol::Content;
 
-pub const PASTE_MARKER: char = '\u{FFFC}';
+pub const ATTACHMENT_MARKER: char = '\u{FFFC}';
 const PASTE_LINE_THRESHOLD: usize = 12;
+
+// ── Attachment types ─────────────────────────────────────────────────────────
+
+/// A single attachment embedded in the input buffer.
+/// Each `ATTACHMENT_MARKER` char in `buf` corresponds to one entry in
+/// `attachments`, matched by counting markers left-to-right.
+#[derive(Clone, Debug)]
+pub enum Attachment {
+    /// A large paste collapsed to a single marker char.
+    Paste { content: String },
+    /// An image with a display label and base64 data URL.
+    Image { label: String, data_url: String },
+}
+
+impl Attachment {
+    /// Display label shown in the input buffer.
+    pub fn display_label(&self) -> String {
+        match self {
+            Attachment::Paste { content } => {
+                let lines = content.lines().count().max(1);
+                format!("[pasted {lines} lines]")
+            }
+            Attachment::Image { label, .. } => format!("[{label}]"),
+        }
+    }
+
+    /// Text to expand into the final submitted text.
+    /// Pastes expand to their full content; images expand to nothing.
+    fn expanded_text(&self) -> &str {
+        match self {
+            Attachment::Paste { content } => content.as_str(),
+            Attachment::Image { .. } => "",
+        }
+    }
+}
+
+/// Snapshot of the input buffer state (used for Ctrl+S stash).
+#[derive(Clone, Debug)]
+pub struct InputSnapshot {
+    pub buf: String,
+    pub cpos: usize,
+    pub attachments: Vec<Attachment>,
+}
 
 // ── Shared input state ───────────────────────────────────────────────────────
 
-/// Unified input buffer with paste tokens and file completer.
+/// Unified input buffer with attachment markers and file completer.
 /// Used by both the prompt loop and the agent-mode type-ahead.
 pub struct InputState {
     pub buf: String,
     pub cpos: usize,
-    pub pastes: Vec<String>,
-    /// Attached image data URLs (base64-encoded).
-    pub images: Vec<String>,
+    pub attachments: Vec<Attachment>,
     pub completer: Option<Completer>,
     pub menu: Option<MenuState>,
     vim: Option<Vim>,
     /// Saved buffer before history search, restored on cancel.
     history_saved_buf: Option<(String, usize)>,
-    /// Stashed prompt: (buf, cpos, pastes, images). Ctrl+S toggles.
-    pub stash: Option<(String, usize, Vec<String>, Vec<String>)>,
+    pub stash: Option<InputSnapshot>,
 }
 
 /// What the caller should do after `handle_event`.
 pub enum Action {
     Redraw,
-    Submit(Content),
+    Submit { content: Content, display: String },
     MenuResult(MenuResult),
     ToggleMode,
     CycleReasoning,
@@ -54,8 +94,7 @@ impl InputState {
         Self {
             buf: String::new(),
             cpos: 0,
-            pastes: Vec::new(),
-            images: Vec::new(),
+            attachments: Vec::new(),
             completer: None,
             menu: None,
             vim: None,
@@ -110,8 +149,7 @@ impl InputState {
     pub fn clear(&mut self) {
         self.buf.clear();
         self.cpos = 0;
-        self.pastes.clear();
-        self.images.clear();
+        self.attachments.clear();
         self.completer = None;
         self.menu = None;
         self.history_saved_buf = None;
@@ -120,33 +158,46 @@ impl InputState {
 
     /// Toggle stash: if no stash, save current buf and clear; if stashed, restore.
     pub fn toggle_stash(&mut self) {
-        if let Some((buf, cpos, pastes, images)) = self.stash.take() {
-            // Unstash: restore stashed content
-            self.buf = buf;
-            self.cpos = cpos;
-            self.pastes = pastes;
-            self.images = images;
+        if let Some(snap) = self.stash.take() {
+            self.buf = snap.buf;
+            self.cpos = snap.cpos;
+            self.attachments = snap.attachments;
             self.completer = None;
-        } else if !self.buf.is_empty() || !self.images.is_empty() {
-            // Stash: save current content and clear
-            self.stash = Some((
-                std::mem::take(&mut self.buf),
-                std::mem::replace(&mut self.cpos, 0),
-                std::mem::take(&mut self.pastes),
-                std::mem::take(&mut self.images),
-            ));
+        } else if !self.buf.is_empty() || !self.attachments.is_empty() {
+            self.stash = Some(InputSnapshot {
+                buf: std::mem::take(&mut self.buf),
+                cpos: std::mem::replace(&mut self.cpos, 0),
+                attachments: std::mem::take(&mut self.attachments),
+            });
             self.completer = None;
         }
     }
 
     /// Restore stash into the buffer (called after submit/command completes).
     pub fn restore_stash(&mut self) {
-        if let Some((buf, cpos, pastes, images)) = self.stash.take() {
-            self.buf = buf;
-            self.cpos = cpos;
-            self.pastes = pastes;
-            self.images = images;
+        if let Some(snap) = self.stash.take() {
+            self.buf = snap.buf;
+            self.cpos = snap.cpos;
+            self.attachments = snap.attachments;
         }
+    }
+
+    /// Restore input from a rewind. The text has pastes expanded and image
+    /// labels inline as `[label]`. Replace each `[label]` with an attachment
+    /// marker so images become editable attachments again.
+    pub fn restore_from_rewind(&mut self, mut text: String, images: Vec<Attachment>) {
+        let mut attachments = Vec::new();
+        for img in images {
+            let label = img.display_label(); // "[filename.png]"
+            if let Some(pos) = text.find(&label) {
+                text.replace_range(pos..pos + label.len(), &ATTACHMENT_MARKER.to_string());
+                attachments.push(img);
+            }
+            // If label not found in text (shouldn't happen), drop silently.
+        }
+        self.buf = text;
+        self.cpos = self.buf.len();
+        self.attachments = attachments;
     }
 
     pub fn open_settings(&mut self, vim_enabled: bool, auto_compact: bool) {
@@ -251,24 +302,70 @@ impl InputState {
         char_pos(&self.buf, self.cpos)
     }
 
-    /// Expand paste markers and return the final text.
+    /// Expand attachment markers and return the final text for submission.
+    /// Pastes are inlined; image markers are stripped (images go via Content::Parts).
     pub fn expanded_text(&self) -> String {
-        expand_pastes(&self.buf, &self.pastes)
+        let mut result = String::new();
+        let mut att_idx = 0;
+        for c in self.buf.chars() {
+            if c == ATTACHMENT_MARKER {
+                if let Some(att) = self.attachments.get(att_idx) {
+                    result.push_str(att.expanded_text());
+                }
+                att_idx += 1;
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    /// Text for the user message block: pastes expanded, images shown as `[label]`.
+    pub fn message_display_text(&self) -> String {
+        let mut result = String::new();
+        let mut att_idx = 0;
+        for c in self.buf.chars() {
+            if c == ATTACHMENT_MARKER {
+                if let Some(att) = self.attachments.get(att_idx) {
+                    match att {
+                        Attachment::Paste { content } => result.push_str(content),
+                        Attachment::Image { label, .. } => {
+                            result.push_str(&format!("[{label}]"));
+                        }
+                    }
+                }
+                att_idx += 1;
+            } else {
+                result.push(c);
+            }
+        }
+        result
     }
 
     pub fn image_count(&self) -> usize {
-        self.images.len()
+        self.attachments
+            .iter()
+            .filter(|a| matches!(a, Attachment::Image { .. }))
+            .count()
     }
 
-    /// Attach an image data URL (base64-encoded).
-    pub fn insert_image(&mut self, data_url: String) {
-        self.images.push(data_url);
+    /// Attach an image at the current cursor position.
+    pub fn insert_image(&mut self, label: String, data_url: String) {
+        self.insert_attachment(Attachment::Image { label, data_url });
     }
 
     /// Build the message content combining text and any attached images.
     pub fn build_content(&self) -> Content {
         let text = self.expanded_text();
-        Content::with_images(text, self.images.clone())
+        let images: Vec<(String, String)> = self
+            .attachments
+            .iter()
+            .filter_map(|a| match a {
+                Attachment::Image { label, data_url } => Some((label.clone(), data_url.clone())),
+                _ => None,
+            })
+            .collect();
+        Content::with_images(text, images)
     }
 
     /// Process a terminal event. Returns what the caller should do next.
@@ -288,19 +385,19 @@ impl InputState {
         // Vim mode intercepts key events.
         if let Some(ref mut vim) = self.vim {
             if let Event::Key(key_ev) = ev {
-                match vim.handle_key(key_ev, &mut self.buf, &mut self.cpos) {
+                match vim.handle_key(key_ev, &mut self.buf, &mut self.cpos, &mut self.attachments) {
                     vim::Action::Consumed => {
                         self.recompute_completer();
                         return Action::Redraw;
                     }
                     vim::Action::Submit => {
+                        let display = self.message_display_text();
                         let content = self.build_content();
                         self.buf.clear();
                         self.cpos = 0;
-                        self.pastes.clear();
-                        self.images.clear();
+                        self.attachments.clear();
                         self.completer = None;
-                        return Action::Submit(content);
+                        return Action::Submit { content, display };
                     }
                     vim::Action::HistoryPrev => {
                         if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(&self.buf)) {
@@ -327,27 +424,46 @@ impl InputState {
 
         match ev {
             Event::Paste(data) => {
-                let trimmed = data.trim().trim_matches('\'').trim_matches('"');
-                if !trimmed.contains('\n')
-                    && engine::image::is_image_file(trimmed)
-                    && std::path::Path::new(trimmed).exists()
-                {
-                    if let Ok(url) = engine::image::read_image_as_data_url(trimmed) {
-                        self.insert_image(url);
+                // Save undo state before pasting if vim is enabled.
+                if let Some(ref mut vim) = self.vim {
+                    vim.save_undo(&self.buf, self.cpos, &self.attachments);
+                }
+                // Try to detect an image file path (drag-and-drop).
+                if let Some(path) = engine::image::normalize_pasted_path(&data) {
+                    if engine::image::is_image_file(&path) && std::path::Path::new(&path).exists() {
+                        let label = engine::image::image_label_from_path(&path);
+                        if let Ok(url) = engine::image::read_image_as_data_url(&path) {
+                            self.insert_image(label, url);
+                            return Action::Redraw;
+                        }
+                    }
+                }
+                // Empty paste (e.g. Cmd+V with image-only clipboard) → try clipboard image.
+                if data.trim().is_empty() {
+                    if let Some(url) = clipboard_image_to_data_url() {
+                        if let Some(ref mut vim) = self.vim {
+                            vim.save_undo(&self.buf, self.cpos, &self.attachments);
+                        }
+                        self.insert_image("clipboard.png".into(), url);
                         return Action::Redraw;
                     }
                 }
                 self.insert_paste(data);
                 Action::Redraw
             }
-            // Ctrl+V: read image from clipboard (text paste goes through Event::Paste).
+            // Ctrl+V / Cmd+V: read image from clipboard.
             Event::Key(KeyEvent {
                 code: KeyCode::Char('v'),
-                modifiers: KeyModifiers::CONTROL,
+                modifiers,
                 ..
-            }) => {
+            }) if modifiers.contains(KeyModifiers::CONTROL)
+                || modifiers.contains(KeyModifiers::SUPER) =>
+            {
                 if let Some(url) = clipboard_image_to_data_url() {
-                    self.insert_image(url);
+                    if let Some(ref mut vim) = self.vim {
+                        vim.save_undo(&self.buf, self.cpos, &self.attachments);
+                    }
+                    self.insert_image("clipboard.png".into(), url);
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -361,12 +477,13 @@ impl InputState {
                 code: KeyCode::Enter,
                 ..
             }) => {
-                if self.buf.trim().is_empty() && self.images.is_empty() {
+                if self.buf.is_empty() && self.attachments.is_empty() {
                     Action::Noop
                 } else {
+                    let display = self.message_display_text();
                     let content = self.build_content();
                     self.clear();
-                    Action::Submit(content)
+                    Action::Submit { content, display }
                 }
             }
             // Ctrl+T: cycle reasoning effort.
@@ -621,9 +738,10 @@ impl InputState {
                     let kind = comp.kind;
                     self.accept_completion(&comp);
                     if kind == CompleterKind::Command {
+                        let display = self.message_display_text();
                         let content = self.build_content();
                         self.clear();
-                        Some(Action::Submit(content))
+                        Some(Action::Submit { content, display })
                     } else {
                         // File: accept and keep editing
                         Some(Action::Redraw)
@@ -821,7 +939,7 @@ impl InputState {
             .next_back()
             .map(|(i, _)| i)
             .unwrap_or(0);
-        self.maybe_remove_paste(prev);
+        self.maybe_remove_attachment(prev);
         self.buf.drain(prev..self.cpos);
         self.cpos = prev;
         self.recompute_completer();
@@ -832,6 +950,22 @@ impl InputState {
             return;
         }
         let target = vim::word_backward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        // Count attachment markers in the drained range and remove them
+        // (iterate in reverse so indices stay valid).
+        let markers_before = self.buf[..target]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        let markers_in_range = self.buf[target..self.cpos]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        for i in (0..markers_in_range).rev() {
+            let idx = markers_before + i;
+            if idx < self.attachments.len() {
+                self.attachments.remove(idx);
+            }
+        }
         self.buf.drain(target..self.cpos);
         self.cpos = target;
         self.recompute_completer();
@@ -845,27 +979,31 @@ impl InputState {
         let lines = data.lines().count();
         let char_threshold = PASTE_LINE_THRESHOLD * (crate::render::term_width().saturating_sub(1));
         if lines >= PASTE_LINE_THRESHOLD || data.len() >= char_threshold {
-            let idx = self.buf[..self.cpos]
-                .chars()
-                .filter(|&c| c == PASTE_MARKER)
-                .count();
-            self.pastes.insert(idx, data);
-            self.buf.insert(self.cpos, PASTE_MARKER);
-            self.cpos += PASTE_MARKER.len_utf8();
+            self.insert_attachment(Attachment::Paste { content: data });
         } else {
             self.buf.insert_str(self.cpos, &data);
             self.cpos += data.len();
         }
     }
 
-    fn maybe_remove_paste(&mut self, byte_pos: usize) {
-        if self.buf[byte_pos..].starts_with(PASTE_MARKER) {
+    fn insert_attachment(&mut self, att: Attachment) {
+        let idx = self.buf[..self.cpos]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        self.attachments.insert(idx, att);
+        self.buf.insert(self.cpos, ATTACHMENT_MARKER);
+        self.cpos += ATTACHMENT_MARKER.len_utf8();
+    }
+
+    fn maybe_remove_attachment(&mut self, byte_pos: usize) {
+        if self.buf[byte_pos..].starts_with(ATTACHMENT_MARKER) {
             let idx = self.buf[..byte_pos]
                 .chars()
-                .filter(|&c| c == PASTE_MARKER)
+                .filter(|&c| c == ATTACHMENT_MARKER)
                 .count();
-            if idx < self.pastes.len() {
-                self.pastes.remove(idx);
+            if idx < self.attachments.len() {
+                self.attachments.remove(idx);
             }
         }
     }
@@ -879,22 +1017,6 @@ pub fn char_pos(s: &str, byte_idx: usize) -> usize {
 
 pub fn byte_of_char(s: &str, n: usize) -> usize {
     s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())
-}
-
-fn expand_pastes(buf: &str, pastes: &[String]) -> String {
-    let mut result = String::new();
-    let mut idx = 0;
-    for c in buf.chars() {
-        if c == PASTE_MARKER {
-            if let Some(content) = pastes.get(idx) {
-                result.push_str(content);
-            }
-            idx += 1;
-        } else {
-            result.push(c);
-        }
-    }
-    result
 }
 
 fn current_line(buf: &str, cpos: usize) -> usize {

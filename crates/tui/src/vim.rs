@@ -1,3 +1,4 @@
+use crate::input::Attachment;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -79,6 +80,7 @@ enum SubState {
 struct UndoEntry {
     buf: String,
     cpos: usize,
+    attachments: Vec<Attachment>,
 }
 
 // ── Vim state ───────────────────────────────────────────────────────────────
@@ -131,17 +133,29 @@ impl Vim {
         self.reset_counts();
     }
 
-    /// Process a key event. Mutates `buf` and `cpos` as needed.
-    pub fn handle_key(&mut self, key: KeyEvent, buf: &mut String, cpos: &mut usize) -> Action {
+    /// Process a key event. Mutates `buf`, `cpos`, and `attachments` as needed.
+    pub fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        buf: &mut String,
+        cpos: &mut usize,
+        attachments: &mut Vec<Attachment>,
+    ) -> Action {
         match self.mode {
-            ViMode::Insert => self.handle_insert(key, buf, cpos),
-            ViMode::Normal => self.handle_normal(key, buf, cpos),
+            ViMode::Insert => self.handle_insert(key, buf, cpos, attachments),
+            ViMode::Normal => self.handle_normal(key, buf, cpos, attachments),
         }
     }
 
     // ── Insert mode ─────────────────────────────────────────────────────
 
-    fn handle_insert(&mut self, key: KeyEvent, buf: &mut String, cpos: &mut usize) -> Action {
+    fn handle_insert(
+        &mut self,
+        key: KeyEvent,
+        buf: &mut String,
+        cpos: &mut usize,
+        attachments: &mut [Attachment],
+    ) -> Action {
         match key {
             // Esc or Ctrl+[ → normal mode
             KeyEvent {
@@ -161,7 +175,7 @@ impl Vim {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
-                self.save_undo(buf, *cpos);
+                self.save_undo(buf, *cpos, attachments);
                 let target = word_backward_pos(buf, *cpos, CharClass::Word);
                 buf.drain(target..*cpos);
                 *cpos = target;
@@ -173,7 +187,7 @@ impl Vim {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
-                self.save_undo(buf, *cpos);
+                self.save_undo(buf, *cpos, attachments);
                 let start = line_start(buf, *cpos);
                 buf.drain(start..*cpos);
                 *cpos = start;
@@ -192,13 +206,19 @@ impl Vim {
 
     // ── Normal mode ─────────────────────────────────────────────────────
 
-    fn handle_normal(&mut self, key: KeyEvent, buf: &mut String, cpos: &mut usize) -> Action {
+    fn handle_normal(
+        &mut self,
+        key: KeyEvent,
+        buf: &mut String,
+        cpos: &mut usize,
+        attachments: &mut Vec<Attachment>,
+    ) -> Action {
         // Ctrl+C / Ctrl+D always pass through for cancel.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('c' | 'd' | 'u' | 't') => return Action::Passthrough,
                 KeyCode::Char('r') => {
-                    self.redo(buf, cpos);
+                    self.redo(buf, cpos, attachments);
                     return Action::Consumed;
                 }
                 _ => return Action::Consumed,
@@ -212,15 +232,17 @@ impl Vim {
 
         // Handle sub-states first.
         match self.sub {
-            SubState::WaitingR => return self.handle_waiting_r(key, buf, cpos),
+            SubState::WaitingR => return self.handle_waiting_r(key, buf, cpos, attachments),
             SubState::WaitingFind(kind) => return self.handle_waiting_find(key, kind, buf, cpos),
             SubState::WaitingOpFind(op, kind) => {
-                return self.handle_waiting_op_find(key, op, kind, buf, cpos)
+                return self.handle_waiting_op_find(key, op, kind, buf, cpos, attachments)
             }
             SubState::WaitingG => return self.handle_waiting_g(key, buf, cpos),
-            SubState::WaitingOpG(op) => return self.handle_waiting_op_g(key, op, buf, cpos),
+            SubState::WaitingOpG(op) => {
+                return self.handle_waiting_op_g(key, op, buf, cpos, attachments)
+            }
             SubState::WaitingTextObj(op, inner) => {
-                return self.handle_waiting_textobj(key, op, inner, buf, cpos)
+                return self.handle_waiting_textobj(key, op, inner, buf, cpos, attachments)
             }
             SubState::WaitingOp(op) => {
                 // Could be digit, motion, text object prefix (i/a), or same-key (dd/cc/yy).
@@ -233,7 +255,7 @@ impl Vim {
                     }
                     // Same operator key → linewise (dd, cc, yy).
                     if c == op.char() {
-                        return self.execute_linewise_op(op, buf, cpos);
+                        return self.execute_linewise_op(op, buf, cpos, attachments);
                     }
                     // Text object prefix.
                     if c == 'i' || c == 'a' {
@@ -242,7 +264,7 @@ impl Vim {
                     }
                 }
                 // Otherwise try as a motion.
-                let result = self.execute_op_motion(key, op, buf, cpos);
+                let result = self.execute_op_motion(key, op, buf, cpos, attachments);
                 // Don't reset if execute_op_motion transitioned to a new substate
                 // (e.g. WaitingOpFind for df/dt combos).
                 if matches!(self.sub, SubState::WaitingOp(_)) {
@@ -256,7 +278,7 @@ impl Vim {
         // Ready state — handle count digits, commands, motions.
         if let KeyCode::Char(c) = key.code {
             if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                return self.handle_normal_char(c, buf, cpos);
+                return self.handle_normal_char(c, buf, cpos, attachments);
             }
         }
 
@@ -293,7 +315,13 @@ impl Vim {
         }
     }
 
-    fn handle_normal_char(&mut self, c: char, buf: &mut String, cpos: &mut usize) -> Action {
+    fn handle_normal_char(
+        &mut self,
+        c: char,
+        buf: &mut String,
+        cpos: &mut usize,
+        attachments: &mut Vec<Attachment>,
+    ) -> Action {
         // Count digit accumulation.
         if c.is_ascii_digit() && (c != '0' || self.count1.is_some()) {
             self.count1 = Some(self.count1.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
@@ -317,7 +345,7 @@ impl Vim {
 
             // ── Operator shortcuts ──────────────────────────────────────
             'D' => {
-                self.save_undo(buf, *cpos);
+                self.save_undo(buf, *cpos, attachments);
                 let end = line_end(buf, *cpos);
                 self.yank(&buf[*cpos..end], false);
                 buf.drain(*cpos..end);
@@ -326,7 +354,7 @@ impl Vim {
                 Action::Consumed
             }
             'C' => {
-                self.save_undo(buf, *cpos);
+                self.save_undo(buf, *cpos, attachments);
                 let end = line_end(buf, *cpos);
                 self.yank(&buf[*cpos..end], false);
                 buf.drain(*cpos..end);
@@ -344,7 +372,7 @@ impl Vim {
             'x' => {
                 let n = self.take_count();
                 if !buf.is_empty() && *cpos < buf.len() {
-                    self.save_undo(buf, *cpos);
+                    self.save_undo(buf, *cpos, attachments);
                     let end = advance_chars(buf, *cpos, n);
                     self.yank(&buf[*cpos..end], false);
                     buf.drain(*cpos..end);
@@ -356,7 +384,7 @@ impl Vim {
             'X' => {
                 let n = self.take_count();
                 if *cpos > 0 {
-                    self.save_undo(buf, *cpos);
+                    self.save_undo(buf, *cpos, attachments);
                     let start = retreat_chars(buf, *cpos, n);
                     self.yank(&buf[start..*cpos], false);
                     buf.drain(start..*cpos);
@@ -368,7 +396,7 @@ impl Vim {
             }
             's' => {
                 let n = self.take_count();
-                self.save_undo(buf, *cpos);
+                self.save_undo(buf, *cpos, attachments);
                 if !buf.is_empty() && *cpos < buf.len() {
                     let end = advance_chars(buf, *cpos, n);
                     self.yank(&buf[*cpos..end], false);
@@ -378,7 +406,7 @@ impl Vim {
                 Action::Consumed
             }
             'S' => {
-                self.save_undo(buf, *cpos);
+                self.save_undo(buf, *cpos, attachments);
                 let (start, end) = current_line_content_range(buf, *cpos);
                 self.yank(&buf[start..end], false);
                 buf.drain(start..end);
@@ -393,7 +421,7 @@ impl Vim {
             '~' => {
                 let n = self.take_count();
                 if !buf.is_empty() && *cpos < buf.len() {
-                    self.save_undo(buf, *cpos);
+                    self.save_undo(buf, *cpos, attachments);
                     for _ in 0..n {
                         if *cpos >= buf.len() {
                             break;
@@ -416,7 +444,7 @@ impl Vim {
             'J' => {
                 let after = &buf[*cpos..];
                 if let Some(nl) = after.find('\n') {
-                    self.save_undo(buf, *cpos);
+                    self.save_undo(buf, *cpos, attachments);
                     let abs = *cpos + nl;
                     // Remove newline and leading whitespace on next line.
                     let mut end = abs + 1;
@@ -432,7 +460,7 @@ impl Vim {
             // ── Paste ───────────────────────────────────────────────────
             'p' => {
                 if !self.register.is_empty() {
-                    self.save_undo(buf, *cpos);
+                    self.save_undo(buf, *cpos, attachments);
                     if self.register_linewise {
                         let eol = line_end(buf, *cpos);
                         let insert = format!("\n{}", self.register);
@@ -454,7 +482,7 @@ impl Vim {
             }
             'P' => {
                 if !self.register.is_empty() {
-                    self.save_undo(buf, *cpos);
+                    self.save_undo(buf, *cpos, attachments);
                     if self.register_linewise {
                         let sol = line_start(buf, *cpos);
                         let insert = format!("{}\n", self.register);
@@ -479,7 +507,7 @@ impl Vim {
 
             // ── Undo / Redo ─────────────────────────────────────────────
             'u' => {
-                self.undo(buf, cpos);
+                self.undo(buf, cpos, attachments);
                 Action::Consumed
             }
 
@@ -510,7 +538,7 @@ impl Vim {
                 Action::Consumed
             }
             'o' => {
-                self.save_undo(buf, *cpos);
+                self.save_undo(buf, *cpos, attachments);
                 let eol = line_end(buf, *cpos);
                 buf.insert(eol, '\n');
                 *cpos = eol + 1;
@@ -518,7 +546,7 @@ impl Vim {
                 Action::Consumed
             }
             'O' => {
-                self.save_undo(buf, *cpos);
+                self.save_undo(buf, *cpos, attachments);
                 let sol = line_start(buf, *cpos);
                 buf.insert(sol, '\n');
                 *cpos = sol;
@@ -722,12 +750,18 @@ impl Vim {
 
     // ── Sub-state handlers ──────────────────────────────────────────────
 
-    fn handle_waiting_r(&mut self, key: KeyEvent, buf: &mut String, cpos: &mut usize) -> Action {
+    fn handle_waiting_r(
+        &mut self,
+        key: KeyEvent,
+        buf: &mut String,
+        cpos: &mut usize,
+        attachments: &mut [Attachment],
+    ) -> Action {
         self.sub = SubState::Ready;
         if let KeyCode::Char(c) = key.code {
             if !buf.is_empty() && *cpos < buf.len() {
                 let n = self.take_count();
-                self.save_undo(buf, *cpos);
+                self.save_undo(buf, *cpos, attachments);
                 let mut pos = *cpos;
                 for _ in 0..n {
                     if pos >= buf.len() {
@@ -780,6 +814,7 @@ impl Vim {
         kind: FindKind,
         buf: &mut String,
         cpos: &mut usize,
+        attachments: &mut [Attachment],
     ) -> Action {
         self.sub = SubState::Ready;
         if let KeyCode::Char(ch) = key.code {
@@ -810,14 +845,14 @@ impl Vim {
                 if start < end {
                     match op {
                         Op::Delete => {
-                            self.save_undo(buf, *cpos);
+                            self.save_undo(buf, *cpos, attachments);
                             self.yank(&buf[start..end], false);
                             buf.drain(start..end);
                             *cpos = start;
                             clamp_normal(buf, cpos);
                         }
                         Op::Change => {
-                            self.save_undo(buf, *cpos);
+                            self.save_undo(buf, *cpos, attachments);
                             self.yank(&buf[start..end], false);
                             buf.drain(start..end);
                             *cpos = start;
@@ -859,6 +894,7 @@ impl Vim {
         op: Op,
         buf: &mut String,
         cpos: &mut usize,
+        attachments: &mut [Attachment],
     ) -> Action {
         self.sub = SubState::Ready;
         if let KeyCode::Char('g') = key.code {
@@ -876,14 +912,14 @@ impl Vim {
             if start != end {
                 match op {
                     Op::Delete => {
-                        self.save_undo(buf, *cpos);
+                        self.save_undo(buf, *cpos, attachments);
                         self.yank(&buf[start..end], false);
                         buf.drain(start..end);
                         *cpos = start;
                         clamp_normal(buf, cpos);
                     }
                     Op::Change => {
-                        self.save_undo(buf, *cpos);
+                        self.save_undo(buf, *cpos, attachments);
                         self.yank(&buf[start..end], false);
                         buf.drain(start..end);
                         *cpos = start;
@@ -909,6 +945,7 @@ impl Vim {
         inner: bool,
         buf: &mut String,
         cpos: &mut usize,
+        attachments: &mut [Attachment],
     ) -> Action {
         self.sub = SubState::Ready;
         if let KeyCode::Char(c) = key.code {
@@ -919,14 +956,14 @@ impl Vim {
                 let _ = n;
                 match op {
                     Op::Delete => {
-                        self.save_undo(buf, *cpos);
+                        self.save_undo(buf, *cpos, attachments);
                         self.yank(&buf[start..end], false);
                         buf.drain(start..end);
                         *cpos = start;
                         clamp_normal(buf, cpos);
                     }
                     Op::Change => {
-                        self.save_undo(buf, *cpos);
+                        self.save_undo(buf, *cpos, attachments);
                         self.yank(&buf[start..end], false);
                         buf.drain(start..end);
                         *cpos = start;
@@ -952,6 +989,7 @@ impl Vim {
         op: Op,
         buf: &mut String,
         cpos: &mut usize,
+        attachments: &mut [Attachment],
     ) -> Action {
         let n = self.effective_count();
         let origin = *cpos;
@@ -1062,14 +1100,14 @@ impl Vim {
 
         match op {
             Op::Delete => {
-                self.save_undo(buf, *cpos);
+                self.save_undo(buf, *cpos, attachments);
                 self.yank(&buf[start..end], false);
                 buf.drain(start..end);
                 *cpos = start;
                 clamp_normal(buf, cpos);
             }
             Op::Change => {
-                self.save_undo(buf, *cpos);
+                self.save_undo(buf, *cpos, attachments);
                 self.yank(&buf[start..end], false);
                 buf.drain(start..end);
                 *cpos = start;
@@ -1084,7 +1122,13 @@ impl Vim {
         Action::Consumed
     }
 
-    fn execute_linewise_op(&mut self, op: Op, buf: &mut String, cpos: &mut usize) -> Action {
+    fn execute_linewise_op(
+        &mut self,
+        op: Op,
+        buf: &mut String,
+        cpos: &mut usize,
+        attachments: &mut [Attachment],
+    ) -> Action {
         let n = self.effective_count();
         self.reset_counts();
         self.sub = SubState::Ready;
@@ -1109,7 +1153,7 @@ impl Vim {
 
         match op {
             Op::Delete => {
-                self.save_undo(buf, *cpos);
+                self.save_undo(buf, *cpos, attachments);
                 self.yank(&buf[start..end], true);
                 buf.drain(start..end);
                 *cpos = start.min(buf.len());
@@ -1119,7 +1163,7 @@ impl Vim {
                 clamp_normal(buf, cpos);
             }
             Op::Change => {
-                self.save_undo(buf, *cpos);
+                self.save_undo(buf, *cpos, attachments);
                 // cc: clear line content but keep the line itself.
                 let (cs, ce) = current_line_content_range(buf, *cpos);
                 self.yank(&buf[cs..ce], true);
@@ -1160,34 +1204,42 @@ impl Vim {
 
     // ── Undo/redo ───────────────────────────────────────────────────────
 
-    fn save_undo(&mut self, buf: &str, cpos: usize) {
+    /// Save the current state for undo. Call this before making changes to buf/attachments.
+    pub fn save_undo(&mut self, buf: &str, cpos: usize, att: &[Attachment]) {
         self.redo_stack.clear();
         self.undo_stack.push(UndoEntry {
             buf: buf.to_string(),
             cpos,
+            attachments: att.to_vec(),
         });
     }
 
-    fn undo(&mut self, buf: &mut String, cpos: &mut usize) {
+    /// Undo to the previous state.
+    pub fn undo(&mut self, buf: &mut String, cpos: &mut usize, att: &mut Vec<Attachment>) {
         if let Some(entry) = self.undo_stack.pop() {
             self.redo_stack.push(UndoEntry {
                 buf: buf.clone(),
                 cpos: *cpos,
+                attachments: att.clone(),
             });
             *buf = entry.buf;
             *cpos = entry.cpos;
+            *att = entry.attachments;
             clamp_normal(buf, cpos);
         }
     }
 
-    fn redo(&mut self, buf: &mut String, cpos: &mut usize) {
+    /// Redo to the next state.
+    pub fn redo(&mut self, buf: &mut String, cpos: &mut usize, att: &mut Vec<Attachment>) {
         if let Some(entry) = self.redo_stack.pop() {
             self.undo_stack.push(UndoEntry {
                 buf: buf.clone(),
                 cpos: *cpos,
+                attachments: att.clone(),
             });
             *buf = entry.buf;
             *cpos = entry.cpos;
+            *att = entry.attachments;
             clamp_normal(buf, cpos);
         }
     }
@@ -1721,186 +1773,187 @@ mod tests {
         }
     }
 
-    fn setup(text: &str) -> (Vim, String, usize) {
+    fn setup(text: &str) -> (Vim, String, usize, Vec<Attachment>) {
         let mut vim = Vim::new();
         vim.mode = ViMode::Normal;
         vim.sub = SubState::Ready;
         let buf = text.to_string();
         let cpos = 0;
-        (vim, buf, cpos)
+        let attachments = Vec::new();
+        (vim, buf, cpos, attachments)
     }
 
     #[test]
     fn test_word_forward() {
-        let (mut vim, mut buf, mut cpos) = setup("hello world foo");
-        vim.handle_key(key('w'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world foo");
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 6);
-        vim.handle_key(key('w'), &mut buf, &mut cpos);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 12);
     }
 
     #[test]
     fn test_word_backward() {
-        let (mut vim, mut buf, mut cpos) = setup("hello world");
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
         cpos = 6;
-        vim.handle_key(key('b'), &mut buf, &mut cpos);
+        vim.handle_key(key('b'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 0);
     }
 
     #[test]
     fn test_word_end() {
-        let (mut vim, mut buf, mut cpos) = setup("hello world");
-        vim.handle_key(key('e'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('e'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 4);
     }
 
     #[test]
     fn test_delete_word() {
-        let (mut vim, mut buf, mut cpos) = setup("hello world");
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
-        vim.handle_key(key('w'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "world");
         assert_eq!(cpos, 0);
     }
 
     #[test]
     fn test_delete_inner_word() {
-        let (mut vim, mut buf, mut cpos) = setup("hello world");
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
-        vim.handle_key(key('i'), &mut buf, &mut cpos);
-        vim.handle_key(key('w'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('i'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, " world");
     }
 
     #[test]
     fn test_change_word() {
-        let (mut vim, mut buf, mut cpos) = setup("hello world");
-        vim.handle_key(key('c'), &mut buf, &mut cpos);
-        vim.handle_key(key('w'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('c'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "world");
         assert_eq!(vim.mode(), ViMode::Insert);
     }
 
     #[test]
     fn test_dd_single_line() {
-        let (mut vim, mut buf, mut cpos) = setup("hello");
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello");
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "");
     }
 
     #[test]
     fn test_dd_multiline() {
-        let (mut vim, mut buf, mut cpos) = setup("aaa\nbbb\nccc");
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
         cpos = 4; // on 'bbb'
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "aaa\nccc");
     }
 
     #[test]
     fn test_dd_middle_line_with_empty_neighbors() {
         // Three lines: empty, "foo", empty. Delete middle line.
-        let (mut vim, mut buf, mut cpos) = setup("\nfoo\n");
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("\nfoo\n");
         cpos = 1; // on 'f'
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "\n"); // Two empty lines remain.
     }
 
     #[test]
     fn test_undo_redo() {
-        let (mut vim, mut buf, mut cpos) = setup("hello world");
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
-        vim.handle_key(key('w'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "world");
-        vim.handle_key(key('u'), &mut buf, &mut cpos);
+        vim.handle_key(key('u'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "hello world");
-        vim.handle_key(key_ctrl('r'), &mut buf, &mut cpos);
+        vim.handle_key(key_ctrl('r'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "world");
     }
 
     #[test]
     fn test_count_motion() {
-        let (mut vim, mut buf, mut cpos) = setup("one two three four");
-        vim.handle_key(key('2'), &mut buf, &mut cpos);
-        vim.handle_key(key('w'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("one two three four");
+        vim.handle_key(key('2'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 8); // start of "three"
     }
 
     #[test]
     fn test_count_delete() {
-        let (mut vim, mut buf, mut cpos) = setup("one two three four");
-        vim.handle_key(key('2'), &mut buf, &mut cpos);
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
-        vim.handle_key(key('w'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("one two three four");
+        vim.handle_key(key('2'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "three four");
     }
 
     #[test]
     fn test_find_char() {
-        let (mut vim, mut buf, mut cpos) = setup("hello world");
-        vim.handle_key(key('f'), &mut buf, &mut cpos);
-        vim.handle_key(key('o'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('f'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('o'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 4);
-        vim.handle_key(key(';'), &mut buf, &mut cpos);
+        vim.handle_key(key(';'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 7);
-        vim.handle_key(key(','), &mut buf, &mut cpos);
+        vim.handle_key(key(','), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 4);
     }
 
     #[test]
     fn test_till_char() {
-        let (mut vim, mut buf, mut cpos) = setup("hello world");
-        vim.handle_key(key('t'), &mut buf, &mut cpos);
-        vim.handle_key(key('o'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('t'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('o'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 3);
     }
 
     #[test]
     fn test_text_object_pair() {
-        let (mut vim, mut buf, mut cpos) = setup("foo(bar)baz");
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("foo(bar)baz");
         cpos = 5; // on 'a' inside parens
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
-        vim.handle_key(key('i'), &mut buf, &mut cpos);
-        vim.handle_key(key('('), &mut buf, &mut cpos);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('i'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('('), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "foo()baz");
     }
 
     #[test]
     fn test_text_object_quote() {
-        let (mut vim, mut buf, mut cpos) = setup(r#"say "hello" end"#);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup(r#"say "hello" end"#);
         cpos = 6; // on 'e' inside quotes
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
-        vim.handle_key(key('i'), &mut buf, &mut cpos);
-        vim.handle_key(key('"'), &mut buf, &mut cpos);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('i'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('"'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, r#"say "" end"#);
     }
 
     #[test]
     fn test_paste() {
-        let (mut vim, mut buf, mut cpos) = setup("hello world");
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
         // Delete word, then paste.
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
-        vim.handle_key(key('w'), &mut buf, &mut cpos);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "world");
-        vim.handle_key(key('p'), &mut buf, &mut cpos);
+        vim.handle_key(key('p'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "whello orld");
     }
 
     #[test]
     fn test_tilde() {
-        let (mut vim, mut buf, mut cpos) = setup("hello");
-        vim.handle_key(key('~'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello");
+        vim.handle_key(key('~'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "Hello");
         assert_eq!(cpos, 1); // ~ advances cursor after toggling
     }
 
     #[test]
     fn test_replace() {
-        let (mut vim, mut buf, mut cpos) = setup("hello");
-        vim.handle_key(key('r'), &mut buf, &mut cpos);
-        vim.handle_key(key('X'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello");
+        vim.handle_key(key('r'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('X'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "Xello");
     }
 
@@ -1909,27 +1962,28 @@ mod tests {
         let mut vim = Vim::new(); // starts in Insert
         let mut buf = "hello world".to_string();
         let mut cpos = buf.len();
-        vim.handle_key(key_ctrl('w'), &mut buf, &mut cpos);
+        let mut attachments = Vec::new();
+        vim.handle_key(key_ctrl('w'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "hello ");
     }
 
     #[test]
     fn test_line_movement() {
-        let (mut vim, mut buf, mut cpos) = setup("aaa\nbbb\nccc");
-        vim.handle_key(key('j'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 4); // start of 'bbb'
-        vim.handle_key(key('j'), &mut buf, &mut cpos);
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 8); // start of 'ccc'
-        vim.handle_key(key('k'), &mut buf, &mut cpos);
+        vim.handle_key(key('k'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 4);
     }
 
     #[test]
     fn test_open_line_and_navigate() {
         // Type 'o' to open line below, press Esc, then navigate with j/k.
-        let (mut vim, mut buf, mut cpos) = setup("hello");
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello");
         // 'o' opens line below → buf = "hello\n", cpos = 6, insert mode.
-        vim.handle_key(key('o'), &mut buf, &mut cpos);
+        vim.handle_key(key('o'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "hello\n");
         assert_eq!(cpos, 6);
         assert_eq!(vim.mode(), ViMode::Insert);
@@ -1941,16 +1995,16 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         };
-        vim.handle_key(esc, &mut buf, &mut cpos);
+        vim.handle_key(esc, &mut buf, &mut cpos, &mut attachments);
         assert_eq!(vim.mode(), ViMode::Normal);
         assert_eq!(cpos, 6); // On the empty second line.
 
         // 'k' should go up to "hello" line.
-        vim.handle_key(key('k'), &mut buf, &mut cpos);
+        vim.handle_key(key('k'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 0);
 
         // 'j' should go back down to the empty line.
-        vim.handle_key(key('j'), &mut buf, &mut cpos);
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 6);
     }
 
@@ -1960,13 +2014,14 @@ mod tests {
         let mut vim = Vim::new(); // starts in Insert
         let mut buf = "hello".to_string();
         let mut cpos = 5; // cursor at end
+        let mut attachments = Vec::new();
         let esc = KeyEvent {
             code: KeyCode::Esc,
             modifiers: KeyModifiers::empty(),
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         };
-        vim.handle_key(esc, &mut buf, &mut cpos);
+        vim.handle_key(esc, &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 4); // Moved back one.
         assert_eq!(vim.mode(), ViMode::Normal);
     }
@@ -1977,70 +2032,71 @@ mod tests {
         let mut vim = Vim::new();
         let mut buf = "hello".to_string();
         let mut cpos = 0;
+        let mut attachments = Vec::new();
         let esc = KeyEvent {
             code: KeyCode::Esc,
             modifiers: KeyModifiers::empty(),
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         };
-        vim.handle_key(esc, &mut buf, &mut cpos);
+        vim.handle_key(esc, &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 0);
     }
 
     #[test]
     fn test_h_l_stay_within_line() {
-        let (mut vim, mut buf, mut cpos) = setup("aa\nbb");
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aa\nbb");
         // Move to end of first line.
-        vim.handle_key(key('$'), &mut buf, &mut cpos);
+        vim.handle_key(key('$'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 1); // On second 'a'.
                              // 'l' should NOT cross to next line.
-        vim.handle_key(key('l'), &mut buf, &mut cpos);
+        vim.handle_key(key('l'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 1); // Still on 'a'.
                              // Move to start of second line.
-        vim.handle_key(key('j'), &mut buf, &mut cpos);
-        vim.handle_key(key('0'), &mut buf, &mut cpos);
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('0'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 3);
         // 'h' should NOT cross to previous line.
-        vim.handle_key(key('h'), &mut buf, &mut cpos);
+        vim.handle_key(key('h'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 3); // Still at start of "bb".
     }
 
     #[test]
     fn test_empty_buffer() {
-        let (mut vim, mut buf, mut cpos) = setup("");
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("");
         // All of these should be no-ops on empty buffer.
-        vim.handle_key(key('x'), &mut buf, &mut cpos);
+        vim.handle_key(key('x'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "");
-        vim.handle_key(key('d'), &mut buf, &mut cpos);
-        vim.handle_key(key('w'), &mut buf, &mut cpos);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "");
     }
 
     #[test]
     fn test_gg() {
-        let (mut vim, mut buf, mut cpos) = setup("aaa\nbbb\nccc");
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
         cpos = 8;
-        vim.handle_key(key('g'), &mut buf, &mut cpos);
-        vim.handle_key(key('g'), &mut buf, &mut cpos);
+        vim.handle_key(key('g'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('g'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 0);
     }
 
     #[test]
     fn test_dollar_and_zero() {
-        let (mut vim, mut buf, mut cpos) = setup("hello world");
-        vim.handle_key(key('$'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('$'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 10); // last char 'd'
-        vim.handle_key(key('0'), &mut buf, &mut cpos);
+        vim.handle_key(key('0'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(cpos, 0);
     }
 
     #[test]
     fn test_yank_paste() {
-        let (mut vim, mut buf, mut cpos) = setup("hello world");
-        vim.handle_key(key('y'), &mut buf, &mut cpos);
-        vim.handle_key(key('w'), &mut buf, &mut cpos);
-        vim.handle_key(key('$'), &mut buf, &mut cpos);
-        vim.handle_key(key('p'), &mut buf, &mut cpos);
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('y'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('$'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('p'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "hello worldhello ");
     }
 }
