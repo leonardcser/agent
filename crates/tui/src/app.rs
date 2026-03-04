@@ -1335,6 +1335,8 @@ impl App {
         self.input_history.push(input.to_string());
         state::set_mode(self.mode);
 
+        // Skip shell escape for pasted content
+        let is_from_paste = self.input.skip_shell_escape();
         match self.handle_command(trimmed) {
             CommandAction::Quit => return InputOutcome::Quit,
             CommandAction::CancelAndClear => return InputOutcome::Continue, // already cleared
@@ -1345,7 +1347,8 @@ impl App {
         if trimmed.starts_with('/') && crate::completer::Completer::is_command(trimmed) {
             return InputOutcome::Continue;
         }
-        if trimmed.starts_with('!') {
+        // Skip starting agent for shell escapes, but NOT for pasted content
+        if trimmed.starts_with('!') && !is_from_paste {
             return InputOutcome::Continue;
         }
 
@@ -1462,7 +1465,7 @@ impl App {
                 self.fork_session();
                 CommandAction::Continue
             }
-            _ if input.starts_with('!') => {
+            _ if input.starts_with('!') && !self.input.skip_shell_escape() => {
                 self.run_shell_escape(&input[1..]);
                 CommandAction::Continue
             }
@@ -1474,8 +1477,10 @@ impl App {
     /// Returns the `EventOutcome` to use, or `None` to queue as a message.
     fn try_command_while_running(&mut self, input: &str) -> Option<EventOutcome> {
         // Not a command — will be queued as a user message.
+        // Skip shell escape check for pasted content
+        let is_from_paste = self.input.skip_shell_escape();
         if !input.starts_with('/')
-            && !input.starts_with('!')
+            && (!input.starts_with('!') || is_from_paste)
             && !matches!(input, ":q" | ":qa" | ":wq" | ":wqa")
         {
             return None;

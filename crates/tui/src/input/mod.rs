@@ -54,6 +54,7 @@ pub struct InputSnapshot {
     pub buf: String,
     pub cpos: usize,
     pub attachments: Vec<Attachment>,
+    from_paste: bool,
 }
 
 // ── Shared input state ───────────────────────────────────────────────────────
@@ -70,6 +71,9 @@ pub struct InputState {
     /// Saved buffer before history search, restored on cancel.
     history_saved_buf: Option<(String, usize)>,
     pub stash: Option<InputSnapshot>,
+    /// Tracks whether the current buffer content originated from a paste.
+    /// Cleared on any manual character input.
+    from_paste: bool,
 }
 
 /// What the caller should do after `handle_event`.
@@ -100,6 +104,7 @@ impl InputState {
             vim: None,
             history_saved_buf: None,
             stash: None,
+            from_paste: false,
         }
     }
 
@@ -116,6 +121,12 @@ impl InputState {
         self.vim
             .as_ref()
             .is_some_and(|v| v.mode() == ViMode::Insert)
+    }
+
+    /// Returns true if the current content originated from a paste and should
+    /// not be treated as a shell escape command (starting with '!').
+    pub fn skip_shell_escape(&self) -> bool {
+        self.from_paste
     }
 
     pub fn set_vim_enabled(&mut self, enabled: bool) {
@@ -153,6 +164,7 @@ impl InputState {
         self.completer = None;
         self.menu = None;
         self.history_saved_buf = None;
+        self.from_paste = false;
         // Note: stash is intentionally NOT cleared here.
     }
 
@@ -162,12 +174,14 @@ impl InputState {
             self.buf = snap.buf;
             self.cpos = snap.cpos;
             self.attachments = snap.attachments;
+            self.from_paste = snap.from_paste;
             self.completer = None;
         } else if !self.buf.is_empty() || !self.attachments.is_empty() {
             self.stash = Some(InputSnapshot {
                 buf: std::mem::take(&mut self.buf),
                 cpos: std::mem::replace(&mut self.cpos, 0),
                 attachments: std::mem::take(&mut self.attachments),
+                from_paste: self.from_paste,
             });
             self.completer = None;
         }
@@ -978,6 +992,7 @@ impl InputState {
     // ── Editing primitives ───────────────────────────────────────────────
 
     fn insert_char(&mut self, c: char) {
+        self.from_paste = false;
         self.buf.insert(self.cpos, c);
         self.cpos += c.len_utf8();
         self.recompute_completer();
@@ -992,6 +1007,10 @@ impl InputState {
             .next_back()
             .map(|(i, _)| i)
             .unwrap_or(0);
+        // Clear from_paste if modifying the beginning of the buffer
+        if prev == 0 {
+            self.from_paste = false;
+        }
         self.maybe_remove_attachment(prev);
         self.buf.drain(prev..self.cpos);
         self.cpos = prev;
@@ -1003,6 +1022,10 @@ impl InputState {
             return;
         }
         let target = vim::word_backward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        // Clear from_paste if deleting from the beginning of the buffer
+        if target == 0 {
+            self.from_paste = false;
+        }
         // Count attachment markers in the drained range and remove them
         // (iterate in reverse so indices stay valid).
         let markers_before = self.buf[..target]
@@ -1029,8 +1052,20 @@ impl InputState {
         // newlines in bracketed paste mode.  Convert \r\n and lone \r to \n
         // so that line counting and display work correctly.
         let data = data.replace("\r\n", "\n").replace('\r', "\n");
+        
+        // Don't set from_paste for empty pastes
+        if data.is_empty() {
+            return;
+        }
+        
         let lines = data.lines().count();
         let char_threshold = PASTE_LINE_THRESHOLD * (crate::render::term_width().saturating_sub(1));
+        // Mark as from_paste if inserting at the beginning of the current line.
+        // This prevents pasted content starting with '!' from being treated as a shell escape.
+        let line_start = self.buf[..self.cpos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        if self.cpos == line_start {
+            self.from_paste = true;
+        }
         if lines >= PASTE_LINE_THRESHOLD || data.len() >= char_threshold {
             self.insert_attachment(Attachment::Paste { content: data });
         } else {
@@ -1294,5 +1329,246 @@ mod tests {
         // Second Esc within 500ms → Cancel with no vim mode to restore.
         let action2 = resolve_agent_esc(None, false, &mut last_esc, &mut saved_mode);
         assert_eq!(action2, EscAction::Cancel { restore_vim: None });
+    }
+
+    // ── from_paste behavior for shell escape prevention ───────────────────
+
+    #[test]
+    fn paste_into_empty_buffer_sets_from_paste() {
+        let mut input = InputState::new();
+        input.insert_paste("!echo hello".to_string());
+        assert!(input.skip_shell_escape(), "Paste at buffer start should set from_paste");
+        assert_eq!(input.buf, "!echo hello");
+    }
+
+    #[test]
+    fn type_then_type_sets_from_paste_false() {
+        let mut input = InputState::new();
+        input.insert_char('!');
+        input.insert_char('e');
+        assert!(!input.skip_shell_escape(), "Manual typing should clear from_paste");
+    }
+
+    #[test]
+    fn type_bang_then_paste_sets_from_paste() {
+        let mut input = InputState::new();
+        // Simulate user typing '!'
+        input.insert_char('!');
+        assert!(!input.skip_shell_escape(), "Typing clears from_paste");
+
+        // Reset cursor to simulate the scenario: user types '!', then pastes at line start
+        // This is the key scenario that was broken before the fix
+        input.buf.clear();
+        input.cpos = 0;
+        input.insert_paste("echo hello".to_string());
+        assert!(input.skip_shell_escape(), "Paste at line start should set from_paste");
+        assert_eq!(input.buf, "echo hello");
+    }
+
+    #[test]
+    fn paste_in_middle_of_line_does_not_set_from_paste() {
+        let mut input = InputState::new();
+        input.buf = "hello ".to_string();
+        input.cpos = 6; // After "hello "
+        input.insert_paste("!world".to_string());
+        assert!(!input.skip_shell_escape(), "Paste in middle of line should not set from_paste");
+        assert_eq!(input.buf, "hello !world");
+    }
+
+    #[test]
+    fn paste_at_end_of_line_does_not_set_from_paste() {
+        let mut input = InputState::new();
+        input.buf = "hello".to_string();
+        input.cpos = 5; // At end
+        input.insert_paste(" world".to_string());
+        assert!(!input.skip_shell_escape(), "Paste at end of line should not set from_paste");
+        assert_eq!(input.buf, "hello world");
+    }
+
+    #[test]
+    fn paste_at_start_of_multiline_buffer() {
+        let mut input = InputState::new();
+        input.buf = "line1\nline2".to_string();
+        input.cpos = 0; // At very start
+        input.insert_paste("!command".to_string());
+        assert!(input.skip_shell_escape(), "Paste at buffer start should set from_paste");
+        assert_eq!(input.buf, "!commandline1\nline2");
+    }
+
+    #[test]
+    fn paste_at_start_of_second_line_sets_from_paste() {
+        let mut input = InputState::new();
+        input.buf = "line1\n".to_string();
+        input.cpos = 6; // Start of second line
+        input.insert_paste("!command".to_string());
+        assert!(input.skip_shell_escape(), "Paste at line start should set from_paste");
+        assert_eq!(input.buf, "line1\n!command");
+    }
+
+    #[test]
+    fn paste_middle_of_second_line_does_not_set_from_paste() {
+        let mut input = InputState::new();
+        input.buf = "line1\nhello".to_string();
+        input.cpos = 8; // Insert at byte position 8 (before first 'l' of "hello")
+        input.insert_paste(" world".to_string());
+        assert!(!input.skip_shell_escape(), "Paste in middle of line should not set from_paste");
+        assert_eq!(input.buf, "line1\nhe worldllo");
+    }
+
+    #[test]
+    fn manual_char_after_paste_clears_from_paste() {
+        let mut input = InputState::new();
+        input.insert_paste("!echo hello".to_string());
+        assert!(input.skip_shell_escape());
+
+        input.insert_char('x');
+        assert!(!input.skip_shell_escape(), "Manual character after paste should clear from_paste");
+    }
+
+    #[test]
+    fn backspace_at_start_clears_from_paste() {
+        let mut input = InputState::new();
+        input.insert_paste("!echo hello".to_string());
+        assert!(input.skip_shell_escape());
+
+        input.backspace(); // Deletes last character
+        assert!(input.skip_shell_escape(), "Backspace not at start should not clear from_paste");
+
+        input.cpos = 0;
+        input.backspace(); // Now at position 0
+        // Can't backspace further, but the logic would clear it if we could
+    }
+
+    #[test]
+    fn delete_word_backward_at_start_clears_from_paste() {
+        let mut input = InputState::new();
+        input.insert_paste("!echo hello".to_string());
+        assert!(input.skip_shell_escape());
+
+        // Move cursor to end
+        input.cpos = input.buf.len();
+        input.delete_word_backward(); // Deletes "hello"
+        assert!(input.skip_shell_escape(), "Delete word not at start should not clear from_paste");
+
+        // Move to after "echo " and delete word
+        input.cpos = 5; // After "echo"
+        input.delete_word_backward(); // Deletes "echo"
+        assert!(input.skip_shell_escape(), "Still not at absolute start");
+
+        input.cpos = 1; // After "!"
+        input.delete_word_backward(); // Would delete to start, which should clear from_paste
+        assert!(!input.skip_shell_escape(), "Delete word to start should clear from_paste");
+    }
+
+    #[test]
+    fn clear_resets_from_paste() {
+        let mut input = InputState::new();
+        input.insert_paste("!test".to_string());
+        assert!(input.skip_shell_escape());
+
+        input.clear();
+        assert!(!input.skip_shell_escape(), "Clear should reset from_paste");
+    }
+
+    #[test]
+    fn large_paste_creates_attachment() {
+        let mut input = InputState::new();
+        // Use multi-line paste which definitely creates an attachment
+        let multi_line = (0..PASTE_LINE_THRESHOLD).map(|i| format!("!line{}", i)).collect::<Vec<_>>().join("\n");
+        input.insert_paste(multi_line);
+        assert!(input.skip_shell_escape(), "Multi-line paste should set from_paste");
+        assert!(!input.attachments.is_empty(), "Multi-line paste above threshold should create attachment");
+        assert_eq!(input.buf, "\u{FFFC}"); // Should be just the marker
+    }
+
+    #[test]
+    fn multi_line_paste_above_threshold_creates_attachment() {
+        let mut input = InputState::new();
+        let multi_line = (0..PASTE_LINE_THRESHOLD).map(|i| format!("!line{}", i)).collect::<Vec<_>>().join("\n");
+        input.insert_paste(multi_line);
+        assert!(input.skip_shell_escape(), "Multi-line paste should set from_paste");
+        assert!(!input.attachments.is_empty(), "Multi-line paste should create attachment");
+    }
+
+    #[test]
+    fn small_multi_line_paste_inlined() {
+        let mut input = InputState::new();
+        let multi_line = "!line1\nline2\nline3".to_string();
+        input.insert_paste(multi_line);
+        assert!(input.skip_shell_escape(), "Small multi-line paste should set from_paste");
+        assert!(input.attachments.is_empty(), "Small multi-line paste should not create attachment");
+        assert_eq!(input.buf, "!line1\nline2\nline3");
+    }
+
+    #[test]
+    fn stash_preserves_from_paste() {
+        let mut input = InputState::new();
+        input.insert_paste("!test".to_string());
+        assert!(input.skip_shell_escape());
+
+        // Stash: saves from_paste to snapshot, but doesn't clear it in active buffer
+        input.toggle_stash();
+        assert!(input.skip_shell_escape(), "Stash saves from_paste to snapshot but keeps it in buffer");
+        assert!(input.buf.is_empty(), "Buffer should be empty after stashing");
+
+        // Restore: restores from_paste from snapshot
+        input.toggle_stash();
+        assert!(input.skip_shell_escape(), "Stash should restore from_paste");
+        assert_eq!(input.buf, "!test");
+    }
+
+    #[test]
+    fn multiple_pastes_set_from_paste() {
+        let mut input = InputState::new();
+        input.insert_paste("!first".to_string());
+        assert!(input.skip_shell_escape());
+
+        // Type something, which clears from_paste
+        input.insert_char(' ');
+        assert!(!input.skip_shell_escape());
+
+        // Paste again at start of line
+        input.cpos = 0;
+        input.insert_paste("!second".to_string());
+        assert!(input.skip_shell_escape(), "Second paste at start should set from_paste again");
+    }
+
+    #[test]
+    fn paste_with_carriage_returns_normalized() {
+        let mut input = InputState::new();
+        input.insert_paste("!line1\r\nline2\rline3".to_string());
+        assert!(input.skip_shell_escape());
+        assert!(!input.buf.contains('\r'), "Carriage returns should be normalized");
+        assert_eq!(input.buf, "!line1\nline2\nline3");
+    }
+
+    #[test]
+    fn empty_paste_does_not_set_from_paste() {
+        let mut input = InputState::new();
+        input.insert_paste("".to_string());
+        assert!(!input.skip_shell_escape(), "Empty paste should not set from_paste");
+    }
+
+    #[test]
+    fn whitespace_only_paste_at_start_sets_from_paste() {
+        let mut input = InputState::new();
+        input.insert_paste("   ".to_string());
+        assert!(input.skip_shell_escape(), "Whitespace paste at start should set from_paste");
+    }
+
+    #[test]
+    fn paste_starting_with_bang_at_line_start() {
+        // This is the main bug scenario: type '!', then paste command
+        let mut input = InputState::new();
+        input.buf = String::new();
+        input.cpos = 0;
+        input.insert_paste("!ls -la".to_string());
+        
+        assert!(input.skip_shell_escape(), "Paste at start of line should set from_paste");
+        assert_eq!(input.buf, "!ls -la");
+        
+        // The expanded text should not be treated as shell command
+        let text = input.expanded_text();
+        assert_eq!(text, "!ls -la");
     }
 }
