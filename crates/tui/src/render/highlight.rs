@@ -1,7 +1,8 @@
 use crate::theme;
+use crate::render::blocks::print_styled_dim;
 use comfy_table::{presets::UTF8_BORDERS_ONLY, ContentArrangement, Table};
 use crossterm::{
-    style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
+    style::{Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor},
     QueueableCommand,
 };
 use similar::{ChangeTag, TextDiff};
@@ -25,7 +26,7 @@ struct DiffLayout {
     max_content: usize,
 }
 
-pub(super) fn render_code_block(out: &mut io::Stdout, lines: &[&str], lang: &str) -> u16 {
+pub(super) fn render_code_block(out: &mut io::Stdout, lines: &[&str], lang: &str, dim: bool) -> u16 {
     let ext = match lang {
         "" => "txt",
         "js" | "javascript" => "js",
@@ -41,7 +42,14 @@ pub(super) fn render_code_block(out: &mut io::Stdout, lines: &[&str], lang: &str
         .find_syntax_by_extension(ext)
         .or_else(|| SYNTAX_SET.find_syntax_by_name(lang))
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    render_highlighted(out, lines, syntax, 0)
+    if dim {
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+    }
+    let rows = render_highlighted(out, lines, syntax, 0);
+    if dim {
+        let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+    }
+    rows
 }
 
 pub(super) fn render_highlighted(
@@ -604,7 +612,7 @@ fn print_split_regions(
     col
 }
 
-pub(super) fn render_markdown_table(out: &mut io::Stdout, lines: &[&str]) -> u16 {
+pub(super) fn render_markdown_table(out: &mut io::Stdout, lines: &[&str], dim: bool) -> u16 {
     let mut rows: Vec<Vec<String>> = Vec::new();
     for line in lines {
         let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
@@ -638,18 +646,39 @@ pub(super) fn render_markdown_table(out: &mut io::Stdout, lines: &[&str]) -> u16
     let rendered = table.to_string();
     for line in rendered.lines() {
         let _ = out.queue(Print(" "));
+        // Split the line into border and content segments, render content with
+        // inline markdown styling (bold, italic, inline code).
+        let mut seg = String::new();
         let mut in_border = false;
         for ch in line.chars() {
             let is_border =
                 ('\u{2500}'..='\u{257F}').contains(&ch) || ('\u{2580}'..='\u{259F}').contains(&ch);
-            if is_border && !in_border {
-                let _ = out.queue(SetForegroundColor(theme::BAR));
-                in_border = true;
-            } else if !is_border && in_border {
-                let _ = out.queue(ResetColor);
-                in_border = false;
+            if is_border {
+                if !seg.is_empty() {
+                    print_styled_dim(out, &seg, dim);
+                    seg.clear();
+                }
+                if !in_border {
+                    let _ = out.queue(SetForegroundColor(theme::BAR));
+                    if dim {
+                        let _ = out.queue(SetAttribute(Attribute::Dim));
+                    }
+                    in_border = true;
+                }
+                let _ = out.queue(Print(ch.to_string()));
+            } else {
+                if in_border {
+                    let _ = out.queue(ResetColor);
+                    if dim {
+                        let _ = out.queue(SetAttribute(Attribute::Reset));
+                    }
+                    in_border = false;
+                }
+                seg.push(ch);
             }
-            let _ = out.queue(Print(ch.to_string()));
+        }
+        if !seg.is_empty() {
+            print_styled_dim(out, &seg, dim);
         }
         if in_border {
             let _ = out.queue(ResetColor);

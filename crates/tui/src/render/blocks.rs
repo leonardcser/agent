@@ -129,43 +129,7 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
             }
             rows
         }
-        Block::Text { content } => {
-            let lines: Vec<&str> = content.lines().collect();
-            let mut i = 0;
-            let mut rows = 0u16;
-            while i < lines.len() {
-                if lines[i].trim_start().starts_with("```") {
-                    let lang = lines[i].trim_start().trim_start_matches('`').trim();
-                    i += 1;
-                    let code_start = i;
-                    while i < lines.len() && !lines[i].trim_start().starts_with("```") {
-                        i += 1;
-                    }
-                    let code_lines = &lines[code_start..i];
-                    if i < lines.len() {
-                        i += 1;
-                    }
-                    rows += render_code_block(out, code_lines, lang);
-                } else if lines[i].trim_start().starts_with('|') {
-                    let table_start = i;
-                    while i < lines.len() && lines[i].trim_start().starts_with('|') {
-                        i += 1;
-                    }
-                    rows += render_markdown_table(out, &lines[table_start..i]);
-                } else {
-                    let max_cols = width.saturating_sub(1);
-                    let segments = wrap_line(lines[i], max_cols);
-                    for seg in &segments {
-                        let _ = out.queue(Print(" "));
-                        print_styled(out, seg);
-                        crlf(out);
-                    }
-                    i += 1;
-                    rows += segments.len() as u16;
-                }
-            }
-            rows
-        }
+        Block::Text { content } => render_markdown(out, content, width, " ", false),
         Block::ToolCall {
             name,
             summary,
@@ -273,8 +237,8 @@ pub(super) fn render_tool(
     let mut rows = 1u16;
     if name == "web_fetch" {
         if let Some(prompt) = args.get("prompt").and_then(|v| v.as_str()) {
-            for seg in &wrap_line(prompt, width.saturating_sub(3)) {
-                print_dim(out, &format!("   {seg}"));
+            for seg in &wrap_line(prompt, width.saturating_sub(4)) {
+                print_dim(out, &format!("   {}", seg));
                 crlf(out);
                 rows += 1;
             }
@@ -410,7 +374,7 @@ fn print_tool_output(
             }
             count
         }
-        "read_file" | "glob" | "grep" | "web_fetch" if !is_error => {
+        "read_file" | "glob" | "grep" if !is_error => {
             let (s, p) = match name {
                 "glob" => ("file", "files"),
                 "grep" => ("match", "matches"),
@@ -418,6 +382,7 @@ fn print_tool_output(
             };
             print_dim_count(out, content.lines().count(), s, p)
         }
+        "web_fetch" if !is_error => render_web_fetch_output(out, content, width),
         "edit_file" if !is_error => render_edit_output(out, args),
         "write_file" if !is_error => render_write_output(out, args),
         "ask_user_question" if !is_error => render_question_output(out, content, width),
@@ -495,6 +460,54 @@ fn render_question_output(out: &mut io::Stdout, content: &str, width: usize) -> 
     rows
 }
 
+fn render_web_fetch_output(out: &mut io::Stdout, content: &str, width: usize) -> u16 {
+    render_markdown(out, content.trim(), width, "   ", true)
+}
+
+fn render_markdown(
+    out: &mut io::Stdout,
+    content: &str,
+    width: usize,
+    indent: &str,
+    dim: bool,
+) -> u16 {
+    let max_cols = width.saturating_sub(indent.len() + 1);
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0;
+    let mut rows = 0u16;
+    while i < lines.len() {
+        if lines[i].trim_start().starts_with("```") {
+            let lang = lines[i].trim_start().trim_start_matches('`').trim();
+            i += 1;
+            let code_start = i;
+            while i < lines.len() && !lines[i].trim_start().starts_with("```") {
+                i += 1;
+            }
+            let code_lines = &lines[code_start..i];
+            if i < lines.len() {
+                i += 1;
+            }
+            rows += render_code_block(out, code_lines, lang, dim);
+        } else if lines[i].trim_start().starts_with('|') {
+            let table_start = i;
+            while i < lines.len() && lines[i].trim_start().starts_with('|') {
+                i += 1;
+            }
+            rows += render_markdown_table(out, &lines[table_start..i], dim);
+        } else {
+            let segments = wrap_line(lines[i], max_cols);
+            for seg in &segments {
+                let _ = out.queue(Print(indent));
+                print_styled_dim(out, seg, dim);
+                crlf(out);
+            }
+            i += 1;
+            rows += segments.len() as u16;
+        }
+    }
+    rows
+}
+
 fn render_bash_output(out: &mut io::Stdout, content: &str, is_error: bool, width: usize) -> u16 {
     const MAX_LINES: usize = 20;
     let max_cols = width.saturating_sub(4); // "   " prefix + 1 margin
@@ -513,6 +526,7 @@ fn render_bash_output(out: &mut io::Stdout, content: &str, is_error: bool, width
         &lines[..]
     };
     for line in visible {
+        let line = &line.replace('\t', "    ");
         let segments = wrap_line(line, max_cols);
         for seg in &segments {
             if is_error {
@@ -614,14 +628,23 @@ pub(super) fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
     segments
 }
 
-pub(super) fn print_styled(out: &mut io::Stdout, text: &str) {
+pub(crate) fn print_styled_dim(out: &mut io::Stdout, text: &str, dim: bool) {
+    macro_rules! reset {
+        () => {
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+            let _ = out.queue(ResetColor);
+            if dim {
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+            }
+        };
+    }
+
     let trimmed = text.trim_start();
     if trimmed.starts_with('#') {
         let _ = out.queue(SetForegroundColor(theme::HEADING));
         let _ = out.queue(SetAttribute(Attribute::Bold));
         let _ = out.queue(Print(trimmed));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
-        let _ = out.queue(ResetColor);
+        reset!();
         return;
     }
 
@@ -630,8 +653,12 @@ pub(super) fn print_styled(out: &mut io::Stdout, text: &str) {
         let _ = out.queue(SetAttribute(Attribute::Dim));
         let _ = out.queue(SetAttribute(Attribute::Italic));
         let _ = out.queue(Print(content));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        reset!();
         return;
+    }
+
+    if dim {
+        let _ = out.queue(SetAttribute(Attribute::Dim));
     }
 
     let chars: Vec<char> = text.chars().collect();
@@ -641,65 +668,65 @@ pub(super) fn print_styled(out: &mut io::Stdout, text: &str) {
 
     while i < len {
         if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
-            if !plain.is_empty() {
-                let _ = out.queue(Print(&plain));
-                plain.clear();
+            // Look ahead to find closing **
+            let mut j = i + 2;
+            while j + 1 < len && !(chars[j] == '*' && chars[j + 1] == '*') {
+                j += 1;
             }
-            i += 2;
-            let start = i;
-            while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '*') {
-                i += 1;
+            if j + 1 < len {
+                if !plain.is_empty() {
+                    let _ = out.queue(Print(&plain));
+                    plain.clear();
+                }
+                let word: String = chars[i + 2..j].iter().collect();
+                let _ = out.queue(SetAttribute(Attribute::Bold));
+                let _ = out.queue(Print(&word));
+                reset!();
+                i = j + 2;
+                continue;
             }
-            let word: String = chars[start..i].iter().collect();
-            let _ = out.queue(SetAttribute(Attribute::Bold));
-            let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(Print(&word));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-            if i + 1 < len {
-                i += 2;
-            }
-            continue;
         }
 
         if chars[i] == '*' && i + 1 < len && chars[i + 1] != '*' {
-            if !plain.is_empty() {
-                let _ = out.queue(Print(&plain));
-                plain.clear();
+            // Look ahead to find closing *
+            let mut j = i + 1;
+            while j < len && chars[j] != '*' {
+                j += 1;
             }
-            i += 1;
-            let start = i;
-            while i < len && chars[i] != '*' {
-                i += 1;
+            if j < len {
+                if !plain.is_empty() {
+                    let _ = out.queue(Print(&plain));
+                    plain.clear();
+                }
+                let word: String = chars[i + 1..j].iter().collect();
+                let _ = out.queue(SetAttribute(Attribute::Italic));
+                let _ = out.queue(Print(&word));
+                reset!();
+                i = j + 1;
+                continue;
             }
-            let word: String = chars[start..i].iter().collect();
-            let _ = out.queue(SetAttribute(Attribute::Italic));
-            let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(Print(&word));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-            if i < len {
-                i += 1;
-            }
-            continue;
         }
 
         if chars[i] == '`' {
-            if !plain.is_empty() {
-                let _ = out.queue(Print(&plain));
-                plain.clear();
+            let mut j = i + 1;
+            while j < len && chars[j] != '`' {
+                j += 1;
             }
-            i += 1;
-            let start = i;
-            while i < len && chars[i] != '`' {
-                i += 1;
+            if j < len {
+                if !plain.is_empty() {
+                    let _ = out.queue(Print(&plain));
+                    plain.clear();
+                }
+                let word: String = chars[i + 1..j].iter().collect();
+                let _ = out.queue(SetForegroundColor(theme::accent()));
+                if dim {
+                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                }
+                let _ = out.queue(Print(&word));
+                reset!();
+                i = j + 1;
+                continue;
             }
-            let word: String = chars[start..i].iter().collect();
-            let _ = out.queue(SetForegroundColor(theme::accent()));
-            let _ = out.queue(Print(&word));
-            let _ = out.queue(ResetColor);
-            if i < len {
-                i += 1;
-            }
-            continue;
         }
 
         plain.push(chars[i]);
@@ -707,5 +734,9 @@ pub(super) fn print_styled(out: &mut io::Stdout, text: &str) {
     }
     if !plain.is_empty() {
         let _ = out.queue(Print(&plain));
+    }
+    if dim {
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(ResetColor);
     }
 }
