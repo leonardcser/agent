@@ -237,10 +237,16 @@ pub enum EngineEvent {
     TitleGenerated { title: String },
 
     /// Snapshot of the engine's message list, sent after each significant step.
-    Messages { messages: Vec<Message> },
+    Messages {
+        turn_id: u64,
+        messages: Vec<Message>,
+    },
 
     /// The agent turn completed successfully.
-    TurnComplete { messages: Vec<Message> },
+    TurnComplete {
+        turn_id: u64,
+        messages: Vec<Message>,
+    },
 
     /// The agent turn ended with an error.
     TurnError { message: String },
@@ -256,6 +262,7 @@ pub enum EngineEvent {
 pub enum UiCommand {
     /// Start a new agent turn.
     StartTurn {
+        turn_id: u64,
         input: String,
         mode: Mode,
         model: String,

@@ -1529,7 +1529,6 @@ pub(super) fn chunk_line(line: &str, width: usize) -> Vec<String> {
     chars.chunks(width).map(|c| c.iter().collect()).collect()
 }
 
-
 fn make_relative(path: &str) -> String {
     if let Ok(cwd) = std::env::current_dir() {
         let prefix = cwd.to_string_lossy();

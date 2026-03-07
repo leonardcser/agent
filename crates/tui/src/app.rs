@@ -46,9 +46,11 @@ pub struct App {
     last_width: u16,
     last_height: u16,
     permissions: Permissions,
+    next_turn_id: u64,
 }
 
 struct TurnState {
+    turn_id: u64,
     pending: Option<PendingTool>,
     steered_count: usize,
     _perf: Option<crate::perf::Guard>,
@@ -338,6 +340,7 @@ impl App {
             last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
             last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
             permissions: Permissions::load(),
+            next_turn_id: 1,
         }
     }
 
@@ -434,8 +437,12 @@ impl App {
                         }
                     };
                     let action = if let Some(ref mut ag) = agent {
-                        let ctrl =
-                            self.handle_engine_event(ev, &mut ag.pending, &mut ag.steered_count);
+                        let ctrl = self.handle_engine_event(
+                            ev,
+                            ag.turn_id,
+                            &mut ag.pending,
+                            &mut ag.steered_count,
+                        );
                         self.dispatch_control(
                             ctrl,
                             &mut ag.pending,
@@ -642,7 +649,7 @@ impl App {
 
                 Some(ev) = self.engine.recv(), if !active_dialog.as_ref().is_some_and(|d| d.blocks_agent()) => {
                     if let Some(ref mut ag) = agent {
-                        let ctrl = self.handle_engine_event(ev, &mut ag.pending, &mut ag.steered_count);
+                        let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending, &mut ag.steered_count);
                         let action = self.dispatch_control(
                             ctrl,
                             &mut ag.pending,
@@ -724,7 +731,11 @@ impl App {
             self.session.first_user_message = Some(message.clone());
         }
 
+        let turn_id = self.next_turn_id;
+        self.next_turn_id += 1;
+
         self.engine.send(UiCommand::StartTurn {
+            turn_id,
             input: message,
             mode: self.mode,
             model: self.model.clone(),
@@ -767,13 +778,13 @@ impl App {
                         answer: Some("User is not available (headless mode).".into()),
                     });
                 }
-                EngineEvent::Messages { messages } => {
+                EngineEvent::Messages { messages, .. } => {
                     self.history = messages;
                 }
                 EngineEvent::TurnError { message } => {
                     eprintln!("[error] {message}");
                 }
-                EngineEvent::TurnComplete { messages } => {
+                EngineEvent::TurnComplete { messages, .. } => {
                     self.history = messages;
                     break;
                 }
@@ -1413,7 +1424,11 @@ impl App {
         }
         self.screen.set_throbber(render::Throbber::Working);
 
+        let turn_id = self.next_turn_id;
+        self.next_turn_id += 1;
+
         self.engine.send(UiCommand::StartTurn {
+            turn_id,
             input: text.clone(),
             mode: self.mode,
             model: self.model.clone(),
@@ -1424,6 +1439,7 @@ impl App {
         });
 
         TurnState {
+            turn_id,
             pending: None,
             steered_count: 0,
             _perf: crate::perf::begin("agent_turn"),
@@ -1964,6 +1980,7 @@ impl App {
     pub fn handle_engine_event(
         &mut self,
         ev: EngineEvent,
+        turn_id: u64,
         pending: &mut Option<PendingTool>,
         steered_count: &mut usize,
     ) -> SessionControl {
@@ -2092,11 +2109,23 @@ impl App {
                 self.save_session();
                 SessionControl::Continue
             }
-            EngineEvent::Messages { messages } => {
-                self.history = messages;
+            EngineEvent::Messages {
+                turn_id: id,
+                messages,
+            } => {
+                if id == turn_id {
+                    self.history = messages;
+                }
                 SessionControl::Continue
             }
-            EngineEvent::TurnComplete { messages } => {
+            EngineEvent::TurnComplete {
+                turn_id: id,
+                messages,
+            } => {
+                if id != turn_id {
+                    // Stale event from a previous (cancelled) turn — ignore.
+                    return SessionControl::Continue;
+                }
                 self.history = messages;
                 SessionControl::Done
             }

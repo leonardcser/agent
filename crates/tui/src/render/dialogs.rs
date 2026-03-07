@@ -1207,8 +1207,7 @@ impl ResumeDialog {
         }
         self.last_drawn = Instant::now();
 
-        let Some((mut out, w, _)) =
-            self.list.begin_draw(start_row, self.filtered.len().max(1))
+        let Some((mut out, w, _)) = self.list.begin_draw(start_row, self.filtered.len().max(1))
         else {
             return;
         };
@@ -1359,8 +1358,7 @@ impl PsDialog {
         }
         self.procs = fresh;
 
-        let Some((mut out, w, _)) = self.list.begin_draw(start_row, self.procs.len().max(1))
-        else {
+        let Some((mut out, w, _)) = self.list.begin_draw(start_row, self.procs.len().max(1)) else {
             return;
         };
         let now = std::time::Instant::now();

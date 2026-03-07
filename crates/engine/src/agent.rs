@@ -38,12 +38,12 @@ pub async fn engine_task(
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCommand::StartTurn { input, mode, model, reasoning_effort, history, api_base, api_key } => {
+                    UiCommand::StartTurn { turn_id, input, mode, model, reasoning_effort, history, api_base, api_key } => {
                         last_model = model.clone();
                         run_turn(
                             &config, &client, &registry, &config.permissions,
                             &processes, &proc_done_tx, &mut cmd_rx, &event_tx,
-                            input, mode, &model, reasoning_effort, history,
+                            turn_id, input, mode, &model, reasoning_effort, history,
                             api_base, api_key,
                         ).await;
                     }
@@ -121,6 +121,7 @@ async fn run_turn(
     proc_done_tx: &mpsc::UnboundedSender<(String, Option<i32>)>,
     cmd_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
+    turn_id: u64,
     input: String,
     mut mode: Mode,
     model: &str,
@@ -165,6 +166,7 @@ async fn run_turn(
     // Send a snapshot of the current messages (minus the system prompt) to the TUI.
     let send_snapshot = |msgs: &[Message], tx: &mpsc::UnboundedSender<EngineEvent>| {
         let _ = tx.send(EngineEvent::Messages {
+            turn_id,
             messages: msgs[1..].to_vec(),
         });
     };
@@ -205,7 +207,7 @@ async fn run_turn(
 
         if cancel.is_cancelled() {
             messages.remove(0);
-            let _ = event_tx.send(EngineEvent::TurnComplete { messages });
+            let _ = event_tx.send(EngineEvent::TurnComplete { turn_id, messages });
             return;
         }
 
@@ -231,7 +233,7 @@ async fn run_turn(
             Err(e) => {
                 if e == "cancelled" {
                     messages.remove(0);
-                    let _ = event_tx.send(EngineEvent::TurnComplete { messages });
+                    let _ = event_tx.send(EngineEvent::TurnComplete { turn_id, messages });
                 } else {
                     log::entry(
                         log::Level::Warn,
@@ -309,7 +311,7 @@ async fn run_turn(
             });
             send_snapshot(&messages, event_tx);
             messages.remove(0);
-            let _ = event_tx.send(EngineEvent::TurnComplete { messages });
+            let _ = event_tx.send(EngineEvent::TurnComplete { turn_id, messages });
             return;
         }
 
