@@ -73,14 +73,21 @@ impl io::Write for RenderOut {
 /// terminal scrollback.  In overlay mode (`row: Some`) it uses `MoveTo` to
 /// reposition without scrolling — dialogs use this to avoid polluting
 /// scrollback.
+///
+/// In overlay mode the clear is issued *after* the `MoveTo` so it erases
+/// stale content on the upcoming row instead of the current one.  This
+/// avoids a terminal quirk where `\x1b[K` in pending-wrap state (cursor at
+/// the rightmost column) erases the last visible character on some emulators.
+/// tmux virtualises terminal state and is immune, but bare terminals are not.
 #[track_caller]
 pub(super) fn crlf(out: &mut RenderOut) {
-    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
     if let Some(ref mut r) = out.row {
         *r += 1;
         let next = *r;
         let _ = out.queue(cursor::MoveTo(0, next));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
     } else {
+        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
         let caller = std::panic::Location::caller();
         log(&format!(
             "crlf SCROLL at {}:{}",
