@@ -130,7 +130,7 @@ pub(super) fn render_block(out: &mut RenderOut, block: &Block, width: usize) -> 
             }
             rows
         }
-        Block::Text { content } => render_markdown(out, content, width, " ", false),
+        Block::Text { content } => render_markdown(out, content.trim_end(), width, " ", false),
         Block::ToolCall {
             name,
             summary,
@@ -476,6 +476,7 @@ fn render_markdown(
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
     let mut rows = 0u16;
+    let mut prev_blank = true; // treat start as if preceded by blank
     while i < lines.len() {
         if lines[i].trim_start().starts_with("```") {
             let lang = lines[i].trim_start().trim_start_matches('`').trim();
@@ -488,13 +489,24 @@ fn render_markdown(
             if i < lines.len() {
                 i += 1;
             }
-            rows += render_code_block(out, code_lines, lang, dim);
+            if !prev_blank {
+                crlf(out);
+                rows += 1;
+            }
+            rows += render_code_block(out, code_lines, lang, width, dim);
+            // Insert blank after code block unless next line is already blank
+            if i < lines.len() && !lines[i].trim().is_empty() {
+                crlf(out);
+                rows += 1;
+            }
+            prev_blank = true;
         } else if lines[i].trim_start().starts_with('|') {
             let table_start = i;
             while i < lines.len() && lines[i].trim_start().starts_with('|') {
                 i += 1;
             }
             rows += render_markdown_table(out, &lines[table_start..i], dim);
+            prev_blank = false;
         } else {
             let segments = wrap_line(lines[i], max_cols);
             for seg in &segments {
@@ -502,6 +514,7 @@ fn render_markdown(
                 print_styled_dim(out, seg, dim);
                 crlf(out);
             }
+            prev_blank = lines[i].trim().is_empty();
             i += 1;
             rows += segments.len() as u16;
         }

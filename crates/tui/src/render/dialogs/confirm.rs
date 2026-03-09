@@ -164,7 +164,7 @@ impl ConfirmDialog {
         let fixed_rows: u16 = 1
             + title_rows
             + summary_rows
-            + if has_preview { 2 } else { 0 }
+            + if has_preview { 2 } else { 1 }
             + 1
             + self.options.len() as u16
             + ta_extra
@@ -365,7 +365,7 @@ impl super::Dialog for ConfirmDialog {
             + 1
             + ly.title_rows
             + ly.summary_rows
-            + if ly.has_preview { 2 + ly.viewport_rows } else { 0 }
+            + if ly.has_preview { 2 + ly.viewport_rows } else { 1 }
             + 1;
 
         // Partial redraw: when editing and the layout above the options
@@ -455,6 +455,10 @@ impl super::Dialog for ConfirmDialog {
                 row += 1;
             }
 
+            if !ly.has_preview {
+                crlf(&mut out);
+                row += 1;
+            }
             // "Allow?"
             let _ = out.queue(SetAttribute(Attribute::Dim));
             let _ = out.queue(Print(" Allow?"));

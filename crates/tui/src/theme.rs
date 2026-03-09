@@ -22,7 +22,6 @@ pub const TOOL_ERR: Color = Color::Red;
 pub const TOOL_PENDING: Color = Color::DarkGrey;
 pub const APPLY: Color = Color::AnsiValue(141);
 pub const USER_BG: Color = Color::AnsiValue(236);
-pub const CODE_BG: Option<Color> = None;
 pub const BAR: Color = Color::AnsiValue(237);
 pub const HEADING: Color = Color::AnsiValue(214); // orange for markdown headings
 pub const MUTED: Color = Color::AnsiValue(244); // light gray for token count and other muted elements

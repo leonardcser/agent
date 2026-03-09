@@ -27,7 +27,13 @@ struct DiffLayout {
     max_content: usize,
 }
 
-pub(super) fn render_code_block(out: &mut RenderOut, lines: &[&str], lang: &str, dim: bool) -> u16 {
+pub(super) fn render_code_block(
+    out: &mut RenderOut,
+    lines: &[&str],
+    lang: &str,
+    width: usize,
+    dim: bool,
+) -> u16 {
     let ext = match lang {
         "" => "txt",
         "js" | "javascript" => "js",
@@ -46,7 +52,38 @@ pub(super) fn render_code_block(out: &mut RenderOut, lines: &[&str], lang: &str,
     if dim {
         let _ = out.queue(SetAttribute(Attribute::Dim));
     }
-    let rows = render_highlighted(out, lines, syntax, 0, 0);
+    let theme = &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended];
+    let text_w = width.saturating_sub(1).max(1);
+    let expanded: Vec<String> = lines.iter().map(|l| l.replace('\t', "    ")).collect();
+    let max_len = expanded.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let wraps = max_len > text_w;
+    let block_w = if wraps { text_w + 1 } else { max_len + 1 };
+    let mut rows = 0u16;
+    let mut h = HighlightLines::new(syntax, theme);
+    // Top dashed border
+    let _ = out.queue(SetForegroundColor(theme::BAR));
+    let _ = out.queue(Print("\u{254c}".repeat(block_w)));
+    let _ = out.queue(ResetColor);
+    crlf(out);
+    rows += 1;
+    for line in &expanded {
+        let line_with_nl = format!("{}\n", line);
+        let regions = h
+            .highlight_line(&line_with_nl, &SYNTAX_SET)
+            .unwrap_or_default();
+        let visual_rows = split_regions_into_rows(&regions, text_w);
+        for vrow in &visual_rows {
+            print_split_regions(out, vrow, None);
+            crlf(out);
+        }
+        rows += visual_rows.len() as u16;
+    }
+    // Bottom dashed border
+    let _ = out.queue(SetForegroundColor(theme::BAR));
+    let _ = out.queue(Print("\u{254c}".repeat(block_w)));
+    let _ = out.queue(ResetColor);
+    crlf(out);
+    rows += 1;
     if dim {
         let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
     }
@@ -92,7 +129,7 @@ pub(super) fn render_highlighted(
                 } else {
                     let _ = out.queue(Print(&blank_gutter));
                 }
-                print_split_regions(out, vrow, theme::CODE_BG);
+                print_split_regions(out, vrow, None);
                 crlf(out);
                 emitted += 1;
             }
@@ -252,7 +289,8 @@ pub(super) fn print_inline_diff(
 
     let indent = "   ";
     let dv = compute_diff_view(old, new, path, anchor);
-    let file_lines: Vec<&str> = dv.file_content.lines().collect();
+    let expanded_lines: Vec<String> = dv.file_content.lines().map(|l| l.replace('\t', "    ")).collect();
+    let file_lines: Vec<&str> = expanded_lines.iter().map(|s| s.as_str()).collect();
     let changes = &dv.changes;
 
     let max_lineno = dv.view_end;
@@ -327,7 +365,8 @@ pub(super) fn print_inline_diff(
         if emitted >= emit_limit {
             break;
         }
-        let text = change.value.trim_end_matches('\n');
+        let raw = change.value.trim_end_matches('\n').replace('\t', "    ");
+        let text = raw.as_str();
         match change.tag {
             ChangeTag::Equal => {
                 if visible[ci] {
@@ -471,10 +510,11 @@ pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &
     let right_margin = indent.len();
     let max_content = term_width().saturating_sub(prefix_len + right_margin);
 
-    let file_lines: Vec<&str> = dv.file_content.lines().collect();
+    let expanded_lines: Vec<String> = dv.file_content.lines().map(|l| l.replace('\t', "    ")).collect();
+    let file_lines: Vec<&str> = expanded_lines.iter().map(|s| s.as_str()).collect();
 
     let visual_rows_for = |line: &str| -> usize {
-        let chars = line.chars().count();
+        let chars = line.replace('\t', "    ").chars().count();
         if max_content == 0 {
             1
         } else {
