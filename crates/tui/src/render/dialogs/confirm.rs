@@ -365,7 +365,11 @@ impl super::Dialog for ConfirmDialog {
             + 1
             + ly.title_rows
             + ly.summary_rows
-            + if ly.has_preview { 2 + ly.viewport_rows } else { 1 }
+            + if ly.has_preview {
+                2 + ly.viewport_rows
+            } else {
+                1
+            }
             + 1;
 
         // Partial redraw: when editing and the layout above the options

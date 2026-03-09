@@ -55,7 +55,11 @@ pub(super) fn render_code_block(
     let theme = &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended];
     let text_w = width.saturating_sub(1).max(1);
     let expanded: Vec<String> = lines.iter().map(|l| l.replace('\t', "    ")).collect();
-    let max_len = expanded.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let max_len = expanded
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0);
     let wraps = max_len > text_w;
     let block_w = if wraps { text_w + 1 } else { max_len + 1 };
     let mut rows = 0u16;
@@ -289,7 +293,11 @@ pub(super) fn print_inline_diff(
 
     let indent = "   ";
     let dv = compute_diff_view(old, new, path, anchor);
-    let expanded_lines: Vec<String> = dv.file_content.lines().map(|l| l.replace('\t', "    ")).collect();
+    let expanded_lines: Vec<String> = dv
+        .file_content
+        .lines()
+        .map(|l| l.replace('\t', "    "))
+        .collect();
     let file_lines: Vec<&str> = expanded_lines.iter().map(|s| s.as_str()).collect();
     let changes = &dv.changes;
 
@@ -510,7 +518,11 @@ pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &
     let right_margin = indent.len();
     let max_content = term_width().saturating_sub(prefix_len + right_margin);
 
-    let expanded_lines: Vec<String> = dv.file_content.lines().map(|l| l.replace('\t', "    ")).collect();
+    let expanded_lines: Vec<String> = dv
+        .file_content
+        .lines()
+        .map(|l| l.replace('\t', "    "))
+        .collect();
     let file_lines: Vec<&str> = expanded_lines.iter().map(|s| s.as_str()).collect();
 
     let visual_rows_for = |line: &str| -> usize {

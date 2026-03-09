@@ -536,8 +536,7 @@ impl App {
                         DeferredDialog::AskQuestion { args, request_id } => {
                             self.screen.set_active_status(ToolStatus::Confirm);
                             let questions = render::parse_questions(&args);
-                            let dialog =
-                                Box::new(QuestionDialog::new(questions, request_id));
+                            let dialog = Box::new(QuestionDialog::new(questions, request_id));
                             self.open_blocking_dialog(dialog, &mut active_dialog);
                         }
                     }

@@ -565,7 +565,9 @@ impl Screen {
         } else {
             0
         };
-        let w = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
+        let w = crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(80);
         // At confirm time there's no output yet, so tool rows = 1 + optional web_fetch prompt
         let mut rows = 1u16;
         if tool.name == "web_fetch" {
