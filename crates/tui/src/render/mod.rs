@@ -23,7 +23,7 @@ use crossterm::{
     terminal, QueueableCommand,
 };
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::time::{Duration, Instant};
 
 use blocks::{gap_between, render_block, render_tool, Element};
@@ -52,7 +52,7 @@ impl RenderOut {
     /// Dialogs switch to overlay mode by setting `out.row = Some(r)`.
     pub fn scroll() -> Self {
         Self {
-            out: Box::new(io::stdout()),
+            out: Box::new(BufWriter::with_capacity(1 << 16, io::stdout())),
             row: None,
         }
     }
@@ -101,7 +101,6 @@ pub(super) fn crlf(out: &mut RenderOut) {
         let _ = out.queue(Print("\r\n"));
     }
 }
-
 
 pub(super) const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
 
