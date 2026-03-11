@@ -721,13 +721,19 @@ pub(crate) fn print_styled_dim(out: &mut RenderOut, text: &str, dim: bool) {
     let mut plain = String::new();
 
     while i < len {
-        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+        if i + 1 < len
+            && chars[i] == '*'
+            && chars[i + 1] == '*'
+            && i + 2 < len
+            && !chars[i + 2].is_whitespace()
+            && (i == 0 || !chars[i - 1].is_alphanumeric())
+        {
             // Look ahead to find closing **
             let mut j = i + 2;
             while j + 1 < len && !(chars[j] == '*' && chars[j + 1] == '*') {
                 j += 1;
             }
-            if j + 1 < len {
+            if j + 1 < len && !chars[j - 1].is_whitespace() {
                 if !plain.is_empty() {
                     let _ = out.queue(Print(&plain));
                     plain.clear();
@@ -741,13 +747,18 @@ pub(crate) fn print_styled_dim(out: &mut RenderOut, text: &str, dim: bool) {
             }
         }
 
-        if chars[i] == '*' && i + 1 < len && chars[i + 1] != '*' {
+        if chars[i] == '*'
+            && i + 1 < len
+            && chars[i + 1] != '*'
+            && !chars[i + 1].is_whitespace()
+            && (i == 0 || !chars[i - 1].is_alphanumeric())
+        {
             // Look ahead to find closing *
             let mut j = i + 1;
             while j < len && chars[j] != '*' {
                 j += 1;
             }
-            if j < len {
+            if j < len && !chars[j - 1].is_whitespace() {
                 if !plain.is_empty() {
                     let _ = out.queue(Print(&plain));
                     plain.clear();
