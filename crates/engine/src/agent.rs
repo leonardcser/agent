@@ -218,17 +218,45 @@ async fn run_turn(
             });
         };
 
-        let resp = match provider
-            .chat(
+        // Monitor cmd_rx for Cancel commands while the HTTP request is
+        // pending.  Without this, a Cancel sent during a long request
+        // (e.g. model loading into VRAM) sits unread in cmd_rx and the
+        // cancellation token is never triggered.
+        let chat_result = {
+            let chat_future = provider.chat(
                 &messages,
                 &tool_defs,
                 model,
                 reasoning_effort,
                 &cancel,
                 Some(&on_retry),
-            )
-            .await
-        {
+            );
+            tokio::pin!(chat_future);
+
+            let mut cancel_received = false;
+            loop {
+                if cancel_received {
+                    // Stop reading cmd_rx to avoid consuming commands
+                    // meant for later turns.  provider.chat() will
+                    // return almost instantly since the token is set.
+                    break (&mut chat_future).await;
+                }
+                tokio::select! {
+                    result = &mut chat_future => break result,
+                    Some(cmd) = cmd_rx.recv() => match cmd {
+                        UiCommand::Cancel => {
+                            cancel.cancel();
+                            cancel_received = true;
+                        }
+                        UiCommand::SetMode { mode: m } => mode = m,
+                        UiCommand::SetReasoningEffort { effort } => reasoning_effort = effort,
+                        _ => {}
+                    },
+                }
+            }
+        };
+
+        let resp = match chat_result {
             Ok(r) => r,
             Err(e) => {
                 if e == "cancelled" {
