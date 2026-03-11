@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::highlight::{
-    print_inline_diff, print_syntax_file, render_code_block, render_markdown_table,
+    print_highlighted_bash_line, print_inline_diff, print_syntax_file, render_code_block,
+    render_markdown_table,
 };
 use super::{
     crlf, truncate_str, wrap_line, Block, ConfirmChoice, RenderOut, ToolOutput, ToolStatus,
@@ -348,7 +349,12 @@ fn print_tool_line(
     let max_summary = width.saturating_sub(prefix_len + suffix_len + 1);
     let truncated = truncate_str(summary, max_summary);
     print_dim(out, &format!(" {}", name));
-    let _ = out.queue(Print(format!(" {}", truncated)));
+    let _ = out.queue(Print(" "));
+    if name == "bash" {
+        print_highlighted_bash_line(out, &truncated);
+    } else {
+        let _ = out.queue(Print(&truncated));
+    }
     if !time_str.is_empty() {
         print_dim(out, &time_str);
     }

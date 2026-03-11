@@ -806,6 +806,53 @@ fn split_regions_into_rows(
     rows
 }
 
+/// Stateful bash/shell syntax highlighter that preserves state across lines.
+pub(crate) struct BashHighlighter<'a> {
+    h: HighlightLines<'a>,
+}
+
+impl<'a> BashHighlighter<'a> {
+    pub fn new() -> Self {
+        let syntax = SYNTAX_SET
+            .find_syntax_by_extension("sh")
+            .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+        let theme = &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended];
+        Self {
+            h: HighlightLines::new(syntax, theme),
+        }
+    }
+
+    /// Print a single line with syntax highlighting.
+    /// Does not emit `crlf` — the caller controls line breaks.
+    pub fn print_line(&mut self, out: &mut RenderOut, line: &str) {
+        let line_with_nl = format!("{}\n", line);
+        let regions = self
+            .h
+            .highlight_line(&line_with_nl, &SYNTAX_SET)
+            .unwrap_or_default();
+        for (style, text) in &regions {
+            let text = text.trim_end_matches('\n').trim_end_matches('\r');
+            if text.is_empty() {
+                continue;
+            }
+            let fg = Color::Rgb {
+                r: style.foreground.r,
+                g: style.foreground.g,
+                b: style.foreground.b,
+            };
+            let _ = out.queue(SetForegroundColor(fg));
+            let _ = out.queue(Print(text));
+        }
+        let _ = out.queue(ResetColor);
+    }
+}
+
+/// Print a single line of bash/shell code with syntax highlighting.
+/// Does not emit `crlf` — the caller controls line breaks.
+pub(crate) fn print_highlighted_bash_line(out: &mut RenderOut, line: &str) {
+    BashHighlighter::new().print_line(out, line);
+}
+
 /// Print pre-split owned regions. Returns columns printed.
 fn print_split_regions(
     out: &mut RenderOut,

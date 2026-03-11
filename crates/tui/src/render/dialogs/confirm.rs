@@ -2,7 +2,9 @@ use super::{
     begin_dialog_draw, finish_dialog_frame, render_inline_textarea, wrap_line, DialogResult,
     TextArea,
 };
-use crate::render::highlight::{count_inline_diff_rows, print_inline_diff, print_syntax_file};
+use crate::render::highlight::{
+    count_inline_diff_rows, print_inline_diff, print_syntax_file, BashHighlighter,
+};
 use crate::render::{crlf, draw_bar, ConfirmChoice, RenderOut};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -152,7 +154,20 @@ impl ConfirmDialog {
         };
 
         let prefix_len = 1 + self.tool_name.len() + 2;
-        let title_rows = wrap_line(&self.desc, w.saturating_sub(prefix_len)).len() as u16;
+        let title_rows = if self.tool_name == "bash" {
+            // For bash, we render each line of the command on its own row.
+            // First line has the "bash: " prefix, rest are indented.
+            let first_line_width = w.saturating_sub(prefix_len);
+            let rest_width = w.saturating_sub(1);
+            let mut rows = 0usize;
+            for (i, line) in self.desc.lines().enumerate() {
+                let avail = if i == 0 { first_line_width } else { rest_width };
+                rows += wrap_line(line, avail).len();
+            }
+            rows.max(1) as u16
+        } else {
+            wrap_line(&self.desc, w.saturating_sub(prefix_len)).len() as u16
+        };
         let summary_rows: u16 = self
             .summary
             .as_ref()
@@ -394,20 +409,46 @@ impl super::Dialog for ConfirmDialog {
             row += 1;
 
             // title -- wrap long commands with a leading space on continuation lines
-            let prefix_len = 1 + self.tool_name.len() + 2; // " tool: "
-            let segments = wrap_line(&self.desc, w.saturating_sub(prefix_len));
-            for (i, seg) in segments.iter().enumerate() {
-                if i == 0 {
-                    let _ = out.queue(Print(" "));
-                    let _ = out.queue(SetForegroundColor(theme::accent()));
-                    let _ = out.queue(Print(&self.tool_name));
-                    let _ = out.queue(ResetColor);
-                    let _ = out.queue(Print(format!(": {seg}")));
-                } else {
-                    let _ = out.queue(Print(format!(" {seg}")));
+            if self.tool_name == "bash" {
+                // Syntax-highlighted bash command with stateful highlighter
+                let prefix_len = 1 + self.tool_name.len() + 2;
+                let first_line_width = w.saturating_sub(prefix_len);
+                let rest_width = w.saturating_sub(1);
+                let mut bh = BashHighlighter::new();
+                for (i, line) in self.desc.lines().enumerate() {
+                    let avail = if i == 0 { first_line_width } else { rest_width };
+                    let segments = wrap_line(line, avail);
+                    for (si, seg) in segments.iter().enumerate() {
+                        if i == 0 && si == 0 {
+                            let _ = out.queue(Print(" "));
+                            let _ = out.queue(SetForegroundColor(theme::accent()));
+                            let _ = out.queue(Print(&self.tool_name));
+                            let _ = out.queue(ResetColor);
+                            let _ = out.queue(Print(": "));
+                        } else {
+                            let _ = out.queue(Print(" "));
+                        }
+                        bh.print_line(&mut out, seg);
+                        crlf(&mut out);
+                        row += 1;
+                    }
                 }
-                crlf(&mut out);
-                row += 1;
+            } else {
+                let prefix_len = 1 + self.tool_name.len() + 2; // " tool: "
+                let segments = wrap_line(&self.desc, w.saturating_sub(prefix_len));
+                for (i, seg) in segments.iter().enumerate() {
+                    if i == 0 {
+                        let _ = out.queue(Print(" "));
+                        let _ = out.queue(SetForegroundColor(theme::accent()));
+                        let _ = out.queue(Print(&self.tool_name));
+                        let _ = out.queue(ResetColor);
+                        let _ = out.queue(Print(format!(": {seg}")));
+                    } else {
+                        let _ = out.queue(Print(format!(" {seg}")));
+                    }
+                    crlf(&mut out);
+                    row += 1;
+                }
             }
 
             // summary
