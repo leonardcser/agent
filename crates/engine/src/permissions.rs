@@ -261,11 +261,22 @@ impl Permissions {
         let command = command.trim();
         let subcmds = split_shell_commands(command);
         if subcmds.len() <= 1 {
-            return check_ruleset(&perms.bash, command);
+            let d = check_ruleset(&perms.bash, command);
+            // Auto-allowed commands that redirect output to a file are
+            // effectively write operations — require confirmation.
+            if d == Decision::Allow && has_output_redirection(command) {
+                return Decision::Ask;
+            }
+            return d;
         }
         let mut worst = Decision::Allow;
         for subcmd in subcmds {
             let d = check_ruleset(&perms.bash, &subcmd);
+            let d = if d == Decision::Allow && has_output_redirection(&subcmd) {
+                Decision::Ask
+            } else {
+                d
+            };
             match d {
                 Decision::Deny => return Decision::Deny,
                 Decision::Ask if worst == Decision::Allow => worst = Decision::Ask,
@@ -623,6 +634,81 @@ fn check_ruleset(ruleset: &RuleSet, value: &str) -> Decision {
         }
     }
     Decision::Ask
+}
+
+/// Check whether a command contains an output redirection (`>`, `>>`, `&>`, `&>>`).
+/// Quote-aware: ignores redirection operators inside single or double quotes.
+fn has_output_redirection(cmd: &str) -> bool {
+    let bytes = cmd.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        match bytes[i] {
+            b'\'' => {
+                i += 1;
+                while i < len && bytes[i] != b'\'' {
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < len && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' && i + 1 < len {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
+                }
+            }
+            b'\\' if i + 1 < len => {
+                i += 2;
+            }
+            b'<' => {
+                // Skip << (heredoc) — not an output redirection by itself.
+                if i + 1 < len && bytes[i + 1] == b'<' {
+                    i += 2;
+                    // Skip past delimiter and body (already handled by split_impl,
+                    // but for standalone use, just skip the << token).
+                } else {
+                    // Input redirection <, not output.
+                    i += 1;
+                }
+            }
+            b'&' => {
+                // &> or &>> is output redirection
+                if i + 1 < len && bytes[i + 1] == b'>' {
+                    return true;
+                }
+                i += 1;
+            }
+            b'>' => {
+                // Check if this is >&N style fd duplication (e.g., 2>&1).
+                // These don't write to files, they just duplicate file descriptors.
+                // A standalone > or >> or N> is output redirection to a file.
+                if i + 1 < len && bytes[i + 1] == b'&' {
+                    // >& followed by a digit is fd duplication (e.g., 2>&1)
+                    let j = i + 2;
+                    if j < len && bytes[j].is_ascii_digit() {
+                        i += 1;
+                        continue;
+                    }
+                    // >& without a following digit, or >&N where N isn't a digit
+                    // could still be problematic, but let's be conservative.
+                }
+                return true;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    false
 }
 
 // ── Base decision (without workspace restriction) ────────────────────────────
@@ -1598,6 +1684,131 @@ mod tests {
         assert_eq!(
             p.check_tool(Mode::Normal, "some_unknown_tool"),
             Decision::Ask
+        );
+    }
+
+    // --- output redirection escalation ---
+
+    #[test]
+    fn has_output_redirection_simple_greater() {
+        assert!(has_output_redirection("cat file > out.txt"));
+    }
+
+    #[test]
+    fn has_output_redirection_double_greater() {
+        assert!(has_output_redirection("cat file >> out.txt"));
+    }
+
+    #[test]
+    fn has_output_redirection_ampersand_greater() {
+        assert!(has_output_redirection("cargo build &> /dev/null"));
+    }
+
+    #[test]
+    fn has_output_redirection_double_ampersand_greater() {
+        assert!(has_output_redirection("cargo build &>> /dev/null"));
+    }
+
+    #[test]
+    fn has_output_redirection_no_redirection() {
+        assert!(!has_output_redirection("cat file"));
+    }
+
+    #[test]
+    fn has_output_redirection_input_only() {
+        assert!(!has_output_redirection("cat < input.txt"));
+    }
+
+    #[test]
+    fn has_output_redirection_heredoc_only() {
+        // << alone is not an output redirection
+        assert!(!has_output_redirection("cat << EOF"));
+    }
+
+    #[test]
+    fn has_output_redirection_heredoc_with_output_redirect() {
+        // heredoc with output redirection to a file
+        assert!(has_output_redirection("cat << 'EOF' > file.txt"));
+    }
+
+    #[test]
+    fn has_output_redirection_inside_quotes_ignored() {
+        // > inside quotes should not be detected as redirection
+        assert!(!has_output_redirection(r#"echo ">" file.txt"#));
+    }
+
+    #[test]
+    fn has_output_redirection_mixed_quotes() {
+        assert!(has_output_redirection("cat file > 'out.txt'"));
+    }
+
+    #[test]
+    fn has_output_redirection_stderr_redirect() {
+        // 2>&1 is fd duplication, not file output redirection
+        assert!(!has_output_redirection("cargo build 2>&1"));
+    }
+
+    #[test]
+    fn auto_allowed_with_output_redirect_escalates_to_ask() {
+        // cat * is in the default allowlist, but with > it should ask
+        let p = perms_with_bash(&["cat *"], &[], &[]);
+        assert_eq!(
+            p.check_bash(Mode::Normal, "cat file.txt > output.txt"),
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn auto_allowed_with_append_redirect_escalates_to_ask() {
+        let p = perms_with_bash(&["cat *"], &[], &[]);
+        assert_eq!(
+            p.check_bash(Mode::Normal, "cat file.txt >> output.txt"),
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn auto_allowed_heredoc_with_redirect_escalates_to_ask() {
+        // cat << 'EOF' > file.txt matches cat * but has output redirection
+        let p = perms_with_bash(&["cat *"], &[], &[]);
+        let cmd = "cat << 'EOF' > long_file.txt\nhello\nworld\nEOF";
+        assert_eq!(p.check_bash(Mode::Normal, cmd), Decision::Ask);
+    }
+
+    #[test]
+    fn auto_allowed_no_redirect_stays_allow() {
+        // Without redirection, cat * should still be allowed
+        let p = perms_with_bash(&["cat *"], &[], &[]);
+        assert_eq!(p.check_bash(Mode::Normal, "cat file.txt"), Decision::Allow);
+    }
+
+    #[test]
+    fn chained_command_with_redirect_escalates() {
+        let p = perms_with_bash(&["ls *", "cat *"], &[], &[]);
+        // ls is allowed, cat with redirect should escalate
+        assert_eq!(
+            p.check_bash(Mode::Normal, "ls -la && cat file > out.txt"),
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn pipe_with_output_redirect_escalates() {
+        let p = perms_with_bash(&["cat *", "grep *"], &[], &[]);
+        // pipe is allowed, but output redirect at end should escalate
+        assert_eq!(
+            p.check_bash(Mode::Normal, "cat file | grep foo > out.txt"),
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn denied_command_with_redirect_stays_deny() {
+        let p = perms_with_bash(&[], &[], &["rm *"]);
+        // rm is denied regardless of redirection
+        assert_eq!(
+            p.check_bash(Mode::Normal, "rm file.txt > /dev/null"),
+            Decision::Deny
         );
     }
 }
