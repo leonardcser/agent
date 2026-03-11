@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Run tests
+        run: cargo test --workspace
+
+  release:
+    name: Create Release
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Update version in Cargo.toml
+        run: |
+          # Extract version from tag (remove 'v' prefix)
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Updating version to: $VERSION"
+
+          # Update version in Cargo.toml
+          sed -i.bak "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
+          rm -f Cargo.toml.bak
+
+      - name: Commit and push version update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml
+          if git diff --staged --quiet; then
+            echo "Version already up to date"
+          else
+            git commit -m "chore: bump version to ${GITHUB_REF_NAME}"
+            git push origin main
+          fi
+
+          # Move the tag to include the version bump commit
+          git tag -f "${GITHUB_REF_NAME}"
+          git push -f origin "${GITHUB_REF_NAME}"
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${GITHUB_REF_NAME}$" | head -n 1)
+          if [ -z "$PREV_TAG" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${PREV_TAG}..HEAD"
+          fi
+
+          print_section() {
+            local title="$1"
+            local pattern="$2"
+            local commits=$(git log --pretty=format:"%h %s" $RANGE | grep -E "^[a-f0-9]+ ${pattern}" | sed 's/^/- /' || true)
+            if [ -n "$commits" ]; then
+              echo "## $title"
+              echo "$commits"
+              echo ""
+            fi
+          }
+
+          {
+            echo 'body<<EOF'
+            print_section "Breaking Changes" "[a-z]+(\(.+\))?!:"
+            print_section "Features" "feat(\(.+\))?:"
+            print_section "Bug Fixes" "fix(\(.+\))?:"
+            print_section "Other Changes" "(refactor|docs|perf|chore|test|ci|revert)(\(.+\))?:"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary
+        run: cargo build --release --bin agent
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
+          body: ${{ steps.notes.outputs.body }}
+          files: target/release/agent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
