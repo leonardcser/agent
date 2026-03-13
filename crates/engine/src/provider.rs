@@ -243,7 +243,10 @@ impl Provider {
             let msg = &choice["message"];
 
             let content = msg["content"].as_str().map(|s| s.to_string());
-            let reasoning_content = msg["reasoning_content"].as_str().map(|s| s.to_string());
+            let reasoning_content = msg["reasoning_content"]
+                .as_str()
+                .or_else(|| msg["reasoning"].as_str())
+                .map(|s| s.to_string());
 
             let tool_calls: Vec<ToolCall> = if let Some(tcs) = msg.get("tool_calls") {
                 serde_json::from_value(tcs.clone()).unwrap_or_default()

@@ -56,8 +56,11 @@ async fn main() {
                 .iter()
                 .find(|m| m.key == default || m.model_name == default)
         } else if let Some(ref cached) = app_state.selected_model {
-            // No config default: use last used model
-            available_models.iter().find(|m| m.key == *cached)
+            // No config default: use last used model, fall back to first if stale
+            available_models
+                .iter()
+                .find(|m| m.key == *cached)
+                .or(available_models.first())
         } else {
             // Fallback to first model in config
             available_models.first()
