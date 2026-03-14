@@ -281,7 +281,13 @@ impl App {
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
-            .map(|s| if s.len() > 500 { s[..s.floor_char_boundary(500)].to_string() } else { s })
+            .map(|s| {
+                if s.len() > 500 {
+                    s[..s.floor_char_boundary(500)].to_string()
+                } else {
+                    s
+                }
+            })
             .collect();
         engine::log::entry(
             engine::log::Level::Info,

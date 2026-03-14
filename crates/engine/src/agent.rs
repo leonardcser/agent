@@ -127,7 +127,9 @@ fn spawn_title_generation(
                     "title_result",
                     &serde_json::json!({"title": title}),
                 );
-                let _ = tx.send(EngineEvent::TitleGenerated { title: title.clone() });
+                let _ = tx.send(EngineEvent::TitleGenerated {
+                    title: title.clone(),
+                });
             }
             Err(ref e) => {
                 log::entry(
@@ -207,7 +209,13 @@ impl<'a> Turn<'a> {
     fn handle_background_cmd(&self, cmd: UiCommand) -> bool {
         match cmd {
             UiCommand::GenerateTitle { user_messages } => {
-                spawn_title_generation(self.config, self.http_client, &self.model, user_messages, self.event_tx);
+                spawn_title_generation(
+                    self.config,
+                    self.http_client,
+                    &self.model,
+                    user_messages,
+                    self.event_tx,
+                );
                 true
             }
             _ => false,
@@ -499,7 +507,9 @@ impl<'a> Turn<'a> {
                 Ok(UiCommand::Cancel) => {
                     self.cancel.cancel();
                 }
-                Ok(other) => { self.handle_background_cmd(other); }
+                Ok(other) => {
+                    self.handle_background_cmd(other);
+                }
                 Err(_) => break,
             }
         }
@@ -649,7 +659,9 @@ impl<'a> Turn<'a> {
                     return (false, None);
                 }
                 None => return (false, None),
-                Some(other) => { self.handle_background_cmd(other); }
+                Some(other) => {
+                    self.handle_background_cmd(other);
+                }
             }
         }
     }
@@ -669,7 +681,9 @@ impl<'a> Turn<'a> {
                     return None;
                 }
                 None => return None,
-                Some(other) => { self.handle_background_cmd(other); }
+                Some(other) => {
+                    self.handle_background_cmd(other);
+                }
             }
         }
     }
