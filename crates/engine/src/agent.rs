@@ -61,6 +61,8 @@ pub async fn engine_task(
                             proc_done_tx: &proc_done_tx,
                             cmd_rx: &mut cmd_rx,
                             event_tx: &event_tx,
+                            config: &config,
+                            http_client: &client,
                             cancel: tokio_util::sync::CancellationToken::new(),
                             messages: Vec::new(),
                             mode,
@@ -84,21 +86,8 @@ pub async fn engine_task(
                             }
                         }
                     }
-                    UiCommand::GenerateTitle { first_message } => {
-                        let provider = build_provider(&config, &client);
-                        match provider.complete_title(&first_message, &last_model).await {
-                            Ok(title) => {
-                                let _ = event_tx.send(EngineEvent::TitleGenerated { title });
-                            }
-                            Err(_) => {
-                                let fallback = first_message.lines().next().unwrap_or("Untitled");
-                                let mut title = fallback.to_string();
-                                if title.len() > 48 { title.truncate(title.floor_char_boundary(48)); }
-                                let _ = event_tx.send(EngineEvent::TitleGenerated {
-                                    title: title.trim().to_string(),
-                                });
-                            }
-                        }
+                    UiCommand::GenerateTitle { user_messages } => {
+                        spawn_title_generation(&config, &client, &last_model, user_messages, &event_tx);
                     }
                     _ => {} // Steer, Cancel, etc. only relevant during a turn
                 }
@@ -111,6 +100,55 @@ pub async fn engine_task(
     }
 
     let _ = event_tx.send(EngineEvent::Shutdown { reason: None });
+}
+
+/// Spawn title generation as a background task so it doesn't block the engine
+/// loop or get swallowed by a running turn.
+fn spawn_title_generation(
+    config: &EngineConfig,
+    client: &reqwest::Client,
+    model: &str,
+    user_messages: Vec<String>,
+    event_tx: &mpsc::UnboundedSender<EngineEvent>,
+) {
+    let provider = build_provider(config, client);
+    let model = model.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        log::entry(
+            log::Level::Info,
+            "title_request",
+            &serde_json::json!({"message_count": user_messages.len(), "model": &model}),
+        );
+        match provider.complete_title(&user_messages, &model).await {
+            Ok(ref title) => {
+                log::entry(
+                    log::Level::Info,
+                    "title_result",
+                    &serde_json::json!({"title": title}),
+                );
+                let _ = tx.send(EngineEvent::TitleGenerated { title: title.clone() });
+            }
+            Err(ref e) => {
+                log::entry(
+                    log::Level::Warn,
+                    "title_error",
+                    &serde_json::json!({"error": e}),
+                );
+                let fallback = user_messages
+                    .last()
+                    .and_then(|m| m.lines().next())
+                    .unwrap_or("Untitled");
+                let mut title = fallback.to_string();
+                if title.len() > 48 {
+                    title.truncate(title.floor_char_boundary(48));
+                }
+                let _ = tx.send(EngineEvent::TitleGenerated {
+                    title: title.trim().to_string(),
+                });
+            }
+        }
+    });
 }
 
 fn build_provider(config: &EngineConfig, client: &reqwest::Client) -> Provider {
@@ -147,6 +185,8 @@ struct Turn<'a> {
     proc_done_tx: &'a mpsc::UnboundedSender<(String, Option<i32>)>,
     cmd_rx: &'a mut mpsc::UnboundedReceiver<UiCommand>,
     event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
+    config: &'a EngineConfig,
+    http_client: &'a reqwest::Client,
     cancel: tokio_util::sync::CancellationToken,
     messages: Vec<Message>,
     mode: Mode,
@@ -160,6 +200,18 @@ struct Turn<'a> {
 impl<'a> Turn<'a> {
     fn emit(&self, event: EngineEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    /// Handle a command that arrived during a turn but isn't turn-specific.
+    /// Returns true if the command was handled (caller should not fall through).
+    fn handle_background_cmd(&self, cmd: UiCommand) -> bool {
+        match cmd {
+            UiCommand::GenerateTitle { user_messages } => {
+                spawn_title_generation(self.config, self.http_client, &self.model, user_messages, self.event_tx);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn send_snapshot(&self) {
@@ -447,7 +499,7 @@ impl<'a> Turn<'a> {
                 Ok(UiCommand::Cancel) => {
                     self.cancel.cancel();
                 }
-                Ok(_) => {}
+                Ok(other) => { self.handle_background_cmd(other); }
                 Err(_) => break,
             }
         }
@@ -489,7 +541,7 @@ impl<'a> Turn<'a> {
                     }
                     UiCommand::SetMode { mode } => self.mode = mode,
                     UiCommand::SetReasoningEffort { effort } => self.reasoning_effort = effort,
-                    _ => {}
+                    other => { self.handle_background_cmd(other); }
                 },
             }
         }
@@ -597,7 +649,7 @@ impl<'a> Turn<'a> {
                     return (false, None);
                 }
                 None => return (false, None),
-                _ => {}
+                Some(other) => { self.handle_background_cmd(other); }
             }
         }
     }
@@ -617,7 +669,7 @@ impl<'a> Turn<'a> {
                     return None;
                 }
                 None => return None,
-                _ => {}
+                Some(other) => { self.handle_background_cmd(other); }
             }
         }
     }

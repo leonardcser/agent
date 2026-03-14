@@ -123,8 +123,10 @@ impl App {
 
     pub(super) fn resume_entries(&self) -> Vec<ResumeEntry> {
         let sessions = session::list_sessions();
+        let current_id = &self.session.id;
         let flat: Vec<ResumeEntry> = sessions
             .into_iter()
+            .filter(|s| s.id != *current_id)
             .map(|s| ResumeEntry {
                 id: s.id,
                 title: s.title.unwrap_or_default(),
@@ -248,15 +250,48 @@ impl App {
     }
 
     pub(super) fn maybe_generate_title(&mut self) {
-        if self.session.title.is_some() || self.pending_title {
+        if self.pending_title {
+            engine::log::entry(
+                engine::log::Level::Debug,
+                "title_skip",
+                &serde_json::json!({"reason": "pending"}),
+            );
             return;
         }
-        if let Some(ref msg) = self.session.first_user_message {
-            self.pending_title = true;
-            self.engine.send(UiCommand::GenerateTitle {
-                first_message: msg.clone(),
-            });
+        let user_messages: Vec<String> = self
+            .history
+            .iter()
+            .filter(|m| matches!(m.role, protocol::Role::User))
+            .filter_map(|m| m.content.as_ref().map(|c| c.text_content()))
+            .filter(|t| !t.is_empty())
+            .collect();
+        if user_messages.is_empty() {
+            engine::log::entry(
+                engine::log::Level::Debug,
+                "title_skip",
+                &serde_json::json!({"reason": "no_user_messages"}),
+            );
+            return;
         }
+        // Send last 5 user messages for title generation (recency-weighted).
+        let recent: Vec<String> = user_messages
+            .into_iter()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|s| if s.len() > 500 { s[..s.floor_char_boundary(500)].to_string() } else { s })
+            .collect();
+        engine::log::entry(
+            engine::log::Level::Info,
+            "title_generate",
+            &serde_json::json!({"message_count": recent.len(), "current_title": self.session.title}),
+        );
+        self.pending_title = true;
+        self.engine.send(UiCommand::GenerateTitle {
+            user_messages: recent,
+        });
     }
 
     pub fn compact_history(&mut self) {

@@ -314,8 +314,8 @@ pub enum UiCommand {
         history: Vec<Message>,
     },
 
-    /// Generate a title for the session.
-    GenerateTitle { first_message: String },
+    /// Generate a title for the session based on recent user messages.
+    GenerateTitle { user_messages: Vec<String> },
 
     /// Cancel the current turn.
     Cancel,

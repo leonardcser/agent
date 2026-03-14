@@ -476,12 +476,20 @@ impl Provider {
 
     pub async fn complete_title(
         &self,
-        first_user_message: &str,
+        user_messages: &[String],
         model: &str,
     ) -> Result<String, String> {
+        let numbered: Vec<String> = user_messages
+            .iter()
+            .enumerate()
+            .map(|(i, m)| format!("{}. {}", i + 1, m.replace('\n', " ")))
+            .collect();
         let prompt = format!(
-            "Generate a short session title (3-6 words) for: \"{}\". Reply with only the title.",
-            first_user_message.replace('\n', " ")
+            "Generate a short session title (3-6 words) for a coding session. \
+             Focus on the most recent topic/task, not earlier ones. \
+             Reply with only the title, no quotes.\n\n\
+             User messages (oldest to newest):\n{}",
+            numbered.join("\n")
         );
 
         let title = self.complete_short(&prompt, model, 512, 0.2).await?;
