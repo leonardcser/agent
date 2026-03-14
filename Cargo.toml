@@ -3,7 +3,7 @@ members = ["crates/protocol", "crates/engine", "crates/tui"]
 
 [package]
 name = "agent"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 
 [[bin]]
