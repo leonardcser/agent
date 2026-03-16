@@ -372,7 +372,15 @@ impl App {
             // Ignore stale Messages snapshots from cancelled/completed turns.
             // These would overwrite a freshly cleared history (e.g. after /clear).
             EngineEvent::Messages { .. } => {}
-            EngineEvent::TurnComplete { .. } => {}
+            EngineEvent::TurnComplete { messages, .. } => {
+                // Accept final messages from a just-cancelled turn so that
+                // denial tool results are persisted before the session is saved.
+                if !self.history.is_empty() && !messages.is_empty() {
+                    self.history = messages;
+                    self.rebuild_screen_from_history();
+                    self.save_session();
+                }
+            }
             EngineEvent::CompactionComplete { messages } => {
                 if self.pending_compact_epoch != self.compact_epoch {
                     self.screen.set_throbber(render::Throbber::Done);

@@ -199,8 +199,14 @@ impl App {
                                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
                             let summary = tool_arg_summary(&tc.function.name, &args);
                             let output = tool_outputs.get(&tc.id).cloned();
-                            let status = if output.is_some() {
-                                ToolStatus::Ok
+                            let status = if let Some(ref out) = output {
+                                if out.content.contains("denied this tool call")
+                                    || out.content.contains("blocked this tool call")
+                                {
+                                    ToolStatus::Denied
+                                } else {
+                                    ToolStatus::Ok
+                                }
                             } else {
                                 ToolStatus::Pending
                             };
