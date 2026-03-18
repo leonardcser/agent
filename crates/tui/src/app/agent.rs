@@ -381,8 +381,14 @@ impl App {
                 // Accept final messages from a just-cancelled turn so that
                 // denial tool results are persisted before the session is saved.
                 if !self.history.is_empty() && !messages.is_empty() {
+                    // Preserve throbber state (e.g. Interrupted) across the
+                    // rebuild, since screen.clear() would wipe it.
+                    let throbber = self.screen.working_throbber();
                     self.history = messages;
                     self.rebuild_screen_from_history();
+                    if let Some(t) = throbber {
+                        self.screen.set_throbber(t);
+                    }
                     self.save_session();
                 }
             }

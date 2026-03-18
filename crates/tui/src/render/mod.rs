@@ -731,6 +731,10 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
+    pub fn working_throbber(&self) -> Option<Throbber> {
+        self.working.throbber
+    }
+
     pub fn set_throbber(&mut self, state: Throbber) {
         self.working.set_throbber(state);
         self.prompt.dirty = true;
