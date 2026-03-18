@@ -31,6 +31,7 @@ pub struct InputState {
     pub buf: String,
     pub cpos: usize,
     pub attachment_ids: Vec<AttachmentId>,
+    pub store: AttachmentStore,
     pub completer: Option<Completer>,
     pub menu: Option<MenuState>,
     vim: Option<Vim>,
@@ -66,6 +67,7 @@ impl InputState {
             buf: String::new(),
             cpos: 0,
             attachment_ids: Vec::new(),
+            store: AttachmentStore::new(),
             completer: None,
             menu: None,
             vim: None,
@@ -132,7 +134,7 @@ impl InputState {
         self.menu = None;
         self.history_saved_buf = None;
         self.from_paste = false;
-        // Note: stash is intentionally NOT cleared here.
+        // Note: stash and store are intentionally NOT cleared here.
     }
 
     /// Toggle stash: if no stash, save current buf and clear; if stashed, restore.
@@ -168,18 +170,13 @@ impl InputState {
     /// Restore input from a rewind. The text has pastes expanded and image
     /// labels inline as `[label]`. Replace each `[label]` with an attachment
     /// marker so images become editable attachments again.
-    pub fn restore_from_rewind(
-        &mut self,
-        mut text: String,
-        images: Vec<(String, String)>,
-        store: &mut AttachmentStore,
-    ) {
+    pub fn restore_from_rewind(&mut self, mut text: String, images: Vec<(String, String)>) {
         let mut ids = Vec::new();
         for (label, data_url) in images {
             let display = format!("[{label}]");
             if let Some(pos) = text.find(&display) {
                 text.replace_range(pos..pos + display.len(), &ATTACHMENT_MARKER.to_string());
-                let id = store.insert_image(label, data_url);
+                let id = self.store.insert_image(label, data_url);
                 ids.push(id);
             }
         }
@@ -322,9 +319,7 @@ impl InputState {
                 MenuKind::Model { models } => (models.len() + 2).min(12),
                 MenuKind::Theme { presets, .. } => presets.len().min(14),
                 MenuKind::Color { presets, .. } => presets.len().min(14),
-                MenuKind::Stats { left, right } => {
-                    crate::metrics::stats_row_count(left, right)
-                }
+                MenuKind::Stats { left, right } => crate::metrics::stats_row_count(left, right),
             },
             None => 0,
         }
@@ -356,13 +351,13 @@ impl InputState {
 
     /// Expand attachment markers and return the final text for submission.
     /// Pastes are inlined; image markers are stripped (images go via Content::Parts).
-    pub fn expanded_text(&self, store: &AttachmentStore) -> String {
+    pub fn expanded_text(&self) -> String {
         let mut result = String::new();
         let mut att_idx = 0;
         for c in self.buf.chars() {
             if c == ATTACHMENT_MARKER {
                 if let Some(&id) = self.attachment_ids.get(att_idx) {
-                    result.push_str(store.expanded_text(id));
+                    result.push_str(self.store.expanded_text(id));
                 }
                 att_idx += 1;
             } else {
@@ -373,13 +368,13 @@ impl InputState {
     }
 
     /// Text for the user message block: pastes expanded, images shown as `[label]`.
-    pub fn message_display_text(&self, store: &AttachmentStore) -> String {
+    pub fn message_display_text(&self) -> String {
         let mut result = String::new();
         let mut att_idx = 0;
         for c in self.buf.chars() {
             if c == ATTACHMENT_MARKER {
                 if let Some(&id) = self.attachment_ids.get(att_idx) {
-                    if let Some(att) = store.get(id) {
+                    if let Some(att) = self.store.get(id) {
                         match att {
                             Attachment::Paste { content } => result.push_str(content),
                             Attachment::Image { label, .. } => {
@@ -396,26 +391,26 @@ impl InputState {
         result
     }
 
-    pub fn image_count(&self, store: &AttachmentStore) -> usize {
+    pub fn image_count(&self) -> usize {
         self.attachment_ids
             .iter()
-            .filter(|&&id| matches!(store.get(id), Some(Attachment::Image { .. })))
+            .filter(|&&id| matches!(self.store.get(id), Some(Attachment::Image { .. })))
             .count()
     }
 
     /// Attach an image at the current cursor position.
-    pub fn insert_image(&mut self, store: &mut AttachmentStore, label: String, data_url: String) {
-        let id = store.insert_image(label, data_url);
+    pub fn insert_image(&mut self, label: String, data_url: String) {
+        let id = self.store.insert_image(label, data_url);
         self.insert_attachment_id(id);
     }
 
     /// Build the message content combining text and any attached images.
-    pub fn build_content(&self, store: &AttachmentStore) -> Content {
-        let text = self.expanded_text(store);
+    pub fn build_content(&self) -> Content {
+        let text = self.expanded_text();
         let images: Vec<(String, String)> = self
             .attachment_ids
             .iter()
-            .filter_map(|&id| match store.get(id) {
+            .filter_map(|&id| match self.store.get(id) {
                 Some(Attachment::Image { label, data_url }) => {
                     Some((label.clone(), data_url.clone()))
                 }
@@ -426,12 +421,7 @@ impl InputState {
     }
 
     /// Process a terminal event. Returns what the caller should do next.
-    pub fn handle_event(
-        &mut self,
-        ev: Event,
-        mut history: Option<&mut History>,
-        store: &mut AttachmentStore,
-    ) -> Action {
+    pub fn handle_event(&mut self, ev: Event, mut history: Option<&mut History>) -> Action {
         // Menu intercepts all keys when open
         if self.menu.is_some() {
             return self.handle_menu_event(&ev);
@@ -439,7 +429,7 @@ impl InputState {
 
         // Completer intercepts navigation keys when active
         if self.completer.is_some() {
-            if let Some(action) = self.handle_completer_event(&ev, store) {
+            if let Some(action) = self.handle_completer_event(&ev) {
                 return action;
             }
         }
@@ -458,8 +448,8 @@ impl InputState {
                         return Action::Redraw;
                     }
                     vim::Action::Submit => {
-                        let display = self.message_display_text(store);
-                        let content = self.build_content(store);
+                        let display = self.message_display_text();
+                        let content = self.build_content();
                         self.clear();
                         return Action::Submit { content, display };
                     }
@@ -498,7 +488,7 @@ impl InputState {
                         match engine::image::read_image_as_data_url(&path) {
                             Ok(url) => {
                                 let label = engine::image::image_label_from_path(&path);
-                                self.insert_image(store, label, url);
+                                self.insert_image(label, url);
                                 return Action::Redraw;
                             }
                             Err(e) => {
@@ -513,11 +503,11 @@ impl InputState {
                         if let Some(ref mut vim) = self.vim {
                             vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
                         }
-                        self.insert_image(store, "clipboard.png".into(), url);
+                        self.insert_image("clipboard.png".into(), url);
                         return Action::Redraw;
                     }
                 }
-                self.insert_paste(store, data);
+                self.insert_paste(data);
                 Action::Redraw
             }
             // Cmd+V: read image from clipboard.
@@ -530,7 +520,7 @@ impl InputState {
                     if let Some(ref mut vim) = self.vim {
                         vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
                     }
-                    self.insert_image(store, "clipboard.png".into(), url);
+                    self.insert_image("clipboard.png".into(), url);
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -548,8 +538,8 @@ impl InputState {
                 if self.buf.is_empty() && self.attachment_ids.is_empty() {
                     Action::Noop
                 } else {
-                    let display = self.message_display_text(store);
-                    let content = self.build_content(store);
+                    let display = self.message_display_text();
+                    let content = self.build_content();
                     self.clear();
                     Action::Submit { content, display }
                 }
@@ -829,7 +819,7 @@ impl InputState {
     }
 
     /// Try to handle the event as a completer navigation. Returns Some if consumed.
-    fn handle_completer_event(&mut self, ev: &Event, store: &AttachmentStore) -> Option<Action> {
+    fn handle_completer_event(&mut self, ev: &Event) -> Option<Action> {
         let is_history = self
             .completer
             .as_ref()
@@ -853,8 +843,8 @@ impl InputState {
                     let kind = comp.kind;
                     self.accept_completion(&comp);
                     if kind == CompleterKind::Command {
-                        let display = self.message_display_text(store);
-                        let content = self.build_content(store);
+                        let display = self.message_display_text();
+                        let content = self.build_content();
                         self.clear();
                         Some(Action::Submit { content, display })
                     } else {
@@ -1095,7 +1085,7 @@ impl InputState {
         self.recompute_completer();
     }
 
-    fn insert_paste(&mut self, store: &mut AttachmentStore, data: String) {
+    fn insert_paste(&mut self, data: String) {
         // Normalize line endings: terminals (especially macOS) send \r for
         // newlines in bracketed paste mode.  Convert \r\n and lone \r to \n
         // so that line counting and display work correctly.
@@ -1118,7 +1108,7 @@ impl InputState {
             self.from_paste = true;
         }
         if lines >= PASTE_LINE_THRESHOLD || data.len() >= char_threshold {
-            let id = store.insert_paste(data);
+            let id = self.store.insert_paste(data);
             self.insert_attachment_id(id);
         } else {
             self.buf.insert_str(self.cpos, &data);
@@ -1388,8 +1378,7 @@ mod tests {
     #[test]
     fn paste_into_empty_buffer_sets_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
-        input.insert_paste(&mut store, "!echo hello".to_string());
+        input.insert_paste("!echo hello".to_string());
         assert!(
             input.skip_shell_escape(),
             "Paste at buffer start should set from_paste"
@@ -1400,7 +1389,6 @@ mod tests {
     #[test]
     fn type_then_type_sets_from_paste_false() {
         let mut input = InputState::new();
-        let _store = AttachmentStore::new();
         input.insert_char('!');
         input.insert_char('e');
         assert!(
@@ -1412,7 +1400,7 @@ mod tests {
     #[test]
     fn type_bang_then_paste_sets_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
+
         // Simulate user typing '!'
         input.insert_char('!');
         assert!(!input.skip_shell_escape(), "Typing clears from_paste");
@@ -1421,7 +1409,7 @@ mod tests {
         // This is the key scenario that was broken before the fix
         input.buf.clear();
         input.cpos = 0;
-        input.insert_paste(&mut store, "echo hello".to_string());
+        input.insert_paste("echo hello".to_string());
         assert!(
             input.skip_shell_escape(),
             "Paste at line start should set from_paste"
@@ -1432,10 +1420,10 @@ mod tests {
     #[test]
     fn paste_in_middle_of_line_does_not_set_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
+
         input.buf = "hello ".to_string();
         input.cpos = 6; // After "hello "
-        input.insert_paste(&mut store, "!world".to_string());
+        input.insert_paste("!world".to_string());
         assert!(
             !input.skip_shell_escape(),
             "Paste in middle of line should not set from_paste"
@@ -1446,10 +1434,10 @@ mod tests {
     #[test]
     fn paste_at_end_of_line_does_not_set_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
+
         input.buf = "hello".to_string();
         input.cpos = 5; // At end
-        input.insert_paste(&mut store, " world".to_string());
+        input.insert_paste(" world".to_string());
         assert!(
             !input.skip_shell_escape(),
             "Paste at end of line should not set from_paste"
@@ -1460,10 +1448,10 @@ mod tests {
     #[test]
     fn paste_at_start_of_multiline_buffer() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
+
         input.buf = "line1\nline2".to_string();
         input.cpos = 0; // At very start
-        input.insert_paste(&mut store, "!command".to_string());
+        input.insert_paste("!command".to_string());
         assert!(
             input.skip_shell_escape(),
             "Paste at buffer start should set from_paste"
@@ -1474,10 +1462,10 @@ mod tests {
     #[test]
     fn paste_at_start_of_second_line_sets_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
+
         input.buf = "line1\n".to_string();
         input.cpos = 6; // Start of second line
-        input.insert_paste(&mut store, "!command".to_string());
+        input.insert_paste("!command".to_string());
         assert!(
             input.skip_shell_escape(),
             "Paste at line start should set from_paste"
@@ -1488,10 +1476,10 @@ mod tests {
     #[test]
     fn paste_middle_of_second_line_does_not_set_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
+
         input.buf = "line1\nhello".to_string();
         input.cpos = 8; // Insert at byte position 8 (before first 'l' of "hello")
-        input.insert_paste(&mut store, " world".to_string());
+        input.insert_paste(" world".to_string());
         assert!(
             !input.skip_shell_escape(),
             "Paste in middle of line should not set from_paste"
@@ -1502,8 +1490,7 @@ mod tests {
     #[test]
     fn manual_char_after_paste_clears_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
-        input.insert_paste(&mut store, "!echo hello".to_string());
+        input.insert_paste("!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
         input.insert_char('x');
@@ -1516,8 +1503,7 @@ mod tests {
     #[test]
     fn backspace_at_start_clears_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
-        input.insert_paste(&mut store, "!echo hello".to_string());
+        input.insert_paste("!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
         input.backspace(); // Deletes last character
@@ -1534,8 +1520,7 @@ mod tests {
     #[test]
     fn delete_word_backward_at_start_clears_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
-        input.insert_paste(&mut store, "!echo hello".to_string());
+        input.insert_paste("!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
         // Move cursor to end
@@ -1562,8 +1547,7 @@ mod tests {
     #[test]
     fn clear_resets_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
-        input.insert_paste(&mut store, "!test".to_string());
+        input.insert_paste("!test".to_string());
         assert!(input.skip_shell_escape());
 
         input.clear();
@@ -1573,13 +1557,13 @@ mod tests {
     #[test]
     fn large_paste_creates_attachment() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
+
         // Use multi-line paste which definitely creates an attachment
         let multi_line = (0..PASTE_LINE_THRESHOLD)
             .map(|i| format!("!line{}", i))
             .collect::<Vec<_>>()
             .join("\n");
-        input.insert_paste(&mut store, multi_line);
+        input.insert_paste(multi_line);
         assert!(
             input.skip_shell_escape(),
             "Multi-line paste should set from_paste"
@@ -1594,12 +1578,12 @@ mod tests {
     #[test]
     fn multi_line_paste_above_threshold_creates_attachment() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
+
         let multi_line = (0..PASTE_LINE_THRESHOLD)
             .map(|i| format!("!line{}", i))
             .collect::<Vec<_>>()
             .join("\n");
-        input.insert_paste(&mut store, multi_line);
+        input.insert_paste(multi_line);
         assert!(
             input.skip_shell_escape(),
             "Multi-line paste should set from_paste"
@@ -1613,9 +1597,9 @@ mod tests {
     #[test]
     fn small_multi_line_paste_inlined() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
+
         let multi_line = "!line1\nline2\nline3".to_string();
-        input.insert_paste(&mut store, multi_line);
+        input.insert_paste(multi_line);
         assert!(
             input.skip_shell_escape(),
             "Small multi-line paste should set from_paste"
@@ -1630,8 +1614,7 @@ mod tests {
     #[test]
     fn stash_preserves_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
-        input.insert_paste(&mut store, "!test".to_string());
+        input.insert_paste("!test".to_string());
         assert!(input.skip_shell_escape());
 
         // Stash: saves from_paste to snapshot, but doesn't clear it in active buffer
@@ -1654,8 +1637,7 @@ mod tests {
     #[test]
     fn multiple_pastes_set_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
-        input.insert_paste(&mut store, "!first".to_string());
+        input.insert_paste("!first".to_string());
         assert!(input.skip_shell_escape());
 
         // Type something, which clears from_paste
@@ -1664,7 +1646,7 @@ mod tests {
 
         // Paste again at start of line
         input.cpos = 0;
-        input.insert_paste(&mut store, "!second".to_string());
+        input.insert_paste("!second".to_string());
         assert!(
             input.skip_shell_escape(),
             "Second paste at start should set from_paste again"
@@ -1674,8 +1656,7 @@ mod tests {
     #[test]
     fn paste_with_carriage_returns_normalized() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
-        input.insert_paste(&mut store, "!line1\r\nline2\rline3".to_string());
+        input.insert_paste("!line1\r\nline2\rline3".to_string());
         assert!(input.skip_shell_escape());
         assert!(
             !input.buf.contains('\r'),
@@ -1687,8 +1668,7 @@ mod tests {
     #[test]
     fn empty_paste_does_not_set_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
-        input.insert_paste(&mut store, "".to_string());
+        input.insert_paste("".to_string());
         assert!(
             !input.skip_shell_escape(),
             "Empty paste should not set from_paste"
@@ -1698,8 +1678,7 @@ mod tests {
     #[test]
     fn whitespace_only_paste_at_start_sets_from_paste() {
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
-        input.insert_paste(&mut store, "   ".to_string());
+        input.insert_paste("   ".to_string());
         assert!(
             input.skip_shell_escape(),
             "Whitespace paste at start should set from_paste"
@@ -1710,10 +1689,10 @@ mod tests {
     fn paste_starting_with_bang_at_line_start() {
         // This is the main bug scenario: type '!', then paste command
         let mut input = InputState::new();
-        let mut store = AttachmentStore::new();
+
         input.buf = String::new();
         input.cpos = 0;
-        input.insert_paste(&mut store, "!ls -la".to_string());
+        input.insert_paste("!ls -la".to_string());
 
         assert!(
             input.skip_shell_escape(),
@@ -1722,7 +1701,7 @@ mod tests {
         assert_eq!(input.buf, "!ls -la");
 
         // The expanded text should not be treated as shell command
-        let text = input.expanded_text(&store);
+        let text = input.expanded_text();
         assert_eq!(text, "!ls -la");
     }
 }

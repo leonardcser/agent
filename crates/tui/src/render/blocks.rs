@@ -14,13 +14,15 @@ use super::highlight::{
     render_markdown_table,
 };
 use super::{
-    crlf, truncate_str, wrap_line, Block, ConfirmChoice, RenderOut, ToolOutput, ToolStatus,
+    crlf, truncate_str, wrap_line, ActiveExec, Block, ConfirmChoice, RenderOut, ToolOutput,
+    ToolStatus,
 };
 
 /// Element types for spacing calculation.
 pub(super) enum Element<'a> {
     Block(&'a Block),
     ActiveTool,
+    ActiveExec,
     Prompt,
 }
 
@@ -56,6 +58,8 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
         (_, Element::Block(Block::Error { .. })) => 1,
         (_, Element::Block(Block::Compacted { .. })) => 1,
         (Element::Block(Block::Compacted { .. }), _) => 1,
+        (_, Element::ActiveExec) => 1,
+        (Element::ActiveExec, _) => 1,
         (Element::Block(_), Element::Prompt) => 1,
         (Element::ActiveTool, Element::Prompt) => 1,
         _ => 0,
@@ -198,10 +202,8 @@ pub(super) fn render_block(out: &mut RenderOut, block: &Block, width: usize) -> 
             1 + render_markdown_inner(out, summary, width, " ", true, None)
         }
         Block::Exec { command, output } => {
-            let w = width;
-            let display = format!("!{}", command);
-            let char_len = display.chars().count();
-            let pad_width = (char_len + 2).min(w);
+            let char_len = command.chars().count() + 1;
+            let pad_width = (char_len + 2).min(width);
             let trailing = pad_width.saturating_sub(char_len + 1);
             let _ = out.queue(SetBackgroundColor(theme::USER_BG));
             let _ = out.queue(SetForegroundColor(theme::EXEC));
@@ -214,16 +216,7 @@ pub(super) fn render_block(out: &mut RenderOut, block: &Block, width: usize) -> 
             crlf(out);
             let mut rows = 1u16;
             if !output.is_empty() {
-                let max_cols = w.saturating_sub(3);
-                for line in output.lines() {
-                    for seg in &wrap_line(line, max_cols) {
-                        let _ = out.queue(SetForegroundColor(theme::MUTED));
-                        let _ = out.queue(Print(format!("  {}", seg)));
-                        let _ = out.queue(ResetColor);
-                        crlf(out);
-                        rows += 1;
-                    }
-                }
+                rows += render_bash_output(out, output, false, width);
             }
             rows
         }
@@ -1269,4 +1262,37 @@ mod tests {
             "empty thinking adds 1 extra gap row before text content"
         );
     }
+}
+
+// ── Active exec rendering ────────────────────────────────────────────────────
+
+pub(super) fn render_active_exec(out: &mut RenderOut, exec: &ActiveExec, width: usize) -> u16 {
+    // Header: styled like Block::Exec
+    let char_len = exec.command.chars().count() + 1; // +1 for "!"
+    let pad_width = (char_len + 2).min(width);
+    let trailing = pad_width.saturating_sub(char_len + 1);
+
+    let elapsed = exec.start_time.elapsed();
+    let time_str = format!(" {}", format_duration(elapsed.as_secs()));
+
+    let _ = out.queue(SetBackgroundColor(theme::USER_BG));
+    let _ = out.queue(SetForegroundColor(theme::EXEC));
+    let _ = out.queue(SetAttribute(Attribute::Bold));
+    let _ = out.queue(Print(" !"));
+    let _ = out.queue(SetForegroundColor(Color::Reset));
+    let _ = out.queue(Print(format!("{}{}", exec.command, " ".repeat(trailing))));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    let _ = out.queue(ResetColor);
+    // Elapsed time
+    let _ = out.queue(SetAttribute(Attribute::Dim));
+    let _ = out.queue(Print(&time_str));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    crlf(out);
+    let mut rows = 1u16;
+
+    // Output: reuse the bash tail-trimming renderer
+    if !exec.output.is_empty() {
+        rows += render_bash_output(out, &exec.output, false, width);
+    }
+    rows
 }

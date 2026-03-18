@@ -214,30 +214,11 @@ pub fn load(id_or_prefix: &str) -> Option<Session> {
 }
 
 fn load_exact(id: &str) -> Option<Session> {
-    // Try new directory layout first.
     let dir_path = sessions_dir().join(id);
-    let session_path = dir_path.join("session.json");
-    if session_path.is_file() {
-        let contents = fs::read_to_string(&session_path).ok()?;
-        let mut session: Session = serde_json::from_str(&contents).ok()?;
-
-        // Resolve blob refs back to inline data URLs.
-        let blob_dir = dir_path.join("blobs");
-        if blob_dir.is_dir() {
-            let blob_to_url = crate::attachment::AttachmentStore::load_blobs(&blob_dir);
-            if !blob_to_url.is_empty() {
-                internalize_blobs(&mut session.messages, &blob_to_url);
-            }
-        }
-        return Some(session);
-    }
-
-    // Fall back to legacy flat file layout.
-    let legacy_path = sessions_dir().join(format!("{id}.json"));
-    let contents = fs::read_to_string(legacy_path).ok()?;
+    let contents = fs::read_to_string(dir_path.join("session.json")).ok()?;
     let mut session: Session = serde_json::from_str(&contents).ok()?;
 
-    let blob_dir = sessions_dir().join(format!("{id}.blobs"));
+    let blob_dir = dir_path.join("blobs");
     if blob_dir.is_dir() {
         let blob_to_url = crate::attachment::AttachmentStore::load_blobs(&blob_dir);
         if !blob_to_url.is_empty() {
@@ -250,40 +231,28 @@ fn load_exact(id: &str) -> Option<Session> {
 /// Resolve a prefix to a full session ID. Returns `None` if no match,
 /// or if the prefix is ambiguous (matches multiple sessions).
 fn resolve_prefix(prefix: &str) -> Option<String> {
-    // Exact match — fast path.
     let dir = sessions_dir();
-    if dir.join(prefix).join("session.json").is_file()
-        || dir.join(format!("{prefix}.json")).is_file()
-    {
+
+    // Exact match — fast path.
+    if dir.join(prefix).join("session.json").is_file() {
         return Some(prefix.to_string());
     }
 
-    // Prefix scan.
+    // Prefix scan over session directories.
     let Ok(entries) = fs::read_dir(&dir) else {
         return None;
     };
     let mut matches = Vec::new();
     for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
         let name = entry.file_name();
         let Some(name_str) = name.to_str() else {
             continue;
         };
-        if !name_str.starts_with(prefix) {
-            continue;
-        }
-        // New layout: directory with session.json inside.
-        if entry.path().join("session.json").is_file() {
+        if name_str.starts_with(prefix) {
             matches.push(name_str.to_string());
-        }
-        // Legacy layout: <id>.json flat file.
-        if name_str.ends_with(".json")
-            && !name_str.ends_with(".meta.json")
-            && !name_str.ends_with(".tmp")
-        {
-            let id = name_str.trim_end_matches(".json");
-            if id.starts_with(prefix) && !matches.contains(&id.to_string()) {
-                matches.push(id.to_string());
-            }
         }
     }
     if matches.len() == 1 {
@@ -294,19 +263,9 @@ fn resolve_prefix(prefix: &str) -> Option<String> {
 }
 
 pub fn delete(id: &str) {
-    let dir = sessions_dir();
-    // New layout
-    let session_dir = dir.join(id);
+    let session_dir = sessions_dir().join(id);
     if session_dir.is_dir() {
         let _ = fs::remove_dir_all(&session_dir);
-        return;
-    }
-    // Legacy layout
-    let _ = fs::remove_file(dir.join(format!("{id}.json")));
-    let _ = fs::remove_file(dir.join(format!("{id}.meta.json")));
-    let blob_dir = dir.join(format!("{id}.blobs"));
-    if blob_dir.is_dir() {
-        let _ = fs::remove_dir_all(&blob_dir);
     }
 }
 
@@ -320,64 +279,29 @@ pub fn list_sessions() -> Vec<SessionMeta> {
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
 
-        // New layout: directory with meta.json / session.json.
-        if path.is_dir() {
-            let meta_path = path.join("meta.json");
-            if let Ok(contents) = fs::read_to_string(&meta_path) {
-                if let Ok(meta) = serde_json::from_str::<SessionMeta>(&contents) {
-                    out.push(meta);
-                    continue;
-                }
-            }
-            // Fall back to full session file.
-            let session_path = path.join("session.json");
-            if let Ok(contents) = fs::read_to_string(&session_path) {
-                if let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) {
-                    if meta.id.is_empty() {
-                        meta.id = name.to_string();
-                    }
-                    out.push(meta);
-                }
-            }
-            continue;
-        }
-
-        // Legacy flat layout: <id>.json files.
-        let name_str = name.to_string();
-        if name_str.ends_with(".meta.json")
-            || name_str.ends_with(".tmp")
-            || !name_str.ends_with(".json")
-        {
-            continue;
-        }
-        let id = name_str.trim_end_matches(".json").to_string();
-        if id.is_empty() {
-            continue;
-        }
-
-        // Try legacy sidecar meta first.
-        let meta_path = dir.join(format!("{id}.meta.json"));
-        if let Ok(contents) = fs::read_to_string(&meta_path) {
+        // Try fast sidecar meta first.
+        if let Ok(contents) = fs::read_to_string(path.join("meta.json")) {
             if let Ok(meta) = serde_json::from_str::<SessionMeta>(&contents) {
                 out.push(meta);
                 continue;
             }
         }
         // Fall back to full session file.
-        let Ok(contents) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) else {
-            continue;
-        };
-        if meta.id.is_empty() {
-            meta.id = id;
+        if let Ok(contents) = fs::read_to_string(path.join("session.json")) {
+            if let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) {
+                if meta.id.is_empty() {
+                    meta.id = name.to_string();
+                }
+                out.push(meta);
+            }
         }
-        out.push(meta);
     }
     out.sort_by_key(|b| std::cmp::Reverse(session_updated_at(b)));
     out
@@ -431,6 +355,58 @@ fn sessions_dir() -> PathBuf {
     config::state_dir().join("sessions")
 }
 
+/// Migrate legacy flat-file sessions to the new directory layout.
+/// Each `<id>.json` + optional `<id>.meta.json` + optional `<id>.blobs/`
+/// becomes `<id>/session.json` + `<id>/meta.json` + `<id>/blobs/`.
+pub fn migrate_legacy_sessions() {
+    let dir = sessions_dir();
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+
+    let ids: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name();
+            let s = name.to_str()?;
+            if s.ends_with(".meta.json") || s.ends_with(".tmp") || !s.ends_with(".json") {
+                return None;
+            }
+            // Only migrate flat files, not directories.
+            if e.path().is_dir() {
+                return None;
+            }
+            Some(s.trim_end_matches(".json").to_string())
+        })
+        .collect();
+
+    for id in ids {
+        let session_dir = dir.join(&id);
+        if session_dir.exists() {
+            continue; // already migrated or name collision
+        }
+        if fs::create_dir_all(&session_dir).is_err() {
+            continue;
+        }
+
+        // Move main session file.
+        let src = dir.join(format!("{id}.json"));
+        let _ = fs::rename(&src, session_dir.join("session.json"));
+
+        // Move sidecar metadata.
+        let meta_src = dir.join(format!("{id}.meta.json"));
+        if meta_src.exists() {
+            let _ = fs::rename(&meta_src, session_dir.join("meta.json"));
+        }
+
+        // Move blobs directory.
+        let blobs_src = dir.join(format!("{id}.blobs"));
+        if blobs_src.is_dir() {
+            let _ = fs::rename(&blobs_src, session_dir.join("blobs"));
+        }
+    }
+}
+
 pub fn print_resume_hint(session_id: &str) {
     use crossterm::style::{Attribute, Print, SetAttribute};
     use crossterm::QueueableCommand;
@@ -454,17 +430,12 @@ fn shortest_unique_prefix(id: &str) -> &str {
     let others: Vec<String> = entries
         .flatten()
         .filter_map(|e| {
+            if !e.path().is_dir() {
+                return None;
+            }
             let name = e.file_name();
             let s = name.to_str()?.to_string();
-            // New layout: directories. Legacy: <id>.json files.
-            if e.path().is_dir() {
-                (s != id).then_some(s)
-            } else if s.ends_with(".json") && !s.ends_with(".meta.json") {
-                let trimmed = s.trim_end_matches(".json").to_string();
-                (trimmed != id).then_some(trimmed)
-            } else {
-                None
-            }
+            (s != id).then_some(s)
         })
         .collect();
 

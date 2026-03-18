@@ -107,14 +107,11 @@ fn aggregate(entries: &[MetricsEntry]) -> Stats {
         stats.total_prompt += prompt;
         stats.total_completion += completion;
 
-        let m = stats
-            .by_model
-            .entry(e.model.clone())
-            .or_insert(ModelStats {
-                prompt: 0,
-                completion: 0,
-                calls: 0,
-            });
+        let m = stats.by_model.entry(e.model.clone()).or_insert(ModelStats {
+            prompt: 0,
+            completion: 0,
+            calls: 0,
+        });
         m.prompt += prompt;
         m.completion += completion;
         m.calls += 1;

@@ -3,7 +3,6 @@ mod commands;
 mod events;
 mod history;
 
-use crate::attachment::AttachmentStore;
 use crate::input::{
     resolve_agent_esc, Action, EscAction, History, InputState, MenuKind, MenuResult,
 };
@@ -42,7 +41,8 @@ pub struct App {
     pub history: Vec<Message>,
     pub input_history: History,
     pub input: InputState,
-    pub attachments: AttachmentStore,
+    exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>>,
+    exec_kill: Option<std::sync::Arc<tokio::sync::Notify>>,
     pub queued_messages: Vec<String>,
     pub auto_approved: HashMap<String, Vec<glob::Pattern>>,
     /// Directories outside the workspace that have appeared in confirm dialogs.
@@ -99,17 +99,30 @@ enum EventOutcome {
     Quit,
     CancelAgent,
     CancelAndClear,
-    Submit { content: Content, display: String },
+    Submit {
+        content: Content,
+        display: String,
+    },
     MenuResult(MenuResult),
     OpenDialog(Box<dyn render::Dialog>),
+    Exec(
+        tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
+        std::sync::Arc<tokio::sync::Notify>,
+    ),
 }
 
 enum CommandAction {
     Continue,
     Quit,
     CancelAndClear,
-    Compact { focus: Option<String> },
+    Compact {
+        focus: Option<String>,
+    },
     OpenDialog(Box<dyn render::Dialog>),
+    Exec(
+        tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
+        std::sync::Arc<tokio::sync::Notify>,
+    ),
 }
 
 /// Arrange flat session entries into a tree: roots first (sorted by
@@ -202,10 +215,16 @@ fn classify_startup_command(input: &str) -> Option<&'static str> {
 enum InputOutcome {
     Continue,
     StartAgent,
-    Compact { focus: Option<String> },
+    Compact {
+        focus: Option<String>,
+    },
     Quit,
     OpenDialog(Box<dyn render::Dialog>),
     CustomCommand(Box<crate::custom_commands::CustomCommand>),
+    Exec(
+        tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
+        std::sync::Arc<tokio::sync::Notify>,
+    ),
 }
 
 /// Mutable timer state shared across event handlers.
@@ -302,7 +321,8 @@ impl App {
             history: Vec::new(),
             input_history: History::load(),
             input,
-            attachments: AttachmentStore::new(),
+            exec_rx: None,
+            exec_kill: None,
             queued_messages: Vec::new(),
             auto_approved: HashMap::new(),
             seen_outside_dirs: HashSet::new(),
@@ -350,12 +370,8 @@ impl App {
             }
             self.screen.flush_blocks();
         }
-        self.screen.draw_prompt(
-            &self.input,
-            self.mode,
-            render::term_width(),
-            &self.attachments,
-        );
+        self.screen
+            .draw_prompt(&self.input, self.mode, render::term_width());
 
         let mut term_events = EventStream::new();
         let mut agent: Option<TurnState> = None;
@@ -366,7 +382,10 @@ impl App {
         if let Some(msg) = initial_message {
             let trimmed = msg.trim();
             if let Some(cmd) = trimmed.strip_prefix('!') {
-                self.run_shell_escape(cmd);
+                if let Some((rx, kill)) = self.start_shell_escape(cmd) {
+                    self.exec_rx = Some(rx);
+                    self.exec_kill = Some(kill);
+                }
             } else if trimmed == "/resume" {
                 if let CommandAction::OpenDialog(dlg) = self.handle_command(trimmed) {
                     active_dialog = Some(dlg);
@@ -522,6 +541,10 @@ impl App {
                                 InputOutcome::CustomCommand(cmd) => {
                                     agent = Some(self.begin_custom_command_turn(*cmd));
                                 }
+                                InputOutcome::Exec(rx, kill) => {
+                                    self.exec_rx = Some(rx);
+                                    self.exec_kill = Some(kill);
+                                }
                                 InputOutcome::Continue | InputOutcome::Quit => {}
                                 InputOutcome::OpenDialog(dlg) => {
                                     active_dialog = Some(dlg);
@@ -639,6 +662,25 @@ impl App {
                     }
                 }
 
+                Some(ev) = async {
+                    match self.exec_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match ev {
+                        commands::ExecEvent::Output(line) => {
+                            self.screen.append_exec_output(&line);
+                        }
+                        commands::ExecEvent::Done(code) => {
+                            self.screen.finish_exec(code);
+                            self.screen.commit_exec();
+                            self.exec_rx = None;
+                            self.exec_kill = None;
+                        }
+                    }
+                }
+
                 _ = tokio::time::sleep(Duration::from_millis(80)) => {
                     // Timer tick for spinner animation.
                     // Mark dialog dirty so elapsed timers update live (e.g. PsDialog).
@@ -647,6 +689,10 @@ impl App {
                     }
                     // Animate btw "thinking..." dots.
                     if self.screen.has_btw() {
+                        self.screen.mark_dirty();
+                    }
+                    // Redraw active exec for elapsed time update.
+                    if self.screen.has_active_exec() {
                         self.screen.mark_dirty();
                     }
                 }

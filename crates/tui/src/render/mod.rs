@@ -36,7 +36,6 @@ pub struct FramePrompt<'a> {
     pub mode: protocol::Mode,
     pub queued: &'a [String],
     pub prediction: Option<&'a str>,
-    pub store: &'a AttachmentStore,
 }
 
 /// Output wrapper that selects the line-advance strategy.
@@ -200,6 +199,14 @@ pub enum ToolStatus {
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+}
+
+pub struct ActiveExec {
+    pub command: String,
+    pub output: String,
+    pub start_time: Instant,
+    pub finished: bool,
+    pub exit_code: Option<i32>,
 }
 
 pub struct ActiveTool {
@@ -368,6 +375,7 @@ impl BlockHistory {
 pub struct Screen {
     history: BlockHistory,
     active_tool: Option<ActiveTool>,
+    active_exec: Option<ActiveExec>,
     prompt: PromptState,
     working: WorkingState,
     context_tokens: Option<u32>,
@@ -437,6 +445,7 @@ impl Screen {
         Self {
             history: BlockHistory::new(),
             active_tool: None,
+            active_exec: None,
             prompt: PromptState::new(),
             working: WorkingState::new(),
             context_tokens: None,
@@ -678,6 +687,52 @@ impl Screen {
             start_time: Instant::now(),
         });
         self.prompt.dirty = true;
+    }
+
+    pub fn start_exec(&mut self, command: String) {
+        self.active_exec = Some(ActiveExec {
+            command,
+            output: String::new(),
+            start_time: Instant::now(),
+            finished: false,
+            exit_code: None,
+        });
+        self.prompt.dirty = true;
+    }
+
+    pub fn append_exec_output(&mut self, chunk: &str) {
+        if let Some(ref mut exec) = self.active_exec {
+            if !exec.output.is_empty() && !exec.output.ends_with('\n') {
+                exec.output.push('\n');
+            }
+            exec.output.push_str(chunk);
+            self.prompt.dirty = true;
+        }
+    }
+
+    pub fn finish_exec(&mut self, exit_code: Option<i32>) {
+        if let Some(ref mut exec) = self.active_exec {
+            exec.finished = true;
+            exec.exit_code = exit_code;
+            self.prompt.dirty = true;
+        }
+    }
+
+    /// Commit the active exec to block history.
+    pub fn commit_exec(&mut self) {
+        if let Some(exec) = self.active_exec.take() {
+            let mut output = exec.output;
+            output.truncate(output.trim_end().len());
+            self.history.push(Block::Exec {
+                command: exec.command,
+                output,
+            });
+            self.prompt.dirty = true;
+        }
+    }
+
+    pub fn has_active_exec(&self) -> bool {
+        self.active_exec.is_some()
     }
 
     pub fn append_active_output(&mut self, chunk: &str) {
@@ -1000,6 +1055,7 @@ impl Screen {
     pub fn clear(&mut self) {
         self.history.clear();
         self.active_tool = None;
+        self.active_exec = None;
         self.prompt = PromptState::new();
         self.prompt.anchor_row = Some(0);
         self.working.clear();
@@ -1043,13 +1099,7 @@ impl Screen {
         self.redraw(true);
     }
 
-    pub fn draw_prompt(
-        &mut self,
-        state: &InputState,
-        mode: protocol::Mode,
-        width: usize,
-        store: &AttachmentStore,
-    ) {
+    pub fn draw_prompt(&mut self, state: &InputState, mode: protocol::Mode, width: usize) {
         self.draw_frame(
             width,
             Some(FramePrompt {
@@ -1057,7 +1107,6 @@ impl Screen {
                 mode,
                 queued: &[],
                 prediction: None,
-                store,
             }),
         );
     }
@@ -1147,9 +1196,29 @@ impl Screen {
             }
         }
 
+        // ── Render active exec ──────────────────────────────────────
+        if show_active {
+            if let Some(ref exec) = self.active_exec {
+                let exec_gap = if self.active_tool.is_some() {
+                    gap_between(&Element::ActiveTool, &Element::ActiveExec)
+                } else if let Some(last) = self.history.blocks.last() {
+                    gap_between(&Element::Block(last), &Element::ActiveExec)
+                } else {
+                    0
+                };
+                for _ in 0..exec_gap {
+                    crlf(&mut out);
+                }
+                let rows = blocks::render_active_exec(&mut out, exec, width);
+                active_rows += exec_gap + rows;
+            }
+        }
+
         if let Some(p) = prompt {
             // ── Full mode: render prompt ────────────────────────────────
-            let gap = if self.active_tool.is_some() {
+            let gap = if self.active_exec.is_some() {
+                gap_between(&Element::ActiveExec, &Element::Prompt)
+            } else if self.active_tool.is_some() {
                 gap_between(&Element::ActiveTool, &Element::Prompt)
             } else {
                 self.history.blocks.last().map_or(0, |last| {
@@ -1171,7 +1240,6 @@ impl Screen {
                 self.prompt.prev_rows.saturating_sub(pre_prompt),
                 draw_start_row,
                 pre_prompt,
-                p.store,
             );
             if scrolled {
                 self.has_scrollback = true;
@@ -1258,7 +1326,6 @@ impl Screen {
         prev_rows: u16,
         draw_start_row: u16,
         pre_prompt_rows: u16,
-        store: &AttachmentStore,
     ) -> (u16, u16, bool) {
         let usable = width.saturating_sub(2);
         let height = terminal::size()
@@ -1267,7 +1334,7 @@ impl Screen {
             .saturating_sub(pre_prompt_rows as usize);
         let stash_rows = if state.stash.is_some() { 1 } else { 0 };
 
-        let mut extra_rows = render_stash(out, &state.stash, usable, store);
+        let mut extra_rows = render_stash(out, &state.stash, usable, &state.store);
         let queued_visual = render_queued(out, queued, usable);
         extra_rows += queued_visual;
         let queued_rows = queued_visual as usize;
@@ -1424,7 +1491,7 @@ impl Screen {
         );
         let _ = out.queue(Print("\r\n"));
 
-        let spans = build_display_spans(&state.buf, &state.attachment_ids, store);
+        let spans = build_display_spans(&state.buf, &state.attachment_ids, &state.store);
         let display_buf = spans_to_string(&spans);
         let char_kinds = build_char_kinds(&spans);
         let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);

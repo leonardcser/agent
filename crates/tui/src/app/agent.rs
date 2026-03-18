@@ -514,8 +514,7 @@ impl App {
                         *agent = None;
                     }
                     if let Some((text, images)) = self.rewind_to(idx) {
-                        self.input
-                            .restore_from_rewind(text, images, &mut self.attachments);
+                        self.input.restore_from_rewind(text, images);
                     }
                     // rewind_to → redraw(true) already purged the screen;
                     // drain stale engine events and save the truncated state.

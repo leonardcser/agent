@@ -1,5 +1,10 @@
 use super::*;
 
+pub(super) enum ExecEvent {
+    Output(String),
+    Done(Option<i32>),
+}
+
 impl App {
     // ── Commands ─────────────────────────────────────────────────────────
 
@@ -128,8 +133,11 @@ impl App {
                 CommandAction::Continue
             }
             _ if input.starts_with('!') && !self.input.skip_shell_escape() => {
-                self.run_shell_escape(&input[1..]);
-                CommandAction::Continue
+                if let Some((rx, kill)) = self.start_shell_escape(&input[1..]) {
+                    CommandAction::Exec(rx, kill)
+                } else {
+                    CommandAction::Continue
+                }
             }
             _ => CommandAction::Continue,
         }
@@ -168,38 +176,86 @@ impl App {
             CommandAction::Quit => Some(EventOutcome::Quit),
             CommandAction::CancelAndClear => Some(EventOutcome::CancelAndClear),
             CommandAction::OpenDialog(dlg) => Some(EventOutcome::OpenDialog(dlg)),
+            CommandAction::Exec(rx, kill) => Some(EventOutcome::Exec(rx, kill)),
             CommandAction::Continue => Some(EventOutcome::Noop),
             CommandAction::Compact { .. } => unreachable!(), // blocked above
         }
     }
 
-    pub(super) fn run_shell_escape(&mut self, raw: &str) {
+    /// Spawn a shell command asynchronously. Returns a receiver for output
+    /// lines and the child process handle (for killing on Ctrl+C).
+    pub(super) fn start_shell_escape(
+        &mut self,
+        raw: &str,
+    ) -> Option<(
+        tokio::sync::mpsc::UnboundedReceiver<ExecEvent>,
+        std::sync::Arc<tokio::sync::Notify>,
+    )> {
         let cmd = raw.trim();
         if cmd.is_empty() {
-            return;
+            return None;
         }
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output()
-            .map(|o| {
-                let mut s = String::from_utf8_lossy(&o.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                if !stderr.is_empty() {
-                    if !s.is_empty() {
-                        s.push('\n');
-                    }
-                    s.push_str(&stderr);
+        self.screen.start_exec(cmd.to_string());
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let kill = std::sync::Arc::new(tokio::sync::Notify::new());
+        let kill2 = kill.clone();
+        let cmd = cmd.to_string();
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let child = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn();
+
+            let mut child = match child {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(ExecEvent::Output(format!("error: {e}")));
+                    let _ = tx.send(ExecEvent::Done(None));
+                    return;
                 }
-                s.truncate(s.trim_end().len());
-                s
-            })
-            .unwrap_or_else(|e| format!("error: {}", e));
-        self.screen.push(Block::Exec {
-            command: cmd.to_string(),
-            output,
+            };
+
+            let stdout = child.stdout.take().unwrap();
+            let stderr = child.stderr.take().unwrap();
+            let mut stdout_lines = tokio::io::BufReader::new(stdout).lines();
+            let mut stderr_lines = tokio::io::BufReader::new(stderr).lines();
+            let mut stdout_done = false;
+            let mut stderr_done = false;
+
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = kill2.notified() => {
+                        let _ = child.kill().await;
+                        let _ = tx.send(ExecEvent::Done(Some(130)));
+                        return;
+                    }
+                    line = stdout_lines.next_line(), if !stdout_done => {
+                        match line {
+                            Ok(Some(l)) => { let _ = tx.send(ExecEvent::Output(l)); }
+                            _ => { stdout_done = true; }
+                        }
+                    }
+                    line = stderr_lines.next_line(), if !stderr_done => {
+                        match line {
+                            Ok(Some(l)) => { let _ = tx.send(ExecEvent::Output(l)); }
+                            _ => { stderr_done = true; }
+                        }
+                    }
+                }
+                if stdout_done && stderr_done {
+                    break;
+                }
+            }
+            let status = child.wait().await.ok();
+            let _ = tx.send(ExecEvent::Done(status.and_then(|s| s.code())));
         });
-        self.screen.flush_blocks();
+
+        Some((rx, kill))
     }
 
     pub(super) fn start_btw(

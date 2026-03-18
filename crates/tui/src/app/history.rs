@@ -37,7 +37,7 @@ impl App {
         self.queued_messages.clear();
         self.screen.clear();
         self.input.clear();
-        self.attachments.clear();
+        self.input.store.clear();
         self.engine.processes.clear();
         self.session = session::Session::new();
         self.pending_title = false;
@@ -82,7 +82,7 @@ impl App {
         self.auto_approved.clear();
         self.queued_messages.clear();
         self.input.clear();
-        self.attachments.clear();
+        self.input.store.clear();
         self.pending_title = false;
         self.engine.processes.clear();
         self.compact_epoch += 1;
@@ -284,7 +284,7 @@ impl App {
         self.session.mode = Some(self.mode.as_str().to_string());
         self.session.reasoning_effort = Some(self.reasoning_effort);
         self.session.model = Some(self.model.clone());
-        session::save(&self.session, &self.attachments);
+        session::save(&self.session, &self.input.store);
         if let Ok(mut guard) = self.shared_session.lock() {
             *guard = Some(self.session.clone());
         }

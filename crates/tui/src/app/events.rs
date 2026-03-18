@@ -72,6 +72,23 @@ impl App {
             return false;
         }
 
+        // Ctrl+C while exec is running → kill it.
+        if self.exec_kill.is_some()
+            && matches!(
+                ev,
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                })
+            )
+        {
+            if let Some(kill) = self.exec_kill.take() {
+                kill.notify_one();
+            }
+            return false;
+        }
+
         let outcome = if agent.is_some() {
             self.handle_event_running(ev, t)
         } else {
@@ -171,6 +188,12 @@ impl App {
                 *active_dialog = Some(dlg);
                 false
             }
+            EventOutcome::Exec(rx, kill) => {
+                self.screen.erase_prompt();
+                self.exec_rx = Some(rx);
+                self.exec_kill = Some(kill);
+                false
+            }
             EventOutcome::Submit { content, display } => {
                 if self.try_btw_submit(&content, &display) {
                     // handled
@@ -197,6 +220,10 @@ impl App {
                                 } else {
                                     self.compact_history(focus);
                                 }
+                            }
+                            InputOutcome::Exec(rx, kill) => {
+                                self.exec_rx = Some(rx);
+                                self.exec_kill = Some(kill);
                             }
                             InputOutcome::Continue => {}
                             InputOutcome::Quit => return true,
@@ -394,10 +421,7 @@ impl App {
         }
 
         // Delegate to InputState::handle_event
-        match self
-            .input
-            .handle_event(ev, Some(&mut self.input_history), &mut self.attachments)
-        {
+        match self.input.handle_event(ev, Some(&mut self.input_history)) {
             Action::Submit { content, display } => EventOutcome::Submit { content, display },
             Action::MenuResult(result) => EventOutcome::MenuResult(result),
             Action::ToggleMode => {
@@ -521,7 +545,7 @@ impl App {
                 &mut t.esc_vim_mode,
             ) {
                 EscAction::VimToNormal => {
-                    self.input.handle_event(ev, None, &mut self.attachments);
+                    self.input.handle_event(ev, None);
                     self.screen.mark_dirty();
                 }
                 EscAction::Unqueue => {
@@ -553,10 +577,7 @@ impl App {
         }
 
         // Everything else → InputState::handle_event (type-ahead with history).
-        match self
-            .input
-            .handle_event(ev, Some(&mut self.input_history), &mut self.attachments)
-        {
+        match self.input.handle_event(ev, Some(&mut self.input_history)) {
             Action::Submit { content, display } => {
                 if self.try_btw_submit(&content, &display) {
                     self.screen.mark_dirty();
@@ -667,6 +688,7 @@ impl App {
             }
             CommandAction::Compact { focus } => return InputOutcome::Compact { focus },
             CommandAction::OpenDialog(dlg) => return InputOutcome::OpenDialog(dlg),
+            CommandAction::Exec(rx, kill) => return InputOutcome::Exec(rx, kill),
             CommandAction::Continue => {}
         }
         if trimmed.starts_with('/') {
@@ -705,7 +727,6 @@ impl App {
                     mode: self.mode,
                     queued: &self.queued_messages,
                     prediction: None,
-                    store: &self.attachments,
                 }),
             );
         } else {
@@ -716,7 +737,6 @@ impl App {
                     mode: self.mode,
                     queued: &[],
                     prediction: self.input_prediction.as_deref(),
-                    store: &self.attachments,
                 }),
             );
         }
