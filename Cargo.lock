@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "clap",
  "crossterm",
@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "engine"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64",
  "glob",
@@ -1531,7 +1531,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -2444,7 +2444,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tui"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "arboard",
  "base64",
