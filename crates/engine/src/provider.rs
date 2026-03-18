@@ -3,7 +3,7 @@ use protocol::{Content, Message, ReasoningEffort, Role, ToolCall};
 use reqwest::Client;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize)]
@@ -185,6 +185,8 @@ impl Provider {
         let max_retries = 9;
 
         for attempt in 0..=max_retries {
+            let request_start = Instant::now();
+
             let mut req = self.client.post(&url).json(&body);
             if !self.api_key.is_empty() {
                 req = req.bearer_auth(&self.api_key);
@@ -281,7 +283,17 @@ impl Provider {
             let completion_tokens = data["usage"]["completion_tokens"]
                 .as_u64()
                 .map(|n| n as u32);
-            let tokens_per_sec = data["timings"]["predicted_per_second"].as_f64();
+
+            let elapsed = request_start.elapsed();
+            let tokens_per_sec = if let Some(completed) = completion_tokens {
+                if completed > 0 && elapsed.as_secs_f64() >= 0.001 {
+                    Some(completed as f64 / elapsed.as_secs_f64())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             log::entry(
                 log::Level::Debug,

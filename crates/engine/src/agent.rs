@@ -380,11 +380,7 @@ impl<'a> Turn<'a> {
             };
 
             if let Some(tokens) = resp.prompt_tokens {
-                let tokens_per_sec = if resp.completion_tokens.unwrap_or(0) >= 5 {
-                    resp.tokens_per_sec
-                } else {
-                    None
-                };
+                let tokens_per_sec = resp.tokens_per_sec;
                 self.emit(EngineEvent::TokenUsage {
                     prompt_tokens: tokens,
                     completion_tokens: resp.completion_tokens,
