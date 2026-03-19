@@ -6,6 +6,10 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::mpsc;
 
+/// Maximum number of output lines retained per background process.
+/// Older lines are dropped once this limit is reached.
+const MAX_LINES: usize = 10_000;
+
 struct Process {
     lines: Vec<String>,
     read_cursor: usize,
@@ -22,6 +26,17 @@ pub struct ProcessInfo {
     pub id: String,
     pub command: String,
     pub started_at: Instant,
+}
+
+impl Process {
+    fn push_line(&mut self, line: String) {
+        self.lines.push(line);
+        if self.lines.len() > MAX_LINES {
+            let drop = self.lines.len() - MAX_LINES;
+            self.lines.drain(..drop);
+            self.read_cursor = self.read_cursor.saturating_sub(drop);
+        }
+    }
 }
 
 /// Shared registry of background processes.
@@ -88,7 +103,7 @@ impl ProcessRegistry {
                             Ok(Some(line)) => {
                                 let mut map = registry.lock().unwrap();
                                 if let Some(p) = map.get_mut(&id2) {
-                                    p.lines.push(line);
+                                    p.push_line(line);
                                 }
                             }
                             _ => stdout_done = true,
@@ -99,7 +114,7 @@ impl ProcessRegistry {
                             Ok(Some(line)) => {
                                 let mut map = registry.lock().unwrap();
                                 if let Some(p) = map.get_mut(&id2) {
-                                    p.lines.push(line);
+                                    p.push_line(line);
                                 }
                             }
                             _ => stderr_done = true,
@@ -132,9 +147,11 @@ impl ProcessRegistry {
         let p = map
             .get_mut(id)
             .ok_or_else(|| format!("no process with id '{id}'"))?;
-        let new_lines = &p.lines[p.read_cursor..];
-        let output = new_lines.join("\n");
-        p.read_cursor = p.lines.len();
+        let output = p.lines[p.read_cursor..].join("\n");
+        // Drop already-read lines to free memory.
+        let consumed = p.lines.len();
+        p.lines.drain(..consumed);
+        p.read_cursor = 0;
         Ok((output, !p.finished, p.exit_code))
     }
 
@@ -152,9 +169,9 @@ impl ProcessRegistry {
         }
         // Give the background task a moment to finish
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let map = self.0.lock().unwrap();
+        let mut map = self.0.lock().unwrap();
         let p = map
-            .get(id)
+            .remove(id)
             .ok_or_else(|| format!("no process with id '{id}'"))?;
         Ok(p.lines.join("\n"))
     }

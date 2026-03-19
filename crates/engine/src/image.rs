@@ -1,12 +1,12 @@
 use base64::Engine;
 
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "svg"];
+const IMAGE_EXTENSIONS: &[&str] = &[
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg",
+];
 
 pub fn is_image_file(path: &str) -> bool {
     let lower = path.to_lowercase();
-    IMAGE_EXTENSIONS
-        .iter()
-        .any(|ext| lower.ends_with(&format!(".{ext}")))
+    IMAGE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
 }
 
 pub fn mime_from_extension(path: &str) -> &'static str {

@@ -1,7 +1,6 @@
 use super::web_cache;
 use super::web_shared::{
-    domain_pattern, extract_links, extract_text, extract_title, html_to_markdown, next_user_agent,
-    truncate_output,
+    domain_pattern, next_user_agent, truncate_output, ParsedHtml,
 };
 use super::{str_arg, Tool, ToolContext, ToolFuture, ToolResult};
 use base64::Engine;
@@ -261,29 +260,18 @@ impl WebFetchTool {
         }
 
         let is_html = content_type.contains("text/html") || content_type.contains("xhtml");
-        let title = if is_html { extract_title(&body) } else { None };
-        let links = if is_html {
-            extract_links(&body, &parsed_url)
-        } else {
-            vec![]
-        };
 
-        let content = match format.as_str() {
-            "text" => {
-                if is_html {
-                    extract_text(&body)
-                } else {
-                    body.clone()
-                }
-            }
-            "html" => body.clone(),
-            _ => {
-                if is_html {
-                    html_to_markdown(&body)
-                } else {
-                    body.clone()
-                }
-            }
+        // Parse HTML once and extract title, links, and content in a single pass.
+        let (title, links, content) = if is_html {
+            let parsed = ParsedHtml::parse(&body, Some(&parsed_url));
+            let content = match format.as_str() {
+                "text" => parsed.to_text(),
+                "html" => body.clone(),
+                _ => parsed.to_markdown(),
+            };
+            (parsed.title, parsed.links, content)
+        } else {
+            (None, vec![], body.clone())
         };
 
         let mut output = String::new();

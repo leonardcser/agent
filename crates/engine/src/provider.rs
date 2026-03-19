@@ -394,25 +394,11 @@ impl Provider {
             ));
         }
 
-        let system = Message {
-            role: Role::System,
-            content: Some(Content::text(system_text)),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: false,
-        };
-        let user = Message {
-            role: Role::User,
-            content: Some(Content::text(format!(
-                "Conversation to summarize:\n\n{}",
-                conversation
-            ))),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: false,
-        };
+        let system = Message::system(system_text);
+        let user = Message::user(Content::text(format!(
+            "Conversation to summarize:\n\n{}",
+            conversation
+        )));
         let resp = self
             .chat(
                 &[system, user],
@@ -490,13 +476,6 @@ impl Provider {
         }
     }
 
-    pub async fn describe_command(&self, command: &str, model: &str) -> Result<String, String> {
-        let prompt = format!(
-            "Describe what this shell command does in a short sentence (max 10 words). \
-             Reply with only the description, no quotes.\n\n{command}"
-        );
-        self.complete_short(&prompt, model, 128, 0.0, false).await
-    }
 
     pub async fn extract_web_content(
         &self,

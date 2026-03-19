@@ -429,6 +429,56 @@ pub struct Message {
     pub is_error: bool,
 }
 
+impl Message {
+    pub fn system(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::System,
+            content: Some(Content::text(text)),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        }
+    }
+
+    pub fn user(content: Content) -> Self {
+        Self {
+            role: Role::User,
+            content: Some(content),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        }
+    }
+
+    pub fn assistant(
+        content: Option<Content>,
+        reasoning: Option<String>,
+        tool_calls: Option<Vec<ToolCall>>,
+    ) -> Self {
+        Self {
+            role: Role::Assistant,
+            content,
+            reasoning_content: reasoning,
+            tool_calls,
+            tool_call_id: None,
+            is_error: false,
+        }
+    }
+
+    pub fn tool(call_id: String, content: impl Into<String>, is_error: bool) -> Self {
+        Self {
+            role: Role::Tool,
+            content: Some(Content::text(content)),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: Some(call_id),
+            is_error,
+        }
+    }
+}
+
 fn is_false(v: &bool) -> bool {
     !v
 }

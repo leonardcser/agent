@@ -177,12 +177,16 @@ pub fn trim_tool_output(content: &str, max_lines: usize) -> String {
     if content == "no matches found" {
         return content.to_string();
     }
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.len() <= max_lines {
+    let total = content.lines().count();
+    if total <= max_lines {
         return content.to_string();
     }
-    let mut out = lines[..max_lines].join("\n");
-    out.push_str(&format!("\n... (trimmed, {} lines total)", lines.len()));
+    let mut out: String = content
+        .lines()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .join("\n");
+    out.push_str(&format!("\n... (trimmed, {} lines total)", total));
     out
 }
 

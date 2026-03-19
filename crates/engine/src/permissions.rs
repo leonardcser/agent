@@ -188,13 +188,9 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
     }
 }
 
-fn config_dir() -> PathBuf {
-    crate::paths::config_dir()
-}
-
 impl Permissions {
     pub fn load() -> Self {
-        let path = config_dir().join("config.yaml");
+        let path = crate::paths::config_dir().join("config.yaml");
         let contents = std::fs::read_to_string(&path).unwrap_or_default();
         let raw: RawConfig = serde_yml::from_str(&contents).unwrap_or_default();
         Self {
@@ -783,12 +779,7 @@ fn has_output_redirection(cmd: &str) -> bool {
 
 // ── Base decision (without workspace restriction) ────────────────────────────
 
-fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
+use crate::tools::str_arg;
 
 fn decide_base(
     permissions: &Permissions,

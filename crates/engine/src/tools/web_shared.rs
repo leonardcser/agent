@@ -47,102 +47,168 @@ pub fn next_user_agent() -> &'static str {
     }
 }
 
-/// Extract text content from HTML, stripping scripts/styles/etc.
-pub fn extract_text(html: &str) -> String {
-    use scraper::{Html, Selector};
 
-    let doc = Html::parse_document(html);
-    let skip = Selector::parse("script, style, noscript, iframe, object, embed, svg").unwrap();
+const SKIP_ELEMENTS: &[&str] = &[
+    "script", "style", "noscript", "iframe", "object", "embed", "meta", "link", "svg",
+];
 
-    let mut text = String::new();
-    fn collect(node: scraper::ElementRef, skip: &Selector, out: &mut String) {
-        if skip.matches(&node) {
-            return;
+/// HTML void elements that must not have a closing tag.
+const VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+    "source", "track", "wbr",
+];
+
+/// Escape a string for use inside an HTML attribute value.
+fn escape_attr(val: &str, out: &mut String) {
+    for c in val.chars() {
+        match c {
+            '"' => out.push_str("&quot;"),
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
         }
-        for child in node.children() {
-            if let Some(t) = child.value().as_text() {
-                let trimmed = t.trim();
-                if !trimmed.is_empty() {
-                    if !out.is_empty() {
-                        out.push(' ');
-                    }
-                    out.push_str(trimmed);
+    }
+}
+
+/// Recursively serialize a DOM element to HTML, skipping non-content elements.
+fn serialize_clean(el: scraper::ElementRef, out: &mut String) {
+    let name = el.value().name();
+    if SKIP_ELEMENTS.contains(&name) {
+        return;
+    }
+    out.push('<');
+    out.push_str(name);
+    for (key, val) in el.value().attrs() {
+        out.push(' ');
+        out.push_str(key);
+        out.push_str("=\"");
+        escape_attr(val, out);
+        out.push('"');
+    }
+    if VOID_ELEMENTS.contains(&name) {
+        out.push_str(" />");
+        return;
+    }
+    out.push('>');
+    for child in el.children() {
+        if let Some(text) = child.value().as_text() {
+            out.push_str(text);
+        } else if let Some(child_el) = scraper::ElementRef::wrap(child) {
+            serialize_clean(child_el, out);
+        }
+    }
+    out.push_str("</");
+    out.push_str(name);
+    out.push('>');
+}
+
+/// Parse HTML once and extract all content (title, links, body) in a single pass.
+pub struct ParsedHtml {
+    pub title: Option<String>,
+    pub links: Vec<String>,
+    doc: scraper::Html,
+}
+
+impl ParsedHtml {
+    pub fn parse(html: &str, base_url: Option<&url::Url>) -> Self {
+        use scraper::{Html, Selector};
+        use std::collections::HashSet;
+
+        let doc = Html::parse_document(html);
+
+        let title = {
+            let sel = Selector::parse("title").unwrap();
+            doc.select(&sel)
+                .next()
+                .map(|el| el.text().collect::<String>().trim().to_string())
+        };
+
+        let links = if let Some(base) = base_url {
+            let sel = Selector::parse("a[href]").unwrap();
+            let mut seen = HashSet::new();
+            let mut links = Vec::new();
+            for el in doc.select(&sel) {
+                if links.len() >= 50 {
+                    break;
                 }
-            } else if let Some(el) = scraper::ElementRef::wrap(child) {
-                collect(el, skip, out);
+                let Some(href) = el.value().attr("href") else {
+                    continue;
+                };
+                let href = href.trim();
+                if href.is_empty()
+                    || href.starts_with("javascript:")
+                    || href.starts_with("mailto:")
+                    || href.starts_with("tel:")
+                    || href.starts_with('#')
+                {
+                    continue;
+                }
+                let Ok(mut resolved) = base.join(href) else {
+                    continue;
+                };
+                resolved.set_fragment(None);
+                let s = resolved.to_string();
+                if seen.insert(s.clone()) {
+                    links.push(s);
+                }
+            }
+            links
+        } else {
+            vec![]
+        };
+
+        Self { title, links, doc }
+    }
+
+    /// Convert to markdown, stripping non-content elements in a single pass.
+    pub fn to_markdown(&self) -> String {
+        use scraper::Selector;
+
+        // Build cleaned HTML by walking the tree and skipping unwanted elements.
+        let mut cleaned = String::new();
+        if let Some(root) = self.doc.select(&Selector::parse("html").unwrap()).next() {
+            serialize_clean(root, &mut cleaned);
+        }
+
+        htmd::convert(&cleaned).unwrap_or_else(|_| self.to_text())
+    }
+
+    /// Extract text content, stripping all tags.
+    pub fn to_text(&self) -> String {
+        use scraper::Selector;
+
+        let skip =
+            Selector::parse("script, style, noscript, iframe, object, embed, svg").unwrap();
+        let body_sel = Selector::parse("body").unwrap();
+
+        let mut text = String::new();
+        fn collect(node: scraper::ElementRef, skip: &Selector, out: &mut String) {
+            if skip.matches(&node) {
+                return;
+            }
+            for child in node.children() {
+                if let Some(t) = child.value().as_text() {
+                    let trimmed = t.trim();
+                    if !trimmed.is_empty() {
+                        if !out.is_empty() {
+                            out.push(' ');
+                        }
+                        out.push_str(trimmed);
+                    }
+                } else if let Some(el) = scraper::ElementRef::wrap(child) {
+                    collect(el, skip, out);
+                }
             }
         }
-    }
 
-    if let Some(body) = doc.select(&Selector::parse("body").unwrap()).next() {
-        collect(body, &skip, &mut text);
-    }
-    text
-}
-
-/// Convert HTML to markdown, stripping non-content elements first.
-pub fn html_to_markdown(html: &str) -> String {
-    use scraper::{Html, Selector};
-
-    // Remove script/style/etc before conversion
-    let doc = Html::parse_document(html);
-    let remove =
-        Selector::parse("script, style, noscript, iframe, object, embed, meta, link").unwrap();
-    let mut cleaned = doc.html();
-    for el in doc.select(&remove) {
-        cleaned = cleaned.replace(&el.html(), "");
-    }
-
-    htmd::convert(&cleaned).unwrap_or_else(|_| extract_text(html))
-}
-
-/// Extract title from HTML.
-pub fn extract_title(html: &str) -> Option<String> {
-    use scraper::{Html, Selector};
-    let doc = Html::parse_document(html);
-    let sel = Selector::parse("title").unwrap();
-    doc.select(&sel)
-        .next()
-        .map(|el| el.text().collect::<String>().trim().to_string())
-}
-
-/// Extract up to 50 deduplicated, canonicalized links from HTML.
-pub fn extract_links(html: &str, base_url: &url::Url) -> Vec<String> {
-    use scraper::{Html, Selector};
-    use std::collections::HashSet;
-
-    let doc = Html::parse_document(html);
-    let sel = Selector::parse("a[href]").unwrap();
-    let mut seen = HashSet::new();
-    let mut links = Vec::new();
-
-    for el in doc.select(&sel) {
-        if links.len() >= 50 {
-            break;
+        if let Some(body) = self.doc.select(&body_sel).next() {
+            collect(body, &skip, &mut text);
         }
-        let Some(href) = el.value().attr("href") else {
-            continue;
-        };
-        let href = href.trim();
-        if href.is_empty()
-            || href.starts_with("javascript:")
-            || href.starts_with("mailto:")
-            || href.starts_with("tel:")
-            || href.starts_with('#')
-        {
-            continue;
-        }
-        let Ok(mut resolved) = base_url.join(href) else {
-            continue;
-        };
-        resolved.set_fragment(None);
-        let s = resolved.to_string();
-        if seen.insert(s.clone()) {
-            links.push(s);
-        }
+        text
     }
-    links
 }
+
 
 /// Truncate output to max lines/bytes, appending a note if truncated.
 pub fn truncate_output(text: &str, max_lines: usize, max_bytes: usize) -> String {

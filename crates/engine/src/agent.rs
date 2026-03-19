@@ -183,27 +183,13 @@ fn spawn_btw_request(
         let cancel = tokio_util::sync::CancellationToken::new();
 
         let mut messages = Vec::with_capacity(history.len() + 2);
-        messages.push(protocol::Message {
-            role: protocol::Role::System,
-            content: Some(protocol::Content::text(
-                "You are a helpful assistant. The user is asking a quick side question \
-                 while working on something else. Answer concisely and directly. \
-                 You have the conversation history for context.",
-            )),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: false,
-        });
+        messages.push(protocol::Message::system(
+            "You are a helpful assistant. The user is asking a quick side question \
+             while working on something else. Answer concisely and directly. \
+             You have the conversation history for context.",
+        ));
         messages.extend(history);
-        messages.push(protocol::Message {
-            role: protocol::Role::User,
-            content: Some(protocol::Content::text(&question)),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: false,
-        });
+        messages.push(protocol::Message::user(protocol::Content::text(&question)));
 
         let content = match provider
             .chat(&messages, &[], &model, reasoning_effort, &cancel, None)
@@ -250,7 +236,7 @@ fn spawn_predict_request(
             }
             // Truncate each message to keep the request small.
             let truncated = if text.len() > 500 {
-                &text[text.len() - 500..]
+                &text[text.floor_char_boundary(text.len() - 500)..]
             } else {
                 &text
             };
@@ -268,22 +254,8 @@ fn spawn_predict_request(
         );
 
         let messages = vec![
-            protocol::Message {
-                role: protocol::Role::System,
-                content: Some(protocol::Content::text(system)),
-                reasoning_content: None,
-                tool_calls: None,
-                tool_call_id: None,
-                is_error: false,
-            },
-            protocol::Message {
-                role: protocol::Role::User,
-                content: Some(protocol::Content::text(&user_msg)),
-                reasoning_content: None,
-                tool_calls: None,
-                tool_call_id: None,
-                is_error: false,
-            },
+            protocol::Message::system(system),
+            protocol::Message::user(protocol::Content::text(&user_msg)),
         ];
 
         if let Ok(Ok(resp)) = tokio::time::timeout(
@@ -406,35 +378,14 @@ impl<'a> Turn<'a> {
         }
     }
 
-    fn send_snapshot(&self) {
-        let _ = self.event_tx.send(EngineEvent::Messages {
-            turn_id: self.turn_id,
-            messages: self.messages[1..].to_vec(),
-        });
-    }
-
     /// Main agentic loop for a single turn.
     async fn run(&mut self, content: Content, history: Vec<Message>) {
         self.messages = Vec::with_capacity(history.len() + 2);
-        self.messages.push(Message {
-            role: Role::System,
-            content: Some(Content::text(self.system_prompt)),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: false,
-        });
+        self.messages.push(Message::system(self.system_prompt));
         self.messages.extend(history);
 
         if !content.is_empty() {
-            self.messages.push(Message {
-                role: Role::User,
-                content: Some(content),
-                reasoning_content: None,
-                tool_calls: None,
-                tool_call_id: None,
-                is_error: false,
-            });
+            self.messages.push(Message::user(content));
         }
 
         let mut first = true;
@@ -480,7 +431,14 @@ impl<'a> Turn<'a> {
                         "agent_stop",
                         &serde_json::json!({"reason": "llm_error", "error": e.to_string()}),
                     );
-                    self.send_snapshot();
+                    // Send final history so the TUI can persist tool results
+                    // accumulated before the error.
+                    self.messages.remove(0);
+                    let msgs = std::mem::take(&mut self.messages);
+                    self.emit(EngineEvent::TurnComplete {
+                        turn_id: self.turn_id,
+                        messages: msgs,
+                    });
                     self.emit(EngineEvent::TurnError {
                         message: e.to_string(),
                     });
@@ -539,15 +497,7 @@ impl<'a> Turn<'a> {
                     continue;
                 }
 
-                self.messages.push(Message {
-                    role: Role::Assistant,
-                    content,
-                    reasoning_content: reasoning,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    is_error: false,
-                });
-                self.send_snapshot();
+                self.messages.push(Message::assistant(content, reasoning, None));
                 self.messages.remove(0);
                 let msgs = std::mem::take(&mut self.messages);
                 self.emit(EngineEvent::TurnComplete {
@@ -559,15 +509,8 @@ impl<'a> Turn<'a> {
 
             // Has tool calls — execute them
             empty_retries = 0;
-            self.messages.push(Message {
-                role: Role::Assistant,
-                content,
-                reasoning_content: reasoning,
-                tool_calls: Some(tool_calls.clone()),
-                tool_call_id: None,
-                is_error: false,
-            });
-            self.send_snapshot();
+            self.messages
+                .push(Message::assistant(content, reasoning, Some(tool_calls.clone())));
 
             for tc in &tool_calls {
                 self.drain_commands();
@@ -641,19 +584,12 @@ impl<'a> Turn<'a> {
                 if let Some(ref msg) = confirm_msg {
                     tool_content.push_str(&format!("\n\nUser message: {msg}"));
                 }
-                self.messages.push(Message {
-                    role: Role::Tool,
-                    content: Some(Content::text(tool_content)),
-                    reasoning_content: None,
-                    tool_calls: None,
-                    tool_call_id: Some(tc.id.clone()),
-                    is_error,
-                });
+                self.messages
+                    .push(Message::tool(tc.id.clone(), tool_content, is_error));
                 self.emit(EngineEvent::ToolFinished {
                     call_id: tc.id.clone(),
                     result: ToolOutcome { content, is_error },
                 });
-                self.send_snapshot();
             }
         }
     }
@@ -667,14 +603,7 @@ impl<'a> Turn<'a> {
                         text: text.clone(),
                         count: 1,
                     });
-                    self.messages.push(Message {
-                        role: Role::User,
-                        content: Some(Content::text(text)),
-                        reasoning_content: None,
-                        tool_calls: None,
-                        tool_call_id: None,
-                        is_error: false,
-                    });
+                    self.messages.push(Message::user(Content::text(text)));
                 }
                 Ok(UiCommand::Unsteer { count }) => {
                     // Remove the last `count` steered user messages.
@@ -794,16 +723,8 @@ impl<'a> Turn<'a> {
                 let approval_patterns = tool.approval_patterns(args);
 
                 let cmd_summary = if tool_name == "bash" {
-                    let cmd = tools::str_arg(args, "command");
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
-                        self.provider.describe_command(&cmd, &self.model),
-                    )
-                    .await
-                    {
-                        Ok(Ok(s)) => Some(s),
-                        _ => None,
-                    }
+                    let desc = tools::str_arg(args, "description");
+                    if desc.is_empty() { None } else { Some(desc) }
                 } else {
                     None
                 };
@@ -906,14 +827,8 @@ impl<'a> Turn<'a> {
     }
 
     fn push_tool_result(&mut self, tool_call_id: &str, content: &str, is_error: bool) {
-        self.messages.push(Message {
-            role: Role::Tool,
-            content: Some(Content::text(content)),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: Some(tool_call_id.to_string()),
-            is_error,
-        });
+        self.messages
+            .push(Message::tool(tool_call_id.to_string(), content, is_error));
         self.emit(EngineEvent::ToolFinished {
             call_id: tool_call_id.to_string(),
             result: ToolOutcome {
@@ -957,16 +872,9 @@ async fn compact_history(
     let to_summarize = &messages[..cut];
     let summary = provider.compact(to_summarize, model, focus, cancel).await?;
 
-    let mut new_messages = vec![Message {
-        role: Role::User,
-        content: Some(Content::text(format!(
-            "Summary of prior conversation:\n\n{summary}"
-        ))),
-        reasoning_content: None,
-        tool_calls: None,
-        tool_call_id: None,
-        is_error: false,
-    }];
+    let mut new_messages = vec![Message::user(Content::text(format!(
+        "Summary of prior conversation:\n\n{summary}"
+    )))];
     new_messages.extend_from_slice(&messages[cut..]);
     Ok(new_messages)
 }
