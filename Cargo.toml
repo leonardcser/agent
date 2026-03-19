@@ -17,7 +17,7 @@ tui = { path = "crates/tui" }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "charset", "http2", "native-tls"] }
 
 [profile.release]
 strip = true
