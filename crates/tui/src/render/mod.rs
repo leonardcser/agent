@@ -876,7 +876,11 @@ impl Screen {
     }
 
     pub fn set_task_label(&mut self, label: String) {
-        self.task_label = Some(label);
+        if label.trim().is_empty() {
+            self.task_label = None;
+        } else {
+            self.task_label = Some(label);
+        }
         self.prompt.dirty = true;
     }
 
