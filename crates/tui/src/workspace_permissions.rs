@@ -1,6 +1,5 @@
 use crate::config;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -20,9 +19,52 @@ struct Store {
     rules: Vec<Rule>,
 }
 
+/// Encode a cwd path as a directory name.
+///
+/// `/` becomes `-`, literal `-` becomes `--`. Leading `-` from the root `/` is stripped.
+/// This is reversible and collision-free.
+fn encode_path(cwd: &str) -> String {
+    let mut out = String::with_capacity(cwd.len());
+    for c in cwd.chars() {
+        match c {
+            '/' => out.push('-'),
+            '-' => out.push_str("--"),
+            c => out.push(c),
+        }
+    }
+    // Strip the leading `-` produced by the root `/`.
+    if out.starts_with('-') && !out.starts_with("--") {
+        out.remove(0);
+    }
+    out
+}
+
+#[cfg(test)]
+fn decode_path(encoded: &str) -> String {
+    let full = format!("-{encoded}"); // restore leading `/`
+    let mut out = String::with_capacity(full.len());
+    let mut chars = full.chars();
+    while let Some(c) = chars.next() {
+        if c == '-' {
+            if chars.as_str().starts_with('-') {
+                chars.next();
+                out.push('-');
+            } else {
+                out.push('/');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn workspaces_dir() -> PathBuf {
+    config::state_dir().join("workspaces")
+}
+
 fn workspace_dir(cwd: &str) -> PathBuf {
-    let hash = format!("{:x}", Sha256::digest(cwd.as_bytes()));
-    config::state_dir().join("workspaces").join(&hash[..16])
+    workspaces_dir().join(encode_path(cwd))
 }
 
 fn permissions_path(cwd: &str) -> PathBuf {
@@ -112,4 +154,49 @@ pub fn into_approvals(rules: &[Rule]) -> (HashMap<String, Vec<glob::Pattern>>, V
         }
     }
     (tool_map, dirs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_decode_roundtrip() {
+        let paths = [
+            "/Users/leo/dev/rust/agent",
+            "/Users/leo/dev-rust/agent",
+            "/tmp/foo",
+            "/a/b-c/d",
+            "/a/b/c/d",
+            "/home/user/my--project",
+        ];
+        for path in paths {
+            let encoded = encode_path(path);
+            let decoded = decode_path(&encoded);
+            assert_eq!(
+                decoded, path,
+                "roundtrip failed for {path} (encoded: {encoded})"
+            );
+        }
+    }
+
+    #[test]
+    fn encode_no_collision() {
+        // These previously collided with naive `-` replacement.
+        let a = encode_path("/a/b-c/d");
+        let b = encode_path("/a/b/c/d");
+        assert_ne!(a, b, "collision between /a/b-c/d and /a/b/c/d");
+    }
+
+    #[test]
+    fn encode_readable() {
+        assert_eq!(
+            encode_path("/Users/leo/dev/rust/agent"),
+            "Users-leo-dev-rust-agent"
+        );
+        assert_eq!(
+            encode_path("/Users/leo/dev-rust/agent"),
+            "Users-leo-dev--rust-agent"
+        );
+    }
 }

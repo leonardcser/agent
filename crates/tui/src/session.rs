@@ -169,9 +169,14 @@ pub fn time_ago(ts_ms: u64, now_ms: u64) -> String {
 
 // ── Save / Load / Delete ─────────────────────────────────────────────────────
 
+/// Return the directory for a session on disk.
+pub fn dir_for(session: &Session) -> PathBuf {
+    sessions_dir().join(&session.id)
+}
+
 pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
     let _perf = crate::perf::begin("session_save");
-    let session_dir = sessions_dir().join(&session.id);
+    let session_dir = dir_for(session);
     let _ = fs::create_dir_all(&session_dir);
     let ts = now_ms();
 
@@ -353,58 +358,6 @@ fn session_updated_at(meta: &SessionMeta) -> u64 {
 
 fn sessions_dir() -> PathBuf {
     config::state_dir().join("sessions")
-}
-
-/// Migrate legacy flat-file sessions to the new directory layout.
-/// Each `<id>.json` + optional `<id>.meta.json` + optional `<id>.blobs/`
-/// becomes `<id>/session.json` + `<id>/meta.json` + `<id>/blobs/`.
-pub fn migrate_legacy_sessions() {
-    let dir = sessions_dir();
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return;
-    };
-
-    let ids: Vec<String> = entries
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name();
-            let s = name.to_str()?;
-            if s.ends_with(".meta.json") || s.ends_with(".tmp") || !s.ends_with(".json") {
-                return None;
-            }
-            // Only migrate flat files, not directories.
-            if e.path().is_dir() {
-                return None;
-            }
-            Some(s.trim_end_matches(".json").to_string())
-        })
-        .collect();
-
-    for id in ids {
-        let session_dir = dir.join(&id);
-        if session_dir.exists() {
-            continue; // already migrated or name collision
-        }
-        if fs::create_dir_all(&session_dir).is_err() {
-            continue;
-        }
-
-        // Move main session file.
-        let src = dir.join(format!("{id}.json"));
-        let _ = fs::rename(&src, session_dir.join("session.json"));
-
-        // Move sidecar metadata.
-        let meta_src = dir.join(format!("{id}.meta.json"));
-        if meta_src.exists() {
-            let _ = fs::rename(&meta_src, session_dir.join("meta.json"));
-        }
-
-        // Move blobs directory.
-        let blobs_src = dir.join(format!("{id}.blobs"));
-        if blobs_src.is_dir() {
-            let _ = fs::rename(&blobs_src, session_dir.join("blobs"));
-        }
-    }
 }
 
 pub fn print_resume_hint(session_id: &str) {

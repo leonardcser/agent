@@ -27,6 +27,7 @@ impl App {
             api_base: Some(self.api_base.clone()),
             api_key: Some(self.api_key()),
             session_id: self.session.id.clone(),
+            session_dir: crate::session::dir_for(&self.session),
             model_config_overrides: None,
             permission_overrides: None,
         });
@@ -148,6 +149,7 @@ impl App {
             api_base: Some(api_base),
             api_key: Some(api_key),
             session_id: self.session.id.clone(),
+            session_dir: crate::session::dir_for(&self.session),
             model_config_overrides,
             permission_overrides,
         });

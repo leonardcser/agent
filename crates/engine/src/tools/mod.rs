@@ -57,6 +57,7 @@ pub struct ToolContext<'a> {
     pub provider: &'a Provider,
     pub model: &'a str,
     pub session_id: &'a str,
+    pub session_dir: &'a std::path::Path,
 }
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;

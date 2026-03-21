@@ -38,7 +38,7 @@ impl Tool for ExitPlanModeTool {
         Box::pin(async move {
             let summary = str_arg(&args, "plan_summary");
 
-            match crate::plan::save(ctx.session_id, &summary) {
+            match crate::plan::save(ctx.session_dir, ctx.session_id, &summary) {
                 Ok(path) => {
                     let display_path = path.display().to_string();
                     ToolResult {

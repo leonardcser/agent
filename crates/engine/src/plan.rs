@@ -159,15 +159,15 @@ fn generate_name(session_id: &str) -> String {
     format!("{adj}-{noun}-{verb}")
 }
 
-/// Directory where plan files are stored.
-pub fn plans_dir(session_id: &str) -> PathBuf {
-    crate::state_dir().join("plans").join(session_id)
+/// Directory where plan files are stored for a session.
+pub fn plans_dir(session_dir: &Path) -> PathBuf {
+    session_dir.join("plans")
 }
 
 /// Write a plan to disk and return the file path.
 /// If the generated name already exists, appends -2, -3, etc.
-pub fn save(session_id: &str, content: &str) -> std::io::Result<PathBuf> {
-    let dir = plans_dir(session_id);
+pub fn save(session_dir: &Path, session_id: &str, content: &str) -> std::io::Result<PathBuf> {
+    let dir = plans_dir(session_dir);
     fs::create_dir_all(&dir)?;
 
     let base = generate_name(session_id);
@@ -183,8 +183,8 @@ pub fn save(session_id: &str, content: &str) -> std::io::Result<PathBuf> {
 }
 
 /// List all plan files for a session.
-pub fn list(session_id: &str) -> Vec<PathBuf> {
-    let dir = plans_dir(session_id);
+pub fn list(session_dir: &Path) -> Vec<PathBuf> {
+    let dir = plans_dir(session_dir);
     let mut plans: Vec<PathBuf> = fs::read_dir(&dir)
         .into_iter()
         .flatten()
@@ -197,7 +197,7 @@ pub fn list(session_id: &str) -> Vec<PathBuf> {
 }
 
 /// Check if a given file path is a plan file for the given session.
-pub fn is_plan_file(session_id: &str, file_path: &str) -> bool {
-    let dir = plans_dir(session_id);
+pub fn is_plan_file(session_dir: &Path, file_path: &str) -> bool {
+    let dir = plans_dir(session_dir);
     Path::new(file_path).starts_with(&dir)
 }

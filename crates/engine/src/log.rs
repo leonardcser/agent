@@ -37,16 +37,44 @@ pub fn parse_level(s: &str) -> Option<Level> {
     }
 }
 
+/// Maximum number of log files to keep.
+const MAX_LOG_FILES: usize = 20;
+
 fn log_path() -> &'static PathBuf {
     LOG_PATH.get_or_init(|| {
         let dir = dirs();
         let _ = fs::create_dir_all(&dir);
+        rotate_logs(&dir);
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         dir.join(format!("{ts}-{}.jsonl", std::process::id()))
     })
+}
+
+/// Keep only the most recent `MAX_LOG_FILES` log files, delete the rest.
+fn rotate_logs(dir: &std::path::Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut logs: Vec<_> = entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            Some((name, e.path()))
+        })
+        .collect();
+    if logs.len() <= MAX_LOG_FILES {
+        return;
+    }
+    // Sort by name (timestamp prefix) ascending.
+    logs.sort_by(|a, b| a.0.cmp(&b.0));
+    let to_remove = logs.len() - MAX_LOG_FILES;
+    for (_, path) in &logs[..to_remove] {
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn dirs() -> PathBuf {

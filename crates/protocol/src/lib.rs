@@ -296,6 +296,8 @@ pub enum UiCommand {
         api_key: Option<String>,
         /// Session ID for plan file storage.
         session_id: String,
+        /// On-disk directory for this session (date-bucketed).
+        session_dir: std::path::PathBuf,
         /// Per-turn model parameter overrides (from custom commands).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         model_config_overrides: Option<ModelConfigOverrides>,

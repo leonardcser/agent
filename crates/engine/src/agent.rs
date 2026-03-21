@@ -8,6 +8,7 @@ use protocol::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
@@ -38,7 +39,7 @@ pub async fn engine_task(
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id, model_config_overrides, permission_overrides } => {
+                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id, session_dir, model_config_overrides, permission_overrides } => {
                         predict_cancel.cancel();
                         let mut provider = build_provider_with_overrides(
                             &config, &client,
@@ -72,6 +73,7 @@ pub async fn engine_task(
                             model,
                             system_prompt: &config.system_prompt,
                             session_id,
+                            session_dir,
                         };
                         turn.run(input_content, history).await;
                     }
@@ -323,6 +325,7 @@ struct Turn<'a> {
     model: String,
     system_prompt: &'a str,
     session_id: String,
+    session_dir: PathBuf,
 }
 
 impl<'a> Turn<'a> {
@@ -568,6 +571,7 @@ impl<'a> Turn<'a> {
                         provider: &self.provider,
                         model: &self.model,
                         session_id: &self.session_id,
+                        session_dir: &self.session_dir,
                     };
                     tool.execute(args.clone(), &ctx).await
                 };
@@ -707,7 +711,7 @@ impl<'a> Turn<'a> {
         // Auto-allow edit_file on plan files in Plan mode.
         if self.mode == Mode::Plan && tool_name == "edit_file" {
             if let Some(path) = args.get("file_path").and_then(|v| v.as_str()) {
-                if crate::plan::is_plan_file(&self.session_id, path) {
+                if crate::plan::is_plan_file(&self.session_dir, path) {
                     return PermissionResult::Allow(None);
                 }
             }

@@ -40,7 +40,6 @@ async fn main() {
     }));
 
     let args = Args::parse();
-    tui::session::migrate_legacy_sessions();
     let cfg = tui::config::Config::load();
     let app_state = tui::state::State::load();
     let available_models = cfg.resolve_models();
