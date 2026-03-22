@@ -849,7 +849,7 @@ impl App {
 
     fn open_blocking_dialog(
         &mut self,
-        dialog: Box<dyn render::Dialog>,
+        mut dialog: Box<dyn render::Dialog>,
         active_dialog: &mut Option<Box<dyn render::Dialog>>,
     ) {
         // Flush any pending blocks (e.g. Thinking) to scroll mode so they
@@ -861,6 +861,8 @@ impl App {
             self.screen.erase_prompt();
         }
         self.screen.set_show_tool_in_dialog(fits);
+        // Share the kill ring so Ctrl+K/Y work across input ↔ dialog.
+        dialog.set_kill_ring(self.input.take_kill_ring());
         *active_dialog = Some(dialog);
     }
 }

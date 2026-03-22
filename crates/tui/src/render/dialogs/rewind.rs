@@ -1,3 +1,4 @@
+use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{crlf, draw_bar};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -47,30 +48,34 @@ impl super::Dialog for RewindDialog {
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {
-        match code {
-            KeyCode::Enter => {
-                return Some(DialogResult::Rewind {
-                    block_idx: Some(self.turns[self.list.selected].0),
-                    restore_vim_insert: self.restore_vim_insert,
-                })
+        let n = self.turns.len();
+        match nav_lookup(code, mods) {
+            Some(NavAction::Confirm) => Some(DialogResult::Rewind {
+                block_idx: Some(self.turns[self.list.selected].0),
+                restore_vim_insert: self.restore_vim_insert,
+            }),
+            Some(NavAction::Dismiss) => Some(DialogResult::Rewind {
+                block_idx: None,
+                restore_vim_insert: self.restore_vim_insert,
+            }),
+            Some(NavAction::Up) => {
+                self.list.select_prev(n);
+                None
             }
-            KeyCode::Esc => {
-                return Some(DialogResult::Rewind {
-                    block_idx: None,
-                    restore_vim_insert: self.restore_vim_insert,
-                })
+            Some(NavAction::Down) => {
+                self.list.select_next(n);
+                None
             }
-            KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => {
-                return Some(DialogResult::Rewind {
-                    block_idx: None,
-                    restore_vim_insert: self.restore_vim_insert,
-                })
+            Some(NavAction::PageUp) => {
+                self.list.page_up();
+                None
             }
-            KeyCode::Up | KeyCode::Char('k') => self.list.select_prev(),
-            KeyCode::Down | KeyCode::Char('j') => self.list.select_next(self.turns.len()),
-            _ => {}
+            Some(NavAction::PageDown) => {
+                self.list.page_down(n);
+                None
+            }
+            _ => None,
         }
-        None
     }
 
     fn draw(&mut self, start_row: u16, sync_started: bool) {
@@ -120,7 +125,7 @@ impl super::Dialog for RewindDialog {
 
         crlf(&mut out);
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(" enter: select  esc: cancel"));
+        let _ = out.queue(Print(&hints::join(&[hints::SELECT, hints::CANCEL])));
         let _ = out.queue(SetAttribute(Attribute::Reset));
         end_dialog_draw(&mut out);
     }

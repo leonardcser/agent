@@ -1,3 +1,4 @@
+use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{crlf, draw_bar};
 use crate::{theme, workspace_permissions};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -26,6 +27,7 @@ pub struct PermissionsDialog {
     items: Vec<Item>,
     list: ListState,
     pending_d: bool,
+    vim_enabled: bool,
 }
 
 /// Number of non-item rows: bar + empty-line above hint + hint line.
@@ -36,6 +38,7 @@ impl PermissionsDialog {
         session_entries: Vec<PermissionEntry>,
         workspace_rules: Vec<workspace_permissions::Rule>,
         max_height: Option<u16>,
+        vim_enabled: bool,
     ) -> Self {
         let items = build_items(&session_entries, &workspace_rules);
         let total = display_row_count(&session_entries, &workspace_rules, &items);
@@ -46,6 +49,7 @@ impl PermissionsDialog {
             items,
             list,
             pending_d: false,
+            vim_enabled,
         }
     }
 
@@ -110,35 +114,42 @@ impl super::Dialog for PermissionsDialog {
             }
         }
 
+        // Permissions-specific: q to close, d to delete, backspace to delete.
         match (code, mods) {
-            (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
-                return Some(self.close_result())
-            }
-            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                return Some(self.close_result())
-            }
-            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                self.list.select_prev();
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                self.list.select_next(self.items.len());
-            }
-            (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
-                self.list.page_up();
-            }
-            (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => {
-                self.list.page_down(self.items.len());
-            }
+            (KeyCode::Char('q'), KeyModifiers::NONE) => return Some(self.close_result()),
             (KeyCode::Char('d'), KeyModifiers::NONE) => {
                 self.pending_d = true;
                 self.list.dirty = true;
+                return None;
             }
             (KeyCode::Backspace, _) => {
                 self.delete_selected();
+                return None;
             }
             _ => {}
         }
-        None
+
+        let n = self.items.len();
+        match nav_lookup(code, mods) {
+            Some(NavAction::Dismiss) => Some(self.close_result()),
+            Some(NavAction::Up) => {
+                self.list.select_prev(n);
+                None
+            }
+            Some(NavAction::Down) => {
+                self.list.select_next(n);
+                None
+            }
+            Some(NavAction::PageUp) => {
+                self.list.page_up();
+                None
+            }
+            Some(NavAction::PageDown) => {
+                self.list.page_down(n);
+                None
+            }
+            _ => None,
+        }
     }
 
     fn draw(&mut self, start_row: u16, sync_started: bool) {
@@ -187,11 +198,11 @@ impl super::Dialog for PermissionsDialog {
         crlf(&mut out);
         let _ = out.queue(SetAttribute(Attribute::Dim));
         let hint = if self.pending_d {
-            " press d to confirm delete  esc: close"
+            hints::join(&[hints::DD_PENDING, hints::CLOSE])
         } else {
-            " backspace/dd: remove  esc: close"
+            hints::join(&[hints::dd_delete(self.vim_enabled), hints::CLOSE])
         };
-        let _ = out.queue(Print(hint));
+        let _ = out.queue(Print(&hint));
         let _ = out.queue(SetAttribute(Attribute::Reset));
         end_dialog_draw(&mut out);
     }

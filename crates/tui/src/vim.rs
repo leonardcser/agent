@@ -10,7 +10,7 @@ pub enum ViMode {
 }
 
 /// What the caller should do after a key is processed.
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Action {
     /// Key consumed, buf/cpos may have changed.
     Consumed,
@@ -133,6 +133,17 @@ impl Vim {
         self.reset_counts();
     }
 
+    /// Get the current register contents (for syncing with the shared kill ring).
+    pub fn register(&self) -> &str {
+        &self.register
+    }
+
+    /// Set the register contents (for syncing from the shared kill ring).
+    pub fn set_register(&mut self, text: String) {
+        self.register = text;
+        self.register_linewise = false;
+    }
+
     /// Process a key event. Mutates `buf`, `cpos`, and `attachments` as needed.
     pub fn handle_key(
         &mut self,
@@ -152,9 +163,9 @@ impl Vim {
     fn handle_insert(
         &mut self,
         key: KeyEvent,
-        buf: &mut String,
+        buf: &mut str,
         cpos: &mut usize,
-        attachments: &mut [AttachmentId],
+        _attachments: &mut [AttachmentId],
     ) -> Action {
         match key {
             // Esc or Ctrl+[ → normal mode
@@ -169,30 +180,12 @@ impl Vim {
                 self.enter_normal(buf, cpos);
                 Action::Consumed
             }
-            // Ctrl+W → delete word backward
+            // Ctrl+W / Ctrl+U → pass through to main handler (kill ring support).
             KeyEvent {
-                code: KeyCode::Char('w'),
+                code: KeyCode::Char('w' | 'u'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
-            } => {
-                self.save_undo(buf, *cpos, attachments);
-                let target = word_backward_pos(buf, *cpos, CharClass::Word);
-                buf.drain(target..*cpos);
-                *cpos = target;
-                Action::Consumed
-            }
-            // Ctrl+U → delete to line start
-            KeyEvent {
-                code: KeyCode::Char('u'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.save_undo(buf, *cpos, attachments);
-                let start = line_start(buf, *cpos);
-                buf.drain(start..*cpos);
-                *cpos = start;
-                Action::Consumed
-            }
+            } => Action::Passthrough,
             // Ctrl+H → backspace (same as Backspace, but let caller handle)
             KeyEvent {
                 code: KeyCode::Char('h'),
@@ -213,14 +206,17 @@ impl Vim {
         cpos: &mut usize,
         attachments: &mut Vec<AttachmentId>,
     ) -> Action {
-        // Ctrl+C / Ctrl+D always pass through for cancel.
+        // Ctrl+key handling in normal mode.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('c' | 'd' | 'u' | 't') => return Action::Passthrough,
                 KeyCode::Char('r') => {
                     self.redo(buf, cpos, attachments);
                     return Action::Consumed;
                 }
+                // Pass through keys that the main handler needs.
+                KeyCode::Char(
+                    'c' | 'd' | 'u' | 't' | 'k' | 'l' | 'f' | 'b' | 'j' | 'n' | 'p' | 's',
+                ) => return Action::Passthrough,
                 _ => return Action::Consumed,
             }
         }
@@ -1353,7 +1349,7 @@ fn move_right_inclusive(buf: &str, cpos: usize) -> usize {
     next_char_boundary(buf, cpos).min(buf.len())
 }
 
-fn word_forward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
+pub(crate) fn word_forward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
     let chars: Vec<(usize, char)> = buf[cpos..].char_indices().collect();
     if chars.is_empty() {
         return cpos;
@@ -1958,13 +1954,14 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_ctrl_w() {
+    fn test_insert_ctrl_w_passthrough() {
+        // Ctrl+W in insert mode passes through to the main handler (kill ring).
         let mut vim = Vim::new(); // starts in Insert
         let mut buf = "hello world".to_string();
         let mut cpos = buf.len();
         let mut attachments = Vec::new();
-        vim.handle_key(key_ctrl('w'), &mut buf, &mut cpos, &mut attachments);
-        assert_eq!(buf, "hello ");
+        let action = vim.handle_key(key_ctrl('w'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(action, Action::Passthrough);
     }
 
     #[test]

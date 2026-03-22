@@ -6,6 +6,7 @@ pub mod custom_commands;
 pub mod fuzzy;
 pub mod input;
 pub mod instructions;
+pub mod keymap;
 pub mod metrics;
 pub mod perf;
 pub mod render;

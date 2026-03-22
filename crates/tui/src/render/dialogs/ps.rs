@@ -1,3 +1,4 @@
+use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{crlf, draw_bar};
 use crate::{theme, utils::format_duration};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -56,27 +57,37 @@ impl super::Dialog for PsDialog {
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {
-        match (code, mods) {
-            (KeyCode::Esc, _) => return Some(DialogResult::PsClosed),
-            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                return Some(DialogResult::PsClosed)
+        // Ps-specific: backspace kills a process.
+        if code == KeyCode::Backspace {
+            if let Some(p) = self.procs.get(self.list.selected) {
+                self.killed.push(p.id.clone());
+                self.procs = Self::fetch_procs(&self.registry, &self.killed);
+                self.list.set_items(self.procs.len().max(1));
             }
-            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                self.list.select_prev();
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                self.list.select_next(self.procs.len());
-            }
-            (KeyCode::Backspace, _) => {
-                if let Some(p) = self.procs.get(self.list.selected) {
-                    self.killed.push(p.id.clone());
-                    self.procs = Self::fetch_procs(&self.registry, &self.killed);
-                    self.list.set_items(self.procs.len().max(1));
-                }
-            }
-            _ => {}
+            return None;
         }
-        None
+
+        let n = self.procs.len();
+        match nav_lookup(code, mods) {
+            Some(NavAction::Dismiss) => Some(DialogResult::PsClosed),
+            Some(NavAction::Up) => {
+                self.list.select_prev(n);
+                None
+            }
+            Some(NavAction::Down) => {
+                self.list.select_next(n);
+                None
+            }
+            Some(NavAction::PageUp) => {
+                self.list.page_up();
+                None
+            }
+            Some(NavAction::PageDown) => {
+                self.list.page_down(n);
+                None
+            }
+            _ => None,
+        }
     }
 
     fn draw(&mut self, start_row: u16, sync_started: bool) {
@@ -140,7 +151,7 @@ impl super::Dialog for PsDialog {
 
         crlf(&mut out);
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(" esc: close  backspace: kill selected"));
+        let _ = out.queue(Print(&hints::join(&[hints::CLOSE, hints::KILL_PROC])));
         let _ = out.queue(SetAttribute(Attribute::Reset));
         end_dialog_draw(&mut out);
     }

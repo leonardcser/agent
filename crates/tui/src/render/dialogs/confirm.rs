@@ -2,6 +2,7 @@ use super::{
     begin_dialog_draw, finish_dialog_frame, render_inline_textarea, wrap_line, DialogResult,
     TextArea,
 };
+use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::highlight::{
     count_inline_diff_rows, print_inline_diff, print_syntax_file, BashHighlighter,
 };
@@ -193,6 +194,7 @@ pub struct ConfirmDialog {
     preview_scroll: usize,
     selected: usize,
     textarea: TextArea,
+    kill_ring: String,
     editing: bool,
     dirty: bool,
     request_id: u64,
@@ -282,6 +284,7 @@ impl ConfirmDialog {
             preview_scroll: 0,
             selected: 0,
             textarea: TextArea::new(),
+            kill_ring: String::new(),
             editing: false,
             anchor_row: None,
             options_row: 0,
@@ -386,11 +389,21 @@ impl super::Dialog for ConfirmDialog {
         self.anchor_row
     }
 
+    fn set_kill_ring(&mut self, contents: String) {
+        self.kill_ring = contents;
+    }
+
+    fn kill_ring(&self) -> Option<&str> {
+        Some(&self.kill_ring)
+    }
+
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<DialogResult> {
         self.dirty = true;
+
+        // ── Editing mode (textarea active) ──────────────────────────────
         if self.editing {
-            match (code, modifiers) {
-                (KeyCode::Enter, _) => {
+            match nav_lookup(code, modifiers) {
+                Some(NavAction::Confirm) => {
                     let msg = if self.textarea.is_empty() {
                         None
                     } else {
@@ -403,94 +416,85 @@ impl super::Dialog for ConfirmDialog {
                         request_id: self.request_id,
                     });
                 }
-                (KeyCode::Esc, _) => {
-                    self.editing = false;
-                }
-                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                    if self.textarea.is_empty() {
+                Some(NavAction::Dismiss) => {
+                    if code == KeyCode::Esc {
+                        // Esc exits editing; Ctrl+C rejects or clears.
+                        self.editing = false;
+                    } else if self.textarea.is_empty() {
                         return Some(DialogResult::Confirm {
                             choice: ConfirmChoice::No,
                             message: None,
                             tool_name: self.tool_name.clone(),
                             request_id: self.request_id,
                         });
+                    } else {
+                        self.textarea.clear();
+                        self.editing = false;
                     }
-                    self.textarea.clear();
-                    self.editing = false;
                 }
                 _ => {
-                    self.textarea.handle_key(code, modifiers);
+                    self.textarea
+                        .handle_key_with_kill_ring(code, modifiers, &mut self.kill_ring);
                 }
             }
             return None;
         }
 
-        match (code, modifiers) {
-            (KeyCode::Enter, _) => {
+        // ── Selection mode ──────────────────────────────────────────────
+        let (_, height) = terminal::size().unwrap_or((80, 24));
+        let viewport = self
+            .layout(terminal::size().unwrap_or((80, 24)).0, height)
+            .viewport_rows as usize;
+        let scroll_step = (viewport / 2).max(1);
+        match nav_lookup(code, modifiers) {
+            Some(NavAction::Confirm) => {
                 let msg = if self.textarea.is_empty() {
                     None
                 } else {
                     Some(self.textarea.text())
                 };
-                return Some(DialogResult::Confirm {
+                Some(DialogResult::Confirm {
                     choice: self.options[self.selected].1.clone(),
                     message: msg,
                     tool_name: self.tool_name.clone(),
                     request_id: self.request_id,
-                });
+                })
             }
-            (KeyCode::Tab, _) => {
+            Some(NavAction::Dismiss) => Some(DialogResult::Confirm {
+                choice: ConfirmChoice::No,
+                message: None,
+                tool_name: self.tool_name.clone(),
+                request_id: self.request_id,
+            }),
+            Some(NavAction::Edit) => {
                 self.editing = true;
+                None
             }
-            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                return Some(DialogResult::Confirm {
-                    choice: ConfirmChoice::No,
-                    message: None,
-                    tool_name: self.tool_name.clone(),
-                    request_id: self.request_id,
-                });
-            }
-            (KeyCode::Esc, _) => {
-                return Some(DialogResult::Confirm {
-                    choice: ConfirmChoice::No,
-                    message: None,
-                    tool_name: self.tool_name.clone(),
-                    request_id: self.request_id,
-                });
-            }
-            // Preview scrolling
-            (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => {
-                let tp = self.preview_total_rows();
-                if tp > 0 {
-                    let half = 10usize;
-                    self.preview_scroll = (self.preview_scroll + half).min(tp);
-                }
-            }
-            (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
-                self.preview_scroll = self.preview_scroll.saturating_sub(10);
-            }
-            (KeyCode::PageDown, _) => {
-                let tp = self.preview_total_rows();
-                if tp > 0 {
-                    self.preview_scroll = (self.preview_scroll + 20).min(tp);
-                }
-            }
-            (KeyCode::PageUp, _) => {
-                self.preview_scroll = self.preview_scroll.saturating_sub(20);
-            }
-            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+            Some(NavAction::Up) => {
                 self.selected = if self.selected == 0 {
                     self.options.len() - 1
                 } else {
                     self.selected - 1
                 };
+                None
             }
-            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+            Some(NavAction::Down) => {
                 self.selected = (self.selected + 1) % self.options.len();
+                None
             }
-            _ => {}
+            Some(NavAction::PageUp) => {
+                self.preview_scroll = self.preview_scroll.saturating_sub(scroll_step);
+                None
+            }
+            Some(NavAction::PageDown) => {
+                let tp = self.preview_total_rows();
+                if tp > 0 {
+                    self.preview_scroll = (self.preview_scroll + scroll_step).min(tp);
+                }
+                None
+            }
+            _ => None,
         }
-        None
     }
 
     fn draw(&mut self, start_row: u16, sync_started: bool) {
@@ -701,23 +705,20 @@ impl super::Dialog for ConfirmDialog {
         crlf(&mut out);
         crlf(&mut out);
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        if self.editing {
-            let _ = out.queue(Print(" enter: send  esc: cancel"));
+        let hint = if self.editing {
+            hints::join(&[hints::SEND, hints::CANCEL])
         } else if !self.textarea.is_empty() {
             if ly.total_preview > 0 {
-                let _ = out.queue(Print(
-                    " enter: confirm with message  tab: edit  ctrl+u/d: scroll",
-                ));
+                hints::join(&[hints::CONFIRM_WITH_MSG, hints::EDIT_MSG, hints::SCROLL])
             } else {
-                let _ = out.queue(Print(" enter: confirm with message  tab: edit"));
+                hints::join(&[hints::CONFIRM_WITH_MSG, hints::EDIT_MSG])
             }
         } else if ly.total_preview > 0 {
-            let _ = out.queue(Print(
-                " enter: confirm  tab: add message  ctrl+u/d: scroll  esc: cancel",
-            ));
+            hints::join(&[hints::CONFIRM, hints::ADD_MSG, hints::SCROLL, hints::CANCEL])
         } else {
-            let _ = out.queue(Print(" enter: confirm  tab: add message  esc: cancel"));
-        }
+            hints::join(&[hints::CONFIRM, hints::ADD_MSG, hints::CANCEL])
+        };
+        let _ = out.queue(Print(&hint));
         let _ = out.queue(SetAttribute(Attribute::Reset));
         // Only clear below the dialog if there's actually viewport space left.
         // When the dialog fills the full terminal, the cursor is at or past

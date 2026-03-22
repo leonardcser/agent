@@ -196,20 +196,116 @@ Press `Shift+Tab` to cycle through modes:
 
 ## Keybindings
 
-| Key         | Action                             |
-| ----------- | ---------------------------------- |
-| `Enter`     | Submit message                     |
-| `Ctrl+J`    | Insert newline                     |
-| `Ctrl+A`    | Move to beginning of line          |
-| `Ctrl+E`    | Move to end of line                |
-| `Ctrl+R`    | Fuzzy search history               |
-| `Ctrl+S`    | Stash/unstash current input        |
-| `Ctrl+T`    | Cycle reasoning effort             |
-| `Shift+Tab` | Cycle mode (normal → plan → apply) |
-| `Esc`       | Unqueue messages or dismiss dialog |
-| `Esc Esc`   | Cancel agent / compaction / rewind |
-| `↑ / ↓`     | Navigate input history             |
-| `Tab`       | Accept completion                  |
+### Input
+
+| Key                             | Action                             |
+| ------------------------------- | ---------------------------------- |
+| **General**                     |                                    |
+| `Enter`                         | Submit message                     |
+| `Ctrl+J` / `Shift+Enter`        | Insert newline                     |
+| `Ctrl+R`                        | Fuzzy search history               |
+| `Ctrl+S`                        | Stash / unstash current input      |
+| `Ctrl+C`                        | Clear input / cancel agent / quit  |
+| `Ctrl+L`                        | Redraw screen                      |
+| `Ctrl+T`                        | Cycle reasoning effort             |
+| `Shift+Tab`                     | Cycle mode (normal → plan → apply) |
+| `Esc`                           | Unqueue messages or dismiss dialog |
+| `Esc Esc`                       | Cancel agent / compaction / rewind |
+| `↑` / `↓` / `Ctrl+P` / `Ctrl+N` | Navigate input history             |
+| `Tab`                           | Accept completion / ghost text     |
+| `?`                             | Open help (when input is empty)    |
+| `Cmd+V`                         | Paste image from clipboard         |
+| **Cursor movement**             |                                    |
+| `Ctrl+A` / `Home` / `Cmd+Left`  | Move to beginning of line          |
+| `Ctrl+E` / `End` / `Cmd+Right`  | Move to end of line                |
+| `Ctrl+F` / `Right`              | Move forward one character         |
+| `Ctrl+B` / `Left`               | Move backward one character        |
+| `Alt+F` / `Alt+Right`           | Move forward one word              |
+| `Alt+B` / `Alt+Left`            | Move backward one word             |
+| `Cmd+Up`                        | Move to start of buffer            |
+| `Cmd+Down`                      | Move to end of buffer              |
+| **Deletion**                    |                                    |
+| `Backspace`                     | Delete character backward          |
+| `Delete` / `Ctrl+D`             | Delete character forward           |
+| `Alt+Backspace` / `Ctrl+W`      | Delete word backward               |
+| `Alt+D` / `Alt+Delete`          | Delete word forward                |
+| `Cmd+Backspace`                 | Delete to start of line            |
+| **Kill & yank**                 |                                    |
+| `Ctrl+K`                        | Kill to end of line                |
+| `Ctrl+U`                        | Kill to start of line              |
+| `Ctrl+Y`                        | Yank (paste killed text)           |
+
+### Vim normal mode overrides
+
+When vim mode is enabled and in normal mode, these keys change behavior:
+
+| Key        | Vim normal mode  | Insert / non-vim      |
+| ---------- | ---------------- | --------------------- |
+| `Ctrl+U`   | Half-page up     | Kill to start of line |
+| `Ctrl+D`   | Half-page down   | Delete char forward   |
+| `Ctrl+J`   | History next     | Insert newline        |
+| `Ctrl+K`   | History prev     | Kill to end of line   |
+| `Ctrl+R`   | Redo             | History search        |
+| `Ctrl+A`   | No-op            | Start of line         |
+| `Ctrl+E`   | No-op            | End of line           |
+| `Ctrl+W`   | No-op            | Delete word backward  |
+| `Ctrl+Y`   | No-op            | Yank (paste)          |
+
+All standard vim motions, operators (`d`, `c`, `y`), text objects (`iw`, `a(`…),
+find (`f`, `t`, `F`, `T`, `;`, `,`), and commands (`x`, `s`, `r`, `p`, `u`, `~`,
+`J`, etc.) are supported. See `/vim` to toggle.
+
+### Dialogs
+
+All dialogs share these common keys:
+
+| Key                                                       | Action                        |
+| --------------------------------------------------------- | ----------------------------- |
+| `↑` / `k` / `Ctrl+P`                                      | Previous item                 |
+| `↓` / `j` / `Ctrl+N`                                      | Next item                     |
+| `Ctrl+U` / `Ctrl+D` / `Alt+↑` / `Alt+↓` / `PgUp` / `PgDn` | Page scroll                   |
+| `Enter`                                                   | Confirm                       |
+| `Esc` / `Ctrl+C`                                          | Cancel                        |
+| `Tab`                                                     | Edit message (confirm dialog) |
+
+Additional dialog-specific keys:
+
+| Dialog      | Key            | Action                       |
+| ----------- | -------------- | ---------------------------- |
+| Help        | `q` / `?`      | Close                        |
+| Confirm     | `Tab`          | Enter message editing mode   |
+| Question    | `Space`        | Toggle option (multi-select) |
+| Question    | `1`–`9`        | Select option by number      |
+| Question    | `←` / `→` / `h` / `l` | Switch between questions     |
+| Permissions | `dd`           | Delete selected permission   |
+| Permissions | `⌫`            | Delete immediately           |
+| Permissions | `q`            | Close                        |
+| Ps          | `⌫`            | Kill selected process        |
+| Resume      | `dd` / `⌫`     | Delete session               |
+| Resume      | `Ctrl+W`       | Toggle workspace filter      |
+| Resume      | Type to search | Fuzzy filter sessions        |
+
+### Completer
+
+| Key                       | Action                  |
+| ------------------------- | ----------------------- |
+| `Tab`                     | Accept completion       |
+| `Enter`                   | Accept + submit/replace |
+| `↑` / `Ctrl+K` / `Ctrl+P` | Previous result         |
+| `↓` / `Ctrl+J` / `Ctrl+N` | Next result             |
+| `Ctrl+R`                  | Cycle history matches   |
+| `Esc`                     | Cancel                  |
+
+### Menu (settings / model / theme)
+
+| Key                  | Action                           |
+| -------------------- | -------------------------------- |
+| `↑` / `k` / `Ctrl+P` | Previous item                    |
+| `↓` / `j` / `Ctrl+N` | Next item                        |
+| `Enter`              | Select / toggle                  |
+| `Space`              | Toggle (settings)                |
+| `Tab`                | Cycle auxiliary (e.g. reasoning) |
+| `Esc` / `q`          | Dismiss                          |
 
 ## Slash Commands
 

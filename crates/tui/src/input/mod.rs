@@ -6,6 +6,7 @@ pub use settings::{Menu, MenuAction, MenuKind, MenuResult, MenuState};
 
 use crate::attachment::{Attachment, AttachmentId, AttachmentStore};
 use crate::completer::{Completer, CompleterKind};
+use crate::keymap::{self, KeyAction, KeyContext};
 use crate::render;
 use crate::vim::{self, ViMode, Vim};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -41,6 +42,8 @@ pub struct InputState {
     /// Tracks whether the current buffer content originated from a paste.
     /// Cleared on any manual character input.
     from_paste: bool,
+    /// Kill ring for Ctrl+K / Ctrl+U / Ctrl+Y (emacs-style kill/yank).
+    kill_ring: String,
     /// Completable arguments for commands like `/model`, `/theme`, `/color`.
     /// Each entry is `("/cmd", vec!["arg1", "arg2", ...])`.
     pub command_arg_sources: Vec<(String, Vec<String>)>,
@@ -49,6 +52,7 @@ pub struct InputState {
 /// What the caller should do after `handle_event`.
 pub enum Action {
     Redraw,
+    PurgeRedraw,
     Submit { content: Content, display: String },
     MenuResult(MenuResult),
     ToggleMode,
@@ -77,6 +81,7 @@ impl InputState {
             history_saved_buf: None,
             stash: None,
             from_paste: false,
+            kill_ring: String::new(),
             command_arg_sources: Vec::new(),
         }
     }
@@ -128,6 +133,16 @@ impl InputState {
     pub fn set_buffer(&mut self, buf: String, cpos: usize) {
         self.buf = buf;
         self.cpos = cpos.min(self.buf.len());
+    }
+
+    /// Take the kill ring contents (moves ownership, leaves empty).
+    pub fn take_kill_ring(&mut self) -> String {
+        std::mem::take(&mut self.kill_ring)
+    }
+
+    /// Set the kill ring contents (used to sync back from dialogs).
+    pub fn set_kill_ring(&mut self, contents: String) {
+        self.kill_ring = contents;
     }
 
     pub fn clear(&mut self) {
@@ -424,14 +439,224 @@ impl InputState {
         Content::with_images(text, images)
     }
 
+    /// Build a `KeyContext` snapshot for keymap lookups.
+    pub fn key_context(&self, agent_running: bool, ghost_text_visible: bool) -> KeyContext {
+        KeyContext {
+            buf_empty: self.buf.is_empty() && self.attachment_ids.is_empty(),
+            vim_normal: self
+                .vim
+                .as_ref()
+                .is_some_and(|v| v.mode() == ViMode::Normal),
+            vim_enabled: self.vim.is_some(),
+            agent_running,
+            ghost_text_visible,
+        }
+    }
+
+    /// Execute a `KeyAction` resolved by the keymap. Handles all editing,
+    /// navigation, and app-control actions. Returns `None` for actions that
+    /// the caller (app event loop) must handle itself.
+    pub fn execute_key_action(
+        &mut self,
+        action: KeyAction,
+        history: Option<&mut History>,
+    ) -> Action {
+        match action {
+            // ── Actions the caller must handle ──────────────────────────
+            KeyAction::Quit => Action::Noop,        // caller checks
+            KeyAction::CancelAgent => Action::Noop, // caller checks
+            KeyAction::OpenHelp => Action::Noop,    // caller checks
+            KeyAction::OpenHistorySearch => Action::Noop, // caller checks
+            KeyAction::AcceptGhostText => Action::Noop, // caller checks
+
+            // ── App control ─────────────────────────────────────────────
+            KeyAction::ClearBuffer => {
+                self.clear();
+                Action::Redraw
+            }
+            KeyAction::ToggleMode => Action::ToggleMode,
+            KeyAction::CycleReasoning => Action::CycleReasoning,
+            KeyAction::ToggleStash => {
+                self.toggle_stash();
+                Action::Redraw
+            }
+            KeyAction::PurgeRedraw => Action::PurgeRedraw,
+
+            // ── Submit / newline ─────────────────────────────────────────
+            KeyAction::Submit => {
+                if self.buf.is_empty() && self.attachment_ids.is_empty() {
+                    Action::Noop
+                } else {
+                    let display = self.message_display_text();
+                    let content = self.build_content();
+                    self.clear();
+                    Action::Submit { content, display }
+                }
+            }
+            KeyAction::InsertNewline => {
+                self.buf.insert(self.cpos, '\n');
+                self.cpos += 1;
+                self.completer = None;
+                Action::Redraw
+            }
+
+            // ── Navigation ──────────────────────────────────────────────
+            KeyAction::MoveLeft => {
+                if self.cpos > 0 {
+                    let cp = char_pos(&self.buf, self.cpos);
+                    self.cpos = byte_of_char(&self.buf, cp - 1);
+                    self.recompute_completer();
+                    Action::Redraw
+                } else {
+                    Action::Noop
+                }
+            }
+            KeyAction::MoveRight => {
+                if self.cpos < self.buf.len() {
+                    let cp = char_pos(&self.buf, self.cpos);
+                    self.cpos = byte_of_char(&self.buf, cp + 1);
+                    self.recompute_completer();
+                    Action::Redraw
+                } else {
+                    Action::Noop
+                }
+            }
+            KeyAction::MoveWordForward => {
+                if self.move_word_forward() {
+                    Action::Redraw
+                } else {
+                    Action::Noop
+                }
+            }
+            KeyAction::MoveWordBackward => {
+                if self.move_word_backward() {
+                    Action::Redraw
+                } else {
+                    Action::Noop
+                }
+            }
+            KeyAction::MoveStartOfLine => {
+                let before = &self.buf[..self.cpos];
+                self.cpos = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+                self.recompute_completer();
+                Action::Redraw
+            }
+            KeyAction::MoveEndOfLine => {
+                let after = &self.buf[self.cpos..];
+                self.cpos += after.find('\n').unwrap_or(after.len());
+                self.recompute_completer();
+                Action::Redraw
+            }
+            KeyAction::MoveStartOfBuffer => {
+                self.cpos = 0;
+                self.recompute_completer();
+                Action::Redraw
+            }
+            KeyAction::MoveEndOfBuffer => {
+                self.cpos = self.buf.len();
+                self.recompute_completer();
+                Action::Redraw
+            }
+            KeyAction::HistoryPrev => {
+                if let Some(entry) = history.and_then(|h| h.up(&self.buf)) {
+                    self.buf = entry.to_string();
+                    self.cpos = 0;
+                    self.sync_completer();
+                    Action::Redraw
+                } else {
+                    Action::Noop
+                }
+            }
+            KeyAction::HistoryNext => {
+                if let Some(entry) = history.and_then(|h| h.down()) {
+                    self.buf = entry.to_string();
+                    self.cpos = self.buf.len();
+                    self.sync_completer();
+                    Action::Redraw
+                } else {
+                    Action::Noop
+                }
+            }
+
+            // ── Editing ─────────────────────────────────────────────────
+            KeyAction::Backspace => {
+                self.backspace();
+                Action::Redraw
+            }
+            KeyAction::DeleteCharForward => {
+                self.vim_save_undo();
+                self.delete_char_forward();
+                Action::Redraw
+            }
+            KeyAction::DeleteWordBackward => {
+                self.vim_save_undo();
+                self.delete_word_backward();
+                Action::Redraw
+            }
+            KeyAction::DeleteWordForward => {
+                self.delete_word_forward();
+                Action::Redraw
+            }
+            KeyAction::DeleteToStartOfLine => {
+                self.delete_to_start_of_line();
+                Action::Redraw
+            }
+            KeyAction::KillToEndOfLine => {
+                self.vim_save_undo();
+                self.kill_to_end_of_line();
+                Action::Redraw
+            }
+            KeyAction::KillToStartOfLine => {
+                self.vim_save_undo();
+                self.kill_to_start_of_line();
+                Action::Redraw
+            }
+            KeyAction::Yank => {
+                self.vim_save_undo();
+                self.yank();
+                Action::Redraw
+            }
+
+            // ── Vim half-page scroll ────────────────────────────────────
+            KeyAction::VimHalfPageUp => {
+                let half = render::term_height() / 2;
+                let line = current_line(&self.buf, self.cpos);
+                let target = line.saturating_sub(half);
+                self.move_to_line(target);
+                Action::Redraw
+            }
+            KeyAction::VimHalfPageDown => {
+                let half = render::term_height() / 2;
+                let line = current_line(&self.buf, self.cpos);
+                let total = self.buf.chars().filter(|&c| c == '\n').count() + 1;
+                let target = (line + half).min(total - 1);
+                self.move_to_line(target);
+                Action::Redraw
+            }
+
+            // ── Clipboard ───────────────────────────────────────────────
+            KeyAction::ClipboardImage => {
+                if let Some(url) = clipboard_image_to_data_url() {
+                    if let Some(ref mut vim) = self.vim {
+                        vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
+                    }
+                    self.insert_image("clipboard.png".into(), url);
+                    Action::Redraw
+                } else {
+                    Action::Noop
+                }
+            }
+        }
+    }
+
     /// Process a terminal event. Returns what the caller should do next.
     pub fn handle_event(&mut self, ev: Event, mut history: Option<&mut History>) -> Action {
-        // Menu intercepts all keys when open
+        // Menu intercepts all keys when open.
         if self.menu.is_some() {
             return self.handle_menu_event(&ev);
         }
 
-        // Completer intercepts navigation keys when active
+        // Completer intercepts navigation keys when active.
         if self.completer.is_some() {
             if let Some(action) = self.handle_completer_event(&ev) {
                 return action;
@@ -441,6 +666,10 @@ impl InputState {
         // Vim mode intercepts key events.
         if let Some(ref mut vim) = self.vim {
             if let Event::Key(key_ev) = ev {
+                // Sync kill ring → vim register so `p` can paste emacs-killed text.
+                if vim.register() != self.kill_ring {
+                    vim.set_register(self.kill_ring.clone());
+                }
                 match vim.handle_key(
                     key_ev,
                     &mut self.buf,
@@ -448,6 +677,8 @@ impl InputState {
                     &mut self.attachment_ids,
                 ) {
                     vim::Action::Consumed => {
+                        // Sync vim register → kill ring so `Ctrl+Y` can paste vim-yanked text.
+                        self.sync_vim_register();
                         self.recompute_completer();
                         return Action::Redraw;
                     }
@@ -474,265 +705,85 @@ impl InputState {
                         return Action::Redraw;
                     }
                     vim::Action::Passthrough => {
-                        // Fall through to normal handling below.
+                        // Fall through to keymap / char insert below.
                     }
                 }
             }
         }
 
-        match ev {
-            Event::Paste(data) => {
-                // Save undo state before pasting if vim is enabled.
-                if let Some(ref mut vim) = self.vim {
-                    vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
-                }
-                // Try to detect an image file path (drag-and-drop).
-                if let Some(path) = engine::image::normalize_pasted_path(&data) {
-                    if engine::image::is_image_file(&path) {
-                        match engine::image::read_image_as_data_url(&path) {
-                            Ok(url) => {
-                                let label = engine::image::image_label_from_path(&path);
-                                self.insert_image(label, url);
-                                return Action::Redraw;
-                            }
-                            Err(e) => {
-                                return Action::NotifyError(format!("cannot read image: {e}"));
-                            }
-                        }
-                    }
-                }
-                // Empty paste (e.g. Cmd+V with image-only clipboard) → try clipboard image.
-                if data.trim().is_empty() {
-                    if let Some(url) = clipboard_image_to_data_url() {
-                        if let Some(ref mut vim) = self.vim {
-                            vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
-                        }
-                        self.insert_image("clipboard.png".into(), url);
-                        return Action::Redraw;
-                    }
-                }
-                self.insert_paste(data);
-                Action::Redraw
+        // Paste events (not key events — handled before keymap).
+        if let Event::Paste(data) = ev {
+            if let Some(ref mut vim) = self.vim {
+                vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
             }
-            // Cmd+V: read image from clipboard.
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('v'),
-                modifiers,
-                ..
-            }) if modifiers.contains(KeyModifiers::SUPER) => {
+            if let Some(path) = engine::image::normalize_pasted_path(&data) {
+                if engine::image::is_image_file(&path) {
+                    match engine::image::read_image_as_data_url(&path) {
+                        Ok(url) => {
+                            let label = engine::image::image_label_from_path(&path);
+                            self.insert_image(label, url);
+                            return Action::Redraw;
+                        }
+                        Err(e) => {
+                            return Action::NotifyError(format!("cannot read image: {e}"));
+                        }
+                    }
+                }
+            }
+            if data.trim().is_empty() {
                 if let Some(url) = clipboard_image_to_data_url() {
                     if let Some(ref mut vim) = self.vim {
                         vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
                     }
                     self.insert_image("clipboard.png".into(), url);
-                    Action::Redraw
-                } else {
-                    Action::Noop
+                    return Action::Redraw;
                 }
             }
-            Event::Key(KeyEvent {
-                code: KeyCode::BackTab,
-                ..
-            }) => Action::ToggleMode,
-            Event::Key(KeyEvent {
-                code: KeyCode::Enter,
-                modifiers,
-                ..
-            }) if !modifiers.contains(KeyModifiers::SHIFT) => {
-                if self.buf.is_empty() && self.attachment_ids.is_empty() {
-                    Action::Noop
-                } else {
-                    let display = self.message_display_text();
-                    let content = self.build_content();
-                    self.clear();
-                    Action::Submit { content, display }
-                }
-            }
-            // Ctrl+T: cycle reasoning effort.
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('t'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => Action::CycleReasoning,
-            // Ctrl+C: handled by the app event loop (double-tap logic).
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => Action::Noop,
-            // Ctrl+U / Ctrl+D: half-page up/down in vim normal mode.
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('u'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) if self
-                .vim
-                .as_ref()
-                .is_some_and(|v| v.mode() == ViMode::Normal) =>
-            {
-                let half = render::term_height() / 2;
-                let line = current_line(&self.buf, self.cpos);
-                let target = line.saturating_sub(half);
-                self.move_to_line(target);
-                Action::Redraw
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('d'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) if self
-                .vim
-                .as_ref()
-                .is_some_and(|v| v.mode() == ViMode::Normal) =>
-            {
-                let half = render::term_height() / 2;
-                let line = current_line(&self.buf, self.cpos);
-                let total = self.buf.chars().filter(|&c| c == '\n').count() + 1;
-                let target = (line + half).min(total - 1);
-                self.move_to_line(target);
-                Action::Redraw
-            }
-            // Ctrl+R: open history fuzzy search.
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('r'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => Action::Noop, // handled by the app event loop
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('j'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::SHIFT,
-                ..
-            }) => {
-                self.buf.insert(self.cpos, '\n');
-                self.cpos += 1;
-                self.completer = None;
-                Action::Redraw
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('a'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => {
-                let before = &self.buf[..self.cpos];
-                self.cpos = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-                self.recompute_completer();
-                Action::Redraw
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('e'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => {
-                let after = &self.buf[self.cpos..];
-                self.cpos += after.find('\n').unwrap_or(after.len());
-                self.recompute_completer();
-                Action::Redraw
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char(c),
-                modifiers,
-                ..
-            }) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-                self.insert_char(c);
-                Action::Redraw
-            }
-            // Alt+Backspace (macOS) / Ctrl+Backspace (Linux/Windows): delete word backward.
-            Event::Key(KeyEvent {
-                code: KeyCode::Backspace,
-                modifiers,
-                ..
-            }) if modifiers.contains(KeyModifiers::ALT)
-                || modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.delete_word_backward();
-                Action::Redraw
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Backspace,
-                ..
-            }) => {
-                self.backspace();
-                Action::Redraw
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Left,
-                ..
-            }) => {
-                if self.cpos > 0 {
-                    let cp = char_pos(&self.buf, self.cpos);
-                    self.cpos = byte_of_char(&self.buf, cp - 1);
-                    self.recompute_completer();
-                    Action::Redraw
-                } else {
-                    Action::Noop
-                }
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Right,
-                ..
-            }) => {
-                if self.cpos < self.buf.len() {
-                    let cp = char_pos(&self.buf, self.cpos);
-                    self.cpos = byte_of_char(&self.buf, cp + 1);
-                    self.recompute_completer();
-                    Action::Redraw
-                } else {
-                    Action::Noop
-                }
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Up, ..
-            }) => {
-                if let Some(entry) = history.and_then(|h| h.up(&self.buf)) {
-                    self.buf = entry.to_string();
-                    self.cpos = 0;
-                    self.sync_completer();
-                    Action::Redraw
-                } else {
-                    Action::Noop
-                }
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }) => {
-                if let Some(entry) = history.and_then(|h| h.down()) {
-                    self.buf = entry.to_string();
-                    self.cpos = self.buf.len();
-                    self.sync_completer();
-                    Action::Redraw
-                } else {
-                    Action::Noop
-                }
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Home,
-                ..
-            }) => {
-                let before = &self.buf[..self.cpos];
-                self.cpos = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-                self.recompute_completer();
-                Action::Redraw
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::End, ..
-            }) => {
-                let after = &self.buf[self.cpos..];
-                self.cpos += after.find('\n').unwrap_or(after.len());
-                self.recompute_completer();
-                Action::Redraw
-            }
-            Event::Resize(w, h) => Action::Resize {
+            self.insert_paste(data);
+            return Action::Redraw;
+        }
+
+        // Resize events.
+        if let Event::Resize(w, h) = ev {
+            return Action::Resize {
                 width: w as usize,
                 height: h as usize,
-            },
-            _ => Action::Noop,
+            };
         }
+
+        // Key events — look up in the keymap.
+        if let Event::Key(KeyEvent {
+            code, modifiers, ..
+        }) = ev
+        {
+            // Build context for keymap lookup. The caller-specific fields
+            // (agent_running, ghost_text) are set to defaults here — the app
+            // event loop overrides them by calling lookup directly when needed.
+            let ctx = KeyContext {
+                buf_empty: self.buf.is_empty() && self.attachment_ids.is_empty(),
+                vim_normal: self
+                    .vim
+                    .as_ref()
+                    .is_some_and(|v| v.mode() == ViMode::Normal),
+                vim_enabled: self.vim.is_some(),
+                agent_running: false,
+                ghost_text_visible: false,
+            };
+
+            if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
+                return self.execute_key_action(action, history);
+            }
+
+            // Fallback: insert character for unmodified / shift-only key presses.
+            if let KeyCode::Char(c) = code {
+                if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
+                    self.insert_char(c);
+                    return Action::Redraw;
+                }
+            }
+        }
+
+        Action::Noop
     }
 
     // ── Completer ────────────────────────────────────────────────────────
@@ -846,7 +897,7 @@ impl InputState {
                     let comp = self.completer.take().unwrap();
                     let kind = comp.kind;
                     self.accept_completion(&comp);
-                    if kind == CompleterKind::Command || kind == CompleterKind::CommandArg {
+                    if kind == CompleterKind::Command {
                         let display = self.message_display_text();
                         let content = self.build_content();
                         self.clear();
@@ -883,7 +934,7 @@ impl InputState {
                 code: KeyCode::Up, ..
             })
             | Event::Key(KeyEvent {
-                code: KeyCode::Char('k'),
+                code: KeyCode::Char('k' | 'p'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
             }) => {
@@ -899,7 +950,7 @@ impl InputState {
                 ..
             })
             | Event::Key(KeyEvent {
-                code: KeyCode::Char('j'),
+                code: KeyCode::Char('j' | 'n'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
             }) => {
@@ -922,10 +973,6 @@ impl InputState {
                     self.history_saved_buf = None;
                 } else {
                     self.accept_completion(&comp);
-                    // Immediately activate arg completion if available.
-                    if comp.kind == CompleterKind::Command {
-                        self.recompute_completer();
-                    }
                 }
                 Some(Action::Redraw)
             }
@@ -1090,6 +1137,22 @@ impl InputState {
 
     // ── Editing primitives ───────────────────────────────────────────────
 
+    /// Sync vim register → kill ring after vim modifies it.
+    fn sync_vim_register(&mut self) {
+        if let Some(ref vim) = self.vim {
+            if vim.register() != self.kill_ring {
+                self.kill_ring = vim.register().to_string();
+            }
+        }
+    }
+
+    /// Save vim undo state if vim is enabled.
+    fn vim_save_undo(&mut self) {
+        if let Some(ref mut vim) = self.vim {
+            vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
+        }
+    }
+
     fn insert_char(&mut self, c: char) {
         self.from_paste = false;
         self.buf.insert(self.cpos, c);
@@ -1144,6 +1207,152 @@ impl InputState {
         self.buf.drain(target..self.cpos);
         self.cpos = target;
         self.recompute_completer();
+    }
+
+    fn delete_char_forward(&mut self) {
+        if self.cpos >= self.buf.len() {
+            return;
+        }
+        self.maybe_remove_attachment(self.cpos);
+        let next = self.buf[self.cpos..]
+            .char_indices()
+            .nth(1)
+            .map(|(i, _)| self.cpos + i)
+            .unwrap_or(self.buf.len());
+        self.buf.drain(self.cpos..next);
+        self.recompute_completer();
+    }
+
+    fn delete_word_forward(&mut self) {
+        if self.cpos >= self.buf.len() {
+            return;
+        }
+        let target = vim::word_forward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        let markers_before = self.buf[..self.cpos]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        let markers_in_range = self.buf[self.cpos..target]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        for i in (0..markers_in_range).rev() {
+            let idx = markers_before + i;
+            if idx < self.attachment_ids.len() {
+                self.attachment_ids.remove(idx);
+            }
+        }
+        self.buf.drain(self.cpos..target);
+        self.recompute_completer();
+    }
+
+    fn kill_to_end_of_line(&mut self) {
+        let end = self.buf[self.cpos..]
+            .find('\n')
+            .map(|i| self.cpos + i)
+            .unwrap_or(self.buf.len());
+        self.kill_ring = self.buf[self.cpos..end].to_string();
+        let markers_before = self.buf[..self.cpos]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        let markers_in_range = self.buf[self.cpos..end]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        for i in (0..markers_in_range).rev() {
+            let idx = markers_before + i;
+            if idx < self.attachment_ids.len() {
+                self.attachment_ids.remove(idx);
+            }
+        }
+        self.buf.drain(self.cpos..end);
+        self.recompute_completer();
+    }
+
+    fn kill_to_start_of_line(&mut self) {
+        let start = self.buf[..self.cpos]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.kill_ring = self.buf[start..self.cpos].to_string();
+        let markers_before = self.buf[..start]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        let markers_in_range = self.buf[start..self.cpos]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        for i in (0..markers_in_range).rev() {
+            let idx = markers_before + i;
+            if idx < self.attachment_ids.len() {
+                self.attachment_ids.remove(idx);
+            }
+        }
+        self.buf.drain(start..self.cpos);
+        self.cpos = start;
+        self.recompute_completer();
+    }
+
+    fn delete_to_start_of_line(&mut self) {
+        let start = self.buf[..self.cpos]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let markers_before = self.buf[..start]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        let markers_in_range = self.buf[start..self.cpos]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        for i in (0..markers_in_range).rev() {
+            let idx = markers_before + i;
+            if idx < self.attachment_ids.len() {
+                self.attachment_ids.remove(idx);
+            }
+        }
+        self.buf.drain(start..self.cpos);
+        self.cpos = start;
+        self.recompute_completer();
+    }
+
+    fn yank(&mut self) {
+        if !self.kill_ring.is_empty() {
+            self.buf.insert_str(self.cpos, &self.kill_ring);
+            self.cpos += self.kill_ring.len();
+            self.recompute_completer();
+        }
+    }
+
+    fn move_word_forward(&mut self) -> bool {
+        if self.cpos >= self.buf.len() {
+            return false;
+        }
+        let target = vim::word_forward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        if target != self.cpos {
+            self.cpos = target;
+            self.recompute_completer();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn move_word_backward(&mut self) -> bool {
+        if self.cpos == 0 {
+            return false;
+        }
+        let target = vim::word_backward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        if target != self.cpos {
+            self.cpos = target;
+            self.recompute_completer();
+            true
+        } else {
+            false
+        }
     }
 
     fn insert_paste(&mut self, data: String) {

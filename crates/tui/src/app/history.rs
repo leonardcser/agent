@@ -102,6 +102,7 @@ impl App {
             entries,
             self.cwd.clone(),
             Some(terminal::size().map(|(_, h)| h / 2).unwrap_or(12)),
+            self.input.vim_enabled(),
         );
         terminal::enable_raw_mode().ok();
         loop {

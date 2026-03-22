@@ -1,3 +1,4 @@
+use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{crlf, draw_bar};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -8,24 +9,22 @@ use super::{end_dialog_draw, DialogResult, ListState};
 
 pub struct HelpDialog {
     list: ListState,
-    /// Total content rows (static, computed once).
+    sections: Vec<(&'static str, Vec<(&'static str, &'static str)>)>,
     total_rows: usize,
 }
 
-impl Default for HelpDialog {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl HelpDialog {
-    /// Number of content lines in the help sections (3 prefixes + 11 keys + 1 separator).
-    const TOTAL_ROWS: usize = 15;
-
-    pub fn new() -> Self {
+    pub fn new(vim_enabled: bool) -> Self {
+        let sections = hints::help_sections(vim_enabled);
+        let total_rows = sections
+            .iter()
+            .enumerate()
+            .map(|(i, (_, entries))| entries.len() + if i + 1 < sections.len() { 1 } else { 0 })
+            .sum();
         Self {
             list: ListState::new(0, None, 4),
-            total_rows: Self::TOTAL_ROWS,
+            sections,
+            total_rows,
         }
     }
 }
@@ -48,28 +47,40 @@ impl super::Dialog for HelpDialog {
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {
-        if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+        // Help-specific close keys (q, ?).
+        if matches!(
+            (code, mods),
+            (KeyCode::Char('q'), _) | (KeyCode::Char('?'), _)
+        ) {
             return Some(DialogResult::Dismissed);
         }
-        match code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') => {
-                Some(DialogResult::Dismissed)
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
+
+        let max_scroll = self.total_rows.saturating_sub(self.list.max_visible);
+        let page = self.list.max_visible.max(1);
+        match nav_lookup(code, mods) {
+            Some(NavAction::Dismiss | NavAction::Confirm) => Some(DialogResult::Dismissed),
+            Some(NavAction::Up) => {
                 if self.list.scroll_offset > 0 {
                     self.list.scroll_offset -= 1;
                     self.list.dirty = true;
                 }
                 None
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                // Clamp eagerly; draw() will also clamp but this prevents
-                // unbounded accumulation from rapid key presses.
-                let max_scroll = self.total_rows.saturating_sub(self.list.max_visible);
+            Some(NavAction::Down) => {
                 if self.list.scroll_offset < max_scroll {
                     self.list.scroll_offset += 1;
                     self.list.dirty = true;
                 }
+                None
+            }
+            Some(NavAction::PageUp) => {
+                self.list.scroll_offset = self.list.scroll_offset.saturating_sub(page);
+                self.list.dirty = true;
+                None
+            }
+            Some(NavAction::PageDown) => {
+                self.list.scroll_offset = (self.list.scroll_offset + page).min(max_scroll);
+                self.list.dirty = true;
                 None
             }
             _ => None,
@@ -77,51 +88,21 @@ impl super::Dialog for HelpDialog {
     }
 
     fn draw(&mut self, start_row: u16, sync_started: bool) {
-        // Each section renders as a heading row followed by entry rows.
-        let sections: &[(&str, &[(&str, &str)])] = &[
-            (
-                "prefixes",
-                &[
-                    (
-                        "/command",
-                        "slash commands  (try /resume, /compact, /fork, /ps, /vim…)",
-                    ),
-                    ("@<path>", "attach a file or URL"),
-                    ("!<cmd>", "run a shell command"),
-                ],
-            ),
-            (
-                "keys",
-                &[
-                    ("enter", "send message"),
-                    ("ctrl+j  shift+enter", "insert newline"),
-                    ("ctrl+c", "cancel / interrupt"),
-                    ("ctrl+r", "search input history"),
-                    ("ctrl+t", "cycle reasoning effort"),
-                    ("shift+tab", "cycle mode  (normal → plan → apply → yolo)"),
-                    ("ctrl+u / ctrl+d", "scroll up / down"),
-                    ("ctrl+a / ctrl+e", "line start / end"),
-                    ("ctrl+w  alt+bs", "delete word backward"),
-                    ("tab", "autocomplete"),
-                    ("esc  ctrl+c", "cancel / close dialog"),
-                ],
-            ),
-        ];
-
-        let label_col = sections
+        let label_col = self
+            .sections
             .iter()
             .flat_map(|(_, entries)| entries.iter().map(|(k, _)| k.len()))
             .max()
             .unwrap_or(0)
             + 4;
 
-        // Collect content lines for scrolling
+        // Collect content lines for scrolling.
         let mut content_lines: Vec<(&str, &str)> = Vec::new();
-        for (si, (_, entries)) in sections.iter().enumerate() {
-            for &(label, detail) in *entries {
+        for (si, (_, entries)) in self.sections.iter().enumerate() {
+            for &(label, detail) in entries {
                 content_lines.push((label, detail));
             }
-            if si + 1 < sections.len() {
+            if si + 1 < self.sections.len() {
                 content_lines.push(("", "")); // blank separator
             }
         }
@@ -169,7 +150,11 @@ impl super::Dialog for HelpDialog {
 
         crlf(&mut out);
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(" esc: close"));
+        let _ = out.queue(Print(&hints::join(&[
+            hints::CLOSE,
+            hints::NAV,
+            hints::SCROLL,
+        ])));
         let _ = out.queue(SetAttribute(Attribute::Reset));
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
 

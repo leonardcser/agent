@@ -1,3 +1,4 @@
+use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{crlf, draw_bar, ResumeEntry};
 use crate::{session, theme};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -16,10 +17,16 @@ pub struct ResumeDialog {
     list: ListState,
     pending_d: bool,
     last_drawn: Instant,
+    vim_enabled: bool,
 }
 
 impl ResumeDialog {
-    pub fn new(entries: Vec<ResumeEntry>, current_cwd: String, max_height: Option<u16>) -> Self {
+    pub fn new(
+        entries: Vec<ResumeEntry>,
+        current_cwd: String,
+        max_height: Option<u16>,
+        vim_enabled: bool,
+    ) -> Self {
         let filtered = filter_resume_entries(&entries, "", true, &current_cwd);
         let list = ListState::new(filtered.len().max(1), max_height, 4);
         Self {
@@ -31,6 +38,7 @@ impl ResumeDialog {
             list,
             pending_d: false,
             last_drawn: Instant::now(),
+            vim_enabled,
         }
     }
 
@@ -73,43 +81,23 @@ impl super::Dialog for ResumeDialog {
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {
-        // Check for DD completion before anything else.
+        // DD completion check.
         if self.pending_d {
             self.pending_d = false;
             if code == KeyCode::Char('d') && mods == KeyModifiers::NONE {
                 self.delete_selected();
                 return None;
             }
-            // 'd' followed by something else: insert both as query chars.
             self.query.push('d');
             // Fall through to handle the current key normally.
         }
 
+        // Resume-specific keys (before shared dialog lookup).
         match (code, mods) {
-            (KeyCode::Enter, _) => {
-                return Some(DialogResult::Resume {
-                    session_id: self.filtered.get(self.list.selected).map(|e| e.id.clone()),
-                });
-            }
-            (KeyCode::Esc, _) => {
-                return Some(DialogResult::Resume { session_id: None });
-            }
-            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                return Some(DialogResult::Resume { session_id: None });
-            }
             (KeyCode::Char('w'), m) if m.contains(KeyModifiers::CONTROL) => {
                 self.workspace_only = !self.workspace_only;
                 self.refilter();
-            }
-            (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
-                if !self.filtered.is_empty() {
-                    self.list.page_up();
-                }
-            }
-            (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => {
-                if !self.filtered.is_empty() {
-                    self.list.page_down(self.filtered.len());
-                }
+                return None;
             }
             (KeyCode::Backspace, m)
                 if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) =>
@@ -126,6 +114,7 @@ impl super::Dialog for ResumeDialog {
                     self.query.truncate(target);
                     self.refilter();
                 }
+                return None;
             }
             (KeyCode::Backspace, _) => {
                 if self.query.is_empty() {
@@ -134,24 +123,54 @@ impl super::Dialog for ResumeDialog {
                     self.query.pop();
                     self.refilter();
                 }
-            }
-            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                self.list.select_prev();
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                self.list.select_next(self.filtered.len());
+                return None;
             }
             (KeyCode::Char('d'), KeyModifiers::NONE) if self.query.is_empty() => {
                 self.pending_d = true;
                 self.list.dirty = true;
-            }
-            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                self.query.push(c);
-                self.refilter();
+                return None;
             }
             _ => {}
         }
-        None
+
+        // Shared dialog keys.
+        let n = self.filtered.len();
+        match nav_lookup(code, mods) {
+            Some(NavAction::Confirm) => Some(DialogResult::Resume {
+                session_id: self.filtered.get(self.list.selected).map(|e| e.id.clone()),
+            }),
+            Some(NavAction::Dismiss) => Some(DialogResult::Resume { session_id: None }),
+            Some(NavAction::Up) => {
+                self.list.select_prev(n);
+                None
+            }
+            Some(NavAction::Down) => {
+                self.list.select_next(n);
+                None
+            }
+            Some(NavAction::PageUp) => {
+                if !self.filtered.is_empty() {
+                    self.list.page_up();
+                }
+                None
+            }
+            Some(NavAction::PageDown) => {
+                if !self.filtered.is_empty() {
+                    self.list.page_down(n);
+                }
+                None
+            }
+            _ => {
+                // Unhandled keys: insert as search query chars.
+                if let KeyCode::Char(c) = code {
+                    if mods.is_empty() || mods == KeyModifiers::SHIFT {
+                        self.query.push(c);
+                        self.refilter();
+                    }
+                }
+                None
+            }
+        }
     }
 
     fn draw(&mut self, start_row: u16, sync_started: bool) {
@@ -237,15 +256,17 @@ impl super::Dialog for ResumeDialog {
 
         crlf(&mut out);
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        if self.workspace_only {
-            let _ = out.queue(Print(
-                " enter: select  dd/bs: delete  esc: cancel  ctrl+w: all sessions",
-            ));
+        let toggle = if self.workspace_only {
+            "ctrl+w: all sessions"
         } else {
-            let _ = out.queue(Print(
-                " enter: select  dd/bs: delete  esc: cancel  ctrl+w: this workspace",
-            ));
-        }
+            "ctrl+w: this workspace"
+        };
+        let _ = out.queue(Print(&hints::join(&[
+            hints::SELECT,
+            hints::dd_delete(self.vim_enabled),
+            hints::CANCEL,
+            toggle,
+        ])));
         let _ = out.queue(SetAttribute(Attribute::Reset));
         end_dialog_draw(&mut out);
     }

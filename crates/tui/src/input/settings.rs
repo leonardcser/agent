@@ -1,4 +1,5 @@
-use crossterm::event::{Event, KeyCode, KeyEvent};
+use crate::keymap::{nav_lookup, NavAction};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 /// Generic navigation result from a menu.
 pub enum MenuAction {
@@ -26,43 +27,35 @@ pub struct Menu {
 
 impl Menu {
     pub fn handle_event(&mut self, ev: &Event) -> MenuAction {
-        match ev {
-            Event::Key(KeyEvent {
-                code: KeyCode::Esc, ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Char('q'),
-                ..
-            }) => MenuAction::Dismiss,
-            Event::Key(KeyEvent {
-                code: KeyCode::Enter,
-                ..
-            }) => {
+        let Event::Key(KeyEvent {
+            code, modifiers, ..
+        }) = ev
+        else {
+            return MenuAction::Noop;
+        };
+
+        // Menu-specific keys (before shared nav lookup).
+        match (*code, *modifiers) {
+            (KeyCode::Char('q'), KeyModifiers::NONE) => return MenuAction::Dismiss,
+            (KeyCode::Char(' '), _) if !self.select_on_enter => {
+                return MenuAction::Toggle(self.selected)
+            }
+            (KeyCode::Char('t'), m) if m.contains(KeyModifiers::CONTROL) => return MenuAction::Tab,
+            _ => {}
+        }
+
+        // Shared navigation keys.
+        match nav_lookup(*code, *modifiers) {
+            Some(NavAction::Dismiss) => MenuAction::Dismiss,
+            Some(NavAction::Confirm) => {
                 if self.select_on_enter {
                     MenuAction::Select(self.selected)
                 } else {
                     MenuAction::Toggle(self.selected)
                 }
             }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char(' '),
-                ..
-            }) if !self.select_on_enter => MenuAction::Toggle(self.selected),
-            Event::Key(KeyEvent {
-                code: KeyCode::Tab, ..
-            }) => MenuAction::Tab,
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('t'),
-                modifiers: crossterm::event::KeyModifiers::CONTROL,
-                ..
-            }) => MenuAction::Tab,
-            Event::Key(KeyEvent {
-                code: KeyCode::Up, ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Char('k'),
-                ..
-            }) => {
+            Some(NavAction::Edit) => MenuAction::Tab,
+            Some(NavAction::Up) => {
                 if self.len == 0 {
                     return MenuAction::Noop;
                 }
@@ -73,14 +66,7 @@ impl Menu {
                 };
                 MenuAction::Redraw
             }
-            Event::Key(KeyEvent {
-                code: KeyCode::Down,
-                ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Char('j'),
-                ..
-            }) => {
+            Some(NavAction::Down) => {
                 if self.len == 0 {
                     return MenuAction::Noop;
                 }

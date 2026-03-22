@@ -29,6 +29,7 @@ impl App {
                         entries,
                         self.cwd.clone(),
                         Some(terminal::size().map(|(_, h)| h / 2).unwrap_or(12)),
+                        self.input.vim_enabled(),
                     )))
                 }
             }
@@ -63,6 +64,7 @@ impl App {
                         session_entries,
                         self.workspace_rules.clone(),
                         Some(terminal::size().map(|(_, h)| h / 2).unwrap_or(12)),
+                        self.input.vim_enabled(),
                     )))
                 }
             }

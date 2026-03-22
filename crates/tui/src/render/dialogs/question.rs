@@ -2,6 +2,7 @@ use super::{
     begin_dialog_draw, finish_dialog_frame, render_inline_textarea, wrap_line, DialogResult,
     TextArea,
 };
+use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{crlf, draw_bar, RenderOut};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -71,6 +72,7 @@ pub struct QuestionDialog {
     selections: Vec<usize>,
     multi_toggles: Vec<Vec<bool>>,
     other_areas: Vec<TextArea>,
+    kill_ring: String,
     editing_other: Vec<bool>,
     visited: Vec<bool>,
     answered: Vec<bool>,
@@ -94,6 +96,7 @@ impl QuestionDialog {
             active_tab: 0,
             selections: vec![0; n],
             other_areas: (0..n).map(|_| TextArea::new()).collect(),
+            kill_ring: String::new(),
             editing_other: vec![false; n],
             visited: vec![false; n],
             answered: vec![false; n],
@@ -200,17 +203,23 @@ impl super::Dialog for QuestionDialog {
         self.anchor_row
     }
 
+    fn set_kill_ring(&mut self, contents: String) {
+        self.kill_ring = contents;
+    }
+
+    fn kill_ring(&self) -> Option<&str> {
+        Some(&self.kill_ring)
+    }
+
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<DialogResult> {
         self.dirty = true;
         let q = &self.questions[self.active_tab];
         let other_idx = q.options.len();
 
+        // ── Editing "other" text area ───────────────────────────────────
         if self.editing_other[self.active_tab] {
-            match (code, modifiers) {
-                (KeyCode::Esc, _) => {
-                    self.editing_other[self.active_tab] = false;
-                }
-                (KeyCode::Enter, _) => {
+            match nav_lookup(code, modifiers) {
+                Some(NavAction::Confirm) => {
                     self.editing_other[self.active_tab] = false;
                     self.answered[self.active_tab] = true;
                     if let Some(next) = (0..self.questions.len()).find(|&i| !self.answered[i]) {
@@ -222,59 +231,46 @@ impl super::Dialog for QuestionDialog {
                         });
                     }
                 }
-                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                    if self.other_areas[self.active_tab].is_empty() {
+                Some(NavAction::Dismiss) => {
+                    if code == KeyCode::Esc {
+                        self.editing_other[self.active_tab] = false;
+                    } else if self.other_areas[self.active_tab].is_empty() {
                         return Some(DialogResult::Question {
                             answer: None,
                             request_id: self.request_id,
                         });
-                    }
-                    self.other_areas[self.active_tab].clear();
-                    self.editing_other[self.active_tab] = false;
-                    if q.multi_select {
-                        self.multi_toggles[self.active_tab][other_idx] = false;
+                    } else {
+                        self.other_areas[self.active_tab].clear();
+                        self.editing_other[self.active_tab] = false;
+                        if q.multi_select {
+                            self.multi_toggles[self.active_tab][other_idx] = false;
+                        }
                     }
                 }
                 _ => {
-                    self.other_areas[self.active_tab].handle_key(code, modifiers);
+                    self.other_areas[self.active_tab].handle_key_with_kill_ring(
+                        code,
+                        modifiers,
+                        &mut self.kill_ring,
+                    );
                 }
             }
             return None;
         }
 
+        // ── Question-specific keys (before shared dialog lookup) ────────
+        // Tab navigation between questions.
         match (code, modifiers) {
-            (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                return Some(DialogResult::Question {
-                    answer: None,
-                    request_id: self.request_id,
-                });
-            }
-            (KeyCode::Enter, _) => {
-                self.answered[self.active_tab] = true;
-                if let Some(next) = (0..self.questions.len()).find(|&i| !self.answered[i]) {
-                    self.active_tab = next;
-                } else {
-                    return Some(DialogResult::Question {
-                        answer: Some(self.build_answer()),
-                        request_id: self.request_id,
-                    });
-                }
-            }
-            (KeyCode::Tab, _) => {
-                if self.selections[self.active_tab] == other_idx {
-                    self.editing_other[self.active_tab] = true;
-                    if q.multi_select {
-                        self.multi_toggles[self.active_tab][other_idx] = true;
-                    }
-                }
-            }
-            (KeyCode::Right, _) | (KeyCode::Char('l'), _) => {
+            (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
                 if self.has_tabs {
                     self.visited[self.active_tab] = true;
                     self.active_tab = (self.active_tab + 1) % self.questions.len();
                 }
+                return None;
             }
-            (KeyCode::BackTab, _) | (KeyCode::Left, _) | (KeyCode::Char('h'), _) => {
+            (KeyCode::BackTab, _)
+            | (KeyCode::Left, _)
+            | (KeyCode::Char('h'), KeyModifiers::NONE) => {
                 if self.has_tabs {
                     self.visited[self.active_tab] = true;
                     self.active_tab = if self.active_tab == 0 {
@@ -283,17 +279,7 @@ impl super::Dialog for QuestionDialog {
                         self.active_tab - 1
                     };
                 }
-            }
-            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
-                self.selections[self.active_tab] = if self.selections[self.active_tab] == 0 {
-                    other_idx
-                } else {
-                    self.selections[self.active_tab] - 1
-                };
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                self.selections[self.active_tab] =
-                    (self.selections[self.active_tab] + 1) % (other_idx + 1);
+                return None;
             }
             (KeyCode::Char(' '), _) if q.multi_select => {
                 let idx = self.selections[self.active_tab];
@@ -303,6 +289,7 @@ impl super::Dialog for QuestionDialog {
                     self.multi_toggles[self.active_tab][idx] =
                         !self.multi_toggles[self.active_tab][idx];
                 }
+                return None;
             }
             (KeyCode::Char(c), _) if c.is_ascii_digit() => {
                 let num = c.to_digit(10).unwrap_or(0) as usize;
@@ -314,10 +301,53 @@ impl super::Dialog for QuestionDialog {
                         self.selections[self.active_tab] = num - 1;
                     }
                 }
+                return None;
             }
             _ => {}
         }
-        None
+
+        // ── Shared dialog keys ──────────────────────────────────────────
+        match nav_lookup(code, modifiers) {
+            Some(NavAction::Dismiss) => Some(DialogResult::Question {
+                answer: None,
+                request_id: self.request_id,
+            }),
+            Some(NavAction::Confirm) => {
+                self.answered[self.active_tab] = true;
+                if let Some(next) = (0..self.questions.len()).find(|&i| !self.answered[i]) {
+                    self.active_tab = next;
+                    None
+                } else {
+                    Some(DialogResult::Question {
+                        answer: Some(self.build_answer()),
+                        request_id: self.request_id,
+                    })
+                }
+            }
+            Some(NavAction::Edit) => {
+                if self.selections[self.active_tab] == other_idx {
+                    self.editing_other[self.active_tab] = true;
+                    if q.multi_select {
+                        self.multi_toggles[self.active_tab][other_idx] = true;
+                    }
+                }
+                None
+            }
+            Some(NavAction::Up) => {
+                self.selections[self.active_tab] = if self.selections[self.active_tab] == 0 {
+                    other_idx
+                } else {
+                    self.selections[self.active_tab] - 1
+                };
+                None
+            }
+            Some(NavAction::Down) => {
+                self.selections[self.active_tab] =
+                    (self.selections[self.active_tab] + 1) % (other_idx + 1);
+                None
+            }
+            _ => None,
+        }
     }
 
     fn draw(&mut self, start_row: u16, sync_started: bool) {
@@ -516,13 +546,14 @@ impl super::Dialog for QuestionDialog {
         // Footer
         crlf(&mut out);
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        if editing {
-            let _ = out.queue(Print(" esc: cancel  enter: confirm"));
+        let hint = if editing {
+            hints::join(&[hints::CANCEL, hints::CONFIRM])
         } else if self.has_tabs {
-            let _ = out.queue(Print(" tab: next question  enter: confirm"));
+            hints::join(&[hints::NEXT_Q, hints::CONFIRM, hints::CANCEL])
         } else {
-            let _ = out.queue(Print(" enter: confirm"));
-        }
+            hints::join(&[hints::CONFIRM, hints::CANCEL])
+        };
+        let _ = out.queue(Print(&hint));
         let _ = out.queue(SetAttribute(Attribute::Reset));
         // Only clear below the dialog if there's viewport space left.
         // When the dialog fills the full terminal, clearing here wipes

@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::keymap::{self, KeyAction};
 use crossterm::{event::Event, terminal};
 
 impl App {
@@ -59,6 +60,10 @@ impl App {
             {
                 let mut d = active_dialog.take().unwrap();
                 if let Some(result) = d.handle_key(code, modifiers) {
+                    // Sync kill ring back from dialog.
+                    if let Some(kr) = d.kill_ring() {
+                        self.input.set_kill_ring(kr.to_string());
+                    }
                     let anchor = d.anchor_row();
                     self.handle_dialog_result(result, anchor, agent);
                 } else {
@@ -167,8 +172,9 @@ impl App {
                 self.screen.mark_dirty();
                 false
             }
-            EventOutcome::OpenDialog(dlg) => {
+            EventOutcome::OpenDialog(mut dlg) => {
                 self.screen.erase_prompt();
+                dlg.set_kill_ring(self.input.take_kill_ring());
                 *active_dialog = Some(dlg);
                 false
             }
@@ -238,91 +244,6 @@ impl App {
             return outcome;
         }
 
-        // Ctrl+R: open history fuzzy search (not in vim normal mode).
-        if matches!(
-            ev,
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('r'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            })
-        ) && self.input.history_search_query().is_none()
-            && !self
-                .input
-                .vim_mode()
-                .is_some_and(|m| m == vim::ViMode::Normal)
-        {
-            self.input.open_history_search(&self.input_history);
-            self.screen.mark_dirty();
-            return EventOutcome::Redraw;
-        }
-
-        // Ctrl+C: dismiss the topmost UI element, or quit if nothing is open.
-        if matches!(
-            ev,
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            })
-        ) {
-            // Menu open → dismiss it.
-            if let Some(result) = self.input.dismiss_menu() {
-                self.screen.mark_dirty();
-                return EventOutcome::MenuResult(result);
-            }
-            // Completer open → close it.
-            if self.input.completer.is_some() {
-                self.input.completer = None;
-                self.screen.mark_dirty();
-                return EventOutcome::Redraw;
-            }
-            // Non-empty prompt → clear it.
-            if !self.input.buf.is_empty() {
-                t.last_ctrlc = Some(Instant::now());
-                self.input.clear();
-                self.screen.mark_dirty();
-                return EventOutcome::Redraw;
-            }
-            // Nothing open, empty prompt → quit.
-            let double_tap = t
-                .last_ctrlc
-                .is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
-            if double_tap {
-                return EventOutcome::Quit;
-            }
-            t.last_ctrlc = Some(Instant::now());
-            return EventOutcome::Quit;
-        }
-
-        // ?: open help dialog (only when input is empty so it doesn't interfere with typing).
-        if self.input.buf.is_empty()
-            && matches!(
-                ev,
-                Event::Key(KeyEvent {
-                    code: KeyCode::Char('?'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                })
-            )
-        {
-            return EventOutcome::OpenDialog(Box::new(render::HelpDialog::new()));
-        }
-
-        // Ctrl+S: toggle stash.
-        if matches!(
-            ev,
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('s'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            })
-        ) {
-            self.input.toggle_stash();
-            self.screen.mark_dirty();
-            return EventOutcome::Redraw;
-        }
-
         // Esc / double-Esc (skip when a modal menu is open — let it handle Esc)
         if !self.input.has_modal()
             && matches!(
@@ -382,66 +303,69 @@ impl App {
             t.last_esc = None;
         }
 
-        // Ghost-text prediction: Tab accepts, any other key dismisses.
-        if self.input_prediction.is_some() && self.input.buf.is_empty() {
-            if matches!(
-                ev,
-                Event::Key(KeyEvent {
-                    code: KeyCode::Tab,
-                    ..
-                })
-            ) {
-                self.input.buf = self.input_prediction.take().unwrap();
-                self.input.cpos = self.input.buf.len();
-                self.screen.mark_dirty();
-                return EventOutcome::Redraw;
-            }
-            self.input_prediction = None;
-        }
+        // Keymap lookup for app-level actions (before delegating to InputState).
+        if let Event::Key(KeyEvent {
+            code, modifiers, ..
+        }) = ev
+        {
+            let ghost = self.input_prediction.is_some() && self.input.buf.is_empty();
+            let ctx = self.input.key_context(false, ghost);
 
-        // Delegate to InputState::handle_event
-        match self.input.handle_event(ev, Some(&mut self.input_history)) {
-            Action::Submit { content, display } => EventOutcome::Submit { content, display },
-            Action::MenuResult(result) => EventOutcome::MenuResult(result),
-            Action::ToggleMode => {
-                self.toggle_mode();
-                EventOutcome::Redraw
+            // Dismiss ghost text on any key that isn't AcceptGhostText.
+            if ghost {
+                if let Some(KeyAction::AcceptGhostText) = keymap::lookup(code, modifiers, &ctx) {
+                    self.input.buf = self.input_prediction.take().unwrap();
+                    self.input.cpos = self.input.buf.len();
+                    self.screen.mark_dirty();
+                    return EventOutcome::Redraw;
+                }
+                self.input_prediction = None;
             }
-            Action::CycleReasoning => {
-                self.set_reasoning_effort(self.reasoning_effort.cycle());
-                EventOutcome::Redraw
-            }
-            Action::Resize {
-                width: w,
-                height: h,
-            } => {
-                self.handle_resize(w as u16, h as u16);
-                EventOutcome::Noop
-            }
-            Action::Redraw => {
-                // Live-preview settings toggles.
-                if let Some(ref ms) = self.input.menu {
-                    if let MenuKind::Settings {
-                        show_speed,
-                        show_slug,
-                        ..
-                    } = ms.kind
-                    {
-                        self.show_speed = show_speed;
-                        self.screen.set_show_speed(show_speed);
-                        self.show_slug = show_slug;
-                        self.screen.set_show_slug(show_slug);
+
+            if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
+                // Handle actions that need app-level context.
+                match action {
+                    KeyAction::Quit => {
+                        return EventOutcome::Quit;
+                    }
+                    KeyAction::ClearBuffer => {
+                        // Dismiss menu/completer first, then clear buffer.
+                        if let Some(result) = self.input.dismiss_menu() {
+                            self.screen.mark_dirty();
+                            return EventOutcome::MenuResult(result);
+                        }
+                        if self.input.completer.is_some() {
+                            self.input.completer = None;
+                            self.screen.mark_dirty();
+                            return EventOutcome::Redraw;
+                        }
+                        t.last_ctrlc = Some(Instant::now());
+                        self.input.clear();
+                        self.screen.mark_dirty();
+                        return EventOutcome::Redraw;
+                    }
+                    KeyAction::OpenHelp => {
+                        return EventOutcome::OpenDialog(Box::new(render::HelpDialog::new(
+                            self.input.vim_enabled(),
+                        )));
+                    }
+                    KeyAction::OpenHistorySearch => {
+                        if self.input.history_search_query().is_none() {
+                            self.input.open_history_search(&self.input_history);
+                            self.screen.mark_dirty();
+                        }
+                        return EventOutcome::Redraw;
+                    }
+                    _ => {
+                        // Delegate to InputState for editing/navigation actions.
                     }
                 }
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
             }
-            Action::NotifyError(msg) => {
-                self.screen.notify_error(msg);
-                EventOutcome::Redraw
-            }
-            Action::Noop => EventOutcome::Noop,
         }
+
+        // Delegate to InputState::handle_event (menu, completer, vim, editing).
+        let action = self.input.handle_event(ev, Some(&mut self.input_history));
+        self.dispatch_input_action(action)
     }
 
     // ── Running event handler ────────────────────────────────────────────
@@ -461,42 +385,55 @@ impl App {
             t.last_keypress = Some(Instant::now());
         }
 
-        // Ctrl+C: dismiss UI elements first, then cancel agent.
-        if matches!(
-            ev,
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            })
-        ) {
-            // Menu open → dismiss it.
-            if let Some(result) = self.input.dismiss_menu() {
-                self.screen.mark_dirty();
-                return EventOutcome::MenuResult(result);
-            }
-            // Completer open → close it.
-            if self.input.completer.is_some() {
-                self.input.completer = None;
-                self.screen.mark_dirty();
-                return EventOutcome::Noop;
-            }
-            // Non-empty prompt → clear it + queued messages.
-            if !self.input.buf.is_empty() {
-                t.last_ctrlc = Some(Instant::now());
-                self.input.clear();
-                let count = self.steered_message_count();
-                if count > 0 {
-                    self.engine.send(UiCommand::Unsteer { count });
+        // Keymap lookup for Ctrl+C (agent-running variant).
+        if let Event::Key(KeyEvent {
+            code, modifiers, ..
+        }) = ev
+        {
+            let ctx = self.input.key_context(true, false);
+            if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
+                match action {
+                    KeyAction::CancelAgent => {
+                        // Dismiss menu/completer first, then cancel.
+                        if let Some(result) = self.input.dismiss_menu() {
+                            self.screen.mark_dirty();
+                            return EventOutcome::MenuResult(result);
+                        }
+                        if self.input.completer.is_some() {
+                            self.input.completer = None;
+                            self.screen.mark_dirty();
+                            return EventOutcome::Noop;
+                        }
+                        self.queued_messages.clear();
+                        self.screen.mark_dirty();
+                        return EventOutcome::CancelAgent;
+                    }
+                    KeyAction::ClearBuffer => {
+                        // Dismiss menu/completer first, then clear.
+                        if let Some(result) = self.input.dismiss_menu() {
+                            self.screen.mark_dirty();
+                            return EventOutcome::MenuResult(result);
+                        }
+                        if self.input.completer.is_some() {
+                            self.input.completer = None;
+                            self.screen.mark_dirty();
+                            return EventOutcome::Noop;
+                        }
+                        t.last_ctrlc = Some(Instant::now());
+                        self.input.clear();
+                        let count = self.steered_message_count();
+                        if count > 0 {
+                            self.engine.send(UiCommand::Unsteer { count });
+                        }
+                        self.queued_messages.clear();
+                        self.screen.mark_dirty();
+                        return EventOutcome::Noop;
+                    }
+                    _ => {
+                        // Other keymap actions — continue to Esc / input handling.
+                    }
                 }
-                self.queued_messages.clear();
-                self.screen.mark_dirty();
-                return EventOutcome::Noop;
             }
-            // Nothing open → cancel agent and clear queued messages.
-            self.queued_messages.clear();
-            self.screen.mark_dirty();
-            return EventOutcome::CancelAgent;
         }
 
         // Esc: use resolve_agent_esc for the running-mode logic.
@@ -518,7 +455,6 @@ impl App {
                     self.screen.mark_dirty();
                 }
                 EscAction::Unqueue => {
-                    // Tell the engine to remove already-steered messages.
                     let count = self.steered_message_count();
                     if count > 0 {
                         self.engine.send(UiCommand::Unsteer { count });
@@ -556,7 +492,6 @@ impl App {
                 if let Some(outcome) = self.try_command_while_running(text.trim()) {
                     return outcome;
                 }
-                // Not a command — queue as a user message.
                 if !text.is_empty() {
                     self.queued_messages.push(text);
                 }
@@ -575,12 +510,65 @@ impl App {
                 self.screen.notify_error(msg);
                 self.screen.mark_dirty();
             }
+            Action::PurgeRedraw => {
+                self.screen.redraw(true);
+            }
             Action::MenuResult(_) | Action::Noop | Action::Resize { .. } => {}
         }
         EventOutcome::Noop
     }
 
     // ── Shared helpers ────────────────────────────────────────────────────
+
+    /// Map an `input::Action` into an `EventOutcome`.
+    fn dispatch_input_action(&mut self, action: Action) -> EventOutcome {
+        match action {
+            Action::Submit { content, display } => EventOutcome::Submit { content, display },
+            Action::MenuResult(result) => EventOutcome::MenuResult(result),
+            Action::ToggleMode => {
+                self.toggle_mode();
+                EventOutcome::Redraw
+            }
+            Action::CycleReasoning => {
+                self.set_reasoning_effort(self.reasoning_effort.cycle());
+                EventOutcome::Redraw
+            }
+            Action::Resize {
+                width: w,
+                height: h,
+            } => {
+                self.handle_resize(w as u16, h as u16);
+                EventOutcome::Noop
+            }
+            Action::Redraw => {
+                // Live-preview settings toggles.
+                if let Some(ref ms) = self.input.menu {
+                    if let MenuKind::Settings {
+                        show_speed,
+                        show_slug,
+                        ..
+                    } = ms.kind
+                    {
+                        self.show_speed = show_speed;
+                        self.screen.set_show_speed(show_speed);
+                        self.show_slug = show_slug;
+                        self.screen.set_show_slug(show_slug);
+                    }
+                }
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            Action::PurgeRedraw => {
+                self.screen.redraw(true);
+                EventOutcome::Noop
+            }
+            Action::NotifyError(msg) => {
+                self.screen.notify_error(msg);
+                EventOutcome::Redraw
+            }
+            Action::Noop => EventOutcome::Noop,
+        }
+    }
 
     fn handle_resize(&mut self, w: u16, h: u16) {
         if w != self.last_width || h != self.last_height {
@@ -602,13 +590,28 @@ impl App {
                 code, modifiers, ..
             }) = ev
             {
-                match (*code, *modifiers) {
-                    (KeyCode::Char('d'), KeyModifiers::CONTROL) | (KeyCode::PageDown, _) => {
-                        self.screen.btw_scroll(10);
+                use crate::keymap::{nav_lookup, NavAction};
+                match nav_lookup(*code, *modifiers) {
+                    Some(NavAction::Down) => {
+                        self.screen.btw_scroll(1);
                         return Some(EventOutcome::Noop);
                     }
-                    (KeyCode::Char('u'), KeyModifiers::CONTROL) | (KeyCode::PageUp, _) => {
-                        self.screen.btw_scroll(-10);
+                    Some(NavAction::Up) => {
+                        self.screen.btw_scroll(-1);
+                        return Some(EventOutcome::Noop);
+                    }
+                    Some(NavAction::PageDown) => {
+                        let half = (render::term_height() / 2).max(1) as isize;
+                        self.screen.btw_scroll(half);
+                        return Some(EventOutcome::Noop);
+                    }
+                    Some(NavAction::PageUp) => {
+                        let half = (render::term_height() / 2).max(1) as isize;
+                        self.screen.btw_scroll(-half);
+                        return Some(EventOutcome::Noop);
+                    }
+                    Some(NavAction::Dismiss) => {
+                        self.screen.dismiss_btw();
                         return Some(EventOutcome::Noop);
                     }
                     _ => {

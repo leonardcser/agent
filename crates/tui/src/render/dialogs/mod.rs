@@ -57,6 +57,13 @@ pub trait Dialog {
     fn handle_resize(&mut self);
     fn anchor_row(&self) -> Option<u16>;
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult>;
+
+    /// Seed the dialog's kill ring from the main input's kill ring.
+    fn set_kill_ring(&mut self, _contents: String) {}
+    /// Retrieve the dialog's kill ring so the main input can sync it back.
+    fn kill_ring(&self) -> Option<&str> {
+        None
+    }
 }
 
 pub(crate) struct ListState {
@@ -118,24 +125,42 @@ impl ListState {
         self.dirty = true;
     }
 
-    pub fn select_prev(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
-            if self.selected < self.scroll_offset {
-                self.scroll_offset = self.selected;
-            }
-            self.dirty = true;
+    pub fn select_prev(&mut self, item_count: usize) {
+        if item_count == 0 {
+            return;
         }
+        self.selected = if self.selected > 0 {
+            self.selected - 1
+        } else {
+            item_count - 1
+        };
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        }
+        // Wrap to bottom: scroll to show the last item.
+        if self.selected >= self.scroll_offset + self.max_visible {
+            self.scroll_offset = self.selected + 1 - self.max_visible;
+        }
+        self.dirty = true;
     }
 
     pub fn select_next(&mut self, item_count: usize) {
-        if self.selected + 1 < item_count {
-            self.selected += 1;
-            if self.selected >= self.scroll_offset + self.max_visible {
-                self.scroll_offset = self.selected + 1 - self.max_visible;
-            }
-            self.dirty = true;
+        if item_count == 0 {
+            return;
         }
+        self.selected = if self.selected + 1 < item_count {
+            self.selected + 1
+        } else {
+            0
+        };
+        if self.selected >= self.scroll_offset + self.max_visible {
+            self.scroll_offset = self.selected + 1 - self.max_visible;
+        }
+        // Wrap to top: reset scroll.
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        }
+        self.dirty = true;
     }
 
     pub fn page_up(&mut self) {
@@ -353,25 +378,176 @@ impl TextArea {
         self.col = self.lines[self.row].chars().count();
     }
 
+    pub fn move_word_forward(&mut self) {
+        let line = &self.lines[self.row];
+        let len = line.chars().count();
+        if self.col >= len {
+            if self.row + 1 < self.lines.len() {
+                self.row += 1;
+                self.col = 0;
+            }
+            return;
+        }
+        let byte = char_to_byte(line, self.col);
+        let target = crate::vim::word_forward_pos(line, byte, crate::vim::CharClass::Word);
+        self.col = line[..target].chars().count();
+    }
+
+    pub fn move_word_backward(&mut self) {
+        if self.col == 0 {
+            if self.row > 0 {
+                self.row -= 1;
+                self.col = self.lines[self.row].chars().count();
+            }
+            return;
+        }
+        let line = &self.lines[self.row];
+        let byte = char_to_byte(line, self.col);
+        let target = crate::vim::word_backward_pos(line, byte, crate::vim::CharClass::Word);
+        self.col = line[..target].chars().count();
+    }
+
+    pub fn delete_char_forward(&mut self) {
+        let len = self.lines[self.row].chars().count();
+        if self.col < len {
+            let byte = char_to_byte(&self.lines[self.row], self.col);
+            self.lines[self.row].remove(byte);
+        } else if self.row + 1 < self.lines.len() {
+            let next = self.lines.remove(self.row + 1);
+            self.lines[self.row].push_str(&next);
+        }
+    }
+
+    pub fn delete_word_forward(&mut self) {
+        let line = &self.lines[self.row];
+        let len = line.chars().count();
+        if self.col >= len {
+            return;
+        }
+        let byte = char_to_byte(line, self.col);
+        let target = crate::vim::word_forward_pos(line, byte, crate::vim::CharClass::Word);
+        self.lines[self.row].drain(byte..target);
+    }
+
+    pub fn kill_to_end_of_line(&mut self, kill_ring: &mut String) {
+        let line = &self.lines[self.row];
+        let byte = char_to_byte(line, self.col);
+        *kill_ring = line[byte..].to_string();
+        self.lines[self.row].truncate(byte);
+    }
+
+    pub fn kill_to_start_of_line(&mut self, kill_ring: &mut String) {
+        let byte = char_to_byte(&self.lines[self.row], self.col);
+        *kill_ring = self.lines[self.row][..byte].to_string();
+        self.lines[self.row].drain(..byte);
+        self.col = 0;
+    }
+
+    pub fn delete_to_start_of_line(&mut self) {
+        let byte = char_to_byte(&self.lines[self.row], self.col);
+        self.lines[self.row].drain(..byte);
+        self.col = 0;
+    }
+
+    pub fn yank(&mut self, kill_ring: &str) {
+        if !kill_ring.is_empty() {
+            let byte = char_to_byte(&self.lines[self.row], self.col);
+            self.lines[self.row].insert_str(byte, kill_ring);
+            self.col += kill_ring.chars().count();
+        }
+    }
+
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        // Note: kill/yank need external kill_ring; handled via handle_key_with_kill_ring.
         match (code, modifiers) {
             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => self.insert_char(c),
             (KeyCode::Enter, _) => self.insert_newline(),
+            // Ctrl+A: start of line
+            (KeyCode::Char('a'), m) if m.contains(KeyModifiers::CONTROL) => self.move_home(),
+            // Ctrl+E: end of line
+            (KeyCode::Char('e'), m) if m.contains(KeyModifiers::CONTROL) => self.move_end(),
+            // Ctrl+F: char forward
+            (KeyCode::Char('f'), m) if m.contains(KeyModifiers::CONTROL) => self.move_right(),
+            // Ctrl+B: char backward
+            (KeyCode::Char('b'), m) if m.contains(KeyModifiers::CONTROL) => self.move_left(),
+            // Alt+F: word forward
+            (KeyCode::Char('f'), m) if m.contains(KeyModifiers::ALT) => self.move_word_forward(),
+            // Alt+B: word backward
+            (KeyCode::Char('b'), m) if m.contains(KeyModifiers::ALT) => self.move_word_backward(),
+            // Ctrl+D: delete char forward
+            (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => {
+                self.delete_char_forward()
+            }
+            // Alt+D: delete word forward
+            (KeyCode::Char('d'), m) if m.contains(KeyModifiers::ALT) => self.delete_word_forward(),
+            // Ctrl+W: delete word backward
+            (KeyCode::Char('w'), m) if m.contains(KeyModifiers::CONTROL) => {
+                self.delete_word_backward()
+            }
             (KeyCode::Backspace, m)
                 if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) =>
             {
                 self.delete_word_backward()
             }
+            // Cmd+Backspace: delete to start of line
+            (KeyCode::Backspace, m) if m.contains(KeyModifiers::SUPER) => {
+                self.delete_to_start_of_line()
+            }
             (KeyCode::Backspace, _) => self.backspace(),
+            // Delete (forward delete key)
+            (KeyCode::Delete, m) if m.contains(KeyModifiers::ALT) => self.delete_word_forward(),
+            (KeyCode::Delete, _) => self.delete_char_forward(),
+            // Alt+Left: word backward
+            (KeyCode::Left, m) if m.contains(KeyModifiers::ALT) => self.move_word_backward(),
+            // Cmd+Left: start of line
+            (KeyCode::Left, m) if m.contains(KeyModifiers::SUPER) => self.move_home(),
             (KeyCode::Left, _) => self.move_left(),
+            // Alt+Right: word forward
+            (KeyCode::Right, m) if m.contains(KeyModifiers::ALT) => self.move_word_forward(),
+            // Cmd+Right: end of line
+            (KeyCode::Right, m) if m.contains(KeyModifiers::SUPER) => self.move_end(),
             (KeyCode::Right, _) => self.move_right(),
+            // Cmd+Up: start of buffer
+            (KeyCode::Up, m) if m.contains(KeyModifiers::SUPER) => {
+                self.row = 0;
+                self.col = 0;
+            }
             (KeyCode::Up, _) => self.move_up(),
+            // Cmd+Down: end of buffer
+            (KeyCode::Down, m) if m.contains(KeyModifiers::SUPER) => {
+                self.row = self.lines.len() - 1;
+                self.col = self.lines[self.row].chars().count();
+            }
             (KeyCode::Down, _) => self.move_down(),
             (KeyCode::Home, _) => self.move_home(),
             (KeyCode::End, _) => self.move_end(),
             _ => return false,
         }
         true
+    }
+
+    /// Like `handle_key` but with kill ring support for Ctrl+K/U/Y.
+    pub fn handle_key_with_kill_ring(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        kill_ring: &mut String,
+    ) -> bool {
+        match (code, modifiers) {
+            (KeyCode::Char('k'), m) if m.contains(KeyModifiers::CONTROL) => {
+                self.kill_to_end_of_line(kill_ring);
+                true
+            }
+            (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
+                self.kill_to_start_of_line(kill_ring);
+                true
+            }
+            (KeyCode::Char('y'), m) if m.contains(KeyModifiers::CONTROL) => {
+                self.yank(kill_ring);
+                true
+            }
+            _ => self.handle_key(code, modifiers),
+        }
     }
 }
 
