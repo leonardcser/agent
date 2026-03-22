@@ -792,10 +792,6 @@ impl App {
             std::process::exit(1);
         }
 
-        if self.session.first_user_message.is_none() {
-            self.session.first_user_message = Some(message.clone());
-        }
-
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
@@ -848,21 +844,16 @@ impl App {
                         answer: Some("User is not available (headless mode).".into()),
                     });
                 }
-                EngineEvent::Messages { messages, .. } => {
-                    self.set_history(messages);
-                }
+                EngineEvent::Messages { .. } => {}
                 EngineEvent::TurnError { message } => {
                     eprintln!("[error] {message}");
                 }
-                EngineEvent::TurnComplete { messages, .. } => {
-                    self.set_history(messages);
+                EngineEvent::TurnComplete { .. } => {
                     break;
                 }
                 _ => {}
             }
         }
-
-        self.save_session();
 
         // Ensure output ends with a newline.
         println!();

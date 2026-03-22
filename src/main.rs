@@ -248,24 +248,24 @@ async fn main() {
             {
                 tokio::signal::ctrl_c().await.ok();
             }
-            let session_id = if let Ok(guard) = shared.lock() {
-                if let Some(ref s) = *guard {
-                    tui::session::save(s, &tui::attachment::AttachmentStore::new());
-                    if !s.messages.is_empty() {
-                        Some(s.id.clone())
+            if !is_headless {
+                let session_id = if let Ok(guard) = shared.lock() {
+                    if let Some(ref s) = *guard {
+                        tui::session::save(s, &tui::attachment::AttachmentStore::new());
+                        if !s.messages.is_empty() {
+                            Some(s.id.clone())
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
-            let _ = crossterm::terminal::disable_raw_mode();
-            let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
-            println!();
-            if !is_headless {
+                };
+                let _ = crossterm::terminal::disable_raw_mode();
+                let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
+                println!();
                 if let Some(id) = session_id {
                     tui::session::print_resume_hint(&id);
                 }
@@ -302,8 +302,8 @@ async fn main() {
         permissions: permissions.clone(),
     });
 
-    // Fetch context window in background (before moving available_models)
-    let ctx_rx = {
+    // Fetch context window in background (only needed for interactive mode)
+    let ctx_rx = if !args.headless {
         let ctx_api_base = args
             .api_base
             .clone()
@@ -328,6 +328,8 @@ async fn main() {
             let _ = tx.send(provider.fetch_context_window(&ctx_model).await);
         });
         Some(rx)
+    } else {
+        None
     };
 
     // Build the TUI app
