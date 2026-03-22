@@ -121,6 +121,7 @@ impl ListState {
     }
 
     pub fn handle_resize(&mut self) {
+        self.max_height = terminal::size().map(|(_, h)| h / 2).ok();
         self.anchor_row = None;
         self.dirty = true;
     }
