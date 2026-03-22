@@ -222,6 +222,7 @@ fn classify_startup_command(input: &str) -> Option<&'static str> {
 enum InputOutcome {
     Continue,
     StartAgent,
+    CancelAndClear,
     Compact {
         focus: Option<String>,
     },
@@ -574,6 +575,10 @@ impl App {
                                 InputOutcome::Exec(rx, kill) => {
                                     self.exec_rx = Some(rx);
                                     self.exec_kill = Some(kill);
+                                }
+                                InputOutcome::CancelAndClear => {
+                                    self.reset_session();
+                                    agent = None;
                                 }
                                 InputOutcome::Continue | InputOutcome::Quit => {}
                                 InputOutcome::OpenDialog(dlg) => {

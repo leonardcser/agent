@@ -31,6 +31,9 @@ impl App {
     }
 
     pub fn reset_session(&mut self) {
+        // Cancel any in-flight engine work (agent turn, title generation, etc.)
+        // before clearing state so stale events don't restore old data.
+        self.engine.send(UiCommand::Cancel);
         self.history.clear();
         self.token_snapshots.clear();
         self.reset_session_permissions();

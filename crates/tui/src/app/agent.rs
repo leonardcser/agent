@@ -439,6 +439,9 @@ impl App {
     }
 
     fn handle_title_generated(&mut self, title: String, slug: String) {
+        if !self.pending_title {
+            return;
+        }
         self.session.title = Some(title);
         self.session.slug = Some(slug.clone());
         self.screen.set_task_label(slug);

@@ -965,6 +965,19 @@ impl Screen {
         }
     }
 
+    /// Gap (in rows) between the last content element and the prompt.
+    fn prompt_gap(&self) -> u16 {
+        if self.active_exec.is_some() {
+            gap_between(&Element::ActiveExec, &Element::Prompt)
+        } else if self.active_tool.is_some() {
+            gap_between(&Element::ActiveTool, &Element::Prompt)
+        } else {
+            self.history.blocks.last().map_or(0, |last| {
+                gap_between(&Element::Block(last), &Element::Prompt)
+            })
+        }
+    }
+
     pub fn render_pending_blocks(&mut self) {
         if self.defer_pending_render {
             self.defer_pending_render = false;
@@ -988,7 +1001,7 @@ impl Screen {
                 .unwrap_or_else(|| cursor::position().map(|(_, y)| y).unwrap_or(0))
         };
         let block_rows = self.history.render(&mut out, term_width());
-        self.prompt.anchor_row = Some(start_row + block_rows);
+        self.prompt.anchor_row = Some(start_row + block_rows + self.prompt_gap());
         let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
     }
@@ -1056,15 +1069,7 @@ impl Screen {
         // Account for the gap between the last block and the prompt so that
         // draw_frame (which sees block_rows=0 since everything is flushed)
         // positions the prompt correctly.
-        let gap = if self.active_exec.is_some() {
-            gap_between(&Element::ActiveExec, &Element::Prompt)
-        } else if self.active_tool.is_some() {
-            gap_between(&Element::ActiveTool, &Element::Prompt)
-        } else {
-            self.history.blocks.last().map_or(0, |last| {
-                gap_between(&Element::Block(last), &Element::Prompt)
-            })
-        };
+        let gap = self.prompt_gap();
         if purge {
             self.has_scrollback = false;
             self.content_start_row = Some(0);
@@ -1238,14 +1243,14 @@ impl Screen {
 
         if let Some(p) = prompt {
             // ── Full mode: render prompt ────────────────────────────────
-            let gap = if self.active_exec.is_some() {
-                gap_between(&Element::ActiveExec, &Element::Prompt)
-            } else if self.active_tool.is_some() {
-                gap_between(&Element::ActiveTool, &Element::Prompt)
-            } else if block_rows > 0 {
-                self.history.blocks.last().map_or(0, |last| {
-                    gap_between(&Element::Block(last), &Element::Prompt)
-                })
+            // Only emit the gap when blocks were actually rendered this
+            // frame (block_rows > 0).  When block_rows is 0 the gap is
+            // already baked into anchor_row by render_pending_blocks /
+            // redraw, so adding it again would double-count.  It also
+            // avoids a stray blank line when the prompt is fullscreen.
+            let gap = if block_rows > 0 || self.active_tool.is_some() || self.active_exec.is_some()
+            {
+                self.prompt_gap()
             } else {
                 0
             };

@@ -127,11 +127,8 @@ impl App {
                         "reason": "user_cancel_and_clear",
                     }),
                 );
-                if agent.is_some() {
-                    self.cancel_agent();
-                    *agent = None;
-                }
                 self.reset_session();
+                *agent = None;
                 false
             }
             EventOutcome::MenuResult(result) => {
@@ -214,6 +211,10 @@ impl App {
                             InputOutcome::Exec(rx, kill) => {
                                 self.exec_rx = Some(rx);
                                 self.exec_kill = Some(kill);
+                            }
+                            InputOutcome::CancelAndClear => {
+                                self.reset_session();
+                                *agent = None;
                             }
                             InputOutcome::Continue => {}
                             InputOutcome::Quit => return true,
@@ -663,8 +664,7 @@ impl App {
         match self.handle_command(trimmed) {
             CommandAction::Quit => return InputOutcome::Quit,
             CommandAction::CancelAndClear => {
-                self.reset_session();
-                return InputOutcome::Continue;
+                return InputOutcome::CancelAndClear;
             }
             CommandAction::Compact { focus } => return InputOutcome::Compact { focus },
             CommandAction::OpenDialog(dlg) => return InputOutcome::OpenDialog(dlg),
