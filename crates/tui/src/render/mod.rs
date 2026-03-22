@@ -885,6 +885,11 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
+    pub fn clear_task_label(&mut self) {
+        self.task_label = None;
+        self.prompt.dirty = true;
+    }
+
     pub fn set_reasoning_effort(&mut self, effort: protocol::ReasoningEffort) {
         self.reasoning_effort = effort;
         self.prompt.dirty = true;
