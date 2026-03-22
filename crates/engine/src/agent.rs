@@ -161,6 +161,13 @@ fn spawn_title_generation(
                     "title_error",
                     &serde_json::json!({"error": e}),
                 );
+                if e.starts_with("quota exceeded") {
+                    let _ = tx.send(EngineEvent::TurnError {
+                        message: "API quota exceeded — check your plan and billing details"
+                            .to_string(),
+                    });
+                    return;
+                }
                 let fallback = user_messages
                     .last()
                     .and_then(|m| m.lines().next())

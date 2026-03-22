@@ -55,6 +55,8 @@ pub enum ProviderError {
     Cancelled,
     #[error("rate limited (attempt {attempt})")]
     RateLimited { attempt: u32 },
+    #[error("quota exceeded: {0}")]
+    QuotaExceeded(String),
     #[error("authentication failed: {0}")]
     Auth(String),
     #[error("not found: {0}")]
@@ -240,6 +242,12 @@ impl Provider {
                 let err = match code {
                     401 | 403 => ProviderError::Auth(text),
                     404 => ProviderError::NotFound(text),
+                    429 if text.contains("insufficient_quota")
+                        || text.contains("billing_not_active")
+                        || text.contains("exceeded") =>
+                    {
+                        ProviderError::QuotaExceeded(text)
+                    }
                     429 => ProviderError::RateLimited {
                         attempt: attempt as u32,
                     },
@@ -444,6 +452,14 @@ impl Provider {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            let code = status.as_u16();
+            if code == 429
+                && (text.contains("insufficient_quota")
+                    || text.contains("billing_not_active")
+                    || text.contains("exceeded"))
+            {
+                return Err(format!("quota exceeded: {text}"));
+            }
             return Err(format!("API error {}: {}", status, text));
         }
 
