@@ -56,6 +56,9 @@ pub struct EngineConfig {
     pub provider_type: String,
     pub model_config: ModelConfig,
     pub instructions: Option<String>,
+    /// When set, replaces the entire system prompt (skips the built-in
+    /// template, mode overlays, and AGENTS.md instructions).
+    pub system_prompt_override: Option<String>,
     pub cwd: PathBuf,
     pub permissions: Arc<Permissions>,
 }

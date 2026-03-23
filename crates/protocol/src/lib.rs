@@ -256,7 +256,7 @@ pub enum EngineEvent {
     BtwResponse { content: String },
 
     /// Predicted next user input (ghost text autocomplete).
-    InputPrediction { text: String },
+    InputPrediction { text: String, generation: u64 },
 
     /// Snapshot of the engine's message list, sent after each significant step.
     Messages {
@@ -373,6 +373,7 @@ pub enum UiCommand {
         model: String,
         api_base: Option<String>,
         api_key: Option<String>,
+        generation: u64,
     },
 
     /// Cancel the current turn.

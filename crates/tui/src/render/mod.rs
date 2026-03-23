@@ -1661,9 +1661,10 @@ impl Screen {
             let _ = out.queue(Print("\r\n"));
         } else if show_prediction {
             let pred = prediction.unwrap();
+            let first_line = pred.lines().next().unwrap_or(pred);
             let _ = out.queue(Print(" "));
             let _ = out.queue(SetAttribute(Attribute::Dim));
-            let msg: String = pred.chars().take(usable.saturating_sub(1)).collect();
+            let msg: String = first_line.chars().take(usable.saturating_sub(1)).collect();
             let _ = out.queue(Print(&msg));
             let _ = out.queue(SetAttribute(Attribute::Reset));
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));

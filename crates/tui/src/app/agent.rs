@@ -220,11 +220,13 @@ impl App {
                     context.push(msg);
                 }
                 if !context.is_empty() {
+                    self.predict_generation += 1;
                     self.engine.send(UiCommand::PredictInput {
                         history: context,
                         model: self.model.clone(),
                         api_base: Some(self.api_base.clone()),
                         api_key: Some(self.api_key()),
+                        generation: self.predict_generation,
                     });
                 }
             }
@@ -387,8 +389,10 @@ impl App {
                 self.screen.set_btw_response(content);
                 SessionControl::Continue
             }
-            EngineEvent::InputPrediction { text } => {
-                self.handle_input_prediction(text);
+            EngineEvent::InputPrediction { text, generation } => {
+                if generation == self.predict_generation {
+                    self.handle_input_prediction(text);
+                }
                 SessionControl::Continue
             }
             EngineEvent::Messages {
@@ -449,8 +453,10 @@ impl App {
             EngineEvent::BtwResponse { content } => {
                 self.screen.set_btw_response(content);
             }
-            EngineEvent::InputPrediction { text } => {
-                self.handle_input_prediction(text);
+            EngineEvent::InputPrediction { text, generation } => {
+                if generation == self.predict_generation {
+                    self.handle_input_prediction(text);
+                }
             }
             EngineEvent::ProcessCompleted { id, exit_code } => {
                 self.handle_process_completed(id, exit_code);

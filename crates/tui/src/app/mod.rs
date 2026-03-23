@@ -75,6 +75,8 @@ pub struct App {
     confirm_context: Option<ConfirmContext>,
     /// Ghost text prediction for the input field.
     pub input_prediction: Option<String>,
+    /// Monotonic counter to discard stale predictions.
+    predict_generation: u64,
     pending_title: bool,
     last_width: u16,
     last_height: u16,
@@ -386,6 +388,7 @@ impl App {
             permissions,
             confirm_context: None,
             input_prediction: None,
+            predict_generation: 0,
             pending_title: false,
             last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
             last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),

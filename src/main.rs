@@ -45,8 +45,26 @@ struct Args {
     top_p: Option<f64>,
     #[arg(long, value_name = "VALUE", help = "Top-k sampling")]
     top_k: Option<u32>,
-    #[arg(long, help = "Disable tool calling (model becomes chat-only)")]
+    #[arg(long, help = "Enable tool calling")]
+    tool_calling: bool,
+    #[arg(
+        long,
+        help = "Disable tool calling (model becomes chat-only)",
+        overrides_with = "tool_calling"
+    )]
     no_tool_calling: bool,
+    #[arg(
+        long,
+        conflicts_with = "no_system_prompt",
+        help = "Override the system prompt"
+    )]
+    system_prompt: Option<String>,
+    #[arg(
+        long,
+        conflicts_with = "system_prompt",
+        help = "Disable system prompt and AGENTS.md instructions"
+    )]
+    no_system_prompt: bool,
     #[arg(long, default_value = "info", value_name = "LEVEL")]
     log_level: String,
     #[arg(long, help = "Print performance timing summary on exit")]
@@ -55,6 +73,54 @@ struct Args {
     headless: bool,
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION_ID")]
     resume: Option<String>,
+
+    // Toggle flags (--flag / --no-flag pairs)
+    #[arg(long, help = "Enable vim mode")]
+    vim_mode: bool,
+    #[arg(long, help = "Disable vim mode", overrides_with = "vim_mode")]
+    no_vim_mode: bool,
+
+    #[arg(long, help = "Enable auto compact")]
+    auto_compact: bool,
+    #[arg(long, help = "Disable auto compact", overrides_with = "auto_compact")]
+    no_auto_compact: bool,
+
+    #[arg(long, help = "Enable speed display")]
+    show_speed: bool,
+    #[arg(long, help = "Disable speed display", overrides_with = "show_speed")]
+    no_show_speed: bool,
+
+    #[arg(long, help = "Enable input prediction")]
+    input_prediction: bool,
+    #[arg(
+        long,
+        help = "Disable input prediction",
+        overrides_with = "input_prediction"
+    )]
+    no_input_prediction: bool,
+
+    #[arg(long, help = "Enable task slug")]
+    task_slug: bool,
+    #[arg(long, help = "Disable task slug", overrides_with = "task_slug")]
+    no_task_slug: bool,
+
+    #[arg(long, help = "Restrict file access to workspace")]
+    restrict_to_workspace: bool,
+    #[arg(
+        long,
+        help = "Allow file access outside workspace",
+        overrides_with = "restrict_to_workspace"
+    )]
+    no_restrict_to_workspace: bool,
+}
+
+/// Resolve a --flag / --no-flag pair into an optional override.
+fn flag(yes: bool, no: bool) -> Option<bool> {
+    match (yes, no) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
 }
 
 #[tokio::main]
@@ -167,12 +233,18 @@ async fn main() {
         })
     });
 
-    let vim_enabled = cfg.settings.vim_mode.unwrap_or(false);
-    let auto_compact = cfg.settings.auto_compact.unwrap_or(false);
-    let show_speed = cfg.settings.show_speed.unwrap_or(true);
-    let input_prediction = cfg.settings.input_prediction.unwrap_or(true);
-    let task_slug = cfg.settings.task_slug.unwrap_or(true);
-    let restrict_to_workspace = cfg.settings.restrict_to_workspace.unwrap_or(true);
+    let vim_enabled = flag(args.vim_mode, args.no_vim_mode)
+        .unwrap_or_else(|| cfg.settings.vim_mode.unwrap_or(false));
+    let auto_compact = flag(args.auto_compact, args.no_auto_compact)
+        .unwrap_or_else(|| cfg.settings.auto_compact.unwrap_or(false));
+    let show_speed = flag(args.show_speed, args.no_show_speed)
+        .unwrap_or_else(|| cfg.settings.show_speed.unwrap_or(true));
+    let input_prediction = flag(args.input_prediction, args.no_input_prediction)
+        .unwrap_or_else(|| cfg.settings.input_prediction.unwrap_or(true));
+    let task_slug = flag(args.task_slug, args.no_task_slug)
+        .unwrap_or_else(|| cfg.settings.task_slug.unwrap_or(true));
+    let restrict_to_workspace = flag(args.restrict_to_workspace, args.no_restrict_to_workspace)
+        .unwrap_or_else(|| cfg.settings.restrict_to_workspace.unwrap_or(true));
 
     // Apply CLI sampling overrides to model_config
     if let Some(v) = args.temperature {
@@ -184,8 +256,8 @@ async fn main() {
     if let Some(v) = args.top_k {
         model_config.top_k = Some(v);
     }
-    if args.no_tool_calling {
-        model_config.tool_calling = Some(false);
+    if let Some(v) = flag(args.tool_calling, args.no_tool_calling) {
+        model_config.tool_calling = Some(v);
     }
 
     // Reasoning effort: CLI --reasoning-effort > config defaults > saved state.
@@ -281,7 +353,16 @@ async fn main() {
 
     // Load instructions and workspace
     let cwd = std::env::current_dir().unwrap_or_default();
-    let instructions = tui::instructions::load();
+    let instructions = if args.no_system_prompt {
+        None
+    } else {
+        tui::instructions::load()
+    };
+    let system_prompt_override = if args.no_system_prompt {
+        Some(String::new())
+    } else {
+        args.system_prompt.clone()
+    };
 
     // Start the engine
     let mut permissions = engine::Permissions::load();
@@ -304,6 +385,7 @@ async fn main() {
             tool_calling: model_config.tool_calling,
         },
         instructions,
+        system_prompt_override,
         cwd,
         permissions: permissions.clone(),
     });

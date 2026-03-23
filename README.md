@@ -233,6 +233,8 @@ Navigate with `j`/`k`, delete with `dd` or `Backspace`, close with `Esc`.
 --top-p <VALUE>                Top-p (nucleus) sampling
 --top-k <VALUE>                Top-k sampling
 --no-tool-calling              Disable tool calling (model becomes chat-only)
+--system-prompt <PROMPT>       Override the system prompt
+--no-system-prompt             Disable system prompt and AGENTS.md instructions
 --log-level <LEVEL>            trace | debug | info | warn | error (default: info)
 --bench                        Print performance timing on exit
 ```

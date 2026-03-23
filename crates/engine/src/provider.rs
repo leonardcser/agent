@@ -364,6 +364,7 @@ impl Provider {
                 let text = resp.text().await.unwrap_or_default();
 
                 let err = match code {
+                    400 => ProviderError::InvalidResponse(text),
                     401 | 403 => ProviderError::Auth(text),
                     404 => ProviderError::NotFound(text),
                     429 if text.contains("insufficient_quota")
@@ -857,6 +858,27 @@ impl Provider {
         } else {
             Ok(text)
         }
+    }
+
+    /// Single-line completion for input prediction. Adds a `\n` stop sequence
+    /// so the model returns at most one line.
+    pub async fn complete_predict(
+        &self,
+        messages: &[protocol::Message],
+        model: &str,
+    ) -> Result<String, String> {
+        let api_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::to_value(m).unwrap())
+            .collect();
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": api_messages,
+            "stop": ["\n"],
+        });
+        body[self.max_tokens_key()] = serde_json::json!(128);
+        self.insert_no_thinking(&mut body);
+        self.complete_raw(body).await
     }
 
     async fn complete_short(

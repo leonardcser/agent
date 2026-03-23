@@ -33,15 +33,13 @@ pub async fn engine_task(
 
     // Process completion channel for background processes
     let (proc_done_tx, mut proc_done_rx) = mpsc::unbounded_channel::<(String, Option<i32>)>();
-    // Cancellation token for the in-flight prediction request.
-    let mut predict_cancel = crate::cancel::CancellationToken::new();
 
     loop {
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
                     UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id, session_dir, model_config_overrides, permission_overrides } => {
-                        predict_cancel.cancel();
+
                         let mut provider = build_provider_with_overrides(
                             &config, &client,
                             api_base.as_deref(), api_key.as_deref(),
@@ -56,11 +54,13 @@ pub async fn engine_task(
                         } else {
                             &config.permissions
                         };
-                        let system_prompt = crate::build_system_prompt(
-                            mode,
-                            &config.cwd,
-                            config.instructions.as_deref(),
-                        );
+                        let system_prompt = config.system_prompt_override.clone().unwrap_or_else(|| {
+                            crate::build_system_prompt(
+                                mode,
+                                &config.cwd,
+                                config.instructions.as_deref(),
+                            )
+                        });
                         let mut turn = Turn {
                             provider,
                             registry: &registry,
@@ -104,10 +104,8 @@ pub async fn engine_task(
                     UiCommand::Btw { question, history, model, reasoning_effort, api_base, api_key } => {
                         spawn_btw_request(&config, &client, &model, reasoning_effort, question, history, api_base, api_key, &event_tx);
                     }
-                    UiCommand::PredictInput { history, model, api_base, api_key } => {
-                        predict_cancel.cancel();
-                        predict_cancel = crate::cancel::CancellationToken::new();
-                        spawn_predict_request(&config, &client, &model, history, api_base, api_key, &event_tx, predict_cancel.clone());
+                    UiCommand::PredictInput { history, model, api_base, api_key, generation } => {
+                        spawn_predict_request(&config, &client, &model, history, api_base, api_key, &event_tx, generation);
                     }
                     UiCommand::SetModel { provider_type, .. } => {
                         config.provider_type = provider_type;
@@ -235,7 +233,7 @@ fn spawn_predict_request(
     api_base: Option<String>,
     api_key: Option<String>,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
-    cancel: crate::cancel::CancellationToken,
+    generation: u64,
 ) {
     let provider =
         build_provider_with_overrides(config, client, api_base.as_deref(), api_key.as_deref());
@@ -282,22 +280,15 @@ fn spawn_predict_request(
             protocol::Message::user(protocol::Content::text(&user_msg)),
         ];
 
-        if let Ok(Ok(resp)) = tokio::time::timeout(
+        let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            provider.chat(
-                &messages,
-                &[],
-                &model,
-                protocol::ReasoningEffort::Off,
-                &cancel,
-                None,
-            ),
+            provider.complete_predict(&messages, &model),
         )
-        .await
-        {
-            let text = resp.content.unwrap_or_default().trim().to_string();
+        .await;
+        if let Ok(Ok(text)) = result {
+            let text = text.trim().to_string();
             if !text.is_empty() {
-                let _ = tx.send(EngineEvent::InputPrediction { text });
+                let _ = tx.send(EngineEvent::InputPrediction { text, generation });
             }
         }
     });

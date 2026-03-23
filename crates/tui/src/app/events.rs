@@ -316,7 +316,8 @@ impl App {
             // Dismiss ghost text on any key that isn't AcceptGhostText.
             if ghost {
                 if let Some(KeyAction::AcceptGhostText) = keymap::lookup(code, modifiers, &ctx) {
-                    self.input.buf = self.input_prediction.take().unwrap();
+                    let full = self.input_prediction.take().unwrap();
+                    self.input.buf = full.lines().next().unwrap_or(&full).to_string();
                     self.input.cpos = self.input.buf.len();
                     self.screen.mark_dirty();
                     return EventOutcome::Redraw;
