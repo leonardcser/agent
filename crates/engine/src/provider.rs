@@ -176,6 +176,10 @@ impl Provider {
         self
     }
 
+    pub fn tool_calling(&self) -> bool {
+        self.model_config.tool_calling()
+    }
+
     /// Cloud APIs reject unknown parameters with 400 errors. These getters
     /// return `None` for params unsupported by the target provider.
     fn top_k(&self) -> Option<u32> {

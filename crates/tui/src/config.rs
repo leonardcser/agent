@@ -19,6 +19,7 @@ pub struct ModelConfig {
     pub top_k: Option<u32>,
     pub min_p: Option<f64>,
     pub repeat_penalty: Option<f64>,
+    pub tool_calling: Option<bool>,
 }
 
 fn deserialize_models<'de, D>(deserializer: D) -> Result<Vec<ModelConfig>, D::Error>

@@ -1002,7 +1002,9 @@ impl Screen {
     /// the prompt.  Used to decide whether to emit a 1-line gap before the
     /// prompt bar.
     fn has_content(&self) -> bool {
-        !self.history.blocks.is_empty() || !self.active_tools.is_empty() || self.active_exec.is_some()
+        !self.history.blocks.is_empty()
+            || !self.active_tools.is_empty()
+            || self.active_exec.is_some()
     }
 
     pub fn render_pending_blocks(&mut self) {

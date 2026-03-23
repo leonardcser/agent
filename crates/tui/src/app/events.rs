@@ -41,7 +41,8 @@ impl App {
                     {
                         let d = active_dialog.take().unwrap();
                         self.screen.clear_dialog_area(d.anchor_row());
-                        self.screen.set_active_status(&ctx.call_id, ToolStatus::Pending);
+                        self.screen
+                            .set_active_status(&ctx.call_id, ToolStatus::Pending);
                         self.engine.send(UiCommand::PermissionDecision {
                             request_id: ctx.request_id,
                             approved: true,

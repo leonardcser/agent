@@ -45,6 +45,8 @@ struct Args {
     top_p: Option<f64>,
     #[arg(long, value_name = "VALUE", help = "Top-k sampling")]
     top_k: Option<u32>,
+    #[arg(long, help = "Disable tool calling (model becomes chat-only)")]
+    no_tool_calling: bool,
     #[arg(long, default_value = "info", value_name = "LEVEL")]
     log_level: String,
     #[arg(long, help = "Print performance timing summary on exit")]
@@ -182,6 +184,9 @@ async fn main() {
     if let Some(v) = args.top_k {
         model_config.top_k = Some(v);
     }
+    if args.no_tool_calling {
+        model_config.tool_calling = Some(false);
+    }
 
     // Reasoning effort: CLI --reasoning-effort > config defaults > saved state.
     let reasoning_effort = args
@@ -296,6 +301,7 @@ async fn main() {
             top_k: model_config.top_k,
             min_p: model_config.min_p,
             repeat_penalty: model_config.repeat_penalty,
+            tool_calling: model_config.tool_calling,
         },
         instructions,
         cwd,

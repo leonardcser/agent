@@ -308,8 +308,12 @@ impl App {
                 args,
                 summary,
             } => {
-                self.screen.start_tool(call_id.clone(), tool_name.clone(), summary, args);
-                pending.push(PendingTool { call_id, name: tool_name });
+                self.screen
+                    .start_tool(call_id.clone(), tool_name.clone(), summary, args);
+                pending.push(PendingTool {
+                    call_id,
+                    name: tool_name,
+                });
                 SessionControl::Continue
             }
             EngineEvent::ToolFinished {
@@ -508,10 +512,19 @@ impl App {
                 tool_name,
                 request_id,
             } => {
-                let call_id = self.confirm_context.as_ref().map(|c| c.call_id.clone()).unwrap_or_default();
+                let call_id = self
+                    .confirm_context
+                    .as_ref()
+                    .map(|c| c.call_id.clone())
+                    .unwrap_or_default();
                 self.confirm_context = None;
-                let should_cancel =
-                    self.resolve_confirm((choice, message), &call_id, request_id, &tool_name, agent);
+                let should_cancel = self.resolve_confirm(
+                    (choice, message),
+                    &call_id,
+                    request_id,
+                    &tool_name,
+                    agent,
+                );
                 self.screen.clear_dialog_area(anchor);
                 if should_cancel && agent.is_some() {
                     self.finish_turn(true);
@@ -766,7 +779,8 @@ impl App {
                     approved: false,
                     message,
                 });
-                self.screen.finish_tool(call_id, ToolStatus::Denied, None, None);
+                self.screen
+                    .finish_tool(call_id, ToolStatus::Denied, None, None);
                 if has_message {
                     // Deny with feedback — let the agent continue with the message.
                     // Clear pending so the engine's ToolFinished event doesn't
@@ -937,7 +951,8 @@ impl App {
                 let recently_typed = last_keypress
                     .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS));
                 if recently_typed && !self.input.buf.is_empty() {
-                    self.screen.set_active_status(&req.call_id, ToolStatus::Confirm);
+                    self.screen
+                        .set_active_status(&req.call_id, ToolStatus::Confirm);
                     self.screen.set_pending_dialog(true);
                     *deferred_dialog = Some(DeferredDialog::Confirm(req));
                     return LoopAction::Continue;
@@ -953,7 +968,8 @@ impl App {
                     args: req.args.clone(),
                     request_id: req.request_id,
                 });
-                self.screen.set_active_status(&req.call_id, ToolStatus::Confirm);
+                self.screen
+                    .set_active_status(&req.call_id, ToolStatus::Confirm);
                 let dialog = Box::new(ConfirmDialog::new(&req, self.input.vim_enabled()));
                 self.open_blocking_dialog(dialog, active_dialog);
                 LoopAction::Continue

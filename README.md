@@ -86,6 +86,8 @@ providers:
         top_k: 40
         min_p: 0.01
         repeat_penalty: 1.0
+      - name: llama3:8b # disable tool calling for models that don't support it
+        tool_calling: false
 
   - name: openai
     type: openai
@@ -230,6 +232,7 @@ Navigate with `j`/`k`, delete with `dd` or `Backspace`, close with `Esc`.
 --temperature <TEMP>           Sampling temperature
 --top-p <VALUE>                Top-p (nucleus) sampling
 --top-k <VALUE>                Top-k sampling
+--no-tool-calling              Disable tool calling (model becomes chat-only)
 --log-level <LEVEL>            trace | debug | info | warn | error (default: info)
 --bench                        Print performance timing on exit
 ```

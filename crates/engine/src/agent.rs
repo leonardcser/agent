@@ -460,8 +460,11 @@ impl<'a> Turn<'a> {
 
             // Recompute tool definitions each iteration — mode may have
             // changed (e.g. Plan → Apply after plan approval).
-            let tool_defs: Vec<ToolDefinition> =
-                self.registry.definitions(self.permissions, self.mode);
+            let tool_defs: Vec<ToolDefinition> = if self.provider.tool_calling() {
+                self.registry.definitions(self.permissions, self.mode)
+            } else {
+                Vec::new()
+            };
 
             if self.cancel.is_cancelled() {
                 self.emit_turn_complete(true);
