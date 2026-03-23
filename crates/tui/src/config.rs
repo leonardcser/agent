@@ -62,6 +62,27 @@ pub struct SettingsConfig {
     pub restrict_to_workspace: Option<bool>,
 }
 
+impl SettingsConfig {
+    /// Apply a `key=value` override. Returns an error message for unknown keys or bad values.
+    pub fn apply(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let b = || match value {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            _ => Err(format!("invalid bool value '{value}' for {key}")),
+        };
+        match key {
+            "vim_mode" => self.vim_mode = b()?,
+            "auto_compact" => self.auto_compact = b()?,
+            "show_speed" => self.show_speed = b()?,
+            "input_prediction" => self.input_prediction = b()?,
+            "task_slug" => self.task_slug = b()?,
+            "restrict_to_workspace" => self.restrict_to_workspace = b()?,
+            _ => return Err(format!("unknown setting '{key}'")),
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ThemeConfig {

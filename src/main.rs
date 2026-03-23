@@ -18,7 +18,7 @@ struct Args {
         help = "Provider type: openai-compatible, openai, anthropic"
     )]
     r#type: Option<String>,
-    #[arg(long)]
+    #[arg(short, long)]
     model: Option<String>,
     #[arg(
         long,
@@ -45,13 +45,7 @@ struct Args {
     top_p: Option<f64>,
     #[arg(long, value_name = "VALUE", help = "Top-k sampling")]
     top_k: Option<u32>,
-    #[arg(long, help = "Enable tool calling")]
-    tool_calling: bool,
-    #[arg(
-        long,
-        help = "Disable tool calling (model becomes chat-only)",
-        overrides_with = "tool_calling"
-    )]
+    #[arg(long, help = "Disable tool calling (model becomes chat-only)")]
     no_tool_calling: bool,
     #[arg(
         long,
@@ -71,56 +65,14 @@ struct Args {
     bench: bool,
     #[arg(long, help = "Run headless (no TUI), requires a message argument")]
     headless: bool,
-    #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION_ID")]
+    #[arg(short, long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION_ID")]
     resume: Option<String>,
-
-    // Toggle flags (--flag / --no-flag pairs)
-    #[arg(long, help = "Enable vim mode")]
-    vim_mode: bool,
-    #[arg(long, help = "Disable vim mode", overrides_with = "vim_mode")]
-    no_vim_mode: bool,
-
-    #[arg(long, help = "Enable auto compact")]
-    auto_compact: bool,
-    #[arg(long, help = "Disable auto compact", overrides_with = "auto_compact")]
-    no_auto_compact: bool,
-
-    #[arg(long, help = "Enable speed display")]
-    show_speed: bool,
-    #[arg(long, help = "Disable speed display", overrides_with = "show_speed")]
-    no_show_speed: bool,
-
-    #[arg(long, help = "Enable input prediction")]
-    input_prediction: bool,
     #[arg(
         long,
-        help = "Disable input prediction",
-        overrides_with = "input_prediction"
+        value_name = "KEY=VALUE",
+        help = "Override a config setting (e.g. --set vim_mode=true)"
     )]
-    no_input_prediction: bool,
-
-    #[arg(long, help = "Enable task slug")]
-    task_slug: bool,
-    #[arg(long, help = "Disable task slug", overrides_with = "task_slug")]
-    no_task_slug: bool,
-
-    #[arg(long, help = "Restrict file access to workspace")]
-    restrict_to_workspace: bool,
-    #[arg(
-        long,
-        help = "Allow file access outside workspace",
-        overrides_with = "restrict_to_workspace"
-    )]
-    no_restrict_to_workspace: bool,
-}
-
-/// Resolve a --flag / --no-flag pair into an optional override.
-fn flag(yes: bool, no: bool) -> Option<bool> {
-    match (yes, no) {
-        (true, _) => Some(true),
-        (_, true) => Some(false),
-        _ => None,
-    }
+    set: Vec<String>,
 }
 
 #[tokio::main]
@@ -133,7 +85,18 @@ async fn main() {
     }));
 
     let args = Args::parse();
-    let cfg = tui::config::Config::load();
+    let mut cfg = tui::config::Config::load();
+
+    for pair in &args.set {
+        let Some((key, value)) = pair.split_once('=') else {
+            eprintln!("error: --set requires KEY=VALUE format, got '{pair}'");
+            std::process::exit(1);
+        };
+        if let Err(e) = cfg.settings.apply(key, value) {
+            eprintln!("error: --set {pair}: {e}");
+            std::process::exit(1);
+        }
+    }
     let app_state = tui::state::State::load();
     let available_models = cfg.resolve_models();
 
@@ -233,18 +196,12 @@ async fn main() {
         })
     });
 
-    let vim_enabled = flag(args.vim_mode, args.no_vim_mode)
-        .unwrap_or_else(|| cfg.settings.vim_mode.unwrap_or(false));
-    let auto_compact = flag(args.auto_compact, args.no_auto_compact)
-        .unwrap_or_else(|| cfg.settings.auto_compact.unwrap_or(false));
-    let show_speed = flag(args.show_speed, args.no_show_speed)
-        .unwrap_or_else(|| cfg.settings.show_speed.unwrap_or(true));
-    let input_prediction = flag(args.input_prediction, args.no_input_prediction)
-        .unwrap_or_else(|| cfg.settings.input_prediction.unwrap_or(true));
-    let task_slug = flag(args.task_slug, args.no_task_slug)
-        .unwrap_or_else(|| cfg.settings.task_slug.unwrap_or(true));
-    let restrict_to_workspace = flag(args.restrict_to_workspace, args.no_restrict_to_workspace)
-        .unwrap_or_else(|| cfg.settings.restrict_to_workspace.unwrap_or(true));
+    let vim_enabled = cfg.settings.vim_mode.unwrap_or(false);
+    let auto_compact = cfg.settings.auto_compact.unwrap_or(false);
+    let show_speed = cfg.settings.show_speed.unwrap_or(true);
+    let input_prediction = cfg.settings.input_prediction.unwrap_or(true);
+    let task_slug = cfg.settings.task_slug.unwrap_or(true);
+    let restrict_to_workspace = cfg.settings.restrict_to_workspace.unwrap_or(true);
 
     // Apply CLI sampling overrides to model_config
     if let Some(v) = args.temperature {
@@ -256,8 +213,8 @@ async fn main() {
     if let Some(v) = args.top_k {
         model_config.top_k = Some(v);
     }
-    if let Some(v) = flag(args.tool_calling, args.no_tool_calling) {
-        model_config.tool_calling = Some(v);
+    if args.no_tool_calling {
+        model_config.tool_calling = Some(false);
     }
 
     // Reasoning effort: CLI --reasoning-effort > config defaults > saved state.
