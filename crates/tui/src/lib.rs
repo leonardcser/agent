@@ -25,8 +25,9 @@ pub fn expand_at_refs(input: &str) -> String {
     let mut i = 0;
     while i < chars.len() {
         if let Some((_, path, end)) = render::scan_at_token(&chars, i) {
-            if std::path::Path::new(&path).exists() {
-                refs.push(path);
+            let resolved = path.trim_end_matches([',', '.']);
+            if !resolved.is_empty() && std::path::Path::new(resolved).exists() {
+                refs.push(resolved.to_string());
             }
             i = end;
         } else {

@@ -2446,7 +2446,19 @@ pub(crate) fn scan_at_token(chars: &[char], i: usize) -> Option<(String, String,
 /// Returns `Some((token, end_index))` if the path after `@` exists on disk.
 pub(super) fn try_at_ref(chars: &[char], i: usize) -> Option<(String, usize)> {
     let (token, path, end) = scan_at_token(chars, i)?;
-    std::path::Path::new(&path).exists().then_some((token, end))
+    if std::path::Path::new(&path).exists() {
+        return Some((token, end));
+    }
+    // Strip trailing punctuation and retry
+    let trimmed = path.trim_end_matches([',', '.']);
+    if trimmed.len() < path.len() && !trimmed.is_empty() && std::path::Path::new(trimmed).exists()
+    {
+        let stripped = path.len() - trimmed.len();
+        let short_token = token[..token.len() - stripped].to_string();
+        Some((short_token, end - stripped))
+    } else {
+        None
+    }
 }
 
 fn build_display_spans(buf: &str, att_ids: &[AttachmentId], store: &AttachmentStore) -> Vec<Span> {

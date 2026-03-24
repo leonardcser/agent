@@ -94,6 +94,7 @@ impl super::Dialog for RewindDialog {
         let _ = out.queue(SetAttribute(Attribute::Reset));
         crlf(&mut out);
 
+        let num_width = self.turns.len().to_string().len();
         for (i, (_, ref full_text)) in self
             .turns
             .iter()
@@ -103,21 +104,20 @@ impl super::Dialog for RewindDialog {
         {
             let label = full_text.lines().next().unwrap_or("");
             let num = i + 1;
-            let max_label = w.saturating_sub(8);
+            let pad = num_width + 4; // "  " + num_width + ". "
+            let max_label = w.saturating_sub(pad);
             let truncated = truncate_str(label, max_label);
-            let _ = out.queue(Print("  "));
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print(format!("  {:>width$}.", num, width = num_width)));
             if i == self.list.selected {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print(format!("{}.", num)));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
                 let _ = out.queue(Print(" "));
                 let _ = out.queue(SetForegroundColor(theme::accent()));
                 let _ = out.queue(Print(&truncated));
                 let _ = out.queue(ResetColor);
             } else {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print(format!("{}. ", num)));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
+                let _ = out.queue(Print(" "));
                 let _ = out.queue(Print(&truncated));
             }
             crlf(&mut out);
