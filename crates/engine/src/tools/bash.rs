@@ -12,7 +12,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). Use run_in_background for long-running processes."
+        "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). Use run_in_background for long-running processes. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves."
     }
 
     fn parameters(&self) -> Value {
@@ -56,6 +56,13 @@ impl Tool for BashTool {
         Box::pin(async move {
             let command = str_arg(&args, "command");
 
+            if let Some(msg) = check_interactive(&command) {
+                return ToolResult {
+                    content: msg.to_string(),
+                    is_error: true,
+                };
+            }
+
             if bool_arg(&args, "run_in_background") {
                 return execute_background(&command, ctx).await;
             }
@@ -63,6 +70,43 @@ impl Tool for BashTool {
             execute_streaming(&command, &args, ctx).await
         })
     }
+}
+
+/// Known interactive binaries that require a TTY.
+const INTERACTIVE_BINS: &[&str] = &[
+    "vim", "nvim", "vi", "nano", "emacs", "pico", "less", "more", "top", "htop", "btop", "nmon",
+    "irb", "ghci",
+];
+
+/// Git subcommands whose `-i`/`--interactive` flag requires a TTY.
+const GIT_INTERACTIVE_SUBCMDS: &[&str] = &["rebase", "add", "checkout", "clean", "stash"];
+
+fn check_interactive(command: &str) -> Option<&'static str> {
+    let cmds = crate::permissions::split_shell_commands(command);
+    for subcmd in &cmds {
+        let parts: Vec<&str> = subcmd.split_whitespace().collect();
+        let bin = match parts.first() {
+            Some(b) => *b,
+            None => continue,
+        };
+        // Check known interactive binaries (handle paths like /usr/bin/vim)
+        let base = bin.rsplit('/').next().unwrap_or(bin);
+        if INTERACTIVE_BINS.contains(&base) {
+            return Some("Interactive commands (editors, REPLs, pagers) cannot run here — they require a terminal. If there is no non-interactive alternative, ask the user to run it themselves.");
+        }
+        // Check git interactive flags
+        if base == "git" {
+            let has_interactive_flag = parts.iter().any(|p| *p == "-i" || *p == "--interactive");
+            if has_interactive_flag {
+                let has_interactive_subcmd =
+                    parts.iter().any(|p| GIT_INTERACTIVE_SUBCMDS.contains(p));
+                if has_interactive_subcmd {
+                    return Some("Interactive git commands (rebase -i, add -i, etc.) cannot run here — they require a terminal. If there is no non-interactive alternative, ask the user to run it themselves.");
+                }
+            }
+        }
+    }
+    None
 }
 
 async fn execute_background(command: &str, ctx: &ToolContext<'_>) -> ToolResult {
@@ -248,5 +292,50 @@ mod tests {
             patterns(r#"git commit -m "fix(tui): keep lists sized""#),
             vec!["git *"]
         );
+    }
+
+    #[test]
+    fn interactive_vim_blocked() {
+        assert!(check_interactive("vim file.txt").is_some());
+    }
+
+    #[test]
+    fn interactive_nvim_blocked() {
+        assert!(check_interactive("nvim").is_some());
+    }
+
+    #[test]
+    fn interactive_less_blocked() {
+        assert!(check_interactive("less /var/log/syslog").is_some());
+    }
+
+    #[test]
+    fn interactive_git_rebase_i_blocked() {
+        assert!(check_interactive("git rebase -i HEAD~3").is_some());
+    }
+
+    #[test]
+    fn interactive_git_add_i_blocked() {
+        assert!(check_interactive("git add --interactive").is_some());
+    }
+
+    #[test]
+    fn non_interactive_git_rebase_allowed() {
+        assert!(check_interactive("git rebase main").is_none());
+    }
+
+    #[test]
+    fn non_interactive_cargo_allowed() {
+        assert!(check_interactive("cargo build").is_none());
+    }
+
+    #[test]
+    fn interactive_in_chain_blocked() {
+        assert!(check_interactive("echo hello && vim file.txt").is_some());
+    }
+
+    #[test]
+    fn interactive_with_path_blocked() {
+        assert!(check_interactive("/usr/bin/vim file.txt").is_some());
     }
 }

@@ -2451,8 +2451,7 @@ pub(super) fn try_at_ref(chars: &[char], i: usize) -> Option<(String, usize)> {
     }
     // Strip trailing punctuation and retry
     let trimmed = path.trim_end_matches([',', '.']);
-    if trimmed.len() < path.len() && !trimmed.is_empty() && std::path::Path::new(trimmed).exists()
-    {
+    if trimmed.len() < path.len() && !trimmed.is_empty() && std::path::Path::new(trimmed).exists() {
         let stripped = path.len() - trimmed.len();
         let short_token = token[..token.len() - stripped].to_string();
         Some((short_token, end - stripped))
