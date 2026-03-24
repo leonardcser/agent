@@ -35,8 +35,8 @@ agent --model gpt-5.4 --api-base https://api.openai.com/v1 --api-key-env OPENAI_
 
 ## Features
 
-- **Tool use** — file read/write/edit, glob, grep, bash execution, web fetch and
-  search
+- **Tool use** — file read/write/edit, glob, grep, bash execution, notebook
+  editing, web fetch and search
 - **Permission system** — granular allow/ask/deny rules per tool, bash pattern,
   and URL domain
 - **4 modes** — Normal, Plan, Apply, Yolo with different permission defaults
@@ -177,9 +177,11 @@ permissions:
 | `read_file`           | Allow  | Allow | Allow | Allow |
 | `edit_file`           | Ask    | Ask   | Allow | Allow |
 | `write_file`          | Ask    | Ask   | Allow | Allow |
+| `notebook_edit`       | Ask    | Ask   | Ask   | Allow |
 | `glob`                | Allow  | Allow | Allow | Allow |
 | `grep`                | Allow  | Allow | Allow | Allow |
 | `bash`                | Ask    | Ask   | Ask   | Allow |
+| `bash_background`     | Ask    | Ask   | Ask   | Allow |
 | `web_fetch`           | Ask    | Ask   | Ask   | Allow |
 | `web_search`          | Ask    | Ask   | Ask   | Allow |
 | `ask_user_question`   | Allow  | Allow | Allow | Allow |
@@ -221,11 +223,14 @@ Navigate with `j`/`k`, delete with `dd` or `Backspace`, close with `Esc`.
 ## CLI Flags
 
 ```
---model <MODEL>                Model to use (overrides config)
+agent [MESSAGE]                Initial message to send (auto-submits on startup)
+-m, --model <MODEL>            Model to use (overrides config)
 --api-base <URL>               API base URL (overrides config)
 --api-key-env <VAR>            Env var for API key (overrides config)
 --type <TYPE>                  Provider type: openai-compatible, openai, anthropic
                                (auto-detected from --api-base when omitted)
+--mode <MODE>                  Agent mode: normal, plan, apply, yolo
+-r, --resume [SESSION_ID]      Resume a saved session (opens picker if no ID given)
 --reasoning-effort <EFFORT>    Starting reasoning effort (off/low/medium/high/max)
 --reasoning-efforts <LEVELS>   Available reasoning levels for cycling
                                (comma-separated: off,low,medium,high,max)
@@ -235,6 +240,8 @@ Navigate with `j`/`k`, delete with `dd` or `Backspace`, close with `Esc`.
 --no-tool-calling              Disable tool calling (model becomes chat-only)
 --system-prompt <PROMPT>       Override the system prompt
 --no-system-prompt             Disable system prompt and AGENTS.md instructions
+--set <KEY=VALUE>              Override a config setting (can be repeated)
+--headless                     Run without TUI (requires a message argument)
 --log-level <LEVEL>            trace | debug | info | warn | error (default: info)
 --bench                        Print performance timing on exit
 ```
