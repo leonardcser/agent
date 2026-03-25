@@ -96,7 +96,12 @@ pub async fn engine_task(
                                 let _ = event_tx.send(EngineEvent::CompactionComplete { messages });
                             }
                             Err(e) => {
-                                let _ = event_tx.send(EngineEvent::TurnError { message: e });
+                                let msg = if e.starts_with("quota exceeded") {
+                                    "API quota exceeded — check your plan and billing details".to_string()
+                                } else {
+                                    format!("compaction failed: {e}")
+                                };
+                                let _ = event_tx.send(EngineEvent::TurnError { message: msg });
                             }
                         }
                     }
@@ -471,6 +476,19 @@ impl<'a> Turn<'a> {
                 Ok(r) => r,
                 Err(ProviderError::Cancelled) => {
                     self.emit_turn_complete(true);
+                    return;
+                }
+                Err(ProviderError::QuotaExceeded(ref body)) => {
+                    log::entry(
+                        log::Level::Warn,
+                        "agent_stop",
+                        &serde_json::json!({"reason": "quota_exceeded", "error": body}),
+                    );
+                    self.emit_turn_complete(false);
+                    self.emit(EngineEvent::TurnError {
+                        message: "API quota exceeded — check your plan and billing details"
+                            .to_string(),
+                    });
                     return;
                 }
                 Err(e) => {
