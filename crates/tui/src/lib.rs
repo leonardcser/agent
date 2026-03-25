@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod perf;
 pub mod render;
 pub mod session;
+pub mod sleep_inhibit;
 pub mod state;
 pub mod theme;
 pub mod utils;

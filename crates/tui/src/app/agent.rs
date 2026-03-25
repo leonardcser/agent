@@ -4,6 +4,7 @@ impl App {
     // ── Agent lifecycle ──────────────────────────────────────────────────
 
     pub(super) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
+        self.sleep_inhibit.acquire();
         self.input_prediction = None;
         self.screen.begin_turn();
         self.show_user_message(display, content.image_labels());
@@ -128,6 +129,7 @@ impl App {
             }
         };
 
+        self.sleep_inhibit.acquire();
         self.screen.begin_turn();
         self.show_user_message(&display, vec![]);
         if self.session.first_user_message.is_none() {
@@ -166,12 +168,14 @@ impl App {
     /// generating titles, or triggering auto-compact. Used before rewind/clear
     /// where the history will be mutated immediately after.
     pub(super) fn cancel_agent(&mut self) {
+        self.sleep_inhibit.release();
         self.engine.send(UiCommand::Cancel);
         self.screen.set_throbber(render::Throbber::Interrupted);
         self.queued_messages.clear();
     }
 
     pub(super) fn finish_turn(&mut self, cancelled: bool) {
+        self.sleep_inhibit.release();
         self.screen.flush_blocks();
         if cancelled {
             self.engine.send(UiCommand::Cancel);
