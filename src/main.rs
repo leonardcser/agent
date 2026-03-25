@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 struct Args {
     /// Initial message to send (auto-submits on startup)
     message: Option<String>,
+    #[arg(long, value_name = "PATH", help = "Path to a custom config file")]
+    config: Option<String>,
     #[arg(long)]
     api_base: Option<String>,
     #[arg(long)]
@@ -92,7 +94,10 @@ async fn main() {
     }));
 
     let args = Args::parse();
-    let mut cfg = tui::config::Config::load();
+    let mut cfg = match args.config {
+        Some(ref path) => tui::config::Config::load_from(std::path::Path::new(path)),
+        None => tui::config::Config::load(),
+    };
 
     for pair in &args.set {
         let Some((key, value)) = pair.split_once('=') else {

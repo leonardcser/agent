@@ -65,7 +65,8 @@ cargo install --path .
 
 ## Configuration
 
-Config file: `~/.config/agent/config.yaml` (respects `$XDG_CONFIG_HOME`)
+Config file: `~/.config/agent/config.yaml` (respects `$XDG_CONFIG_HOME`).
+Use `--config <path>` to load a different config file.
 
 ```yaml
 # Providers: named connections to LLM APIs
@@ -224,6 +225,7 @@ Navigate with `j`/`k`, delete with `dd` or `Backspace`, close with `Esc`.
 
 ```
 agent [MESSAGE]                Initial message to send (auto-submits on startup)
+--config <PATH>                Path to a custom config file
 -m, --model <MODEL>            Model to use (overrides config)
 --api-base <URL>               API base URL (overrides config)
 --api-key-env <VAR>            Env var for API key (overrides config)

@@ -128,8 +128,11 @@ pub struct ResolvedModel {
 
 impl Config {
     pub fn load() -> Self {
-        let path = config_dir().join("config.yaml");
-        let Ok(contents) = std::fs::read_to_string(&path) else {
+        Self::load_from(&config_dir().join("config.yaml"))
+    }
+
+    pub fn load_from(path: &std::path::Path) -> Self {
+        let Ok(contents) = std::fs::read_to_string(path) else {
             return Self::default();
         };
         match serde_yml::from_str(&contents) {
