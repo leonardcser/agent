@@ -103,10 +103,12 @@ pub struct Vim {
     register_linewise: bool,
     undo_stack: Vec<UndoEntry>,
     redo_stack: Vec<UndoEntry>,
-    /// Snapshot saved when entering insert mode — committed to undo_stack on exit.
-    insert_snapshot: Option<UndoEntry>,
     /// Byte position of the visual mode anchor (where 'v'/'V' was pressed).
     visual_anchor: usize,
+    /// Desired column for vertical motions (j/k). Preserved across vertical
+    /// moves so the cursor snaps back after passing through short lines.
+    /// Cleared by any horizontal motion.
+    curswant: Option<usize>,
 }
 
 impl Default for Vim {
@@ -127,8 +129,8 @@ impl Vim {
             register_linewise: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            insert_snapshot: None,
             visual_anchor: 0,
+            curswant: None,
         }
     }
 
@@ -353,6 +355,11 @@ impl Vim {
         cpos: &mut usize,
         attachments: &mut Vec<AttachmentId>,
     ) -> Action {
+        // Clear desired column for any non-vertical motion.
+        if c != 'j' && c != 'k' && !c.is_ascii_digit() {
+            self.curswant = None;
+        }
+
         // Count digit accumulation.
         if c.is_ascii_digit() && (c != '0' || self.count1.is_some()) {
             self.count1 = Some(self.count1.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
@@ -559,18 +566,21 @@ impl Vim {
 
             // ── Enter insert mode ───────────────────────────────────────
             'i' => {
-                self.take_count(); // discard
+                self.take_count();
+                self.save_undo(buf, *cpos, attachments);
                 self.enter_insert_mode();
                 Action::Consumed
             }
             'I' => {
                 self.take_count();
+                self.save_undo(buf, *cpos, attachments);
                 *cpos = first_non_blank(buf, *cpos);
                 self.enter_insert_mode();
                 Action::Consumed
             }
             'a' => {
                 self.take_count();
+                self.save_undo(buf, *cpos, attachments);
                 if !buf.is_empty() && *cpos < buf.len() {
                     *cpos = advance_chars(buf, *cpos, 1);
                 }
@@ -579,6 +589,7 @@ impl Vim {
             }
             'A' => {
                 self.take_count();
+                self.save_undo(buf, *cpos, attachments);
                 *cpos = line_end(buf, *cpos);
                 self.enter_insert_mode();
                 Action::Consumed
@@ -683,15 +694,15 @@ impl Vim {
             'j' => {
                 let n = self.take_count();
                 if buf.contains('\n') {
-                    let new_pos = move_down(buf, *cpos);
+                    let (new_pos, col) = move_down_col(buf, *cpos, self.curswant);
                     if new_pos == *cpos && n <= 1 {
-                        // Clipped at bottom — navigate history forward.
                         self.reset_pending();
                         return Action::HistoryNext;
                     }
+                    self.curswant = Some(col);
                     *cpos = new_pos;
                     for _ in 1..n {
-                        *cpos = move_down(buf, *cpos);
+                        (*cpos, _) = move_down_col(buf, *cpos, self.curswant);
                     }
                     clamp_normal(buf, cpos);
                     return Action::Consumed;
@@ -706,15 +717,15 @@ impl Vim {
             'k' => {
                 let n = self.take_count();
                 if buf.contains('\n') {
-                    let new_pos = move_up(buf, *cpos);
+                    let (new_pos, col) = move_up_col(buf, *cpos, self.curswant);
                     if new_pos == *cpos && n <= 1 {
-                        // Clipped at top — navigate history backward.
                         self.reset_pending();
                         return Action::HistoryPrev;
                     }
+                    self.curswant = Some(col);
                     *cpos = new_pos;
                     for _ in 1..n {
-                        *cpos = move_up(buf, *cpos);
+                        (*cpos, _) = move_up_col(buf, *cpos, self.curswant);
                     }
                     clamp_normal(buf, cpos);
                     return Action::Consumed;
@@ -774,6 +785,7 @@ impl Vim {
             }
             '0' => {
                 *cpos = line_start(buf, *cpos);
+                self.curswant = None;
                 self.reset_pending();
                 Action::Consumed
             }
@@ -903,6 +915,9 @@ impl Vim {
         cpos: &mut usize,
         attachments: &mut [AttachmentId],
     ) -> Action {
+        if c != 'j' && c != 'k' && !c.is_ascii_digit() {
+            self.curswant = None;
+        }
         match c {
             // ── Escape visual mode ─────────────────────────────────────
             'v' if self.mode == ViMode::Visual => {
@@ -1091,7 +1106,9 @@ impl Vim {
             'j' => {
                 let n = self.take_count();
                 for _ in 0..n {
-                    *cpos = move_down(buf, *cpos);
+                    let col;
+                    (*cpos, col) = move_down_col(buf, *cpos, self.curswant);
+                    self.curswant = Some(col);
                 }
                 clamp_normal(buf, cpos);
                 Action::Consumed
@@ -1099,7 +1116,9 @@ impl Vim {
             'k' => {
                 let n = self.take_count();
                 for _ in 0..n {
-                    *cpos = move_up(buf, *cpos);
+                    let col;
+                    (*cpos, col) = move_up_col(buf, *cpos, self.curswant);
+                    self.curswant = Some(col);
                 }
                 clamp_normal(buf, cpos);
                 Action::Consumed
@@ -1400,34 +1419,16 @@ impl Vim {
                 0
             };
             let origin = *cpos;
-            let (start, end) = if target < origin {
-                (target, origin)
-            } else {
-                (origin, target)
-            };
-            if start != end {
-                match op {
-                    Op::Delete => {
-                        self.save_undo(buf, *cpos, attachments);
-                        self.yank(&buf[start..end], false);
-                        buf.drain(start..end);
-                        *cpos = start;
-                        clamp_normal(buf, cpos);
-                    }
-                    Op::Change => {
-                        self.save_undo(buf, *cpos, attachments);
-                        self.yank(&buf[start..end], false);
-                        buf.drain(start..end);
-                        *cpos = start;
-                        self.enter_insert_mode();
-                        self.reset_counts();
-                        return Action::Consumed;
-                    }
-                    Op::Yank => {
-                        self.yank(&buf[start..end], false);
-                        *cpos = start;
-                    }
-                }
+            if target != origin {
+                let (s, e) = if target < origin {
+                    (target, origin)
+                } else {
+                    (origin, target)
+                };
+                let ls = line_start(buf, s);
+                let le = line_end(buf, e);
+                self.reset_pending();
+                return self.apply_linewise_op(op, buf, cpos, attachments, ls, le);
             }
         }
         self.reset_pending();
@@ -1490,21 +1491,35 @@ impl Vim {
         let n = self.effective_count();
         let origin = *cpos;
 
-        // Resolve motion target.
-        let target = match key.code {
+        // Resolve motion target and whether the motion is linewise.
+        let (target, linewise) = match key.code {
             KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
                 let mut p = origin;
                 for _ in 0..n {
                     p = move_left(buf, p);
                 }
-                Some(p)
+                (Some(p), false)
             }
             KeyCode::Char('l') | KeyCode::Right => {
                 let mut p = origin;
                 for _ in 0..n {
                     p = move_right_inclusive(buf, p);
                 }
-                Some(p)
+                (Some(p), false)
+            }
+            KeyCode::Char('j') => {
+                let mut p = origin;
+                for _ in 0..n {
+                    p = move_down(buf, p);
+                }
+                (Some(p), true)
+            }
+            KeyCode::Char('k') => {
+                let mut p = origin;
+                for _ in 0..n {
+                    p = move_up(buf, p);
+                }
+                (Some(p), true)
             }
             KeyCode::Char('w') => {
                 let mut p = origin;
@@ -1520,7 +1535,7 @@ impl Vim {
                         p = word_forward_pos(buf, p, CharClass::Word);
                     }
                 }
-                Some(p)
+                (Some(p), false)
             }
             KeyCode::Char('W') => {
                 let mut p = origin;
@@ -1535,43 +1550,41 @@ impl Vim {
                         p = word_forward_pos(buf, p, CharClass::WORD);
                     }
                 }
-                Some(p)
+                (Some(p), false)
             }
             KeyCode::Char('b') => {
                 let mut p = origin;
                 for _ in 0..n {
                     p = word_backward_pos(buf, p, CharClass::Word);
                 }
-                Some(p)
+                (Some(p), false)
             }
             KeyCode::Char('B') => {
                 let mut p = origin;
                 for _ in 0..n {
                     p = word_backward_pos(buf, p, CharClass::WORD);
                 }
-                Some(p)
+                (Some(p), false)
             }
             KeyCode::Char('e') => {
                 let mut p = origin;
                 for _ in 0..n {
                     p = word_end_pos(buf, p, CharClass::Word);
                 }
-                // e is inclusive: include the char at target.
-                Some(advance_chars(buf, p, 1))
+                (Some(advance_chars(buf, p, 1)), false)
             }
             KeyCode::Char('E') => {
                 let mut p = origin;
                 for _ in 0..n {
                     p = word_end_pos(buf, p, CharClass::WORD);
                 }
-                Some(advance_chars(buf, p, 1))
+                (Some(advance_chars(buf, p, 1)), false)
             }
-            KeyCode::Char('0') => Some(line_start(buf, origin)),
-            KeyCode::Char('^' | '_') => Some(first_non_blank(buf, origin)),
-            KeyCode::Char('$') => Some(line_end(buf, origin)),
-            KeyCode::Char('G') => Some(buf.len()),
+            KeyCode::Char('0') => (Some(line_start(buf, origin)), false),
+            KeyCode::Char('^' | '_') => (Some(first_non_blank(buf, origin)), false),
+            KeyCode::Char('$') => (Some(line_end(buf, origin)), false),
+            KeyCode::Char('G') => (Some(buf.len()), true), // linewise
             KeyCode::Char('g') => {
-                // Wait for 'g' → gg.
                 self.sub = SubState::WaitingOpG(op);
                 return Action::Consumed;
             }
@@ -1591,15 +1604,29 @@ impl Vim {
                 self.sub = SubState::WaitingOpFind(op, FindKind::BackwardTill);
                 return Action::Consumed;
             }
-            KeyCode::Home => Some(line_start(buf, origin)),
-            KeyCode::End => Some(line_end(buf, origin)),
-            _ => None,
+            KeyCode::Home => (Some(line_start(buf, origin)), false),
+            KeyCode::End => (Some(line_end(buf, origin)), false),
+            _ => (None, false),
         };
 
         let Some(target) = target else {
             // Invalid motion — cancel.
             return Action::Consumed;
         };
+
+        if linewise {
+            // Linewise: delegate to the existing linewise operator logic
+            // which handles newline inclusion, first-non-blank, etc.
+            let (start, end) = if target < origin {
+                (target, origin)
+            } else {
+                (origin, target)
+            };
+            // Expand to full lines.
+            let ls = line_start(buf, start);
+            let le = line_end(buf, end);
+            return self.apply_linewise_op(op, buf, cpos, attachments, ls, le);
+        }
 
         let (start, end) = if target < origin {
             (target, origin)
@@ -1646,30 +1673,57 @@ impl Vim {
         self.reset_counts();
         self.sub = SubState::Ready;
 
-        let (mut start, _) = current_line_range(buf, *cpos);
-        let mut end = start;
-        let mut included_trailing_nl = false;
-        for _ in 0..n {
-            end = line_end(buf, end);
-            if end < buf.len() {
-                end += 1; // include the newline
-                included_trailing_nl = true;
+        let start = line_start(buf, *cpos);
+        let mut end_pos = *cpos;
+        for _ in 1..n {
+            let next = line_end(buf, end_pos);
+            if next < buf.len() {
+                end_pos = next + 1;
             }
         }
-        // If deleting all content, don't leave a trailing newline.
-        if start == 0 && end == buf.len() && !included_trailing_nl {
-            // Deleting everything.
-        } else if start > 0 && end == buf.len() && !included_trailing_nl {
-            // Last line(s) with no trailing newline: remove preceding newline instead.
-            start -= 1;
+        let end = line_end(buf, end_pos);
+        self.apply_linewise_op(op, buf, cpos, attachments, start, end)
+    }
+
+    /// Apply a linewise operator over the content range [start..end].
+    /// `start` is the first byte of the first line, `end` is the last byte
+    /// of the last line (before its newline). This function handles newline
+    /// inclusion at buffer boundaries and cursor placement.
+    fn apply_linewise_op(
+        &mut self,
+        op: Op,
+        buf: &mut String,
+        cpos: &mut usize,
+        attachments: &mut [AttachmentId],
+        start: usize,
+        end: usize,
+    ) -> Action {
+        let mut s = start;
+        let mut e = end;
+        let mut has_trailing_nl = false;
+        // Include trailing newline if present.
+        if e < buf.len() && buf.as_bytes()[e] == b'\n' {
+            e += 1;
+            has_trailing_nl = true;
+        } else if e < buf.len() {
+            e = line_end(buf, e);
+            if e < buf.len() {
+                e += 1;
+                has_trailing_nl = true;
+            }
+        }
+        // At end of buffer with no trailing newline — include preceding
+        // newline to avoid leaving a dangling one.
+        if !has_trailing_nl && e >= buf.len() && s > 0 {
+            s -= 1;
         }
 
         match op {
             Op::Delete => {
                 self.save_undo(buf, *cpos, attachments);
-                self.yank(&buf[start..end], true);
-                buf.drain(start..end);
-                *cpos = start.min(buf.len());
+                self.yank(&buf[s..e], true);
+                buf.drain(s..e);
+                *cpos = s.min(buf.len());
                 if !buf.is_empty() && *cpos < buf.len() {
                     *cpos = first_non_blank_at(buf, *cpos);
                 }
@@ -1677,17 +1731,18 @@ impl Vim {
             }
             Op::Change => {
                 self.save_undo(buf, *cpos, attachments);
-                // cc: clear line content but keep the line itself.
-                let (cs, ce) = current_line_content_range(buf, *cpos);
-                self.yank(&buf[cs..ce], true);
-                buf.drain(cs..ce);
-                *cpos = cs;
+                // Clear line content but keep the line structure.
+                let content_start = first_non_blank_at(buf, s);
+                let content_end = line_end(buf, e.saturating_sub(1).max(s));
+                self.yank(&buf[content_start..content_end], true);
+                buf.drain(content_start..content_end);
+                *cpos = content_start;
                 self.enter_insert_mode();
                 return Action::Consumed;
             }
             Op::Yank => {
-                self.yank(&buf[start..end], true);
-                *cpos = line_start(buf, *cpos);
+                self.yank(&buf[s..e], true);
+                *cpos = s;
             }
         }
         Action::Consumed
@@ -1706,8 +1761,6 @@ impl Vim {
     }
 
     fn enter_normal(&mut self, buf: &str, cpos: &mut usize) {
-        // Commit insert snapshot if any.
-        self.commit_insert_snapshot();
         self.mode = ViMode::Normal;
         self.sub = SubState::Ready;
         self.reset_counts();
@@ -1759,13 +1812,6 @@ impl Vim {
             *cpos = entry.cpos;
             *att = entry.attachments;
             clamp_normal(buf, cpos);
-        }
-    }
-
-    fn commit_insert_snapshot(&mut self) {
-        if let Some(snap) = self.insert_snapshot.take() {
-            self.redo_stack.clear();
-            self.undo_stack.push(snap);
         }
     }
 
@@ -1999,29 +2045,41 @@ fn goto_line(buf: &str, line_idx: usize) -> usize {
     pos
 }
 
-pub(crate) fn move_down(buf: &str, cpos: usize) -> usize {
+/// Move down one line. If `want_col` is Some, use that column instead of
+/// the current one (for curswant support). Returns (new_cpos, actual_col)
+/// where actual_col is the column that was targeted (for curswant).
+pub(crate) fn move_down_col(buf: &str, cpos: usize, want_col: Option<usize>) -> (usize, usize) {
     let sol = line_start(buf, cpos);
-    let col = cpos - sol;
+    let col = want_col.unwrap_or(cpos - sol);
     let eol = line_end(buf, cpos);
     if eol >= buf.len() {
-        return cpos; // Already on last line.
+        return (cpos, col);
     }
     let next_sol = eol + 1;
     let next_eol = line_end(buf, next_sol);
     let next_len = next_eol - next_sol;
-    next_sol + col.min(next_len)
+    (next_sol + col.min(next_len), col)
 }
 
-pub(crate) fn move_up(buf: &str, cpos: usize) -> usize {
+pub(crate) fn move_up_col(buf: &str, cpos: usize, want_col: Option<usize>) -> (usize, usize) {
     let sol = line_start(buf, cpos);
     if sol == 0 {
-        return cpos; // Already on first line.
+        let col = want_col.unwrap_or(cpos - sol);
+        return (cpos, col);
     }
-    let col = cpos - sol;
+    let col = want_col.unwrap_or(cpos - sol);
     let prev_eol = sol - 1;
     let prev_sol = line_start(buf, prev_eol);
     let prev_len = prev_eol - prev_sol;
-    prev_sol + col.min(prev_len)
+    (prev_sol + col.min(prev_len), col)
+}
+
+pub(crate) fn move_down(buf: &str, cpos: usize) -> usize {
+    move_down_col(buf, cpos, None).0
+}
+
+pub(crate) fn move_up(buf: &str, cpos: usize) -> usize {
+    move_up_col(buf, cpos, None).0
 }
 
 // ── Find char on line ───────────────────────────────────────────────────────
@@ -2270,12 +2328,24 @@ fn retreat_chars(buf: &str, pos: usize, n: usize) -> usize {
 fn clamp_normal(buf: &str, cpos: &mut usize) {
     if buf.is_empty() {
         *cpos = 0;
-    } else if *cpos >= buf.len() {
-        if buf.ends_with('\n') {
-            *cpos = buf.len();
+        return;
+    }
+    if *cpos >= buf.len() {
+        *cpos = if buf.ends_with('\n') {
+            buf.len()
         } else {
-            *cpos = prev_char_boundary(buf, buf.len());
+            prev_char_boundary(buf, buf.len())
+        };
+        return;
+    }
+    // Don't let cursor sit on a '\n' in the middle of the buffer.
+    // Move back to the last character on the line.
+    if buf.as_bytes()[*cpos] == b'\n' && *cpos > 0 {
+        let sol = line_start(buf, *cpos);
+        if *cpos > sol {
+            *cpos = prev_char_boundary(buf, *cpos);
         }
+        // If sol == cpos, it's an empty line — cursor stays on the '\n'.
     }
 }
 
@@ -3163,5 +3233,120 @@ mod tests {
         assert_eq!(buf, "worldworld");
         // Cursor should be on last char of pasted "world" = 'd' at position 9.
         assert_eq!(cpos, 9);
+    }
+
+    // ── curswant tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_curswant_through_short_line() {
+        // "abcde\nf\nghijk" — j from col 4 should land on col 0 of "f",
+        // then j again should snap back to col 4 of "ghijk".
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("abcde\nf\nghijk");
+        cpos = 4; // on 'e'
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 6); // 'f' (col 0, line too short)
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 12); // 'k' (col 4 restored)
+    }
+
+    #[test]
+    fn test_curswant_cleared_by_horizontal_motion() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("abcde\nf\nghijk");
+        cpos = 4; // on 'e'
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 6); // 'f'
+        vim.handle_key(key('0'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 6); // still 'f' (col 0)
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 8); // 'g' (col 0, curswant was cleared by '0')
+    }
+
+    // ── linewise operator tests ─────────────────────────────────────
+
+    #[test]
+    fn test_dj_deletes_two_lines() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "ccc");
+    }
+
+    #[test]
+    fn test_dk_deletes_two_lines() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        cpos = 4; // on 'bbb'
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('k'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "ccc");
+    }
+
+    #[test]
+    fn test_d_big_g_deletes_to_end_linewise() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        cpos = 5; // middle of 'bbb'
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('G'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "aaa");
+    }
+
+    #[test]
+    fn test_dgg_deletes_to_start_linewise() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        cpos = 8; // on 'ccc'
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('g'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('g'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "");
+    }
+
+    // ── insert undo grouping tests ──────────────────────────────────
+
+    #[test]
+    fn test_insert_undo_groups_entire_session() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("");
+        // Enter insert mode and type characters.
+        vim.handle_key(key('i'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(vim.mode(), ViMode::Insert);
+        // Simulate typing "abc" (caller inserts chars directly into buf).
+        buf.push_str("abc");
+        cpos = 3;
+        // Exit insert mode.
+        let esc = KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+        vim.handle_key(esc, &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(vim.mode(), ViMode::Normal);
+        assert_eq!(buf, "abc");
+        // Undo should restore to empty (the state before 'i').
+        vim.handle_key(key('u'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "");
+    }
+
+    #[test]
+    fn test_insert_after_change_single_undo() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        // cw deletes "hello" and enters insert.
+        vim.handle_key(key('c'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, " world");
+        assert_eq!(vim.mode(), ViMode::Insert);
+        // Type replacement text.
+        buf.insert_str(0, "hi");
+        cpos = 2;
+        // Esc.
+        let esc = KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+        vim.handle_key(esc, &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "hi world");
+        // Single undo should restore original.
+        vim.handle_key(key('u'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "hello world");
     }
 }

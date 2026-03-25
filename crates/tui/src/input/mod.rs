@@ -1515,8 +1515,13 @@ impl InputState {
     }
 
     /// Save undo state before an editing operation.
+    /// When vim is in insert mode, skip — the entire insert session is
+    /// already covered by the undo entry saved on insert entry.
     pub fn save_undo(&mut self) {
         if let Some(ref mut vim) = self.vim {
+            if vim.mode() == ViMode::Insert {
+                return; // insert session groups all edits into one undo step
+            }
             vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
         } else {
             self.undo_stack
