@@ -100,7 +100,7 @@ pub enum ProviderKind {
 
 impl ProviderKind {
     /// Default reasoning effort levels available for cycling in the TUI.
-    pub fn default_reasoning_efforts(self) -> &'static [ReasoningEffort] {
+    pub fn default_reasoning_cycle(self) -> &'static [ReasoningEffort] {
         match self {
             Self::OpenAi | Self::Anthropic => &[
                 ReasoningEffort::Off,

@@ -316,14 +316,14 @@ impl App {
     }
 
     pub(super) fn toggle_mode(&mut self) {
-        self.mode = self.mode.toggle();
+        self.mode = self.mode.cycle_within(&self.mode_cycle);
         state::set_mode(self.mode);
         self.engine.send(UiCommand::SetMode { mode: self.mode });
         self.screen.mark_dirty();
     }
 
     pub(super) fn cycle_reasoning(&mut self) {
-        let next = self.reasoning_effort.cycle_within(&self.reasoning_efforts);
+        let next = self.reasoning_effort.cycle_within(&self.reasoning_cycle);
         self.set_reasoning_effort(next);
     }
 

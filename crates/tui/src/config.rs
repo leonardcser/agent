@@ -93,10 +93,13 @@ pub struct ThemeConfig {
 #[serde(default)]
 pub struct DefaultsConfig {
     pub model: Option<String>,
+    /// Starting mode: normal, plan, apply, yolo.
+    pub mode: Option<String>,
+    /// Modes available for Shift+Tab cycling. Defaults to all modes.
+    pub mode_cycle: Option<Vec<String>>,
     pub reasoning_effort: Option<String>,
-    /// Available reasoning effort levels for the TUI cycle. Overrides
-    /// provider-type defaults. Values: off, low, medium, high, max.
-    pub reasoning_efforts: Option<Vec<String>>,
+    /// Reasoning effort levels available for Ctrl+T cycling.
+    pub reasoning_cycle: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -419,6 +419,24 @@ impl Mode {
             Mode::Yolo => "yolo",
         }
     }
+
+    /// Cycle to the next mode within the given allowed list.
+    pub fn cycle_within(self, allowed: &[Self]) -> Self {
+        let list = if allowed.is_empty() { Self::ALL } else { allowed };
+        let pos = list.iter().position(|&m| m == self);
+        match pos {
+            Some(i) => list[(i + 1) % list.len()],
+            None => list[0],
+        }
+    }
+
+    /// Parse a list of mode labels, skipping unknown ones.
+    pub fn parse_list(items: &[String]) -> Vec<Self> {
+        items.iter().filter_map(|s| Self::parse(s)).collect()
+    }
+
+    /// The full default cycle order.
+    pub const ALL: &[Self] = &[Self::Normal, Self::Plan, Self::Apply, Self::Yolo];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

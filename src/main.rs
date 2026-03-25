@@ -28,6 +28,13 @@ struct Args {
     mode: Option<String>,
     #[arg(
         long,
+        value_delimiter = ',',
+        value_name = "MODES",
+        help = "Modes available for cycling (comma-separated: normal,plan,apply,yolo)"
+    )]
+    mode_cycle: Option<Vec<String>>,
+    #[arg(
+        long,
         value_name = "EFFORT",
         help = "Starting reasoning effort (off/low/medium/high/max)"
     )]
@@ -36,9 +43,9 @@ struct Args {
         long,
         value_delimiter = ',',
         value_name = "LEVELS",
-        help = "Available reasoning levels for cycling (comma-separated: off,low,medium,high,max)"
+        help = "Reasoning effort levels for cycling (comma-separated: off,low,medium,high,max)"
     )]
-    reasoning_efforts: Option<Vec<String>>,
+    reasoning_cycle: Option<Vec<String>>,
     #[arg(long, value_name = "TEMP", help = "Sampling temperature")]
     temperature: Option<f64>,
     #[arg(long, value_name = "VALUE", help = "Top-p (nucleus) sampling")]
@@ -189,12 +196,16 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let mode_override = args.mode.as_deref().map(|s| {
-        Mode::parse(s).unwrap_or_else(|| {
-            eprintln!("warning: unknown --mode '{s}', defaulting to normal");
-            Mode::Normal
-        })
-    });
+    let mode_override = args
+        .mode
+        .as_deref()
+        .or(cfg.defaults.mode.as_deref())
+        .map(|s| {
+            Mode::parse(s).unwrap_or_else(|| {
+                eprintln!("warning: unknown mode '{s}', defaulting to normal");
+                Mode::Normal
+            })
+        });
 
     let vim_enabled = cfg.settings.vim_mode.unwrap_or(false);
     let auto_compact = cfg.settings.auto_compact.unwrap_or(false);
@@ -231,18 +242,24 @@ async fn main() {
         .unwrap_or(app_state.reasoning_effort);
 
     let provider_kind = engine::ProviderKind::from_config(&provider_type);
-    // Available reasoning efforts: CLI > config > provider-type defaults.
-    let mut reasoning_efforts = args
-        .reasoning_efforts
+    let mut reasoning_cycle = args
+        .reasoning_cycle
         .as_deref()
-        .or(cfg.defaults.reasoning_efforts.as_deref())
+        .or(cfg.defaults.reasoning_cycle.as_deref())
         .map(ReasoningEffort::parse_list)
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| provider_kind.default_reasoning_efforts().to_vec());
-    // Ensure the starting effort is in the cycle list.
-    if !reasoning_efforts.contains(&reasoning_effort) {
-        reasoning_efforts.push(reasoning_effort);
+        .unwrap_or_else(|| provider_kind.default_reasoning_cycle().to_vec());
+    if !reasoning_cycle.contains(&reasoning_effort) {
+        reasoning_cycle.push(reasoning_effort);
     }
+
+    let mode_cycle = args
+        .mode_cycle
+        .as_deref()
+        .or(cfg.defaults.mode_cycle.as_deref())
+        .map(Mode::parse_list)
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| Mode::ALL.to_vec());
 
     // Parse theme accent from config
     if let Some(ref accent) = cfg.theme.accent {
@@ -392,12 +409,16 @@ async fn main() {
         task_slug,
         restrict_to_workspace,
         reasoning_effort,
-        reasoning_efforts,
+        reasoning_cycle,
+        mode_cycle,
         shared_session,
         available_models,
     );
     if let Some(mode) = mode_override {
         app.mode = mode;
+    }
+    if !app.mode_cycle.contains(&app.mode) {
+        app.mode_cycle.push(app.mode);
     }
 
     if let Some(ref resume_val) = args.resume {
