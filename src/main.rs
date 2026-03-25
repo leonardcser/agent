@@ -95,7 +95,20 @@ async fn main() {
 
     let args = Args::parse();
     let mut cfg = match args.config {
-        Some(ref path) => tui::config::Config::load_from(std::path::Path::new(path)),
+        Some(ref path) => {
+            let c = tui::config::Config::load_from(std::path::Path::new(path));
+            match c.source {
+                Some(tui::config::ConfigSource::NotFound) => {
+                    eprintln!("error: config file not found: {path}");
+                    std::process::exit(1);
+                }
+                Some(tui::config::ConfigSource::ParseError) => {
+                    // warning already printed by load_from
+                    std::process::exit(1);
+                }
+                _ => c,
+            }
+        }
         None => tui::config::Config::load(),
     };
 
@@ -150,16 +163,38 @@ async fn main() {
                 r.config.clone(),
             )
         } else {
-            let base = args
-                .api_base
-                .clone()
-                .expect("api_base must be set via --api-base or config file");
+            let Some(base) = args.api_base.clone() else {
+                match cfg.source {
+                    Some(tui::config::ConfigSource::NotFound) => {
+                        eprintln!(
+                            "error: no config file found at {}\n\
+                             Provide --api-base and --model, or create a config file.",
+                            cfg.path.display()
+                        );
+                    }
+                    Some(tui::config::ConfigSource::ParseError) => {
+                        eprintln!(
+                            "error: config file at {} failed to parse (see warning above)\n\
+                             Fix the config or provide --api-base and --model.",
+                            cfg.path.display()
+                        );
+                    }
+                    _ => {
+                        eprintln!(
+                            "error: no providers with models found in {}\n\
+                             Add a provider with models, or provide --api-base and --model.",
+                            cfg.path.display()
+                        );
+                    }
+                }
+                std::process::exit(1);
+            };
             let key_env = args.api_key_env.clone().unwrap_or_default();
             let key = std::env::var(&key_env).unwrap_or_default();
-            let model = args
-                .model
-                .clone()
-                .expect("model must be set via --model or config file");
+            let Some(model) = args.model.clone() else {
+                eprintln!("error: --model is required when using --api-base without a config file");
+                std::process::exit(1);
+            };
             (
                 base.clone(),
                 key,

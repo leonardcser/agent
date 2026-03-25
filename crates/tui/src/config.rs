@@ -1,6 +1,6 @@
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn config_dir() -> PathBuf {
     engine::config_dir()
@@ -102,6 +102,16 @@ pub struct DefaultsConfig {
     pub reasoning_cycle: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// Loaded and parsed from a file.
+    Loaded,
+    /// File exists but failed to parse (fell back to defaults).
+    ParseError,
+    /// File was not found (using defaults).
+    NotFound,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -110,6 +120,12 @@ pub struct Config {
     pub defaults: DefaultsConfig,
     pub settings: SettingsConfig,
     pub theme: ThemeConfig,
+    /// Path the config was loaded from (not serialized).
+    #[serde(skip)]
+    pub path: PathBuf,
+    /// How the config was resolved.
+    #[serde(skip)]
+    pub source: Option<ConfigSource>,
 }
 
 /// A resolved model entry combining provider connection info with model config.
@@ -131,15 +147,28 @@ impl Config {
         Self::load_from(&config_dir().join("config.yaml"))
     }
 
-    pub fn load_from(path: &std::path::Path) -> Self {
-        let Ok(contents) = std::fs::read_to_string(path) else {
-            return Self::default();
+    pub fn load_from(path: &Path) -> Self {
+        let path = path.to_path_buf();
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return Self {
+                path,
+                source: Some(ConfigSource::NotFound),
+                ..Self::default()
+            };
         };
         match serde_yml::from_str(&contents) {
-            Ok(cfg) => cfg,
+            Ok(cfg) => Self {
+                path,
+                source: Some(ConfigSource::Loaded),
+                ..cfg
+            },
             Err(e) => {
                 eprintln!("warning: failed to parse {}: {}", path.display(), e);
-                Self::default()
+                Self {
+                    path,
+                    source: Some(ConfigSource::ParseError),
+                    ..Self::default()
+                }
             }
         }
     }
