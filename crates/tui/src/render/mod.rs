@@ -1946,7 +1946,10 @@ impl Screen {
                 let line_start = line_char_offsets[abs_idx];
                 let line_len = line.chars().count();
                 let line_end = line_start + line_len;
-                if sel_end <= line_start || sel_start >= line_end {
+                if line_len == 0 && sel_start <= line_start && sel_end > line_start {
+                    // Empty line within selection — highlight a phantom space.
+                    Some((0, 1))
+                } else if sel_end <= line_start || sel_start >= line_end {
                     None
                 } else {
                     let s = sel_start.saturating_sub(line_start);
@@ -2927,6 +2930,7 @@ fn render_styled_chars(
 ) {
     let mut current = SpanKind::Plain;
     let mut in_sel = false;
+    let char_count = line.chars().count();
     for (i, ch) in line.chars().enumerate() {
         let kind = kinds.get(i).copied().unwrap_or(SpanKind::Plain);
         let want_sel = selection.is_some_and(|(s, e)| i >= s && i < e);
@@ -2946,6 +2950,17 @@ fn render_styled_chars(
             in_sel = want_sel;
         }
         let _ = out.queue(Print(ch));
+    }
+    // Render a highlighted space for empty lines within a selection.
+    if let Some((s, e)) = selection {
+        if e > char_count && s <= char_count {
+            if !in_sel {
+                let _ = out.queue(SetBackgroundColor(theme::SELECTION_BG));
+            }
+            let _ = out.queue(Print(' '));
+            let _ = out.queue(ResetColor);
+            return;
+        }
     }
     if in_sel || current != SpanKind::Plain {
         let _ = out.queue(ResetColor);
