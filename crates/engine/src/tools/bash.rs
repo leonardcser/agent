@@ -4,6 +4,10 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+fn is_default_allowed_pattern(pattern: &str) -> bool {
+    crate::permissions::DEFAULT_BASH_ALLOW.contains(&pattern)
+}
+
 pub struct BashTool;
 
 impl Tool for BashTool {
@@ -40,7 +44,8 @@ impl Tool for BashTool {
             let bin = subcmd.split_whitespace().next().unwrap_or("");
             if !bin.is_empty() {
                 let pat = format!("{bin} *");
-                if !patterns.contains(&pat) {
+                // Skip patterns that are already allowed by default or already in the list
+                if !is_default_allowed_pattern(&pat) && !patterns.contains(&pat) {
                     patterns.push(pat);
                 }
             }
@@ -254,14 +259,16 @@ mod tests {
 
     #[test]
     fn pipe() {
-        assert_eq!(patterns("cat file.txt | grep foo"), vec!["cat *", "grep *"]);
+        // cat and grep are both in default allowed patterns, so no approval needed
+        assert_eq!(patterns("cat file.txt | grep foo"), Vec::<String>::new());
     }
 
     #[test]
     fn mixed() {
+        // grep is in default allowed patterns, so it's filtered out
         assert_eq!(
             patterns("cd /tmp && rm -rf * | grep err; echo done"),
-            vec!["cd *", "rm *", "grep *", "echo *"]
+            vec!["cd *", "rm *", "echo *"]
         );
     }
 
@@ -272,7 +279,8 @@ mod tests {
 
     #[test]
     fn quoted_operator_not_split() {
-        assert_eq!(patterns(r#"grep "&&" file.txt"#), vec!["grep *"]);
+        // grep is in default allowed patterns, so no approval needed
+        assert_eq!(patterns(r#"grep "&&" file.txt"#), Vec::<String>::new());
     }
 
     #[test]

@@ -196,7 +196,7 @@ permissions:
 | `web_fetch`           | Ask    | Ask   | Ask   | Allow |
 | `web_search`          | Ask    | Ask   | Ask   | Allow |
 | `ask_user_question`   | Allow  | Allow | Allow | Allow |
-| `exit_plan_mode`      | Deny   | Ask   | Deny  | Deny  |
+| `exit_plan_mode`      | —      | Ask   | —     | —     |
 | `read_process_output` | Ask    | Ask   | Ask   | Allow |
 | `stop_process`        | Ask    | Ask   | Ask   | Allow |
 | `spawn_agent`*        | Allow  | Allow | Allow | Allow |
@@ -205,7 +205,8 @@ permissions:
 | `peek_agent`*         | Allow  | Allow | Allow | Allow |
 | `stop_agent`*         | Allow  | Allow | Allow | Allow |
 
-*Multi-agent tools are only registered when `--multi-agent` is enabled.
+\*Multi-agent tools are only registered when `--multi-agent` is enabled.  
+`—` indicates the tool is not available in that mode.
 
 **Default bash patterns** (when `permissions.{mode}.bash` is omitted):
 

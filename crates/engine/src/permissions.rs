@@ -87,7 +87,9 @@ fn build_tool_map(raw: &RawRuleSet) -> HashMap<String, Decision> {
     map
 }
 
-const DEFAULT_BASH_ALLOW: &[&str] = &["ls *", "grep *", "find *", "cat *", "tail *", "head *"];
+/// Default bash patterns that are allowed without explicit approval.
+/// Used by both permissions checking and approval pattern suggestions.
+pub const DEFAULT_BASH_ALLOW: &[&str] = &["ls *", "grep *", "find *", "cat *", "tail *", "head *"];
 
 fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
     let mut tools = build_tool_map(&raw.tools);
