@@ -996,8 +996,15 @@ impl App {
         // Drain events, printing text to stdout and tool lifecycle to stderr.
         while let Some(ev) = self.engine.recv().await {
             match ev {
+                EngineEvent::ThinkingDelta { .. } => {
+                    // Thinking deltas not shown in pipe mode.
+                }
                 EngineEvent::Thinking { content } => {
                     log_thinking(&content);
+                }
+                EngineEvent::TextDelta { delta } => {
+                    print!("{delta}");
+                    let _ = io::stdout().flush();
                 }
                 EngineEvent::Text { content } => {
                     if !content.ends_with('\n') {

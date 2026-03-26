@@ -33,7 +33,6 @@ pub(crate) fn render_code_block(
     width: usize,
     dim: bool,
     bctx: Option<&super::BoxContext>,
-    indent: &str,
 ) -> u16 {
     let ext = match lang {
         "" => "txt",
@@ -54,52 +53,13 @@ pub(crate) fn render_code_block(
     let content_width = if let Some(b) = bctx { b.inner_w } else { width };
     let text_w = content_width.saturating_sub(1).max(1);
     let expanded: Vec<String> = lines.iter().map(|l| l.replace('\t', "    ")).collect();
-    let max_len = expanded
-        .iter()
-        .map(|l| l.chars().count())
-        .max()
-        .unwrap_or(0);
-    let wraps = max_len > text_w;
-    let block_w = if wraps { text_w + 1 } else { max_len + 1 };
     let mut rows = 0u16;
     let mut h = HighlightLines::new(syntax, theme);
 
-    macro_rules! left {
-        ($out:expr) => {
-            if let Some(b) = bctx {
-                b.print_left($out);
-            } else if !indent.is_empty() {
-                let _ = $out.queue(Print(indent));
-            }
-            if dim {
-                let _ = $out.queue(SetAttribute(Attribute::Dim));
-            }
-        };
+    if dim {
+        let _ = out.queue(SetAttribute(Attribute::Dim));
     }
 
-    // Top border: lower one-eighth block in code block bg color
-    left!(out);
-    let _ = out.queue(SetForegroundColor(theme::USER_BG));
-    let _ = out.queue(Print("▁".repeat(block_w)));
-    let _ = out.queue(ResetColor);
-    if let Some(b) = bctx {
-        b.print_right(out, block_w);
-    }
-    crlf(out);
-    rows += 1;
-
-    // Top padding
-    left!(out);
-    let _ = out.queue(SetBackgroundColor(theme::CODE_BLOCK_BG));
-    let _ = out.queue(Print(" ".repeat(block_w)));
-    let _ = out.queue(ResetColor);
-    if let Some(b) = bctx {
-        b.print_right(out, block_w);
-    }
-    crlf(out);
-    rows += 1;
-
-    // Code content
     for line in &expanded {
         let line_with_nl = format!("{}\n", line);
         let regions = h
@@ -107,43 +67,23 @@ pub(crate) fn render_code_block(
             .unwrap_or_default();
         let visual_rows = split_regions_into_rows(&regions, text_w);
         for vrow in &visual_rows {
-            left!(out);
+            if let Some(b) = bctx {
+                b.print_left(out);
+            }
             let cols = print_split_regions(out, vrow, Some(theme::CODE_BLOCK_BG));
-            let pad = block_w.saturating_sub(cols);
+            let pad = text_w.saturating_sub(cols);
             if pad > 0 {
                 let _ = out.queue(SetBackgroundColor(theme::CODE_BLOCK_BG));
                 let _ = out.queue(Print(" ".repeat(pad)));
             }
             let _ = out.queue(ResetColor);
             if let Some(b) = bctx {
-                b.print_right(out, block_w);
+                b.print_right(out, text_w);
             }
             crlf(out);
         }
         rows += visual_rows.len() as u16;
     }
-
-    // Bottom padding
-    left!(out);
-    let _ = out.queue(SetBackgroundColor(theme::CODE_BLOCK_BG));
-    let _ = out.queue(Print(" ".repeat(block_w)));
-    let _ = out.queue(ResetColor);
-    if let Some(b) = bctx {
-        b.print_right(out, block_w);
-    }
-    crlf(out);
-    rows += 1;
-
-    // Bottom border: upper one-eighth block in code block bg color
-    left!(out);
-    let _ = out.queue(SetForegroundColor(theme::USER_BG));
-    let _ = out.queue(Print("▔".repeat(block_w)));
-    let _ = out.queue(ResetColor);
-    if let Some(b) = bctx {
-        b.print_right(out, block_w);
-    }
-    crlf(out);
-    rows += 1;
 
     if dim {
         let _ = out.queue(SetAttribute(Attribute::NormalIntensity));

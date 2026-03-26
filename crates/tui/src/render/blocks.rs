@@ -27,17 +27,15 @@ pub(super) enum Element<'a> {
 
 /// Number of blank lines to insert between two adjacent elements.
 pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
-    // Code block borders already provide visual separation, so skip gaps
-    // when a Text block leads or trails with a code fence.
-    if let Element::Block(Block::Text { content }) = below {
-        if content.trim_start().starts_with("```") {
-            return 0;
+    match (above, below) {
+        // CodeLine→CodeLine: no gap (consecutive lines in same block).
+        (Element::Block(Block::CodeLine { .. }), Element::Block(Block::CodeLine { .. })) => {
+            return 0
         }
-    }
-    if let Element::Block(Block::Text { content }) = above {
-        if content.trim_end().ends_with("```") {
-            return 0;
-        }
+        // Transitions into/out of code lines need a blank line.
+        (Element::Block(Block::CodeLine { .. }), _) => return 1,
+        (_, Element::Block(Block::CodeLine { .. })) => return 1,
+        _ => {}
     }
     match (above, below) {
         (Element::Block(Block::User { .. }), _) => 1,
@@ -48,6 +46,7 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
         (Element::Block(Block::ToolCall { .. }), Element::ActiveTool) => 1,
         (Element::Block(Block::Text { .. }), Element::Block(Block::ToolCall { .. })) => 1,
         (Element::Block(Block::Text { .. }), Element::ActiveTool) => 1,
+        (Element::Block(Block::Thinking { .. }), Element::Block(Block::Thinking { .. })) => 0,
         (_, Element::Block(Block::Thinking { .. })) => 1,
         (Element::Block(Block::Thinking { .. }), _) => 1,
         (Element::Block(Block::ToolCall { .. }), Element::Block(Block::Text { .. })) => 1,
@@ -59,6 +58,9 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
         (Element::Block(Block::AgentMessage { .. }), _) => 1,
         (_, Element::Block(Block::Agent { .. })) => 1,
         (Element::Block(Block::Agent { .. }), _) => 1,
+        // Text→Text: 1 gap (paragraph spacing). During streaming, each
+        // paragraph is committed as its own Block::Text.
+        (Element::Block(Block::Text { .. }), Element::Block(Block::Text { .. })) => 1,
         (Element::ActiveTool, Element::ActiveTool) => 1,
         (_, Element::ActiveExec) => 1,
         (Element::ActiveExec, _) => 1,
@@ -154,6 +156,9 @@ pub(super) fn render_block(out: &mut RenderOut, block: &Block, width: usize) -> 
             rows
         }
         Block::Text { content } => render_markdown_inner(out, content, width, " ", false, None),
+        Block::CodeLine { content, lang } => {
+            render_code_block(out, &[content.as_str()], lang, width, false, None)
+        }
         Block::ToolCall {
             name,
             summary,
@@ -728,11 +733,7 @@ pub(crate) fn render_markdown_inner(
             if i < lines.len() {
                 i += 1;
             }
-            rows += render_code_block(out, code_lines, lang, width, dim, bctx, "");
-            // Skip blank lines after code block — the border provides spacing.
-            while i < lines.len() && lines[i].trim().is_empty() {
-                i += 1;
-            }
+            rows += render_code_block(out, code_lines, lang, width, dim, bctx);
         } else if lines[i].trim_start().starts_with('|') {
             let table_start = i;
             while i < lines.len() && lines[i].trim_start().starts_with('|') {
@@ -741,15 +742,17 @@ pub(crate) fn render_markdown_inner(
             rows +=
                 render_markdown_table_from_lines(out, &lines[table_start..i], dim, bctx, indent);
         } else {
-            // Skip blank lines before a code fence — the border provides spacing.
-            let is_blank = lines[i].trim().is_empty();
-            if is_blank {
-                let mut j = i + 1;
-                while j < lines.len() && lines[j].trim().is_empty() {
-                    j += 1;
+            // Skip blank lines that immediately precede a list item.
+            // This prevents unwanted gaps between text and list start.
+            if lines[i].trim().is_empty() {
+                // Look ahead to find the next non-blank line.
+                let mut next_i = i + 1;
+                while next_i < lines.len() && lines[next_i].trim().is_empty() {
+                    next_i += 1;
                 }
-                if j < lines.len() && lines[j].trim_start().starts_with("```") {
-                    i = j;
+                // If the next non-blank line is a list item, skip this blank line.
+                if next_i < lines.len() && is_list_item(lines[next_i]) {
+                    i += 1;
                     continue;
                 }
             }
@@ -848,6 +851,25 @@ fn split_list_prefix(line: &str) -> (&str, &str) {
     ("", line)
 }
 
+/// Check if a line is a list item (ordered or unordered).
+fn is_list_item(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    // Unordered: "- " or "* "
+    if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+        return true;
+    }
+    // Ordered: digits followed by "."
+    let bytes = trimmed.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i > 0 && i < bytes.len() && bytes[i] == b'.' {
+        return true;
+    }
+    false
+}
+
 /// Parse pipe-delimited table lines into rows, then render.
 fn render_markdown_table_from_lines(
     out: &mut RenderOut,
@@ -858,13 +880,10 @@ fn render_markdown_table_from_lines(
 ) -> u16 {
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     for line in lines {
-        let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
-        if trimmed
-            .chars()
-            .all(|c| c == '-' || c == '|' || c == ':' || c == ' ')
-        {
+        if super::is_table_separator(line) {
             continue;
         }
+        let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
         let cells: Vec<String> = trimmed.split('|').map(|c| c.trim().to_string()).collect();
         table_rows.push(cells);
     }
@@ -1362,9 +1381,9 @@ mod tests {
 
     #[test]
     fn adjacent_text_blocks_gap() {
-        // Two consecutive text blocks — gap should be 0 (Text→Text = _ => 0).
+        // Two consecutive text blocks — gap should be 1 (paragraph spacing).
         let gap = gap_between(&Element::Block(&text("a")), &Element::Block(&text("b")));
-        assert_eq!(gap, 0, "Text→Text gap = 0");
+        assert_eq!(gap, 1, "Text→Text gap = 1");
     }
 
     /// Simulate draw_frame anchor tracking across multiple frames.

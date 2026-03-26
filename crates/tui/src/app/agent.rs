@@ -250,7 +250,13 @@ impl App {
             self.engine.send(UiCommand::Cancel);
             self.kill_blocking_agents();
         }
-        self.screen.flush_blocks();
+        // Flush any in-flight streaming content before committing tools.
+        self.screen.flush_streaming_thinking();
+        self.screen.flush_streaming_text();
+        // Commit active tools to block history but don't render yet —
+        // the next draw_frame renders blocks + prompt atomically in one
+        // synchronized update, avoiding a flash where the prompt disappears.
+        self.screen.commit_active_tools();
         if cancelled {
             self.screen.set_throbber(render::Throbber::Interrupted);
             // If a title/slug generation was in-flight, discard it so stale
@@ -363,10 +369,12 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::Steered { text, count } => {
+                // Flush streaming content before showing the queued message.
+                self.screen.flush_streaming_thinking();
+                self.screen.flush_streaming_text();
                 let drain_n = count.min(self.queued_messages.len());
                 self.queued_messages.drain(..drain_n);
                 *steered_count = steered_count.saturating_sub(drain_n);
-                // Only render if the message is still queued (not unqueued by Esc).
                 if drain_n > 0 {
                     self.screen.push(Block::User {
                         text,
@@ -375,12 +383,25 @@ impl App {
                 }
                 SessionControl::Continue
             }
+            EngineEvent::ThinkingDelta { delta } => {
+                self.screen.append_streaming_thinking(&delta);
+                SessionControl::Continue
+            }
             EngineEvent::Thinking { content } => {
-                self.screen.push(Block::Thinking { content });
+                if !self.screen.has_streaming_thinking() {
+                    self.screen.push(Block::Thinking { content });
+                }
+                SessionControl::Continue
+            }
+            EngineEvent::TextDelta { delta } => {
+                self.screen.append_streaming_text(&delta);
                 SessionControl::Continue
             }
             EngineEvent::Text { content } => {
-                self.screen.push(Block::Text { content });
+                let was_streaming = self.screen.flush_streaming_text();
+                if !was_streaming {
+                    self.screen.push(Block::Text { content });
+                }
                 SessionControl::Continue
             }
             EngineEvent::ToolStarted {
@@ -389,6 +410,9 @@ impl App {
                 args,
                 summary,
             } => {
+                // Flush any remaining streaming content before tools render.
+                self.screen.flush_streaming_thinking();
+                self.screen.flush_streaming_text();
                 if tool_name != "spawn_agent" {
                     self.screen
                         .start_tool(call_id.clone(), tool_name.clone(), summary, args);
@@ -572,10 +596,10 @@ impl App {
             EngineEvent::Messages { .. } => {}
             EngineEvent::TurnComplete { messages, .. } => {
                 // Accept final messages from a just-cancelled turn so that
-                // tool results are persisted. Don't rebuild the screen —
-                // the displayed blocks already reflect what the user saw
-                // at cancel time, and rebuilding would cause visual flicker.
-                if !self.history.is_empty() && !messages.is_empty() {
+                // partial assistant content and tool results are persisted.
+                // Don't rebuild the screen — the displayed blocks already
+                // reflect what the user saw at cancel time.
+                if !messages.is_empty() {
                     self.set_history(messages);
                     self.save_session();
                 }

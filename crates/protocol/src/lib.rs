@@ -192,8 +192,14 @@ pub enum EngineEvent {
     /// Extended thinking / chain-of-thought text.
     Thinking { content: String },
 
+    /// Incremental thinking token from the LLM (streaming delta).
+    ThinkingDelta { delta: String },
+
     /// Streamed assistant text (may arrive in chunks).
     Text { content: String },
+
+    /// Incremental text token from the LLM (streaming delta).
+    TextDelta { delta: String },
 
     /// A queued user message was consumed by the engine.
     Steered { text: String, count: usize },

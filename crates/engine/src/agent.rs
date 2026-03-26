@@ -133,7 +133,7 @@ pub async fn engine_task(
                                     ProviderError::QuotaExceeded(_) => {
                                         "API quota exceeded — check your plan and billing details".to_string()
                                     }
-                                    _ => format!("compaction failed: {e}"),
+                                    _ => format!("compaction failed: {}", e.to_string().replace('\n', " ")),
                                 };
                                 let _ = event_tx.send(EngineEvent::TurnError { message: msg });
                             }
@@ -255,7 +255,15 @@ fn spawn_btw_request(
         messages.push(protocol::Message::user(protocol::Content::text(&question)));
 
         let content = match provider
-            .chat(&messages, &[], &model, reasoning_effort, &cancel, None)
+            .chat(
+                &messages,
+                &[],
+                &model,
+                reasoning_effort,
+                &cancel,
+                None,
+                None,
+            )
             .await
         {
             Ok(resp) => resp.content.unwrap_or_default(),
@@ -404,6 +412,23 @@ impl<'a> Turn<'a> {
             turn_id: self.turn_id,
             messages,
         });
+    }
+
+    fn commit_partial_assistant(&mut self, text: String, reasoning: String) {
+        let content = if text.trim().is_empty() {
+            None
+        } else {
+            Some(Content::text(text))
+        };
+        let reasoning = if reasoning.trim().is_empty() {
+            None
+        } else {
+            Some(reasoning)
+        };
+        if content.is_some() || reasoning.is_some() {
+            self.messages
+                .push(Message::assistant(content, reasoning, None));
+        }
     }
 
     fn emit_turn_complete(&mut self, interrupted: bool) {
@@ -587,9 +612,11 @@ impl<'a> Turn<'a> {
             }
 
             // Call LLM with cancel monitoring
-            let (resp, had_injected) = match self.call_llm(&tool_defs).await {
+            let (result, partial_text, partial_reasoning) = self.call_llm(&tool_defs).await;
+            let (resp, had_injected) = match result {
                 Ok(r) => r,
                 Err(ProviderError::Cancelled) => {
+                    self.commit_partial_assistant(partial_text, partial_reasoning);
                     self.emit_turn_complete(true);
                     return;
                 }
@@ -607,17 +634,16 @@ impl<'a> Turn<'a> {
                     return;
                 }
                 Err(e) => {
+                    let error_msg = e.to_string().replace('\n', " ");
                     log::entry(
                         log::Level::Warn,
                         "agent_stop",
-                        &serde_json::json!({"reason": "llm_error", "error": e.to_string()}),
+                        &serde_json::json!({"reason": "llm_error", "error": error_msg.clone()}),
                     );
                     // Send final history so the TUI can persist tool results
                     // accumulated before the error.
                     self.emit_turn_complete(false);
-                    self.emit(EngineEvent::TurnError {
-                        message: e.to_string(),
-                    });
+                    self.emit(EngineEvent::TurnError { message: error_msg });
                     return;
                 }
             };
@@ -805,7 +831,7 @@ impl<'a> Turn<'a> {
                         let request_id = next_request_id();
                         self.emit(EngineEvent::RequestPermission {
                             request_id,
-                            call_id: String::new(),
+                            call_id: tc.id.clone(),
                             tool_name: tc.function.name.clone(),
                             args: args.clone(),
                             confirm_message: desc,
@@ -1014,11 +1040,14 @@ impl<'a> Turn<'a> {
     async fn call_llm(
         &mut self,
         tool_defs: &[ToolDefinition],
-    ) -> Result<(crate::provider::LLMResponse, bool), ProviderError> {
+    ) -> (Result<(crate::provider::LLMResponse, bool), ProviderError>, String, String) {
         // The chat future borrows self.provider and self.model, so model
         // changes received mid-request are deferred until the future resolves.
         let mut pending_model: Option<(String, String, String, String)> = None;
         let mut deferred_turn_cmds: Vec<UiCommand> = Vec::new();
+
+        let partial_text = std::sync::Mutex::new(String::new());
+        let partial_reasoning = std::sync::Mutex::new(String::new());
 
         let result = {
             let on_retry = |delay: std::time::Duration, attempt: u32| {
@@ -1027,6 +1056,20 @@ impl<'a> Turn<'a> {
                     attempt,
                 });
             };
+            let on_delta = |delta: provider::StreamDelta| match delta {
+                provider::StreamDelta::Text(text) => {
+                    partial_text.lock().unwrap().push_str(text);
+                    let _ = self.event_tx.send(EngineEvent::TextDelta {
+                        delta: text.to_string(),
+                    });
+                }
+                provider::StreamDelta::Thinking(text) => {
+                    partial_reasoning.lock().unwrap().push_str(text);
+                    let _ = self.event_tx.send(EngineEvent::ThinkingDelta {
+                        delta: text.to_string(),
+                    });
+                }
+            };
             let chat_future = self.provider.chat(
                 &self.messages,
                 tool_defs,
@@ -1034,6 +1077,7 @@ impl<'a> Turn<'a> {
                 self.reasoning_effort,
                 &self.cancel,
                 Some(&on_retry),
+                Some(&on_delta),
             );
             tokio::pin!(chat_future);
 
@@ -1065,6 +1109,9 @@ impl<'a> Turn<'a> {
             }
         };
 
+        let pt = partial_text.into_inner().unwrap_or_default();
+        let pr = partial_reasoning.into_inner().unwrap_or_default();
+
         if let Some((model, api_base, api_key, provider_type)) = pending_model {
             self.apply_model_change(model, api_base, api_key, provider_type);
         }
@@ -1074,7 +1121,7 @@ impl<'a> Turn<'a> {
         for cmd in deferred_turn_cmds {
             self.handle_turn_cmd(cmd);
         }
-        result.map(|r| (r, had_injected))
+        (result.map(|r| (r, had_injected)), pt, pr)
     }
 
     /// Handle the ask_user_question tool by requesting an answer from the TUI.

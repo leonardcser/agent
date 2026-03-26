@@ -135,6 +135,12 @@ pub(super) fn crlf(out: &mut RenderOut) {
 
 pub(super) const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
 
+/// A markdown table separator line (e.g. `|---|---|`).
+pub(super) fn is_table_separator(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && t.chars().all(|c| c == '-' || c == '|' || c == ':' || c == ' ')
+}
+
 /// Context for rendering content inside a bordered box.
 /// When passed to `render_markdown` and its sub-renderers, each output line
 /// gets a colored left border prefix and a right border suffix with padding.
@@ -279,6 +285,11 @@ pub enum Block {
     },
     Text {
         content: String,
+    },
+    /// A single line of code from a streaming code block.
+    CodeLine {
+        content: String,
+        lang: String,
     },
     ToolCall {
         name: String,
@@ -444,8 +455,37 @@ impl BlockHistory {
     }
 }
 
+/// Streaming state for incremental thinking output.
+/// Completed lines are committed to block history immediately.
+/// Only the current incomplete line lives in the overlay.
+struct ActiveThinking {
+    current_line: String,
+    paragraph: String,
+}
+
+/// Streaming state for incremental LLM text output.
+/// Completed lines are committed to block history immediately.
+/// Only the current incomplete line lives in the overlay.
+struct ActiveText {
+    current_line: String,
+    paragraph: String,
+    in_code_block: Option<String>,
+    /// Table rows accumulated silently during streaming.
+    table_rows: Vec<String>,
+    /// Cached count of non-separator data rows (avoids recomputing per frame).
+    table_data_rows: usize,
+}
+
 pub struct Screen {
     history: BlockHistory,
+    active_thinking: Option<ActiveThinking>,
+    active_text: Option<ActiveText>,
+    /// True if any ThinkingDelta was received this turn (prevents duplicate
+    /// push when the final EngineEvent::Thinking arrives).
+    had_streaming_thinking: bool,
+    /// True if any TextDelta was received this turn (prevents duplicate
+    /// push when the final EngineEvent::Text arrives).
+    had_streaming_text: bool,
     active_tools: Vec<ActiveTool>,
     active_agent: Option<ActiveAgent>,
     active_exec: Option<ActiveExec>,
@@ -518,6 +558,10 @@ impl Screen {
     pub fn new() -> Self {
         Self {
             history: BlockHistory::new(),
+            active_thinking: None,
+            active_text: None,
+            had_streaming_thinking: false,
+            had_streaming_text: false,
             active_tools: Vec::new(),
             active_agent: None,
             active_exec: None,
@@ -862,6 +906,212 @@ impl Screen {
         };
         self.history.push(block);
         self.prompt.dirty = true;
+    }
+
+    // ── Streaming thinking ────────────────────────────────────────────
+
+    pub fn append_streaming_thinking(&mut self, delta: &str) {
+        self.had_streaming_thinking = true;
+        let at = self.active_thinking.get_or_insert_with(|| ActiveThinking {
+            current_line: String::new(),
+            paragraph: String::new(),
+        });
+
+        for ch in delta.chars() {
+            if ch == '\r' {
+                continue;
+            }
+            if ch == '\n' {
+                let line = std::mem::take(&mut at.current_line);
+                if line.trim().is_empty() && !at.paragraph.is_empty() {
+                    // Blank line — commit the paragraph.
+                    // Include the trailing newline so it renders as visual spacing.
+                    at.paragraph.push('\n');
+                    let para = std::mem::take(&mut at.paragraph);
+                    self.history.push(Block::Thinking { content: para });
+                } else {
+                    if !at.paragraph.is_empty() {
+                        at.paragraph.push('\n');
+                    }
+                    at.paragraph.push_str(&line);
+                }
+            } else {
+                at.current_line.push(ch);
+            }
+        }
+        self.prompt.dirty = true;
+    }
+
+    pub fn has_streaming_thinking(&self) -> bool {
+        self.had_streaming_thinking
+    }
+
+    /// Flush remaining thinking content. Returns true if streaming was ever active.
+    pub fn flush_streaming_thinking(&mut self) -> bool {
+        if let Some(mut at) = self.active_thinking.take() {
+            // Commit any remaining content (paragraph + current line).
+            if !at.current_line.is_empty() {
+                if !at.paragraph.is_empty() {
+                    at.paragraph.push('\n');
+                }
+                at.paragraph.push_str(&at.current_line);
+            }
+            let trimmed = at.paragraph.trim();
+            if !trimmed.is_empty() {
+                self.history.push(Block::Thinking {
+                    content: trimmed.to_string(),
+                });
+            }
+            self.prompt.dirty = true;
+        }
+        self.had_streaming_thinking
+    }
+
+    // ── Streaming text ─────────────────────────────────────────────────
+
+    pub fn append_streaming_text(&mut self, delta: &str) {
+        self.had_streaming_text = true;
+        // Text starting means thinking is done — commit remaining thinking.
+        if self.active_thinking.is_some() {
+            self.flush_streaming_thinking();
+        }
+
+        let at = self.active_text.get_or_insert_with(|| ActiveText {
+            current_line: String::new(),
+            paragraph: String::new(),
+            in_code_block: None,
+            table_rows: Vec::new(),
+            table_data_rows: 0,
+        });
+
+        for ch in delta.chars() {
+            if ch == '\r' {
+                continue; // Strip \r (CRLF → LF)
+            }
+            if ch == '\n' {
+                let line = std::mem::take(&mut at.current_line);
+                Self::process_text_line(&mut self.history, at, &line);
+            } else {
+                at.current_line.push(ch);
+            }
+        }
+        self.prompt.dirty = true;
+    }
+
+    /// Process a completed line of streaming text.
+    fn process_text_line(history: &mut BlockHistory, at: &mut ActiveText, line: &str) {
+        let trimmed = line.trim_start();
+
+        // ── Code fence detection ────────────────────────────────────────
+        if trimmed.starts_with("```") {
+            if at.in_code_block.is_some() {
+                // Closing fence — individual code lines were already committed.
+                at.in_code_block = None;
+                return;
+            } else {
+                // Opening fence — commit pending text/table.
+                Self::commit_paragraph(history, at);
+                Self::commit_table(history, at);
+                let lang = trimmed.trim_start_matches('`').trim().to_string();
+                at.in_code_block = Some(lang);
+                return;
+            }
+        }
+
+        // ── Inside a code block ─────────────────────────────────────────
+        if let Some(ref lang) = at.in_code_block {
+            history.push(Block::CodeLine {
+                content: line.to_string(),
+                lang: lang.clone(),
+            });
+            return;
+        }
+
+        // ── Table row — accumulate silently ────────────────────────────
+        if trimmed.starts_with('|') {
+            Self::commit_paragraph(history, at);
+            if !is_table_separator(line) {
+                at.table_data_rows += 1;
+            }
+            at.table_rows.push(line.to_string());
+            return;
+        }
+
+        // ── Blank line ───────────────────────────────────────────────────
+        if line.trim().is_empty() {
+            if !at.table_rows.is_empty() {
+                return; // Skip blank lines inside tables.
+            }
+            if !at.paragraph.is_empty() {
+                Self::commit_paragraph(history, at);
+            }
+            return;
+        }
+
+        // ── Non-table line after table — commit the table ────────────────
+        Self::commit_table(history, at);
+
+        // ── Regular text line ───────────────────────────────────────────
+        if !at.paragraph.is_empty() {
+            at.paragraph.push('\n');
+        }
+        at.paragraph.push_str(line);
+    }
+
+    fn commit_table(history: &mut BlockHistory, at: &mut ActiveText) {
+        if !at.table_rows.is_empty() {
+            let content = std::mem::take(&mut at.table_rows).join("\n");
+            history.push(Block::Text { content });
+            at.table_data_rows = 0;
+        }
+    }
+
+    fn commit_paragraph(history: &mut BlockHistory, at: &mut ActiveText) {
+        let para = std::mem::take(&mut at.paragraph);
+        let trimmed = para.trim();
+        if !trimmed.is_empty() {
+            history.push(Block::Text {
+                content: trimmed.to_string(),
+            });
+        }
+    }
+
+    /// Flush remaining streaming text. Returns true if streaming was ever active.
+    pub fn flush_streaming_text(&mut self) -> bool {
+        self.flush_streaming_thinking();
+        if let Some(mut at) = self.active_text.take() {
+            // If inside an unclosed code block, commit current_line as a code line.
+            if let Some(ref lang) = at.in_code_block {
+                if !at.current_line.is_empty() {
+                    self.history.push(Block::CodeLine {
+                        content: std::mem::take(&mut at.current_line),
+                        lang: lang.clone(),
+                    });
+                }
+                at.in_code_block = None;
+            }
+            // If current_line is a table row, add it to the table.
+            if !at.current_line.is_empty()
+                && at.current_line.trim_start().starts_with('|')
+            {
+                at.table_rows.push(std::mem::take(&mut at.current_line));
+            }
+            Self::commit_table(&mut self.history, &mut at);
+            // Commit remaining paragraph + current line.
+            if !at.current_line.is_empty() {
+                if !at.paragraph.is_empty() {
+                    at.paragraph.push('\n');
+                }
+                at.paragraph.push_str(&at.current_line);
+            }
+            Self::commit_paragraph(&mut self.history, &mut at);
+            self.prompt.dirty = true;
+        }
+        let was = self.had_streaming_text;
+        // Reset flags for the next turn.
+        self.had_streaming_thinking = false;
+        self.had_streaming_text = false;
+        was
     }
 
     pub fn start_tool(
@@ -1214,6 +1464,8 @@ impl Screen {
     /// prompt bar.
     fn has_content(&self) -> bool {
         !self.history.blocks.is_empty()
+            || self.active_thinking.is_some()
+            || self.active_text.is_some()
             || !self.active_tools.is_empty()
             || self.active_agent.is_some()
             || self.active_exec.is_some()
@@ -1241,11 +1493,13 @@ impl Screen {
         }
         let mut out = RenderOut::scroll();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
+        let _ = out.queue(cursor::Hide);
         let start_row = if self.prompt.drawn {
             let row = self.prompt.anchor_row.unwrap_or(0);
             let _ = out.queue(cursor::MoveTo(0, row));
             let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
             self.prompt.drawn = false;
+            self.prompt.prev_rows = 0;
             row
         } else {
             self.prompt
@@ -1266,34 +1520,34 @@ impl Screen {
         let _ = out.flush();
     }
 
+    /// Mark the prompt as needing a full redraw.  Does NOT perform any
+    /// terminal I/O — the next `draw_frame` will clear stale rows and
+    /// repaint atomically within a single synchronized-update frame,
+    /// preventing the flash that occurred when erasure was flushed as a
+    /// separate frame.
     pub fn erase_prompt(&mut self) {
-        self.erase_prompt_inner(true);
+        if self.prompt.drawn {
+            self.prompt.drawn = false;
+            self.prompt.dirty = true;
+        }
     }
 
     /// Erase the prompt area without issuing its own sync frame.
     /// Used when a sync is already open (e.g. from
-    /// `render_pending_blocks_for_dialog`).
+    /// `render_pending_blocks_for_dialog`) and the caller needs the
+    /// terminal lines cleared immediately within that frame.
     pub fn erase_prompt_nosync(&mut self) {
-        self.erase_prompt_inner(false);
-    }
-
-    fn erase_prompt_inner(&mut self, own_sync: bool) {
         if self.prompt.drawn {
             if let Some(anchor) = self.prompt.anchor_row {
                 let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
                 let end = (anchor + self.prompt.prev_rows).min(height);
                 let mut out = RenderOut::scroll();
-                if own_sync {
-                    let _ = out.queue(terminal::BeginSynchronizedUpdate);
-                }
+                let _ = out.queue(cursor::Hide);
                 for r in anchor..end {
                     let _ = out.queue(cursor::MoveTo(0, r));
                     let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
                 }
                 let _ = out.queue(cursor::MoveTo(0, anchor));
-                if own_sync {
-                    let _ = out.queue(terminal::EndSynchronizedUpdate);
-                }
                 let _ = out.flush();
             }
             self.prompt.drawn = false;
@@ -1313,6 +1567,7 @@ impl Screen {
         };
         let mut out = RenderOut::scroll();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
+        let _ = out.queue(cursor::Hide);
         let start = if purge {
             let _ = out.queue(cursor::MoveTo(0, 0));
             let _ = out.queue(terminal::Clear(terminal::ClearType::All));
@@ -1354,6 +1609,10 @@ impl Screen {
 
     pub fn clear(&mut self) {
         self.history.clear();
+        self.active_thinking = None;
+        self.active_text = None;
+        self.had_streaming_thinking = false;
+        self.had_streaming_text = false;
         self.active_tools.clear();
         self.active_agent = None;
         self.active_exec = None;
@@ -1366,6 +1625,7 @@ impl Screen {
         self.content_start_row = None;
         let mut out = RenderOut::scroll();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
+        let _ = out.queue(cursor::Hide);
         let _ = out.queue(cursor::MoveTo(0, 0));
         let _ = out.queue(terminal::Clear(terminal::ClearType::All));
         let _ = out.queue(terminal::Clear(terminal::ClearType::Purge));
@@ -1473,13 +1733,111 @@ impl Screen {
         // ── Render blocks ───────────────────────────────────────────────
         let block_rows = self.history.render(&mut out, width);
 
+        // ── Clear stale volatile area ────────────────────────────────────
+        // When new blocks are committed (block_rows > 0), the overlay
+        // shrinks and previous frame's streaming/prompt content lingers.
+        // Clear everything below the new block content so the overlay and
+        // prompt render into clean space.  With synchronized updates this
+        // is invisible.
+        if block_rows > 0 && self.prompt.prev_rows > 0 {
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+            // Area below is now clean — reset prev_rows so draw_prompt_sections
+            // doesn't try to clear already-cleared rows (which would add extra
+            // blank lines).
+            self.prompt.prev_rows = 0;
+        }
+
+        // ── Render streaming overlay ─────────────────────────────────────
+        // Only the current incomplete line lives here (tables and completed
+        // lines are committed to block history immediately).
+        let mut streaming_rows: u16 = 0;
+
+        let mut overlay_blocks: Vec<Block> = Vec::new();
+
+        // Current thinking line (incomplete — no \n yet).
+        if let Some(ref at) = self.active_thinking {
+            let text = match (at.paragraph.is_empty(), at.current_line.is_empty()) {
+                (true, true) => String::new(),
+                (true, false) => at.current_line.clone(),
+                (false, true) => at.paragraph.clone(),
+                (false, false) => format!("{}\n{}", at.paragraph, at.current_line),
+            };
+            if !text.trim().is_empty() {
+                overlay_blocks.push(Block::Thinking { content: text });
+            }
+        }
+
+        // Current text overlay.
+        if let Some(ref at) = self.active_text {
+            let in_table = !at.table_rows.is_empty()
+                || at.current_line.trim_start().starts_with('|');
+
+            if in_table {
+                let n = at.table_data_rows;
+                let dot_count = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_millis() / 333) as usize % 3 + 1;
+                let dots = &"..."[..dot_count];
+                overlay_blocks.push(Block::Hint {
+                    content: format!(" building table ({n} rows){dots}"),
+                });
+            } else if at.in_code_block.is_some() && !at.current_line.is_empty() {
+                let lang = at.in_code_block.as_deref().unwrap_or("").to_string();
+                overlay_blocks.push(Block::CodeLine {
+                    content: at.current_line.clone(),
+                    lang,
+                });
+            } else {
+                let mut overlay_content = String::new();
+                if !at.paragraph.is_empty() {
+                    overlay_content.push_str(&at.paragraph);
+                }
+                if !at.current_line.is_empty() {
+                    if !overlay_content.is_empty() {
+                        overlay_content.push('\n');
+                    }
+                    overlay_content.push_str(&at.current_line);
+                }
+                if !overlay_content.trim().is_empty() {
+                    overlay_blocks.push(Block::Text {
+                        content: overlay_content,
+                    });
+                }
+            }
+        }
+
+        // Render overlay blocks with correct gaps.
+        for (i, block) in overlay_blocks.iter().enumerate() {
+            let gap = if i == 0 {
+                if let Some(last) = self.history.blocks.last() {
+                    gap_between(&Element::Block(last), &Element::Block(block))
+                } else {
+                    0
+                }
+            } else {
+                gap_between(
+                    &Element::Block(&overlay_blocks[i - 1]),
+                    &Element::Block(block),
+                )
+            };
+            for _ in 0..gap {
+                crlf(&mut out);
+            }
+            let rows = blocks::render_block(&mut out, block, width);
+            streaming_rows += gap + rows;
+        }
+
         // ── Render active tools ─────────────────────────────────────────
         let mut active_rows: u16 = 0;
         let show_active = !is_dialog || self.show_tool_in_dialog;
         if show_active {
             for (i, tool) in self.active_tools.iter().enumerate() {
                 let tool_gap = if i == 0 {
-                    if let Some(last) = self.history.blocks.last() {
+                    if streaming_rows > 0 {
+                        // Streaming text is above — always 1 gap.
+                        1
+                    } else if let Some(last) = self.history.blocks.last() {
                         gap_between(&Element::Block(last), &Element::ActiveTool)
                     } else {
                         0
@@ -1565,7 +1923,7 @@ impl Screen {
                 crlf(&mut out);
             }
 
-            let pre_prompt = block_rows + active_rows + gap;
+            let pre_prompt = block_rows + streaming_rows + active_rows + gap;
             let (top_row, new_rows, scrolled) = self.draw_prompt_sections(
                 &mut out,
                 p.state,
@@ -1588,7 +1946,7 @@ impl Screen {
             // anchor_row: where the next frame starts drawing.  Points to
             // the end of flushed block content — the gap is always emitted
             // fresh by draw_frame, never baked into anchor_row.
-            let prompt_section_rows = active_rows + gap + new_rows;
+            let prompt_section_rows = streaming_rows + active_rows + gap + new_rows;
             if scrolled {
                 let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
                 self.prompt.anchor_row = Some(height.saturating_sub(prompt_section_rows));
@@ -1598,7 +1956,7 @@ impl Screen {
             // prev_dialog_row: where the prompt bar actually starts (after active
             // tool + gap).  Dialogs render here to line up with the prompt.
             let anchor = self.prompt.anchor_row.unwrap_or(0);
-            self.prompt.prev_dialog_row = Some(anchor + active_rows + gap);
+            self.prompt.prev_dialog_row = Some(anchor + streaming_rows + active_rows + gap);
             self.prompt.drawn = true;
             self.prompt.dirty = false;
 
@@ -1612,7 +1970,7 @@ impl Screen {
             // the dialog that follows.  The dialog renders inline at
             // `anchor_row`, pushing conversation up via terminal scroll
             // rather than overlaying it.
-            let gap: u16 = if block_rows > 0 || active_rows > 0 {
+            let gap: u16 = if block_rows > 0 || streaming_rows > 0 || active_rows > 0 {
                 // Clear the gap row (stale prompt content may linger) and
                 // advance past it.  crlf no longer clears the next row, so
                 // we handle it explicitly here.  The dialog bar row (after
@@ -1626,19 +1984,19 @@ impl Screen {
                 0
             };
 
-            let content_rows = block_rows + active_rows + gap;
+            let content_rows = block_rows + streaming_rows + active_rows + gap;
             let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
             let scrolled = draw_start_row + content_rows > height;
 
             let anchor = if scrolled {
                 self.has_scrollback = true;
-                height.saturating_sub(active_rows + gap)
+                height.saturating_sub(streaming_rows + active_rows + gap)
             } else {
                 draw_start_row + block_rows
             };
             self.prompt.anchor_row = Some(anchor);
-            self.prompt.prev_dialog_row = Some(anchor + active_rows + gap);
-            self.prompt.prev_rows = active_rows + gap;
+            self.prompt.prev_dialog_row = Some(anchor + streaming_rows + active_rows + gap);
+            self.prompt.prev_rows = streaming_rows + active_rows + gap;
             self.prompt.drawn = true;
             self.prompt.dirty = false;
 

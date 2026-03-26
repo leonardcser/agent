@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 protocol = { path = "../protocol" }
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "blocking", "charset", "http2", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "blocking", "charset", "http2", "rustls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yml = "0.0.12"
