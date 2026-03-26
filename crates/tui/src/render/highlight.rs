@@ -51,7 +51,7 @@ pub(crate) fn render_code_block(
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
     let theme = &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended];
     let content_width = if let Some(b) = bctx { b.inner_w } else { width };
-    let text_w = content_width.saturating_sub(1).max(1);
+    let text_w = content_width.max(1);
     let expanded: Vec<String> = lines.iter().map(|l| l.replace('\t', "    ")).collect();
     let mut rows = 0u16;
     let mut h = HighlightLines::new(syntax, theme);
@@ -71,15 +71,16 @@ pub(crate) fn render_code_block(
                 b.print_left(out);
             }
             let cols = print_split_regions(out, vrow, Some(theme::CODE_BLOCK_BG));
-            let pad = text_w.saturating_sub(cols);
+            let pad = content_width.saturating_sub(cols);
             if pad > 0 {
                 let _ = out.queue(SetBackgroundColor(theme::CODE_BLOCK_BG));
                 let _ = out.queue(Print(" ".repeat(pad)));
             }
-            let _ = out.queue(ResetColor);
             if let Some(b) = bctx {
-                b.print_right(out, text_w);
+                let _ = out.queue(SetForegroundColor(b.color));
+                let _ = out.queue(Print(b.right));
             }
+            let _ = out.queue(ResetColor);
             crlf(out);
         }
         rows += visual_rows.len() as u16;
