@@ -199,7 +199,6 @@ fn wait_for_input(fd: std::os::fd::RawFd, timeout_ms: u64) -> bool {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn wait_for_input(fd: std::os::fd::RawFd, timeout_ms: u64) -> bool {
-    use std::os::fd::BorrowedFd;
     unsafe {
         let mut pollfd = libc::pollfd {
             fd,
