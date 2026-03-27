@@ -1,3 +1,0 @@
-You have write access. Use edit_file to modify existing files and write_file only to create new files.
-Always read a file with read_file before editing it — edit_file will reject stale edits.
-When modifying files, explain what you're changing and why.

@@ -191,12 +191,13 @@ All toggleable at runtime via `/settings`.
 | Key | Default | Description |
 | --- | --- | --- |
 | `vim_mode` | `false` | Vi keybindings |
-| `auto_compact` | `false` | Auto-summarize at 80% context usage |
+| `auto_compact` | `false` | Auto-summarize at 80% context usage (always on in headless/subagent) |
 | `show_speed` | `true` | Tokens/sec in status bar |
 | `input_prediction` | `true` | Ghost text suggestions |
 | `task_slug` | `true` | Task label in status bar |
 | `restrict_to_workspace` | `true` | Downgrade Allow → Ask outside workspace |
 | `multi_agent` | `false` | Enable multi-agent mode |
+| `context_window` | auto | Override context window size (tokens); auto-detected from API |
 
 ## Theme
 

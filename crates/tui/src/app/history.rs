@@ -471,7 +471,7 @@ impl App {
         let Some(tokens) = self.screen.context_tokens() else {
             return;
         };
-        if tokens as u64 * 100 >= ctx as u64 * 80 {
+        if tokens as u64 * 100 >= ctx as u64 * engine::COMPACT_THRESHOLD_PERCENT {
             self.compact_history(None);
         }
     }

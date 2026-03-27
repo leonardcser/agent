@@ -238,6 +238,7 @@ impl ProviderKind {
             Self::Local => "openai-compatible",
         }
     }
+
 }
 
 // ── Chat options ────────────────────────────────────────────────────────────
@@ -586,7 +587,49 @@ impl Provider {
 
     // ── Utility methods ─────────────────────────────────────────────────
 
+    /// Fetch the context window size (in tokens) from the provider's API.
+    ///
+    /// - **Anthropic**: `GET /v1/models/{model}` → `max_input_tokens`
+    /// - **Local** (llama.cpp): `GET /models` → parse `--ctx-size` from args
+    /// - **OpenAI / Codex**: the standard API does not expose this, returns `None`.
     pub async fn fetch_context_window(&self, model: &str) -> Option<u32> {
+        let result = match self.kind {
+            ProviderKind::Anthropic => self.fetch_context_window_anthropic(model).await,
+            ProviderKind::Local => self.fetch_context_window_local(model).await,
+            ProviderKind::OpenAi | ProviderKind::Codex => None,
+        };
+        crate::log::entry(
+            crate::log::Level::Info,
+            "fetch_context_window",
+            &serde_json::json!({
+                "model": model,
+                "provider": format!("{:?}", self.kind),
+                "result": result,
+            }),
+        );
+        result
+    }
+
+    async fn fetch_context_window_anthropic(&self, model: &str) -> Option<u32> {
+        let url = format!("{}/models/{}", self.api_base, model);
+        let resp = self
+            .client
+            .get(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let data: serde_json::Value = resp.json().await.ok()?;
+        data["max_input_tokens"].as_u64().map(|v| v as u32)
+    }
+
+    /// Fetch context window from a local OpenAI-compatible server.
+    /// Supports vLLM/SGLang (`max_model_len`) and llama.cpp (`--ctx-size`).
+    async fn fetch_context_window_local(&self, model: &str) -> Option<u32> {
         let url = format!("{}/models", self.api_base);
         let mut req = self.client.get(&url);
         if !self.api_key.is_empty() {
@@ -599,12 +642,21 @@ impl Provider {
         let data: serde_json::Value = resp.json().await.ok()?;
         let models = data["data"].as_array()?;
         let entry = models.iter().find(|m| m["id"].as_str() == Some(model))?;
-        let args = entry["status"]["args"].as_array()?;
-        for i in 0..args.len().saturating_sub(1) {
-            if args[i].as_str() == Some("--ctx-size") {
-                return args[i + 1].as_str()?.parse::<u32>().ok();
+
+        // vLLM / SGLang: top-level `max_model_len` field.
+        if let Some(v) = entry["max_model_len"].as_u64() {
+            return Some(v as u32);
+        }
+
+        // llama.cpp: `--ctx-size` in status args.
+        if let Some(args) = entry["status"]["args"].as_array() {
+            for i in 0..args.len().saturating_sub(1) {
+                if args[i].as_str() == Some("--ctx-size") {
+                    return args[i + 1].as_str()?.parse::<u32>().ok();
+                }
             }
         }
+
         None
     }
 

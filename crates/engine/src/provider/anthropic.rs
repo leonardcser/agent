@@ -2,7 +2,7 @@ use super::{collect_indexed_tool_calls, non_empty, sse};
 use super::{ParsedResponse, ProviderError, StreamDelta, ToolDefinition};
 use crate::cancel::CancellationToken;
 use crate::config::ModelConfig;
-use crate::tools::trim_tool_output;
+use crate::tools::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
 use protocol::{FunctionCall, Message, ReasoningEffort, Role, TokenUsage, ToolCall};
 use std::collections::HashMap;
 
@@ -83,7 +83,7 @@ pub(super) fn build_body(
             }
             Role::Tool => {
                 let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
-                let trimmed = trim_tool_output(output, 200);
+                let trimmed = trim_tool_output(output, MAX_TOOL_OUTPUT_LINES);
                 content.push(serde_json::json!({
                     "role": "user",
                     "content": [{

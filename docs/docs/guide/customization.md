@@ -22,6 +22,7 @@ Press `/settings` to toggle these at runtime:
 | `task_slug` | on | Short task label in the status bar |
 | `restrict_to_workspace` | on | Downgrade Allow → Ask for out-of-workspace paths |
 | `multi_agent` | off | Multi-agent mode |
+| `context_window` | auto | Override context window size (tokens) |
 
 Set defaults in config:
 

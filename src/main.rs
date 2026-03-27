@@ -345,7 +345,8 @@ async fn main() {
         });
 
     let vim_enabled = cfg.settings.vim_mode.unwrap_or(false);
-    let auto_compact = args.subagent || cfg.settings.auto_compact.unwrap_or(false);
+    let auto_compact =
+        args.subagent || args.headless || cfg.settings.auto_compact.unwrap_or(false);
     let show_speed = cfg.settings.show_speed.unwrap_or(true);
     let input_prediction = cfg.settings.input_prediction.unwrap_or(true);
     let task_slug = cfg.settings.task_slug.unwrap_or(true);
@@ -530,11 +531,14 @@ async fn main() {
             let loader = engine::SkillLoader::load(&extra_paths);
             Some(Arc::new(loader))
         },
+        auto_compact,
+        context_window: cfg.settings.context_window,
     });
     engine_injector = engine_handle.injector();
 
-    // Fetch context window in background (only needed for interactive mode)
-    let ctx_rx = if !args.headless {
+    // Fetch context window in background (only needed for interactive TUI display).
+    // If the user set it in config, skip the fetch entirely.
+    let ctx_rx = if !args.headless && cfg.settings.context_window.is_none() {
         let ctx_api_base = args
             .api_base
             .clone()

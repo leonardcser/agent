@@ -87,6 +87,9 @@ pub struct SettingsConfig {
     pub task_slug: Option<bool>,
     pub restrict_to_workspace: Option<bool>,
     pub multi_agent: Option<bool>,
+    /// Override the context window size (tokens). When unset, the engine
+    /// fetches it from the provider API at startup.
+    pub context_window: Option<u32>,
 }
 
 impl SettingsConfig {

@@ -285,6 +285,11 @@ pub fn display_path(path: &str) -> String {
     path.into()
 }
 
+/// Maximum lines of tool output sent to the LLM. Individual tools may
+/// enforce their own (often larger) limits before this; this is the final
+/// trim applied when building the API request.
+pub const MAX_TOOL_OUTPUT_LINES: usize = 2000;
+
 /// Trim tool output to `max_lines` for LLM context. Appends a note with
 /// the total line count when truncated.
 pub fn trim_tool_output(content: &str, max_lines: usize) -> String {

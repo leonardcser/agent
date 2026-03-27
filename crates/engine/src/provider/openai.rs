@@ -4,7 +4,7 @@ use super::{ParsedResponse, ProviderError, StreamDelta, ToolDefinition};
 use crate::cancel::CancellationToken;
 use crate::config::ModelConfig;
 use crate::log;
-use crate::tools::trim_tool_output;
+use crate::tools::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
 use protocol::{FunctionCall, Message, ReasoningEffort, Role, TokenUsage, ToolCall};
 use std::collections::HashMap;
 
@@ -86,7 +86,7 @@ pub(super) fn build_body(
             }
             Role::Tool => {
                 let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
-                let trimmed = trim_tool_output(output, 200);
+                let trimmed = trim_tool_output(output, MAX_TOOL_OUTPUT_LINES);
                 let call_id = match &m.tool_call_id {
                     Some(id) if !id.is_empty() => id.as_str(),
                     _ => {

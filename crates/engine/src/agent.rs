@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
+use crate::COMPACT_THRESHOLD_PERCENT;
+
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 fn next_request_id() -> u64 {
@@ -49,6 +51,10 @@ pub async fn engine_task(
 
     // Process completion channel for background processes
     let (proc_done_tx, mut proc_done_rx) = mpsc::unbounded_channel::<(String, Option<i32>)>();
+
+    // Context window size — set from config or lazily fetched from the
+    // provider API on the first turn.
+    let mut context_window: Option<u32> = config.context_window;
 
     loop {
         tokio::select! {
@@ -110,6 +116,7 @@ pub async fn engine_task(
                                 config.instructions.as_deref(),
                                 agent_config.as_ref(),
                                 skill_section,
+                                config.interactive,
                             )
                         });
                         let mut turn = Turn {
@@ -136,8 +143,12 @@ pub async fn engine_task(
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
                             file_locks: &file_locks,
+                            context_window,
+                            compacted_this_turn: false,
                         };
                         turn.run(input_content, history).await;
+                        // Cache the (possibly fetched) context window for future turns.
+                        context_window = turn.context_window;
                     }
                     UiCommand::Compact { keep_turns, history, model, instructions } => {
                         let provider = build_provider(&config, &client);
@@ -405,6 +416,10 @@ struct Turn<'a> {
     started_at: Instant,
     tps_samples: Vec<f64>,
     tool_elapsed: HashMap<String, u64>,
+    /// Cached context window size. Lazily fetched from the provider API
+    /// on the first turn if not set via config.
+    context_window: Option<u32>,
+    compacted_this_turn: bool,
 }
 
 impl<'a> Turn<'a> {
@@ -427,6 +442,7 @@ impl<'a> Turn<'a> {
                     self.config.instructions.as_deref(),
                     self.agent_config.as_ref(),
                     skill_section,
+                    self.config.interactive,
                 )
             });
         self.system_prompt = new;
@@ -454,6 +470,69 @@ impl<'a> Turn<'a> {
             turn_id: self.turn_id,
             messages,
         });
+    }
+
+    /// Compact conversation history mid-turn when context usage crosses the
+    /// threshold. Returns `true` if compaction happened. Only fires once per
+    /// turn to avoid wasting an LLM call when compaction can't reduce further.
+    async fn maybe_compact(&mut self, prompt_tokens: u32) -> bool {
+        if !self.config.auto_compact || self.compacted_this_turn {
+            return false;
+        }
+        // Lazily fetch context window on first check.
+        if self.context_window.is_none() {
+            self.context_window = self
+                .provider
+                .fetch_context_window(&self.model)
+                .await;
+        }
+        let Some(ctx) = self.context_window else {
+            return false;
+        };
+        if (prompt_tokens as u64) * 100 < (ctx as u64) * COMPACT_THRESHOLD_PERCENT {
+            return false;
+        }
+        self.compacted_this_turn = true;
+        debug_assert!(
+            matches!(self.messages[0].role, Role::System),
+            "first message should be the system prompt"
+        );
+        let non_system = &self.messages[1..];
+        match compact_history(
+            &self.provider,
+            non_system,
+            1,
+            &self.model,
+            self.config.instructions.as_deref(),
+            &self.cancel,
+        )
+        .await
+        {
+            Ok(compacted) => {
+                let system = self.messages[0].clone();
+                self.messages = vec![system];
+                self.messages.extend(compacted);
+                self.emit_messages_snapshot();
+                log::entry(
+                    log::Level::Info,
+                    "mid_turn_compact",
+                    &serde_json::json!({
+                        "prompt_tokens": prompt_tokens,
+                        "context_window": ctx,
+                        "new_message_count": self.messages.len(),
+                    }),
+                );
+                true
+            }
+            Err(e) => {
+                log::entry(
+                    log::Level::Warn,
+                    "mid_turn_compact_error",
+                    &serde_json::json!({"error": e.to_string()}),
+                );
+                false
+            }
+        }
     }
 
     fn commit_partial_assistant(&mut self, text: String, reasoning: String) {
@@ -697,7 +776,8 @@ impl<'a> Turn<'a> {
                 }
             };
 
-            if resp.usage.prompt_tokens.is_some() {
+            let prompt_tokens = resp.usage.prompt_tokens;
+            if prompt_tokens.is_some() {
                 let tokens_per_sec = resp.tokens_per_sec;
                 if let Some(tps) = tokens_per_sec {
                     self.tps_samples.push(tps);
@@ -706,6 +786,15 @@ impl<'a> Turn<'a> {
                     usage: resp.usage,
                     tokens_per_sec,
                 });
+            }
+
+            // Mid-turn auto-compaction: if context usage crossed the 80%
+            // threshold, summarize older messages and continue the loop
+            // with a smaller context.
+            if let Some(tokens) = prompt_tokens {
+                if self.maybe_compact(tokens).await {
+                    continue;
+                }
             }
 
             let content = resp.content.map(Content::text);

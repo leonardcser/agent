@@ -170,7 +170,9 @@ The summary replaces older messages in what's sent to the API. Your last 2
 turns are always kept verbatim.
 
 When `auto_compact` is enabled (via `/settings`), compaction triggers
-automatically at 80% context usage. Press `Esc Esc` to cancel.
+automatically at 80% context usage — both between turns and mid-turn if the
+agent's tool loop fills the context. In headless and subagent modes,
+auto-compact is always enabled. Press `Esc Esc` to cancel in interactive mode.
 
 ## Rewind
 

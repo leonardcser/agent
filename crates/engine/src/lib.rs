@@ -21,12 +21,27 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// Trigger auto-compaction when prompt tokens reach this percentage of the
+/// context window.
+pub const COMPACT_THRESHOLD_PERCENT: u64 = 80;
+
 pub use config::ModelConfig;
 pub use mcp::McpServerConfig;
 pub use paths::{cache_dir, config_dir, home_dir, state_dir};
 pub use permissions::Permissions;
 pub use provider::{Provider, ProviderKind};
 pub use skills::SkillLoader;
+
+/// Context for rendering the system prompt template.
+pub struct PromptContext<'a> {
+    pub cwd: &'a std::path::Path,
+    pub interactive: bool,
+    pub write_access: bool,
+    pub plan_mode: bool,
+    pub multi_agent: Option<&'a AgentPromptConfig>,
+    pub skills_section: Option<&'a str>,
+    pub extra_instructions: Option<&'a str>,
+}
 
 /// Assemble the system prompt from the base template, mode overlay, cwd, and
 /// optional extra instructions (e.g. from AGENTS.md files).
@@ -35,7 +50,7 @@ pub fn build_system_prompt(
     cwd: &std::path::Path,
     extra_instructions: Option<&str>,
 ) -> String {
-    build_system_prompt_full(mode, cwd, extra_instructions, None, None)
+    build_system_prompt_full(mode, cwd, extra_instructions, None, None, true)
 }
 
 pub fn build_system_prompt_full(
@@ -44,67 +59,71 @@ pub fn build_system_prompt_full(
     extra_instructions: Option<&str>,
     agent_config: Option<&AgentPromptConfig>,
     skill_section: Option<&str>,
+    interactive: bool,
 ) -> String {
-    let base = include_str!("prompts/system.txt");
-    let overlay = match mode {
-        protocol::Mode::Apply | protocol::Mode::Yolo => include_str!("prompts/system_apply.txt"),
-        protocol::Mode::Plan => include_str!("prompts/system_plan.txt"),
-        protocol::Mode::Normal => "",
+    let ctx = PromptContext {
+        cwd,
+        interactive,
+        write_access: matches!(mode, protocol::Mode::Apply | protocol::Mode::Yolo),
+        plan_mode: matches!(mode, protocol::Mode::Plan),
+        multi_agent: agent_config,
+        skills_section: skill_section,
+        extra_instructions,
     };
+    render_system_prompt(&ctx)
+}
 
-    let mut prompt = format!("{base}\n\nYou are working in: {cwd}", cwd = cwd.display());
+/// Render the system prompt template with the given context.
+pub fn render_system_prompt(ctx: &PromptContext<'_>) -> String {
+    let template_src = include_str!("prompts/system.txt");
+    let env = minijinja::Environment::new();
+    let template = env
+        .template_from_str(template_src)
+        .expect("system prompt template should parse");
 
-    if !overlay.is_empty() {
-        prompt.push_str("\n\n");
-        prompt.push_str(overlay);
-    }
+    let is_child = ctx.multi_agent.map(|m| m.depth > 0).unwrap_or(false);
+    let agent_id = ctx.multi_agent.map(|m| m.agent_id.as_str()).unwrap_or("");
+    let parent_id = ctx
+        .multi_agent
+        .and_then(|m| m.parent_id.as_deref())
+        .unwrap_or("unknown");
+    let siblings = ctx
+        .multi_agent
+        .map(|m| m.siblings.join(", "))
+        .unwrap_or_default();
 
-    if let Some(instructions) = extra_instructions {
-        prompt.push_str("\n\n");
-        prompt.push_str(instructions);
-    }
+    let rendered = template
+        .render(minijinja::context! {
+            cwd => ctx.cwd.display().to_string(),
+            interactive => ctx.interactive,
+            write_access => ctx.write_access,
+            plan_mode => ctx.plan_mode,
+            multi_agent => ctx.multi_agent.is_some(),
+            is_child => is_child,
+            agent_id => agent_id,
+            parent_id => parent_id,
+            siblings => siblings,
+            skills_section => ctx.skills_section.unwrap_or(""),
+            extra_instructions => ctx.extra_instructions.unwrap_or(""),
+        })
+        .expect("system prompt template should render");
 
-    if let Some(section) = skill_section {
-        prompt.push_str("\n\n");
-        prompt.push_str(section);
-    }
-
-    if let Some(cfg) = agent_config {
-        prompt.push_str("\n\n# Multi-agent\n\n");
-
-        prompt.push_str(&format!(
-            "You are part of a multi-agent system. Your name is {}. \
-             Agents have names (e.g. cedar, birch) and are completely separate \
-             from bash background processes (proc_1, proc_2).\n\
-             - Messages from other agents appear as <agent-message from=\"name\"> \
-               blocks. These are not user messages — reply via `message_agent`.\n\
-             - Do not implement work that you already delegated unless the \
-               delegation has clearly failed or been cancelled.\n\
-             - When spawning multiple subagents, ensure their scopes don't \
-               overlap — no two agents should write to the same file.\n\
-             - Subagents take time — do not stop them for being slow. Use \
-               `message_agent` to steer them if they're going in the wrong \
-               direction.\n",
-            cfg.agent_id
-        ));
-
-        if cfg.depth > 0 {
-            let parent = cfg.parent_id.as_deref().unwrap_or("unknown");
-            prompt.push_str(&format!(
-                "\nYou are {}, working with {parent}.",
-                cfg.agent_id
-            ));
-            if !cfg.siblings.is_empty() {
-                prompt.push_str(&format!(" Siblings: {}.", cfg.siblings.join(", ")));
+    // Collapse runs of 3+ blank lines into 2 (section separators).
+    let mut result = String::with_capacity(rendered.len());
+    let mut blank_count = 0u32;
+    for line in rendered.lines() {
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 2 {
+                result.push('\n');
             }
-            prompt.push_str(
-                " Your final response is automatically sent to your parent when \
-                 your turn ends — do not duplicate it with `message_agent`.\n",
-            );
+        } else {
+            blank_count = 0;
+            result.push_str(line);
+            result.push('\n');
         }
     }
-
-    prompt
+    result.trim().to_string()
 }
 
 /// Configuration for the multi-agent section of the system prompt.
@@ -154,6 +173,12 @@ pub struct EngineConfig {
     pub mcp_servers: HashMap<String, McpServerConfig>,
     /// Pre-loaded skill loader.
     pub skills: Option<Arc<SkillLoader>>,
+    /// Auto-compact when context usage crosses the threshold.
+    pub auto_compact: bool,
+    /// Context window size (tokens). When `None`, the engine fetches it from
+    /// the provider API at startup. User config can override via
+    /// `context_window`.
+    pub context_window: Option<u32>,
 }
 
 /// Handle to a running engine. Send commands, receive events.
