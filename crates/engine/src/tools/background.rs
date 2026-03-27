@@ -150,16 +150,18 @@ impl ProcessRegistry {
         let p = map
             .get_mut(id)
             .ok_or_else(|| format!("no process with id '{id}'"))?;
-        let output = p.lines[p.read_cursor..].join("\n");
-        // Drop already-read lines to free memory.
-        let consumed = p.lines.len();
-        p.lines.drain(..consumed);
+        let output = std::mem::take(&mut p.lines).join("\n");
         p.read_cursor = 0;
-        Ok((output, !p.finished, p.exit_code))
+        let running = !p.finished;
+        let exit_code = p.exit_code;
+        if p.finished {
+            map.remove(id);
+        }
+        Ok((output, running, exit_code))
     }
 
     /// Stop a background process. Returns its final accumulated output.
-    pub fn stop(&self, id: &str) -> Result<String, String> {
+    pub async fn stop(&self, id: &str) -> Result<String, String> {
         let kill_tx = {
             let mut map = self.0.lock().unwrap();
             let p = map
@@ -170,8 +172,15 @@ impl ProcessRegistry {
         if let Some(tx) = kill_tx {
             let _ = tx.try_send(());
         }
-        // Give the background task a moment to finish
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Poll until the background task marks the process finished,
+        // rather than a blind sleep that may be too short or too long.
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let map = self.0.lock().unwrap();
+            if map.get(id).is_some_and(|p| p.finished) {
+                break;
+            }
+        }
         let mut map = self.0.lock().unwrap();
         let p = map
             .remove(id)

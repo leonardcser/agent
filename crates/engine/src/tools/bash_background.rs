@@ -90,7 +90,7 @@ impl Tool for ReadProcessOutputTool {
                             break format_read_result(accumulated, false, exit_code);
                         }
                         if ctx.cancel.is_cancelled() {
-                            let _ = self.registry.stop(&id);
+                            let _ = self.registry.stop(&id).await;
                             break format_read_result(accumulated, false, None);
                         }
                         if tokio::time::Instant::now() >= deadline {
@@ -137,7 +137,7 @@ impl Tool for StopProcessTool {
     ) -> ToolFuture<'a> {
         Box::pin(async move {
             let id = str_arg(&args, "id");
-            match self.registry.stop(&id) {
+            match self.registry.stop(&id).await {
                 Ok(output) => ToolResult::ok(if output.is_empty() {
                     "process stopped (no output)".into()
                 } else {

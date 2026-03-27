@@ -2,6 +2,7 @@ use super::{bool_arg, str_arg, Tool, ToolContext, ToolFuture, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
 
 const BLOCKING_TIMEOUT: Duration = Duration::from_secs(600);
 const CHILD_CHECK_INTERVAL: Duration = Duration::from_secs(5);
@@ -200,7 +201,8 @@ impl SpawnAgentTool {
                                 }));
                         }
                         Ok(_) => continue, // message from a different agent
-                        Err(_) => {
+                        Err(RecvError::Lagged(_)) => continue,
+                        Err(RecvError::Closed) => {
                             return ToolResult::err(format!("agent {agent_id}: message channel closed"));
                         }
                     }
