@@ -26,7 +26,6 @@ Normal/Plan/Apply or **Allow** in Yolo.
 | `glob` | Allow | Allow | Allow | Allow |
 | `grep` | Allow | Allow | Allow | Allow |
 | `bash` | Ask | Ask | Ask | Allow |
-| `bash_background` | Ask | Ask | Ask | Allow |
 | `web_fetch` | Ask | Ask | Ask | Allow |
 | `web_search` | Ask | Ask | Ask | Allow |
 | `ask_user_question` | Allow | Allow | Allow | Allow |

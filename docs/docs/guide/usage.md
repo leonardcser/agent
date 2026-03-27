@@ -42,11 +42,10 @@ The agent can use these tools during a conversation:
 | `edit_file` | Apply diff-based edits to a file |
 | `glob` | Find files by pattern |
 | `grep` | Search file contents with regex |
-| `bash` | Run a shell command (streaming output) |
-| `bash_background` | Run a command asynchronously |
+| `bash` | Run a shell command (synchronous or background via `run_in_background`) |
 | `read_process_output` | Read output from a background process |
 | `stop_process` | Kill a background process |
-| `web_fetch` | Fetch a URL (HTML → markdown, images → base64) |
+| `web_fetch` | Fetch a URL and extract content via LLM |
 | `web_search` | Search the web via DuckDuckGo |
 | `notebook_edit` | Edit Jupyter notebooks |
 | `ask_user_question` | Ask you a question with selectable options |

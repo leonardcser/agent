@@ -58,10 +58,16 @@
 | Key | Action |
 | --- | --- |
 | `Shift+Left` / `Shift+Right` | Select character |
-| `Shift+Alt+Left` / `Shift+Alt+Right` | Select word |
+| `Shift+Alt+Left` / `Shift+Alt+Right` / `Shift+Ctrl+Left` / `Shift+Ctrl+Right` | Select word |
 | `Shift+Home` / `Shift+End` | Select to line boundary |
 | `Cmd+C` | Copy |
 | `Cmd+X` | Cut |
+
+!!! note
+
+    `Cmd` keybindings depend on terminal support. Some terminals intercept
+    `Cmd` combinations for their own features (tabs, scrollback). If a `Cmd`
+    binding doesn't work, check your terminal's settings.
 
 ## Vim Mode
 

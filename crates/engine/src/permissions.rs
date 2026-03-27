@@ -109,7 +109,6 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
             "bash",
             "web_fetch",
             "web_search",
-            "bash_background",
             "read_process_output",
             "stop_process",
             "exit_plan_mode",

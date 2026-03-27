@@ -2,6 +2,9 @@
 
 Config file: `~/.config/agent/config.yaml` (respects `$XDG_CONFIG_HOME`).
 
+If the config file is missing, all defaults are used. If it exists but fails to
+parse, a warning is printed and defaults are used.
+
 ## Full Example
 
 ```yaml
@@ -164,8 +167,14 @@ defaults:
   reasoning_cycle: ["off", "low", "medium", "high", "max"]  # Ctrl+T cycle
 ```
 
-- If `model` is set, it overrides the cached selection from the previous session
-- If `model` is omitted, the last used model is restored
+Model selection follows this precedence:
+
+1. `--model` CLI flag
+2. `defaults.model` in config
+3. Last used model (cached from previous session)
+4. First model in the providers list
+
+If `defaults.model` is set, the cached selection is ignored.
 
 ## Settings
 
