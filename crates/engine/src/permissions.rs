@@ -224,14 +224,14 @@ impl Permissions {
         let mut cloned = self.clone();
         fn apply_to_mode(mode: &mut ModePerms, overrides: &protocol::PermissionOverrides) {
             if let Some(ref tools) = overrides.tools {
-                for name in &tools.deny {
-                    mode.tools.insert(name.clone(), Decision::Deny);
+                for name in &tools.allow {
+                    mode.tools.insert(name.clone(), Decision::Allow);
                 }
                 for name in &tools.ask {
-                    mode.tools.entry(name.clone()).or_insert(Decision::Ask);
+                    mode.tools.insert(name.clone(), Decision::Ask);
                 }
-                for name in &tools.allow {
-                    mode.tools.entry(name.clone()).or_insert(Decision::Allow);
+                for name in &tools.deny {
+                    mode.tools.insert(name.clone(), Decision::Deny);
                 }
             }
             if let Some(ref bash) = overrides.bash {
@@ -727,22 +727,47 @@ fn matches_rule(pat: &glob::Pattern, value: &str) -> bool {
 }
 
 fn check_ruleset(ruleset: &RuleSet, value: &str) -> Decision {
+    // Deny always wins — checked first regardless of specificity.
     for pat in &ruleset.deny {
         if matches_rule(pat, value) {
             return Decision::Deny;
         }
     }
+
+    // Among allow and ask, the most specific (longest pattern) wins.
+    // On tie, ask wins (safer default).
+    let mut best_allow: Option<usize> = None;
+    let mut best_ask: Option<usize> = None;
+
     for pat in &ruleset.allow {
         if matches_rule(pat, value) {
-            return Decision::Allow;
+            let len = pat.as_str().len();
+            if best_allow.is_none_or(|prev| len > prev) {
+                best_allow = Some(len);
+            }
         }
     }
     for pat in &ruleset.ask {
         if matches_rule(pat, value) {
-            return Decision::Ask;
+            let len = pat.as_str().len();
+            if best_ask.is_none_or(|prev| len > prev) {
+                best_ask = Some(len);
+            }
         }
     }
-    Decision::Ask
+
+    match (best_allow, best_ask) {
+        (Some(a), Some(k)) => {
+            if k >= a {
+                Decision::Ask
+            } else {
+                Decision::Allow
+            }
+        }
+        (Some(_), None) => Decision::Allow,
+        (None, Some(_)) => Decision::Ask,
+        (None, None) => Decision::Ask,
+    }
 }
 
 /// Check whether a command contains an output redirection (`>`, `>>`, `&>`, `&>>`).
@@ -839,7 +864,7 @@ fn decide_base(
         let bash_decision = permissions.check_bash(mode, &cmd);
         match (&tool_decision, &bash_decision) {
             (_, Decision::Deny) => Decision::Deny,
-            (Decision::Allow, Decision::Ask) => Decision::Allow,
+            (Decision::Allow, Decision::Ask) => Decision::Ask,
             _ => bash_decision,
         }
     } else if tool_name == "web_fetch" {
@@ -1913,5 +1938,83 @@ mod tests {
             p.check_bash(Mode::Normal, "rm file.txt > /dev/null"),
             Decision::Deny
         );
+    }
+
+    // --- specificity: specific ask beats broad allow ---
+
+    #[test]
+    fn specific_ask_beats_broad_allow() {
+        let rs = ruleset(&["git *"], &["git push *"], &[]);
+        assert_eq!(check_ruleset(&rs, "git push foo"), Decision::Ask);
+    }
+
+    #[test]
+    fn broad_allow_still_works_for_non_specific() {
+        let rs = ruleset(&["git *"], &["git push *"], &[]);
+        assert_eq!(check_ruleset(&rs, "git status"), Decision::Allow);
+    }
+
+    // --- bash decide_base: tool Allow + pattern Ask = Ask ---
+
+    #[test]
+    fn bash_tool_allow_pattern_ask() {
+        let mode = ModePerms {
+            tools: {
+                let mut m = HashMap::new();
+                m.insert("bash".to_string(), Decision::Allow);
+                m
+            },
+            bash: ruleset(&[], &["git push *"], &[]),
+            web_fetch: empty_ruleset(),
+            mcp: empty_ruleset(),
+        };
+        let perms = Permissions {
+            normal: mode.clone(),
+            plan: mode.clone(),
+            apply: mode.clone(),
+            yolo: mode,
+            restrict_to_workspace: false,
+            workspace: PathBuf::new(),
+        };
+        let args = args_with("command", "git push origin main");
+        assert_eq!(
+            decide_base(&perms, Mode::Yolo, "bash", &args),
+            Decision::Ask
+        );
+    }
+
+    // --- override tightening: base Allow, override Ask → Ask ---
+
+    #[test]
+    fn override_tightens_allow_to_ask() {
+        let mode = ModePerms {
+            tools: {
+                let mut m = HashMap::new();
+                m.insert("bash".to_string(), Decision::Allow);
+                m
+            },
+            bash: empty_ruleset(),
+            web_fetch: empty_ruleset(),
+            mcp: empty_ruleset(),
+        };
+        let perms = Permissions {
+            normal: mode.clone(),
+            plan: mode.clone(),
+            apply: mode.clone(),
+            yolo: mode,
+            restrict_to_workspace: false,
+            workspace: PathBuf::new(),
+        };
+        let overrides = protocol::PermissionOverrides {
+            tools: Some(protocol::RuleSetOverride {
+                allow: vec![],
+                ask: vec!["bash".to_string()],
+                deny: vec![],
+            }),
+            bash: None,
+            web_fetch: None,
+        };
+        let tightened = perms.with_overrides(&overrides);
+        assert_eq!(tightened.check_tool(Mode::Yolo, "bash"), Decision::Ask);
     }
 }
