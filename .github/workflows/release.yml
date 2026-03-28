@@ -32,9 +32,65 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+  build:
+    name: Build (${{ matrix.target }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: smelt-x86_64-unknown-linux-gnu.tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: smelt-aarch64-unknown-linux-gnu.tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact: smelt-x86_64-apple-darwin.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: smelt-aarch64-apple-darwin.tar.gz
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --bin smelt --target ${{ matrix.target }}
+
+      - name: Package binary
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.artifact }} smelt
+          cd ../../..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
   release:
     name: Create Release
-    needs: test
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -46,9 +102,6 @@ jobs:
           fetch-depth: 0
           ref: main
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Update version in all Cargo.toml files
         run: |
@@ -108,11 +161,28 @@ jobs:
             print_section "Features" "feat(\(.+\))?:"
             print_section "Bug Fixes" "fix(\(.+\))?:"
             print_section "Other Changes" "(refactor|docs|perf|chore|test|ci|revert)(\(.+\))?:"
+            echo ""
+            echo "## Install"
+            echo ""
+            echo '```bash'
+            echo "cargo install --git https://github.com/leonardcser/smelt.git"
+            echo '```'
+            echo ""
+            echo "Or download a prebuilt binary below."
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build release binary
-        run: cargo build --release --bin agent
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Collect binaries
+        run: |
+          mkdir -p release
+          for dir in artifacts/*/; do
+            cp "$dir"/*.tar.gz release/ 2>/dev/null || true
+          done
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -120,6 +190,6 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
           body: ${{ steps.notes.outputs.body }}
-          files: target/release/agent
+          files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
