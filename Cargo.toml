@@ -3,7 +3,7 @@ members = ["crates/protocol", "crates/engine", "crates/tui"]
 
 [package]
 name = "smelt-agent"
-version = "0.2.8"
+version = "0.3.0"
 edition = "2021"
 description = "A Rust TUI coding agent"
 license = "MIT"
