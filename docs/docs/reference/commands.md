@@ -23,7 +23,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/ps`                     | Manage background processes                   |
 | `/agents`                 | Manage running agents (multi-agent only)      |
 | `/btw <question>`         | Ask a side question (not added to history)    |
-| `/exit`, `/quit`          | Exit (also `:q`, `:wq`)                       |
+| `/exit`, `/quit`          | Exit (also `:q`, `:qa`, `:wq`, `:wqa`)        |
 
 ## Shell Escape
 

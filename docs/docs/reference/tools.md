@@ -91,7 +91,7 @@ Fetches a URL and extracts content based on your `prompt`.
 
 - Response body capped at 5 MB
 - Output capped at 2,000 lines or 50 KB (truncation noted)
-- Results are cached by URL and format
+- Results are cached by URL and format for 15 minutes
 
 ### `web_search`
 

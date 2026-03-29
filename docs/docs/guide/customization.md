@@ -17,10 +17,10 @@ available settings.
 
 ## Themes
 
-Twelve accent color presets:
+Thirteen accent color presets:
 
-> `lavender` · `sky` · `mint` · `rose` · `peach` · `lilac` · `gold` · `ember` ·
-> `ice` · `sage` · `coral` · `silver`
+> `lavender` · `sky` · `blue` · `mint` · `rose` · `peach` · `lilac` · `gold` ·
+> `ember` · `ice` · `sage` · `coral` · `silver`
 
 Set in config:
 

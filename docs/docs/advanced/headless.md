@@ -19,8 +19,8 @@ smelt --headless "summarize this repo"
 ```
 
 - **stdout** — final assistant message only (written once the turn completes)
-- **stderr** — tool activity, thinking, token usage, errors. Use `-v` / `--verbose`
-  to include tool output
+- **stderr** — tool activity, thinking, token usage, errors. Use `-v` /
+  `--verbose` to include tool output
 
 When both stdout and stderr are terminals (interactive use), the final message
 is printed to stderr so it appears alongside tool output. When either stream is
@@ -37,8 +37,8 @@ Every `EngineEvent` is emitted as a JSON line (JSONL) to stdout.
 
 ## Color
 
-ANSI colors in stderr output respect `NO_COLOR`, `TERM=dumb`, and TTY
-detection. Override with `--color`:
+ANSI colors in stderr output respect `NO_COLOR`, `TERM=dumb`, and TTY detection.
+Override with `--color`:
 
 ```bash
 smelt --headless --color=never "fix the bug" 2>log.txt

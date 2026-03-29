@@ -68,6 +68,11 @@ defaults:
   reasoning_cycle: ["off", "low", "medium", "high", "max"] # Ctrl+T cycle
 ```
 
+Reasoning effort controls how deeply the model thinks before responding.
+Supported by Anthropic (`thinking`), OpenAI (`reasoning`), and openai-compatible
+providers that support `reasoning_effort`. For OpenAI, `max` maps to `xhigh`.
+Models that don't support thinking ignore this setting.
+
 Model selection follows this precedence:
 
 1. `--model` CLI flag
@@ -101,8 +106,8 @@ theme:
   accent: lavender
 ```
 
-Presets: `lavender`, `sky`, `mint`, `rose`, `peach`, `lilac`, `gold`, `ember`,
-`ice`, `sage`, `coral`, `silver`. Or a raw ANSI value (0–255).
+Presets: `lavender`, `sky`, `blue`, `mint`, `rose`, `peach`, `lilac`, `gold`,
+`ember`, `ice`, `sage`, `coral`, `silver`. Or a raw ANSI value (0–255).
 
 ## MCP (Model Context Protocol)
 
@@ -196,6 +201,24 @@ Detailed instructions for the agent...
 
 See [Permissions Reference](permissions.md) for full details.
 
+## Storage Paths
+
+All runtime data is stored under the XDG base directories:
+
+| Directory                           | Contents                                            |
+| ----------------------------------- | --------------------------------------------------- |
+| `$XDG_CONFIG_HOME/smelt/`           | `config.yaml`, custom commands, global skills       |
+| `$XDG_STATE_HOME/smelt/sessions/`   | Saved sessions (`session.json`, `meta.json`, blobs) |
+| `$XDG_STATE_HOME/smelt/state.json`  | Persisted state (last model, mode, accent color)    |
+| `$XDG_STATE_HOME/smelt/registry/`   | Multi-agent registry entries                        |
+| `$XDG_STATE_HOME/smelt/workspaces/` | Per-workspace saved permissions                     |
+| `$XDG_STATE_HOME/smelt/logs/`       | Log files (rotated, max 20)                         |
+| `$XDG_CACHE_HOME/smelt/`            | Cache                                               |
+
+Codex OAuth tokens are stored in the system keyring (service:
+`smelt-codex-auth`). If the keyring is unavailable, tokens fall back to
+`$XDG_STATE_HOME/smelt/codex_auth.json` (mode `0600`).
+
 ## Environment Variables
 
 | Variable          | Purpose                                                 |
@@ -206,6 +229,7 @@ See [Permissions Reference](permissions.md) for full details.
 | `COLORFGBG`       | Terminal color hint (fallback for dark/light detection) |
 | `TERM`            | Terminal type (`dumb` skips color detection)            |
 | `EDITOR`          | Editor for `Ctrl+X Ctrl+E` and vim `v`                  |
+| `NO_COLOR`        | Disable ANSI colors (respected in headless mode)        |
 
 ## Full Example
 

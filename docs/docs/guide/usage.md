@@ -15,12 +15,12 @@ The agent streams its response and may call tools along the way.
 The agent has four modes, each with different permission defaults. Press
 `Shift+Tab` to cycle through them.
 
-| Mode       | What it does                                                                                            |
-| ---------- | ------------------------------------------------------------------------------------------------------- |
-| **Normal** | Default. Asks before editing files or running commands. Read tools are auto-allowed.                    |
-| **Plan**   | Read-only. The agent produces a plan file and calls `exit_plan_mode` when done. You review and approve. |
-| **Apply**  | File edits are auto-approved. Bash still asks.                                                          |
-| **Yolo**   | Everything auto-approved. You can still deny specific patterns via config.                              |
+| Mode       | What it does                                                                                                                      |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| **Normal** | Default. Asks before editing files or running commands. Read tools are auto-allowed.                                              |
+| **Plan**   | Read-only. The agent produces a plan and calls `exit_plan_mode` when done. You review the summary and approve to switch to Apply. |
+| **Apply**  | File edits are auto-approved. Bash still asks.                                                                                    |
+| **Yolo**   | Everything auto-approved. You can still deny specific patterns via config.                                                        |
 
 The current mode is shown in the status bar. Set the starting mode with `--mode`
 or `defaults.mode` in config. Customize which modes appear in the cycle with

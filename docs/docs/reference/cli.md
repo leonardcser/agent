@@ -35,16 +35,16 @@ Auto-detection:
 
 ## Behavior
 
-| Flag                         | Description                                               |
-| ---------------------------- | --------------------------------------------------------- |
-| `--mode <MODE>`              | Starting mode: `normal`, `plan`, `apply`, `yolo`          |
-| `--mode-cycle <MODES>`       | Modes for `Shift+Tab` cycling (comma-separated)           |
-| `--reasoning-effort <LEVEL>` | Starting reasoning: `off`, `low`, `medium`, `high`, `max` |
-| `--reasoning-cycle <LEVELS>` | Levels for `Ctrl+T` cycling (comma-separated)             |
-| `--no-tool-calling`          | Disable tools (chat-only)                                 |
-| `--system-prompt <PROMPT>`   | Override the system prompt (string or file path)          |
-| `--no-system-prompt`         | Disable system prompt and AGENTS.md                       |
-| `--set <KEY=VALUE>`          | Override a config setting (repeatable)                    |
+| Flag                         | Description                                                                                      |
+| ---------------------------- | ------------------------------------------------------------------------------------------------ |
+| `--mode <MODE>`              | Starting mode: `normal`, `plan`, `apply`, `yolo`                                                 |
+| `--mode-cycle <MODES>`       | Modes for `Shift+Tab` cycling (comma-separated)                                                  |
+| `--reasoning-effort <LEVEL>` | Starting reasoning: `off`, `low`, `medium`, `high`, `max`                                        |
+| `--reasoning-cycle <LEVELS>` | Levels for `Ctrl+T` cycling (comma-separated)                                                    |
+| `--no-tool-calling`          | Disable tools (chat-only)                                                                        |
+| `--system-prompt <PROMPT>`   | Override the system prompt (string or file path)                                                 |
+| `--no-system-prompt`         | Disable system prompt and AGENTS.md                                                              |
+| `--set <KEY=VALUE>`          | Override a config setting (repeatable; see [Settings](configuration.md#settings) for valid keys) |
 
 Reasoning effort controls how deeply the model thinks before responding.
 Supported by Anthropic (`thinking`), OpenAI (`reasoning`), and openai-compatible
@@ -82,7 +82,7 @@ Models that don't support thinking ignore this setting.
 | `--format <FORMAT>`   | Headless output format: `text` (default) or `json` (JSONL events)              |
 | `-v, --verbose`       | Show tool output in headless mode                                              |
 | `--color <WHEN>`      | Color output: `auto` (default), `always`, `never`                              |
-| `--log-level <LEVEL>` | `trace`, `debug`, `info`, `warn`, `error` (default: `info`)                    |
+| `--log-level <LEVEL>` | `debug`, `info`, `warn`, `error` (default: `info`)                             |
 | `--bench`             | Print timing summary on exit                                                   |
 
 CLI flags always take precedence over config values.
