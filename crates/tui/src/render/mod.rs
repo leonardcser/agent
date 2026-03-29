@@ -3616,16 +3616,17 @@ const HEAT_COLORS: [Color; 4] = [
 const HEAT_CHAR: &str = "█";
 const HEAT_EMPTY: &str = "·";
 
-use crate::metrics::stats_line_visual_width as stats_line_width;
+use crate::metrics::{label_col_width, stats_line_visual_width as stats_line_width};
 
-fn draw_stats_line(out: &mut RenderOut, line: &crate::metrics::StatsLine) {
+fn draw_stats_line(out: &mut RenderOut, line: &crate::metrics::StatsLine, label_col: usize) {
     use crate::metrics::StatsLine;
     match line {
         StatsLine::Kv { label, value } => {
             let _ = out.queue(SetAttribute(Attribute::Dim));
             let _ = out.queue(Print(label));
             let _ = out.queue(SetAttribute(Attribute::Reset));
-            let padding = " ".repeat(10usize.saturating_sub(label.len()));
+            let col = label_col.max(label.len() + 2);
+            let padding = " ".repeat(col.saturating_sub(label.len()));
             let _ = out.queue(Print(padding));
             let _ = out.queue(Print(value));
         }
@@ -3669,6 +3670,7 @@ fn draw_stats_sequential(
     already_drawn: usize,
     max_rows: usize,
 ) -> usize {
+    let lc = label_col_width(lines);
     let mut count = 0;
     for line in lines {
         if already_drawn + count >= max_rows {
@@ -3678,7 +3680,7 @@ fn draw_stats_sequential(
             let _ = out.queue(Print("\r\n"));
         }
         let _ = out.queue(Print("  "));
-        draw_stats_line(out, line);
+        draw_stats_line(out, line, lc);
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
         count += 1;
     }
@@ -3691,13 +3693,20 @@ fn draw_stats(
     right: &[crate::metrics::StatsLine],
     max_rows: usize,
 ) -> usize {
+    let left_lc = label_col_width(left);
+    let right_lc = label_col_width(right);
+
     let left_col_width = left
         .iter()
-        .map(|l| 2 + stats_line_width(l))
+        .map(|l| 2 + stats_line_width(l, left_lc))
         .max()
         .unwrap_or(0);
 
-    let right_width: usize = right.iter().map(stats_line_width).max().unwrap_or(0);
+    let right_width: usize = right
+        .iter()
+        .map(|l| stats_line_width(l, right_lc))
+        .max()
+        .unwrap_or(0);
     let term_width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
     let gap = 5;
     let side_by_side = !right.is_empty() && left_col_width + gap + right_width + 2 <= term_width;
@@ -3725,18 +3734,18 @@ fn draw_stats(
             let _ = out.queue(Print("\r\n"));
         }
 
-        let left_width = if i < left.len() {
+        let lw = if i < left.len() {
             let _ = out.queue(Print("  "));
-            draw_stats_line(out, &left[i]);
-            2 + stats_line_width(&left[i])
+            draw_stats_line(out, &left[i], left_lc);
+            2 + stats_line_width(&left[i], left_lc)
         } else {
             0
         };
 
         if i < right.len() {
-            let pad = right_col.saturating_sub(left_width);
+            let pad = right_col.saturating_sub(lw);
             let _ = out.queue(Print(" ".repeat(pad)));
-            draw_stats_line(out, &right[i]);
+            draw_stats_line(out, &right[i], right_lc);
         }
 
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));

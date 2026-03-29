@@ -332,8 +332,19 @@ pub fn stats_row_count(left: &[StatsLine], right: &[StatsLine]) -> usize {
         return left.len();
     }
 
-    let left_width = left.iter().map(stats_line_visual_width).max().unwrap_or(0) + 2;
-    let right_width = right.iter().map(stats_line_visual_width).max().unwrap_or(0);
+    let left_lc = label_col_width(left);
+    let right_lc = label_col_width(right);
+    let left_width = left
+        .iter()
+        .map(|l| stats_line_visual_width(l, left_lc))
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let right_width = right
+        .iter()
+        .map(|l| stats_line_visual_width(l, right_lc))
+        .max()
+        .unwrap_or(0);
     let term_width = crossterm::terminal::size()
         .map(|(w, _)| w as usize)
         .unwrap_or(80);
@@ -348,11 +359,27 @@ pub fn stats_row_count(left: &[StatsLine], right: &[StatsLine]) -> usize {
 }
 
 /// Visual width of a stats line (excluding the 2-char left margin).
-pub fn stats_line_visual_width(line: &StatsLine) -> usize {
+/// Minimum gap between label and value columns.
+const KV_GAP: usize = 2;
+
+/// Compute the label column width for a set of lines (max label length + gap).
+pub fn label_col_width(lines: &[StatsLine]) -> usize {
+    lines
+        .iter()
+        .filter_map(|l| match l {
+            StatsLine::Kv { label, .. } => Some(label.len()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        + KV_GAP
+}
+
+pub fn stats_line_visual_width(line: &StatsLine, label_col: usize) -> usize {
     match line {
         StatsLine::Kv { label, value } => {
-            let padding = 10usize.saturating_sub(label.len());
-            label.len() + padding + value.len()
+            let col = label_col.max(label.len() + KV_GAP);
+            col + value.len()
         }
         StatsLine::Heading(text) | StatsLine::SparklineLegend(text) => text.len(),
         StatsLine::SparklineBars(bars) => bars.chars().count(),
@@ -361,9 +388,14 @@ pub fn stats_line_visual_width(line: &StatsLine) -> usize {
     }
 }
 
-pub fn render_session_cost(cost_usd: f64, model: &str, turns: usize) -> Vec<StatsLine> {
+pub fn render_session_cost(
+    cost_usd: f64,
+    model: &str,
+    turns: usize,
+    pricing: &engine::pricing::ModelPricing,
+) -> Vec<StatsLine> {
     let mut lines = Vec::new();
-    lines.push(StatsLine::Heading("session cost".into()));
+    lines.push(StatsLine::Heading("session".into()));
     lines.push(StatsLine::Kv {
         label: "cost".into(),
         value: if cost_usd > 0.0 {
@@ -380,6 +412,36 @@ pub fn render_session_cost(cost_usd: f64, model: &str, turns: usize) -> Vec<Stat
         label: "turns".into(),
         value: turns.to_string(),
     });
+    lines.push(StatsLine::Blank);
+
+    let fmt_rate = |rate: f64| -> String {
+        if rate == 0.0 {
+            return "—".into();
+        }
+        format_cost(rate)
+    };
+
+    lines.push(StatsLine::Heading("pricing (per 1M tokens)".into()));
+    lines.push(StatsLine::Kv {
+        label: "input".into(),
+        value: fmt_rate(pricing.input),
+    });
+    lines.push(StatsLine::Kv {
+        label: "output".into(),
+        value: fmt_rate(pricing.output),
+    });
+    if pricing.cache_read > 0.0 {
+        lines.push(StatsLine::Kv {
+            label: "cache read".into(),
+            value: fmt_rate(pricing.cache_read),
+        });
+    }
+    if pricing.cache_write > 0.0 {
+        lines.push(StatsLine::Kv {
+            label: "cache write".into(),
+            value: fmt_rate(pricing.cache_write),
+        });
+    }
     lines
 }
 

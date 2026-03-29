@@ -1,4 +1,7 @@
 use protocol::TokenUsage;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 /// Per-model pricing in USD per 1M tokens.
 #[derive(Debug, Clone, Copy)]
@@ -35,155 +38,88 @@ const ZERO: ModelPricing = ModelPricing {
     cache_write: 0.0,
 };
 
-/// Built-in pricing table. Each entry is a pair of keywords that must ALL
-/// appear in the lowercased model name, plus the pricing. Entries are checked
-/// top-to-bottom; more specific entries (e.g. "opus") come before broader ones
-/// (e.g. just "claude"). First match wins.
-const PRICING_TABLE: &[(&[&str], ModelPricing)] = &[
-    // ── OpenAI Codex (ChatGPT subscription — zero cost) ────────────
-    (&["codex"], ZERO),
-    // ── OpenAI ───────────────────────────────────────────────────────
-    (
-        &["gpt-4.1", "nano"],
-        ModelPricing {
-            input: 0.10,
-            output: 0.40,
-            cache_read: 0.025,
-            cache_write: 0.0,
-        },
-    ),
-    (
-        &["gpt-4.1", "mini"],
-        ModelPricing {
-            input: 0.40,
-            output: 1.60,
-            cache_read: 0.10,
-            cache_write: 0.0,
-        },
-    ),
-    (
-        &["gpt-4.1"],
-        ModelPricing {
-            input: 2.0,
-            output: 8.0,
-            cache_read: 0.50,
-            cache_write: 0.0,
-        },
-    ),
-    (
-        &["o3", "mini"],
-        ModelPricing {
-            input: 1.10,
-            output: 4.40,
-            cache_read: 0.275,
-            cache_write: 0.0,
-        },
-    ),
-    (
-        &["o3"],
-        ModelPricing {
-            input: 2.0,
-            output: 8.0,
-            cache_read: 0.50,
-            cache_write: 0.0,
-        },
-    ),
-    (
-        &["o4-mini"],
-        ModelPricing {
-            input: 1.10,
-            output: 4.40,
-            cache_read: 0.275,
-            cache_write: 0.0,
-        },
-    ),
-    (
-        &["gpt-4o", "mini"],
-        ModelPricing {
-            input: 0.15,
-            output: 0.60,
-            cache_read: 0.075,
-            cache_write: 0.0,
-        },
-    ),
-    (
-        &["gpt-4o"],
-        ModelPricing {
-            input: 2.50,
-            output: 10.0,
-            cache_read: 1.25,
-            cache_write: 0.0,
-        },
-    ),
-    // ── Anthropic ────────────────────────────────────────────────────
-    (
-        &["claude", "opus"],
-        ModelPricing {
-            input: 15.0,
-            output: 75.0,
-            cache_read: 1.5,
-            cache_write: 18.75,
-        },
-    ),
-    (
-        &["claude", "sonnet"],
-        ModelPricing {
-            input: 3.0,
-            output: 15.0,
-            cache_read: 0.3,
-            cache_write: 3.75,
-        },
-    ),
-    (
-        &["claude", "haiku"],
-        ModelPricing {
-            input: 0.8,
-            output: 4.0,
-            cache_read: 0.08,
-            cache_write: 1.0,
-        },
-    ),
-    // ── DeepSeek ─────────────────────────────────────────────────────
-    (
-        &["deepseek", "r1"],
-        ModelPricing {
-            input: 0.55,
-            output: 2.19,
-            cache_read: 0.14,
-            cache_write: 0.0,
-        },
-    ),
-    (
-        &["deepseek", "reasoner"],
-        ModelPricing {
-            input: 0.55,
-            output: 2.19,
-            cache_read: 0.14,
-            cache_write: 0.0,
-        },
-    ),
-    (
-        &["deepseek"],
-        ModelPricing {
-            input: 0.27,
-            output: 1.10,
-            cache_read: 0.07,
-            cache_write: 0.0,
-        },
-    ),
-];
+// ── Remote catalog (models.dev) ──────────────────────────────────────────
 
-/// Look up built-in pricing for a model by name.
-///
-/// Returns `None` for unknown/local models (cost = 0).
-pub fn lookup(model: &str) -> Option<ModelPricing> {
-    let m = model.to_lowercase();
-    for (keywords, pricing) in PRICING_TABLE {
-        if keywords.iter().all(|kw| m.contains(kw)) {
-            return Some(*pricing);
+const MODELS_API_URL: &str = "https://models.dev/api.json";
+const CACHE_KEY: &str = "models_dev_pricing";
+const CACHE_TTL: Duration = Duration::from_secs(60 * 60); // 1 hour
+
+/// Global catalog populated by `fetch_catalog()`.
+static CATALOG: OnceLock<HashMap<String, ModelPricing>> = OnceLock::new();
+
+/// Fetch pricing from models.dev in the background. Call once at startup.
+/// Safe to call multiple times — only the first call populates the catalog.
+pub fn spawn_catalog_fetch(client: reqwest::Client) {
+    if CATALOG.get().is_some() {
+        return;
+    }
+    tokio::spawn(async move {
+        let map = load_or_fetch(&client).await;
+        let _ = CATALOG.set(map);
+    });
+}
+
+async fn load_or_fetch(client: &reqwest::Client) -> HashMap<String, ModelPricing> {
+    // Try disk cache first.
+    if let Some(json) = crate::tools::web_cache::get(CACHE_KEY) {
+        if let Some(map) = parse_catalog(&json) {
+            return map;
         }
     }
-    None
+    // Fetch from API.
+    let json = match client.get(MODELS_API_URL).send().await {
+        Ok(resp) => match resp.text().await {
+            Ok(t) => t,
+            Err(_) => return HashMap::new(),
+        },
+        Err(_) => return HashMap::new(),
+    };
+    let map = parse_catalog(&json).unwrap_or_default();
+    if !map.is_empty() {
+        crate::tools::web_cache::put_with_ttl(CACHE_KEY, &json, CACHE_TTL);
+    }
+    map
+}
+
+/// Parse the models.dev JSON into a flat model_id → pricing map.
+fn parse_catalog(json: &str) -> Option<HashMap<String, ModelPricing>> {
+    let root: serde_json::Value = serde_json::from_str(json).ok()?;
+    let obj = root.as_object()?;
+    let mut map = HashMap::new();
+    for (_provider, provider_val) in obj {
+        let models = provider_val.get("models").and_then(|m| m.as_object());
+        let models = match models {
+            Some(m) => m,
+            None => continue,
+        };
+        for (model_id, model_val) in models {
+            let cost = match model_val.get("cost") {
+                Some(c) => c,
+                None => continue,
+            };
+            let input = cost["input"].as_f64().unwrap_or(0.0);
+            let output = cost["output"].as_f64().unwrap_or(0.0);
+            if input == 0.0 && output == 0.0 {
+                continue;
+            }
+            map.insert(
+                model_id.clone(),
+                ModelPricing {
+                    input,
+                    output,
+                    cache_read: cost["cache_read"].as_f64().unwrap_or(0.0),
+                    cache_write: cost["cache_write"].as_f64().unwrap_or(0.0),
+                },
+            );
+        }
+    }
+    Some(map)
+}
+
+/// Look up pricing for a model from the remote catalog.
+/// Returns `None` for unknown/local models (cost = 0).
+pub fn lookup(model: &str) -> Option<ModelPricing> {
+    CATALOG.get()?.get(model).copied()
 }
 
 /// Build a `ModelPricing` from config overrides, falling back to the

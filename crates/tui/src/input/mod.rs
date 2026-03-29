@@ -506,7 +506,7 @@ impl InputState {
     pub fn menu_rows(&self) -> usize {
         match &self.menu {
             Some(ms) => match &ms.kind {
-                MenuKind::Settings { .. } => 6,
+                MenuKind::Settings { .. } => ms.nav.len,
                 MenuKind::Model { models, query, .. } => {
                     // 5 model rows max + separator + thinking + optional query line
                     let model_rows = models.len().min(5);

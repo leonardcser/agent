@@ -30,6 +30,7 @@ pub async fn engine_task(
     event_tx: mpsc::UnboundedSender<EngineEvent>,
 ) {
     let client = reqwest::Client::new();
+    crate::pricing::spawn_catalog_fetch(client.clone());
     let file_locks = tools::FileLocks::default();
 
     // Connect MCP servers and register their tools.

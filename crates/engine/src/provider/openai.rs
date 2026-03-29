@@ -8,6 +8,27 @@ use crate::tools::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
 use protocol::{FunctionCall, Message, ReasoningEffort, Role, TokenUsage, ToolCall};
 use std::collections::HashMap;
 
+/// Parse OpenAI usage fields into a `TokenUsage`. OpenAI reports total input
+/// tokens (including cached), so we subtract cached to match Anthropic semantics.
+fn parse_usage(u: &serde_json::Value) -> TokenUsage {
+    let total_input = u["input_tokens"].as_u64().map(|n| n as u32);
+    let cached = u["input_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .map(|n| n as u32);
+    TokenUsage {
+        prompt_tokens: match (total_input, cached) {
+            (Some(t), Some(c)) => Some(t.saturating_sub(c)),
+            (t, _) => t,
+        },
+        completion_tokens: u["output_tokens"].as_u64().map(|n| n as u32),
+        cache_read_tokens: cached,
+        cache_write_tokens: None,
+        reasoning_tokens: u["output_tokens_details"]["reasoning_tokens"]
+            .as_u64()
+            .map(|n| n as u32),
+    }
+}
+
 fn effort_label(effort: ReasoningEffort) -> String {
     if effort == ReasoningEffort::Max {
         "xhigh".to_string()
@@ -192,18 +213,7 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
         }
     }
 
-    let u = &data["usage"];
-    let usage = TokenUsage {
-        prompt_tokens: u["input_tokens"].as_u64().map(|n| n as u32),
-        completion_tokens: u["output_tokens"].as_u64().map(|n| n as u32),
-        cache_read_tokens: u["input_tokens_details"]["cached_tokens"]
-            .as_u64()
-            .map(|n| n as u32),
-        cache_write_tokens: None,
-        reasoning_tokens: u["output_tokens_details"]["reasoning_tokens"]
-            .as_u64()
-            .map(|n| n as u32),
-    };
+    let usage = parse_usage(&data["usage"]);
 
     Ok(ParsedResponse {
         content,
@@ -273,14 +283,7 @@ pub(super) async fn read_stream(
             }
             "response.completed" | "response.done" => {
                 if let Some(u) = ev.get("response").and_then(|r| r.get("usage")) {
-                    usage.prompt_tokens = u["input_tokens"].as_u64().map(|n| n as u32);
-                    usage.completion_tokens = u["output_tokens"].as_u64().map(|n| n as u32);
-                    usage.cache_read_tokens = u["input_tokens_details"]["cached_tokens"]
-                        .as_u64()
-                        .map(|n| n as u32);
-                    usage.reasoning_tokens = u["output_tokens_details"]["reasoning_tokens"]
-                        .as_u64()
-                        .map(|n| n as u32);
+                    usage = parse_usage(u);
                 }
             }
             _ => {}

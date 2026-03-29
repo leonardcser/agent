@@ -14,7 +14,7 @@ mod peek_agent;
 mod read_file;
 mod spawn_agent;
 mod stop_agent;
-mod web_cache;
+pub(crate) mod web_cache;
 mod web_fetch;
 mod web_search;
 mod web_shared;
