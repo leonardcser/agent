@@ -37,6 +37,22 @@ impl App {
                     )))
                 }
             }
+            "/rewind" => {
+                let turns = self.screen.user_turns();
+                if turns.is_empty() {
+                    self.screen.notify_error("nothing to rewind".into());
+                    CommandAction::Continue
+                } else {
+                    self.screen.erase_prompt();
+                    let restore_vim_insert =
+                        self.input.vim_enabled() && self.input.vim_in_insert_mode();
+                    CommandAction::OpenDialog(Box::new(render::RewindDialog::new(
+                        turns,
+                        restore_vim_insert,
+                        Some(terminal::size().map(|(_, h)| h / 2).unwrap_or(12)),
+                    )))
+                }
+            }
             "/vim" => {
                 let enabled = !self.input.vim_enabled();
                 self.input.set_vim_enabled(enabled);
