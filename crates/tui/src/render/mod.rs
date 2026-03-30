@@ -891,17 +891,12 @@ impl Screen {
     /// at that position on the next tick.
     pub fn clear_dialog_area(&mut self, dialog_anchor: Option<u16>) {
         let anchor = dialog_anchor.unwrap_or(0);
-        let screen_anchor = self.prompt.anchor_row.unwrap_or(anchor);
 
-        // Account for lines the dialog's ScrollUp pushed content upward.
-        // `prev_dialog_row` is where the dialog was *expected* to start;
-        // `anchor` is where it *actually* rendered (post-scroll).  The
-        // difference is the number of rows everything was shifted up.
-        let expected = self.prompt.prev_dialog_row.unwrap_or(anchor);
-        let scroll_deficit = expected.saturating_sub(anchor);
-        let adjusted_anchor = screen_anchor.saturating_sub(scroll_deficit);
-
-        let clear_from = anchor.min(adjusted_anchor);
+        // Clear from the dialog's actual position to the bottom.
+        // The dialog occupies rows [anchor, anchor + height), and we clear
+        // this area so the prompt can redraw. Don't adjust for scroll_deficit
+        // as that would clear content that's still visible on screen.
+        let clear_from = anchor;
 
         let height = self.size().1;
         let mut out = self.scroll_output();
@@ -913,11 +908,6 @@ impl Screen {
         self.defer_pending_render = true;
         self.defer_redraw = true;
         self.show_tool_in_dialog = false;
-        if scroll_deficit > 0 {
-            if let Some(ref mut cs) = self.content_start_row {
-                *cs = cs.saturating_sub(scroll_deficit);
-            }
-        }
         self.prompt.anchor_row = Some(clear_from);
         self.prompt.drawn = false;
         self.prompt.dirty = true;
