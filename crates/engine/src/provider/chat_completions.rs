@@ -29,6 +29,7 @@ pub(super) fn build_body(
                         obj.insert("content".into(), serde_json::json!(trimmed));
                     }
                 }
+                super::sanitize_tool_call_arguments(obj);
             }
             v
         })

@@ -273,6 +273,26 @@ pub struct Provider {
     turn_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
+/// Ensure that `arguments` in any `tool_calls[].function` is valid JSON.
+/// Some models produce malformed argument strings (e.g. `"{"`); sending these
+/// back in conversation history causes 400 errors from strict backends.
+pub(crate) fn sanitize_tool_call_arguments(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    if let Some(tcs) = obj.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
+        for tc in tcs {
+            if let Some(args) = tc
+                .get_mut("function")
+                .and_then(|f| f.get_mut("arguments"))
+            {
+                if let Some(s) = args.as_str() {
+                    if serde_json::from_str::<serde_json::Value>(s).is_err() {
+                        *args = serde_json::json!("{}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Rewrite an Agent-role message as a user message for API serialization.
 pub(crate) fn fixup_agent_message(m: &Message, v: &mut serde_json::Value) {
     if let Some(obj) = v.as_object_mut() {
