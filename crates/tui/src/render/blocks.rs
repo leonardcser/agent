@@ -803,6 +803,27 @@ pub(crate) fn render_markdown_inner(
             rows +=
                 render_markdown_table_from_lines(out, &lines[table_start..i], dim, bctx, indent);
             last_content_line = None;
+        } else if is_horizontal_rule(lines[i]) {
+            // Blank line before horizontal rule unless preceded by blank or heading.
+            let prev_blank = i > 0 && lines[i - 1].trim().is_empty();
+            let after_heading = last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
+            if rows > 0 && !prev_blank && !after_heading {
+                crlf(out);
+                rows += 1;
+            }
+            rows += render_horizontal_rule(out, bctx, indent);
+            // Blank line after horizontal rule unless followed by blank or heading.
+            let mut next_i = i + 1;
+            while next_i < lines.len() && lines[next_i].trim().is_empty() {
+                next_i += 1;
+            }
+            let next_is_heading = next_i < lines.len() && lines[next_i].trim_start().starts_with('#');
+            if next_i < lines.len() && !next_is_heading && !lines[next_i].trim().is_empty() {
+                crlf(out);
+                rows += 1;
+            }
+            last_content_line = None;
+            i += 1;
         } else {
             if lines[i].trim().is_empty() {
                 // Skip blank lines after headings — headings never have
@@ -937,6 +958,74 @@ fn is_list_item(line: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Check if a line is a horizontal rule (---, ***, ___, etc.).
+fn is_horizontal_rule(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Count non-space characters - must be at least 3
+    let non_space_count = trimmed.chars().filter(|&c| !c.is_whitespace()).count();
+    if non_space_count < 3 {
+        return false;
+    }
+    // Check if all non-space characters are the same and one of -, *, or _
+    let mut first_char: Option<char> = None;
+    for ch in trimmed.chars() {
+        if ch == ' ' || ch == '\t' {
+            continue;
+        }
+        if first_char.is_none() {
+            first_char = Some(ch);
+        } else {
+            // All non-space chars must be the same
+            if first_char != Some(ch) {
+                return false;
+            }
+        }
+        // Must be one of the valid HR characters
+        if !matches!(ch, '-' | '*' | '_') {
+            return false;
+        }
+    }
+    first_char.is_some()
+}
+
+/// Render a horizontal rule line with dim styling (matching list markers).
+/// Replaces the HR characters (---, ***, ___) with box-drawing chars (─) but
+/// only renders 3 of them to match the visual weight of list markers.
+fn render_horizontal_rule(
+    out: &mut RenderOut,
+    bctx: Option<&super::BoxContext>,
+    indent: &str,
+) -> u16 {
+    // Use box-drawing character, render only 3 chars (like list markers)
+    let hr = "─".repeat(3);
+    
+    if let Some(b) = bctx {
+        b.print_left(out);
+    } else if !indent.is_empty() {
+        let _ = out.queue(Print(indent));
+    }
+    
+    // Always apply dim attribute (same as list markers)
+    let _ = out.queue(SetAttribute(Attribute::Dim));
+    
+    // Print the horizontal rule
+    let _ = out.queue(Print(&hr));
+    
+    // Reset
+    let _ = out.queue(ResetColor);
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    
+    if let Some(b) = bctx {
+        b.print_right(out, 3);
+    }
+    
+    crlf(out);
+    1
 }
 
 /// Parse pipe-delimited table lines into rows, then render.
@@ -1578,5 +1667,29 @@ mod tests {
             diff, 1,
             "empty thinking adds 1 extra gap row before text content"
         );
+    }
+
+    #[test]
+    fn horizontal_rule_detection() {
+        // Valid horizontal rules
+        assert!(is_horizontal_rule("---"), "basic dashes");
+        assert!(is_horizontal_rule("___"), "basic underscores");
+        assert!(is_horizontal_rule("***"), "basic asterisks");
+        assert!(is_horizontal_rule("------"), "longer dashes");
+        assert!(is_horizontal_rule("-----"), "odd length");
+        assert!(is_horizontal_rule(" - - - "), "spaced dashes");
+        assert!(is_horizontal_rule(" * * * "), "spaced asterisks");
+        assert!(is_horizontal_rule(" _ _ _ "), "spaced underscores");
+        assert!(is_horizontal_rule("  ---  "), "padded dashes");
+        
+        // Invalid horizontal rules
+        assert!(!is_horizontal_rule("--"), "too short");
+        assert!(!is_horizontal_rule("-"), "single char");
+        assert!(!is_horizontal_rule(""), "empty");
+        assert!(!is_horizontal_rule("text"), "regular text");
+        assert!(!is_horizontal_rule("- -"), "too short with spaces");
+        assert!(!is_horizontal_rule("-*-*-*"), "mixed characters");
+        assert!(!is_horizontal_rule("---a"), "contains other chars");
+        assert!(!is_horizontal_rule("123"), "numbers");
     }
 }
