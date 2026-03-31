@@ -809,7 +809,11 @@ impl Screen {
         tool_calls: &[crate::app::AgentToolEntry],
         status: AgentBlockStatus,
     ) {
-        if let Some(agent) = self.active_agents.iter_mut().find(|a| a.agent_id == agent_id) {
+        if let Some(agent) = self
+            .active_agents
+            .iter_mut()
+            .find(|a| a.agent_id == agent_id)
+        {
             agent.slug = slug.map(str::to_string);
             agent.tool_calls = tool_calls.to_vec();
             if status != AgentBlockStatus::Running && agent.status == AgentBlockStatus::Running {
@@ -831,7 +835,11 @@ impl Screen {
 
     /// Commit a specific active agent to history and remove it from the live set.
     pub fn finish_active_agent(&mut self, agent_id: &str) {
-        if let Some(idx) = self.active_agents.iter().position(|a| a.agent_id == agent_id) {
+        if let Some(idx) = self
+            .active_agents
+            .iter()
+            .position(|a| a.agent_id == agent_id)
+        {
             let mut agent = self.active_agents.remove(idx);
             // If still marked Running, the tool returned successfully —
             // the subagent's TurnComplete may not have been drained yet.
