@@ -43,7 +43,7 @@ impl TerminalBackend for TestBackend {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-fn extract_full_content(parser: &mut vt100::Parser) -> String {
+pub fn extract_full_content(parser: &mut vt100::Parser) -> String {
     let (rows, cols) = parser.screen().size();
 
     parser.screen_mut().set_scrollback(usize::MAX);
@@ -136,11 +136,11 @@ fn truncate(s: &str, max: usize) -> String {
 // ── TestHarness ─────────────────────────────────────────────────────
 
 pub struct TestHarness {
-    screen: Screen,
+    pub screen: Screen,
     sink: Arc<Mutex<Vec<u8>>>,
-    parser: vt100::Parser,
-    width: u16,
-    height: u16,
+    pub parser: vt100::Parser,
+    pub width: u16,
+    pub height: u16,
     test_name: String,
     actions: Vec<String>,
     assert_count: usize,
@@ -329,14 +329,12 @@ impl TestHarness {
         self.drain_sink();
     }
 
-    /// Stream text line by line with a draw_prompt tick after each line,
-    /// simulating realistic streaming with frame renders between chunks.
+    /// Stream text line by line with a draw_prompt tick after each line.
     pub fn stream_lines_with_ticks(&mut self, text: &str) {
         self.actions
             .push(format!("stream_lines_with_ticks({:?})", truncate(text, 40)));
         for line in text.split_inclusive('\n') {
             self.screen.append_streaming_text(line);
-            // Tick: renders the streaming overlay.
             let input = tui::input::InputState::default();
             self.screen.draw_frame(
                 self.width as usize,
@@ -384,7 +382,7 @@ impl TestHarness {
 
     // ── Internal ────────────────────────────────────────────────────
 
-    fn drain_sink(&mut self) {
+    pub fn drain_sink(&mut self) {
         let bytes = {
             let mut buf = self.sink.lock().unwrap();
             let b = buf.clone();
