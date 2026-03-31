@@ -231,9 +231,17 @@ impl TestHarness {
     // ── Dialog lifecycle helpers ───────────────────────────────────
 
     /// Run a full confirm dialog cycle: open, draw, dismiss, finish tool.
+    ///
+    /// Draws a prompt frame first to establish anchor_row and prompt state,
+    /// matching the real event loop where tick() always runs before dialog
+    /// handling.
     pub fn confirm_cycle(&mut self, call_id: &str, name: &str, summary: &str, output: &str) {
         self.actions
             .push(format!("confirm_cycle({call_id}, {name}, {summary})"));
+
+        // In the real app, at least one tick() (draw_frame with prompt)
+        // runs before a dialog opens. This establishes the prompt anchor.
+        self.draw_prompt();
 
         self.screen
             .start_tool(call_id.into(), name.into(), summary.into(), HashMap::new());
@@ -241,16 +249,8 @@ impl TestHarness {
         self.screen.render_pending_blocks();
         self.drain_sink();
 
-        // Open dialog.
-        self.screen.render_pending_blocks_for_dialog();
-        self.screen.erase_prompt_nosync();
-        self.screen.set_show_tool_in_dialog(true);
-
-        // Draw content-only frame (no prompt).
-        self.screen.draw_frame(self.width as usize, None);
-        self.drain_sink();
-
-        // Draw the actual ConfirmDialog.
+        // Create dialog and set its term_size to match the test backend
+        // (ConfirmDialog::new uses terminal::size() which is the real terminal).
         let req = ConfirmRequest {
             call_id: call_id.into(),
             tool_name: name.into(),
@@ -262,6 +262,17 @@ impl TestHarness {
             request_id: 1,
         };
         let mut dialog = ConfirmDialog::new(&req, false);
+        dialog.set_term_size(self.width, self.height);
+
+        // Open dialog.
+        self.screen.render_pending_blocks_for_dialog();
+        self.screen.erase_prompt_nosync();
+        let fits = self.screen.tool_overlay_fits_with_dialog(dialog.height());
+        self.screen.set_show_tool_in_dialog(fits);
+
+        // Draw content-only frame (no prompt).
+        self.screen.draw_frame(self.width as usize, None);
+        self.drain_sink();
         let sync = self.screen.take_sync_started();
         let dr = self.screen.dialog_row();
         dialog.draw(dr, sync, self.screen.backend());

@@ -407,6 +407,9 @@ struct BlockHistory {
     row_counts: Vec<u16>,
     flushed: usize,
     last_block_rows: u16,
+    /// When true, the leading gap of the next unflushed block is suppressed.
+    /// Set after a dialog dismiss where ScrollUp pushed the gap into scrollback.
+    suppress_leading_gap: bool,
 }
 
 impl BlockHistory {
@@ -416,6 +419,7 @@ impl BlockHistory {
             row_counts: Vec::new(),
             flushed: 0,
             last_block_rows: 0,
+            suppress_leading_gap: false,
         }
     }
 
@@ -476,8 +480,14 @@ impl BlockHistory {
         }
         let mut total = 0u16;
         let last_idx = self.blocks.len().saturating_sub(1);
+        let mut first = true;
         for i in self.flushed..self.blocks.len() {
-            let gap = self.block_gap(i);
+            let gap = if first && self.suppress_leading_gap {
+                0
+            } else {
+                self.block_gap(i)
+            };
+            first = false;
             for _ in 0..gap {
                 crlf(out);
             }
@@ -488,6 +498,7 @@ impl BlockHistory {
                 self.last_block_rows = rows + gap;
             }
         }
+        self.suppress_leading_gap = false;
         self.flushed = self.blocks.len();
         total
     }
@@ -916,6 +927,7 @@ impl Screen {
         if let Some(ref mut a) = self.prompt.anchor_row {
             *a = a.saturating_sub(deficit);
         }
+        self.has_scrollback = true;
         self.prompt.prev_dialog_row = Some(actual);
     }
 
@@ -924,13 +936,18 @@ impl Screen {
     /// Clears from the dialog's anchor row down and lets the prompt redraw
     /// at that position on the next tick.
     pub fn clear_dialog_area(&mut self, dialog_anchor: Option<u16>) {
-        let anchor = dialog_anchor.unwrap_or(0);
+        let dialog_row = dialog_anchor.unwrap_or(0);
 
-        // Clear from the dialog's actual position to the bottom.
-        // The dialog occupies rows [anchor, anchor + height), and we clear
-        // this area so the prompt can redraw. Don't adjust for scroll_deficit
-        // as that would clear content that's still visible on screen.
-        let clear_from = anchor;
+        // When the tool overlay was shown above the dialog and the dialog's
+        // begin_dialog_draw used ScrollUp, the overlay was shifted upward
+        // and now sits between the screen anchor and the dialog bar.
+        // Extend the clear range to wipe the ghost.
+        let clear_from = if self.show_tool_in_dialog {
+            let screen_anchor = self.prompt.anchor_row.unwrap_or(dialog_row);
+            screen_anchor.min(dialog_row)
+        } else {
+            dialog_row
+        };
 
         let height = self.size().1;
         let mut out = self.scroll_output();
@@ -939,6 +956,16 @@ impl Screen {
             let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         }
         let _ = out.flush();
+        // When the dialog used ScrollUp, the prompt gap that was between
+        // the last block and the prompt was pushed into scrollback.  The
+        // next block render would emit gap_between() again, creating a
+        // double blank line (one in scrollback, one in visible).  Suppress
+        // the leading gap when the anchor was pushed to row 0 — meaning
+        // the previous block's trailing gap is now in scrollback.
+        let screen_anchor = self.prompt.anchor_row.unwrap_or(dialog_row);
+        if screen_anchor == 0 && self.has_scrollback {
+            self.history.suppress_leading_gap = true;
+        }
         self.defer_pending_render = true;
         self.defer_redraw = true;
         self.show_tool_in_dialog = false;
@@ -1424,8 +1451,7 @@ impl Screen {
             if i > 0 {
                 total += inter_tool_gap;
             }
-            // At confirm time there's no output yet, so tool rows = 1 + optional web_fetch prompt
-            let mut rows = 1u16;
+            let mut rows = blocks::tool_line_rows(&tool.name, &tool.summary, w);
             if tool.name == "web_fetch" {
                 if let Some(prompt) = tool.args.get("prompt").and_then(|v| v.as_str()) {
                     rows += wrap_line(prompt, w.saturating_sub(4)).len() as u16;
@@ -1434,6 +1460,24 @@ impl Screen {
             total += rows;
         }
         total
+    }
+
+    /// Returns whether the active tool overlay fits on screen above a
+    /// dialog of the given height.
+    ///
+    /// The check is purely about physical space: can the tool overlay and
+    /// dialog both fit within the terminal height? If yes, the content-only
+    /// frame shows the tool and lets the dialog's `ScrollUp` handle
+    /// positioning. If no (dialog is nearly full-screen), the tool is
+    /// hidden to avoid it being pushed into scrollback as a ghost.
+    pub fn tool_overlay_fits_with_dialog(&self, dialog_height: u16) -> bool {
+        let (_width, height) = self.size();
+        let active_rows = self.active_tool_rows();
+        if active_rows == 0 {
+            return true;
+        }
+        let gap: u16 = 1;
+        active_rows + gap + dialog_height <= height
     }
 
     pub fn clear_context_tokens(&mut self) {

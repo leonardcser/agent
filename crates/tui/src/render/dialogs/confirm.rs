@@ -300,6 +300,13 @@ impl ConfirmDialog {
 }
 
 impl ConfirmDialog {
+    /// Override the cached terminal size (used by `height()` before the
+    /// first `draw()` call).  In production `terminal::size()` matches the
+    /// real screen, but test harnesses may need to inject a custom size.
+    pub fn set_term_size(&mut self, width: u16, height: u16) {
+        self.term_size = (width, height);
+    }
+
     fn preview_total_rows(&self) -> usize {
         self.preview.total_rows(self.term_size.0 as usize) as usize
     }

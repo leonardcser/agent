@@ -515,6 +515,45 @@ fn render_confirm_result(
     rows
 }
 
+/// Layout metrics for a tool header line.
+struct ToolLineLayout {
+    prefix_len: usize,
+    max_summary: usize,
+}
+
+fn tool_line_layout(name: &str, suffix_len: usize, width: usize) -> ToolLineLayout {
+    let prefix_len = 3 + name.len() + 1; // " ⏺ " + name + " "
+    let max_summary = width.saturating_sub(prefix_len + suffix_len + 1);
+    ToolLineLayout {
+        prefix_len,
+        max_summary,
+    }
+}
+
+/// Maximum visual rows for a bash tool call summary (matches
+/// `MAX_VISUAL_ROWS` used by `render_wrapped_output` for tool output).
+const MAX_TOOL_SUMMARY_ROWS: usize = 20;
+
+/// Compute the number of visual rows a tool header line would occupy
+/// without actually rendering it.
+pub(super) fn tool_line_rows(name: &str, summary: &str, width: usize) -> u16 {
+    if name != "bash" {
+        return 1;
+    }
+    let ly = tool_line_layout(name, 0, width);
+    let total: usize = summary
+        .lines()
+        .map(|line| wrap_line(line, ly.max_summary.max(1)).len())
+        .sum();
+    let total = total.max(1);
+    if total > MAX_TOOL_SUMMARY_ROWS {
+        // +1 for the "... N lines below" indicator
+        (MAX_TOOL_SUMMARY_ROWS + 1) as u16
+    } else {
+        total as u16
+    }
+}
+
 fn print_tool_line(
     out: &mut RenderOut,
     name: &str,
@@ -536,38 +575,50 @@ fn print_tool_line(
         .map(|l| format!(" ({})", l))
         .unwrap_or_default();
     let suffix_len = time_str.len() + timeout_str.len();
-    let prefix = format!(" {} ", name);
-    let prefix_len = 3 + name.len() + 1;
-    let max_summary = width.saturating_sub(prefix_len + suffix_len + 1);
+    let ly = tool_line_layout(name, suffix_len, width);
 
-    print_dim(out, &prefix);
+    print_dim(out, &format!(" {} ", name));
 
     if name == "bash" {
-        let mut bh = BashHighlighter::new();
+        // Pre-wrap all lines so we can count and cap them.
+        let wrapped: Vec<String> = summary
+            .lines()
+            .flat_map(|line| wrap_line(line, ly.max_summary.max(1)))
+            .collect();
+        let total = wrapped.len();
+        let show = total.min(MAX_TOOL_SUMMARY_ROWS);
         let mut line_num = 0;
-        for line in summary.lines() {
-            let segments = wrap_line(line, max_summary.max(1));
-            for (i, seg) in segments.iter().enumerate() {
-                if line_num > 0 || i > 0 {
-                    let _ = out.queue(Print(" ".repeat(prefix_len)));
-                }
-                bh.print_line(out, seg);
-                if line_num == 0 && i == 0 {
-                    if !time_str.is_empty() {
-                        print_dim(out, &time_str);
-                    }
-                    if !timeout_str.is_empty() {
-                        print_dim(out, &timeout_str);
-                    }
-                }
-                crlf(out);
-                line_num += 1;
+        let mut bh = BashHighlighter::new();
+
+        for (idx, seg) in wrapped[..show].iter().enumerate() {
+            if idx > 0 {
+                let _ = out.queue(Print(" ".repeat(ly.prefix_len)));
             }
+            bh.print_line(out, seg);
+            if idx == 0 {
+                if !time_str.is_empty() {
+                    print_dim(out, &time_str);
+                }
+                if !timeout_str.is_empty() {
+                    print_dim(out, &timeout_str);
+                }
+            }
+            crlf(out);
+            line_num += 1;
         }
+
+        if total > MAX_TOOL_SUMMARY_ROWS {
+            let skipped = total - MAX_TOOL_SUMMARY_ROWS;
+            let _ = out.queue(Print(" ".repeat(ly.prefix_len)));
+            print_dim(out, &format!("... {} lines below", skipped));
+            crlf(out);
+            line_num += 1;
+        }
+
         return line_num as u16;
     }
 
-    let truncated = truncate_str(summary, max_summary);
+    let truncated = truncate_str(summary, ly.max_summary);
     if matches!(name, "message_agent" | "stop_agent" | "peek_agent") {
         // Agent tool summaries start with agent name(s), followed by
         // optional text. Color only the leading agent name tokens.
@@ -817,7 +868,8 @@ pub(crate) fn render_markdown_inner(
             while next_i < lines.len() && lines[next_i].trim().is_empty() {
                 next_i += 1;
             }
-            let next_is_heading = next_i < lines.len() && lines[next_i].trim_start().starts_with('#');
+            let next_is_heading =
+                next_i < lines.len() && lines[next_i].trim_start().starts_with('#');
             if next_i < lines.len() && !next_is_heading && !lines[next_i].trim().is_empty() {
                 crlf(out);
                 rows += 1;
@@ -1003,27 +1055,27 @@ fn render_horizontal_rule(
 ) -> u16 {
     // Use box-drawing character, render only 3 chars (like list markers)
     let hr = "─".repeat(3);
-    
+
     if let Some(b) = bctx {
         b.print_left(out);
     } else if !indent.is_empty() {
         let _ = out.queue(Print(indent));
     }
-    
+
     // Always apply dim attribute (same as list markers)
     let _ = out.queue(SetAttribute(Attribute::Dim));
-    
+
     // Print the horizontal rule
     let _ = out.queue(Print(&hr));
-    
+
     // Reset
     let _ = out.queue(ResetColor);
     let _ = out.queue(SetAttribute(Attribute::Reset));
-    
+
     if let Some(b) = bctx {
         b.print_right(out, 3);
     }
-    
+
     crlf(out);
     1
 }
@@ -1681,7 +1733,7 @@ mod tests {
         assert!(is_horizontal_rule(" * * * "), "spaced asterisks");
         assert!(is_horizontal_rule(" _ _ _ "), "spaced underscores");
         assert!(is_horizontal_rule("  ---  "), "padded dashes");
-        
+
         // Invalid horizontal rules
         assert!(!is_horizontal_rule("--"), "too short");
         assert!(!is_horizontal_rule("-"), "single char");

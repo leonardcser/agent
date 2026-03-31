@@ -1505,8 +1505,7 @@ impl App {
         // dialog appearance.
         let scr = &mut self.screen;
         scr.render_pending_blocks_for_dialog();
-        let height = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
-        let fits = scr.active_tool_rows() + dialog.height() <= height;
+        let fits = scr.tool_overlay_fits_with_dialog(dialog.height());
         // Always clear the prompt section before drawing a blocking dialog.
         // Keeping old prompt rows (including tab bar) around and relying on
         // later overlay redraws can leave stale lines on some terminals.
