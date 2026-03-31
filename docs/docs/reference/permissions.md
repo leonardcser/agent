@@ -63,22 +63,22 @@ mode.
 
 ```yaml
 permissions:
-  normal:
+  default:
     tools:
-      allow: [read_file, glob, grep]
-      ask: [edit_file, write_file]
-      deny: []
-    bash:
-      allow: ["ls *", "grep *", "find *"]
-      ask: []
-      deny: []
+      allow: [web_search]
     web_fetch:
-      allow: ["https://docs.rs/*"]
-      deny: ["https://evil.com/*"]
+      allow: ["*"]
+    bash:
+      allow: ["git log *", "git diff *"]
+  apply:
+    bash:
+      allow: ["git commit *"]
 ```
 
-Each mode (`normal`, `plan`, `apply`, `yolo`) has the same structure. Omitted
-categories use their defaults.
+`default` applies to all modes. Mode-specific rules (`normal`, `plan`, `apply`,
+`yolo`) are merged on top: their allow/ask/deny lists are appended to the
+default lists. Since deny always wins, a mode-level deny overrides a
+default-level allow for the same entry.
 
 ## Approval Scopes
 

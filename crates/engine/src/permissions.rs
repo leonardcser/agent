@@ -31,10 +31,28 @@ struct RawModePerms {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct RawPerms {
+    default: RawModePerms,
     normal: RawModePerms,
     plan: RawModePerms,
     apply: RawModePerms,
     yolo: RawModePerms,
+}
+
+fn merge_ruleset(default: &RawRuleSet, mode: &RawRuleSet) -> RawRuleSet {
+    RawRuleSet {
+        allow: default.allow.iter().chain(&mode.allow).cloned().collect(),
+        ask: default.ask.iter().chain(&mode.ask).cloned().collect(),
+        deny: default.deny.iter().chain(&mode.deny).cloned().collect(),
+    }
+}
+
+fn merge_mode(default: &RawModePerms, mode: &RawModePerms) -> RawModePerms {
+    RawModePerms {
+        tools: merge_ruleset(&default.tools, &mode.tools),
+        bash: merge_ruleset(&default.bash, &mode.bash),
+        web_fetch: merge_ruleset(&default.web_fetch, &mode.web_fetch),
+        mcp: merge_ruleset(&default.mcp, &mode.mcp),
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -211,11 +229,12 @@ impl Permissions {
         let path = crate::paths::config_dir().join("config.yaml");
         let contents = std::fs::read_to_string(&path).unwrap_or_default();
         let raw: RawConfig = serde_yml::from_str(&contents).unwrap_or_default();
+        let def = &raw.permissions.default;
         Self {
-            normal: build_mode(&raw.permissions.normal, Mode::Normal),
-            plan: build_mode(&raw.permissions.plan, Mode::Plan),
-            apply: build_mode(&raw.permissions.apply, Mode::Apply),
-            yolo: build_mode(&raw.permissions.yolo, Mode::Yolo),
+            normal: build_mode(&merge_mode(def, &raw.permissions.normal), Mode::Normal),
+            plan: build_mode(&merge_mode(def, &raw.permissions.plan), Mode::Plan),
+            apply: build_mode(&merge_mode(def, &raw.permissions.apply), Mode::Apply),
+            yolo: build_mode(&merge_mode(def, &raw.permissions.yolo), Mode::Yolo),
             restrict_to_workspace: true,
             workspace: PathBuf::new(),
         }
