@@ -1226,12 +1226,31 @@ impl App {
         });
     }
 
+    /// Resolve the model name to send to the engine. Some providers (notably
+    /// Codex) may have a selected provider entry with an empty placeholder
+    /// model name until a concrete model is chosen.
+    fn effective_model_name(&self) -> String {
+        if !self.model.is_empty() {
+            return self.model.clone();
+        }
+        self.available_models
+            .iter()
+            .find(|m| m.api_base == self.api_base && m.provider_type == self.provider_type)
+            .and_then(|m| (!m.model_name.is_empty()).then(|| m.model_name.clone()))
+            .or_else(|| {
+                self.available_models
+                    .iter()
+                    .find_map(|m| (!m.model_name.is_empty()).then(|| m.model_name.clone()))
+            })
+            .unwrap_or_default()
+    }
+
     /// Send a Btw query to the engine on behalf of a querying peer.
     fn send_btw_query(&self, question: String) {
         self.engine.send(UiCommand::Btw {
             question,
             history: self.history.clone(),
-            model: self.model.clone(),
+            model: self.effective_model_name(),
             reasoning_effort: self.reasoning_effort,
             api_base: Some(self.api_base.clone()),
             api_key: Some(self.api_key()),
