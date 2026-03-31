@@ -279,10 +279,7 @@ pub struct Provider {
 pub(crate) fn sanitize_tool_call_arguments(obj: &mut serde_json::Map<String, serde_json::Value>) {
     if let Some(tcs) = obj.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
         for tc in tcs {
-            if let Some(args) = tc
-                .get_mut("function")
-                .and_then(|f| f.get_mut("arguments"))
-            {
+            if let Some(args) = tc.get_mut("function").and_then(|f| f.get_mut("arguments")) {
                 if let Some(s) = args.as_str() {
                     if serde_json::from_str::<serde_json::Value>(s).is_err() {
                         *args = serde_json::json!("{}");

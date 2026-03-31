@@ -89,15 +89,14 @@ pub(super) fn build_body(
                 }
                 if let Some(tcs) = &m.tool_calls {
                     for tc in tcs {
-                        let args = if serde_json::from_str::<serde_json::Value>(
-                            &tc.function.arguments,
-                        )
-                        .is_ok()
-                        {
-                            &tc.function.arguments
-                        } else {
-                            "{}"
-                        };
+                        let args =
+                            if serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                                .is_ok()
+                            {
+                                &tc.function.arguments
+                            } else {
+                                "{}"
+                            };
                         input.push(serde_json::json!({
                             "type": "function_call",
                             "call_id": tc.id,
