@@ -628,6 +628,9 @@ async fn main() {
         mode_cycle,
         shared_session,
         available_models,
+        args.model.is_some(),
+        args.api_base.is_some(),
+        args.api_key_env.is_some(),
     );
     app.model_config = (&model_config).into();
     if let Some(mode) = mode_override {

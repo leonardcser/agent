@@ -152,6 +152,12 @@ pub struct App {
     pub session_cost_usd: f64,
     /// Active model config (for pricing lookups).
     pub model_config: engine::ModelConfig,
+    /// Whether model was explicitly provided via CLI (takes precedence over session).
+    cli_model_override: bool,
+    /// Whether api_base was explicitly provided via CLI (takes precedence over session).
+    cli_api_base_override: bool,
+    /// Whether api_key_env was explicitly provided via CLI (takes precedence over session).
+    cli_api_key_env_override: bool,
 }
 
 /// Retained subset of the confirm request for mode-toggle re-checks.
@@ -403,6 +409,9 @@ impl App {
         mode_cycle: Vec<protocol::Mode>,
         shared_session: Arc<Mutex<Option<Session>>>,
         available_models: Vec<crate::config::ResolvedModel>,
+        cli_model_override: bool,
+        cli_api_base_override: bool,
+        cli_api_key_env_override: bool,
     ) -> Self {
         let saved = state::State::load();
         let mode = saved.mode();
@@ -515,6 +524,9 @@ impl App {
             pending_agent_blocks: Vec::new(),
             session_cost_usd: 0.0,
             model_config: engine::ModelConfig::default(),
+            cli_model_override,
+            cli_api_base_override,
+            cli_api_key_env_override,
         }
     }
 

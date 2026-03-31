@@ -94,16 +94,20 @@ impl App {
             self.reasoning_effort = effort;
             self.screen.set_reasoning_effort(effort);
         }
-        if let Some(ref model_key) = loaded.model {
-            if let Some(resolved) = self
-                .available_models
-                .iter()
-                .find(|m| m.key == *model_key || m.model_name == *model_key)
-            {
-                self.model = resolved.model_name.clone();
-                self.api_base = resolved.api_base.clone();
-                self.api_key_env = resolved.api_key_env.clone();
-                self.screen.set_model_label(resolved.model_name.clone());
+        // Only restore model/API settings if not overridden by CLI.
+        if !self.cli_model_override && !self.cli_api_base_override && !self.cli_api_key_env_override
+        {
+            if let Some(ref model_key) = loaded.model {
+                if let Some(resolved) = self
+                    .available_models
+                    .iter()
+                    .find(|m| m.key == *model_key || m.model_name == *model_key)
+                {
+                    self.model = resolved.model_name.clone();
+                    self.api_base = resolved.api_base.clone();
+                    self.api_key_env = resolved.api_key_env.clone();
+                    self.screen.set_model_label(resolved.model_name.clone());
+                }
             }
         }
 
