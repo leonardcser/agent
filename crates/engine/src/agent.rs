@@ -157,7 +157,8 @@ pub async fn engine_task(
                         let provider = build_provider(&config, &client);
                         let cancel = crate::cancel::CancellationToken::new();
                         match compact_history(&provider, &history, keep_turns, &model, instructions.as_deref(), &cancel).await {
-                            Ok(messages) => {
+                            Ok((messages, usage)) => {
+                                emit_usage(&event_tx, &config, &model, usage);
                                 let _ = event_tx.send(EngineEvent::CompactionComplete { messages });
                             }
                             Err(e) => {
@@ -211,6 +212,7 @@ fn spawn_title_generation(
         build_provider_with_overrides(config, client, api_base.as_deref(), api_key.as_deref());
     let model = model.to_string();
     let tx = event_tx.clone();
+    let pricing = PricingContext::from_config(config);
     tokio::spawn(async move {
         log::entry(
             log::Level::Info,
@@ -218,7 +220,8 @@ fn spawn_title_generation(
             &serde_json::json!({"message_count": user_messages.len(), "model": &model}),
         );
         match provider.complete_title(&user_messages, &model).await {
-            Ok((ref title, ref slug)) => {
+            Ok(((ref title, ref slug), usage)) => {
+                pricing.emit(&tx, &model, usage);
                 log::entry(
                     log::Level::Info,
                     "title_result",
@@ -274,6 +277,7 @@ fn spawn_btw_request(
         build_provider_with_overrides(config, client, api_base.as_deref(), api_key.as_deref());
     let model = model.to_string();
     let tx = event_tx.clone();
+    let pricing = PricingContext::from_config(config);
     tokio::spawn(async move {
         let cancel = crate::cancel::CancellationToken::new();
 
@@ -296,7 +300,10 @@ fn spawn_btw_request(
             )
             .await
         {
-            Ok(resp) => resp.content.unwrap_or_default(),
+            Ok(resp) => {
+                pricing.emit(&tx, &model, resp.usage);
+                resp.content.unwrap_or_default()
+            }
             Err(e) => format!("error: {e}"),
         };
         let _ = tx.send(EngineEvent::BtwResponse { content });
@@ -318,6 +325,7 @@ fn spawn_predict_request(
         build_provider_with_overrides(config, client, api_base.as_deref(), api_key.as_deref());
     let model = model.to_string();
     let tx = event_tx.clone();
+    let pricing = PricingContext::from_config(config);
     tokio::spawn(async move {
         let system = "You predict what a user will type next in a coding assistant conversation. \
                       Reply with ONLY the predicted message — no quotes, no explanation, \
@@ -364,7 +372,8 @@ fn spawn_predict_request(
             provider.complete_predict(&messages, &model),
         )
         .await;
-        if let Ok(Ok(text)) = result {
+        if let Ok(Ok((text, usage))) = result {
+            pricing.emit(&tx, &model, usage);
             let text = text.trim().to_string();
             if !text.is_empty() {
                 let _ = tx.send(EngineEvent::InputPrediction { text, generation });
@@ -509,7 +518,8 @@ impl<'a> Turn<'a> {
         )
         .await
         {
-            Ok(compacted) => {
+            Ok((compacted, usage)) => {
+                emit_usage(self.event_tx, self.config, &self.model, usage);
                 let system = self.messages[0].clone();
                 self.messages = vec![system];
                 self.messages.extend(compacted);
@@ -784,17 +794,14 @@ impl<'a> Turn<'a> {
                 if let Some(tps) = tokens_per_sec {
                     self.tps_samples.push(tps);
                 }
-                let resolved = crate::pricing::resolve(
-                    &self.model,
+                send_usage(
+                    self.event_tx,
                     &self.config.api.provider_type,
                     &self.config.api.model_config,
-                );
-                let cost = resolved.pricing.cost(&resp.usage);
-                self.emit(EngineEvent::TokenUsage {
-                    usage: resp.usage,
+                    &self.model,
+                    resp.usage,
                     tokens_per_sec,
-                    cost_usd: if cost > 0.0 { Some(cost) } else { None },
-                });
+                );
             }
 
             // Mid-turn auto-compaction: if context usage crossed the 80%
@@ -1053,6 +1060,7 @@ impl<'a> Turn<'a> {
                         session_id: &self.session_id,
                         session_dir: &self.session_dir,
                         file_locks: self.file_locks,
+                        engine_config: self.config,
                     })
                     .collect();
 
@@ -1371,6 +1379,53 @@ impl<'a> Turn<'a> {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+fn send_usage(
+    tx: &mpsc::UnboundedSender<EngineEvent>,
+    provider_type: &str,
+    model_config: &crate::ModelConfig,
+    model: &str,
+    usage: protocol::TokenUsage,
+    tokens_per_sec: Option<f64>,
+) {
+    let resolved = crate::pricing::resolve(model, provider_type, model_config);
+    let cost = resolved.pricing.cost(&usage);
+    let _ = tx.send(EngineEvent::TokenUsage {
+        usage,
+        tokens_per_sec,
+        cost_usd: if cost > 0.0 { Some(cost) } else { None },
+    });
+}
+
+/// Calculate cost from token usage and emit a `TokenUsage` event.
+pub fn emit_usage(
+    tx: &mpsc::UnboundedSender<EngineEvent>,
+    config: &EngineConfig,
+    model: &str,
+    usage: protocol::TokenUsage,
+) {
+    send_usage(tx, &config.api.provider_type, &config.api.model_config, model, usage, None);
+}
+
+/// Lightweight pricing context for spawned background tasks.
+#[derive(Clone)]
+struct PricingContext {
+    provider_type: String,
+    model_config: crate::ModelConfig,
+}
+
+impl PricingContext {
+    fn from_config(config: &EngineConfig) -> Self {
+        Self {
+            provider_type: config.api.provider_type.clone(),
+            model_config: config.api.model_config.clone(),
+        }
+    }
+
+    fn emit(&self, tx: &mpsc::UnboundedSender<EngineEvent>, model: &str, usage: protocol::TokenUsage) {
+        send_usage(tx, &self.provider_type, &self.model_config, model, usage, None);
+    }
+}
+
 async fn compact_history(
     provider: &Provider,
     messages: &[Message],
@@ -1378,7 +1433,7 @@ async fn compact_history(
     model: &str,
     instructions: Option<&str>,
     cancel: &crate::cancel::CancellationToken,
-) -> Result<Vec<Message>, ProviderError> {
+) -> Result<(Vec<Message>, protocol::TokenUsage), ProviderError> {
     let mut user_count = 0;
     let mut cut = messages.len();
     for (i, m) in messages.iter().enumerate().rev() {
@@ -1397,7 +1452,7 @@ async fn compact_history(
     }
 
     let to_summarize = &messages[..cut];
-    let summary = provider
+    let (summary, usage) = provider
         .compact(to_summarize, model, instructions, cancel)
         .await?;
 
@@ -1405,5 +1460,5 @@ async fn compact_history(
         "Summary of prior conversation:\n\n{summary}"
     )))];
     new_messages.extend_from_slice(&messages[cut..]);
-    Ok(new_messages)
+    Ok((new_messages, usage))
 }

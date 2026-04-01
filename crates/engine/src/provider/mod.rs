@@ -682,7 +682,7 @@ impl Provider {
         model: &str,
         instructions: Option<&str>,
         cancel: &CancellationToken,
-    ) -> Result<String, ProviderError> {
+    ) -> Result<(String, TokenUsage), ProviderError> {
         const COMPACT_PROMPT: &str = include_str!("../prompts/compact.txt");
 
         let conversation = messages
@@ -732,7 +732,7 @@ impl Provider {
         if summary.trim().is_empty() {
             return Err(ProviderError::InvalidResponse("empty summary".into()));
         }
-        Ok(summary)
+        Ok((summary, resp.usage))
     }
 
     /// Simple helper: run a system+user message pair through `chat()` and return the text.
@@ -740,7 +740,7 @@ impl Provider {
         &self,
         messages: &[Message],
         model: &str,
-    ) -> Result<String, ProviderError> {
+    ) -> Result<(String, TokenUsage), ProviderError> {
         let cancel = CancellationToken::new();
         let resp = self
             .chat(
@@ -751,11 +751,12 @@ impl Provider {
                 &ChatOptions::new(&cancel),
             )
             .await?;
+        let usage = resp.usage;
         let text = resp.content.unwrap_or_default().trim().to_string();
         if text.is_empty() {
             Err(ProviderError::InvalidResponse("empty response".into()))
         } else {
-            Ok(text)
+            Ok((text, usage))
         }
     }
 
@@ -763,11 +764,15 @@ impl Provider {
         &self,
         messages: &[protocol::Message],
         model: &str,
-    ) -> Result<String, ProviderError> {
+    ) -> Result<(String, TokenUsage), ProviderError> {
         self.complete_simple(messages, model).await
     }
 
-    async fn complete_short(&self, prompt: &str, model: &str) -> Result<String, ProviderError> {
+    async fn complete_short(
+        &self,
+        prompt: &str,
+        model: &str,
+    ) -> Result<(String, TokenUsage), ProviderError> {
         let messages = vec![
             Message::system("Reasoning: low".to_string()),
             Message::user(Content::text(prompt)),
@@ -780,7 +785,7 @@ impl Provider {
         content: &str,
         prompt: &str,
         model: &str,
-    ) -> Result<String, ProviderError> {
+    ) -> Result<(String, TokenUsage), ProviderError> {
         let messages = vec![
             Message::system(
                 "Answer the user's question based solely on the provided web page content. Be concise and direct.".to_string(),
@@ -796,7 +801,7 @@ impl Provider {
         &self,
         user_messages: &[String],
         model: &str,
-    ) -> Result<(String, String), ProviderError> {
+    ) -> Result<((String, String), TokenUsage), ProviderError> {
         let numbered: Vec<String> = user_messages
             .iter()
             .enumerate()
@@ -812,10 +817,10 @@ impl Provider {
             numbered.join("\n")
         );
 
-        let raw = self.complete_short(&prompt, model).await?;
+        let (raw, usage) = self.complete_short(&prompt, model).await?;
         let (title, slug) = parse_title_and_slug(&raw);
 
-        Ok((title, slug))
+        Ok(((title, slug), usage))
     }
 }
 

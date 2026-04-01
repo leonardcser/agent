@@ -89,7 +89,10 @@ impl Tool for WebFetchTool {
                 .extract_web_content(&raw.content, &prompt, ctx.model)
                 .await
             {
-                Ok(extracted) => ToolResult::ok(extracted),
+                Ok((extracted, usage)) => {
+                    crate::agent::emit_usage(ctx.event_tx, ctx.engine_config, ctx.model, usage);
+                    ToolResult::ok(extracted)
+                }
                 Err(_) => raw,
             }
         })

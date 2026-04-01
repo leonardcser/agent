@@ -108,6 +108,7 @@ pub struct ToolContext<'a> {
     pub session_id: &'a str,
     pub session_dir: &'a std::path::Path,
     pub file_locks: &'a FileLocks,
+    pub engine_config: &'a crate::EngineConfig,
 }
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
