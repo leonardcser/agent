@@ -8,10 +8,14 @@ pub fn set_multi_agent(enabled: bool) {
     MULTI_AGENT_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CompletionItem {
     pub label: String,
     pub description: Option<String>,
+    /// ANSI terminal color for theme/color picker swatches.
+    pub ansi_color: Option<u8>,
+    /// Secondary value (e.g. model key when label is the display name).
+    pub extra: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -20,6 +24,9 @@ pub enum CompleterKind {
     Command,
     CommandArg,
     History,
+    Model,
+    Theme,
+    Color,
 }
 
 pub struct Completer {
@@ -34,6 +41,8 @@ pub struct Completer {
     pub selected: usize,
     /// Full item list (cached on activation).
     all_items: Vec<CompletionItem>,
+    /// Original value to restore on dismiss (Theme = accent, Color = slug color).
+    pub original_value: Option<u8>,
 }
 
 impl Completer {
@@ -42,7 +51,7 @@ impl Completer {
             .into_iter()
             .map(|f| CompletionItem {
                 label: f,
-                description: None,
+                ..Default::default()
             })
             .collect();
         let results = all_items.clone();
@@ -53,6 +62,7 @@ impl Completer {
             results,
             selected: 0,
             all_items,
+            original_value: None,
         }
     }
 
@@ -129,12 +139,14 @@ impl Completer {
             .map(|&(label, desc)| CompletionItem {
                 label: label.into(),
                 description: Some(desc.into()),
+                ..Default::default()
             })
             .collect();
         for (name, desc) in crate::custom_commands::list() {
             all_items.push(CompletionItem {
                 label: name,
                 description: if desc.is_empty() { None } else { Some(desc) },
+                ..Default::default()
             });
         }
         let results = all_items.clone();
@@ -145,6 +157,7 @@ impl Completer {
             results,
             selected: 0,
             all_items,
+            original_value: None,
         }
     }
 
@@ -153,7 +166,7 @@ impl Completer {
             .iter()
             .map(|s| CompletionItem {
                 label: s.clone(),
-                description: None,
+                ..Default::default()
             })
             .collect();
         let results = all_items.clone();
@@ -164,6 +177,7 @@ impl Completer {
             results,
             selected: 0,
             all_items,
+            original_value: None,
         }
     }
 
@@ -183,7 +197,7 @@ impl Completer {
                     .to_string();
                 CompletionItem {
                     label,
-                    description: None,
+                    ..Default::default()
                 }
             })
             .collect();
@@ -195,6 +209,92 @@ impl Completer {
             results,
             selected: 0,
             all_items,
+            original_value: None,
+        }
+    }
+
+    /// Picker for selecting a model. Label = display name, extra = model key.
+    pub fn models(models: &[(String, String, String)]) -> Self {
+        let all_items: Vec<CompletionItem> = models
+            .iter()
+            .map(|(key, name, provider)| CompletionItem {
+                label: name.clone(),
+                description: Some(provider.clone()),
+                extra: Some(key.clone()),
+                ..Default::default()
+            })
+            .collect();
+        let results = all_items.clone();
+        Self {
+            anchor: 0,
+            kind: CompleterKind::Model,
+            query: String::new(),
+            results,
+            selected: 0,
+            all_items,
+            original_value: None,
+        }
+    }
+
+    /// Picker for selecting a theme (accent color).
+    pub fn themes(original: u8) -> Self {
+        let all_items: Vec<CompletionItem> = crate::theme::PRESETS
+            .iter()
+            .map(|&(name, detail, ansi)| CompletionItem {
+                label: name.to_string(),
+                description: Some(detail.to_string()),
+                ansi_color: Some(ansi),
+                ..Default::default()
+            })
+            .collect();
+        let selected = all_items
+            .iter()
+            .position(|i| i.ansi_color == Some(original))
+            .unwrap_or(0);
+        let results = all_items.clone();
+        Self {
+            anchor: 0,
+            kind: CompleterKind::Theme,
+            query: String::new(),
+            results,
+            selected,
+            all_items,
+            original_value: Some(original),
+        }
+    }
+
+    /// Picker for selecting a slug color.
+    pub fn colors(original: u8) -> Self {
+        let mut comp = Self::themes(original);
+        comp.kind = CompleterKind::Color;
+        comp
+    }
+
+    /// Returns the selected item, if any.
+    pub fn selected_item(&self) -> Option<&CompletionItem> {
+        self.results.get(self.selected)
+    }
+
+    /// Returns the `extra` field of the selected item if present, otherwise `label`.
+    pub fn accept_extra(&self) -> Option<&str> {
+        self.selected_item()
+            .map(|i| i.extra.as_deref().unwrap_or(i.label.as_str()))
+    }
+
+    /// True for pickers that should always stay visible (even with no matches).
+    pub fn is_picker(&self) -> bool {
+        matches!(
+            self.kind,
+            CompleterKind::Model | CompleterKind::Theme | CompleterKind::Color
+        )
+    }
+
+    /// Maximum rows to display for this completer kind.
+    pub fn max_visible_rows(&self) -> usize {
+        match self.kind {
+            CompleterKind::Theme | CompleterKind::Color => 14,
+            CompleterKind::Model => 7,
+            _ => 5,
         }
     }
 

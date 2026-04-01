@@ -2323,12 +2323,15 @@ impl Screen {
         let menu_rows = state.menu_rows();
         let comp_total = if menu_rows > 0 {
             menu_rows
+        } else if let Some(c) = state.completer.as_ref() {
+            let visible = c.results.len().min(c.max_visible_rows());
+            if visible == 0 && c.is_picker() {
+                1
+            } else {
+                visible
+            }
         } else {
-            state
-                .completer
-                .as_ref()
-                .map(|c| c.results.len().min(5))
-                .unwrap_or(0)
+            0
         };
         let mut comp_rows = comp_total;
 
@@ -2668,7 +2671,7 @@ impl Screen {
             let _ = out.queue(Print("\r\n"));
         }
         let comp_rows = if let Some(ref ms) = state.menu {
-            draw_menu(out, ms, comp_rows, self.reasoning_effort)
+            draw_menu(out, ms, comp_rows)
         } else {
             draw_completions(out, state.completer.as_ref(), comp_rows)
         };
@@ -3605,10 +3608,22 @@ fn draw_completions(
     completer: Option<&crate::completer::Completer>,
     max_rows: usize,
 ) -> usize {
+    use crate::completer::CompleterKind;
+
     let Some(comp) = completer else {
         return 0;
     };
-    if comp.results.is_empty() || max_rows == 0 {
+    if max_rows == 0 {
+        return 0;
+    }
+    if comp.results.is_empty() {
+        if comp.is_picker() {
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print("  no results"));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            return 1;
+        }
         return 0;
     }
     let total = comp.results.len();
@@ -3623,11 +3638,13 @@ fn draw_completions(
     }
     let end = start + max_rows;
     let last = max_rows - 1;
+
+    let is_color_picker = matches!(comp.kind, CompleterKind::Theme | CompleterKind::Color);
+
     let prefix = match comp.kind {
-        crate::completer::CompleterKind::Command => "/",
-        crate::completer::CompleterKind::CommandArg => "",
-        crate::completer::CompleterKind::File => "./",
-        crate::completer::CompleterKind::History => "",
+        CompleterKind::Command => "/",
+        CompleterKind::File => "./",
+        _ => "",
     };
     let max_label = comp
         .results
@@ -3635,32 +3652,56 @@ fn draw_completions(
         .map(|i| prefix.len() + i.label.len())
         .max()
         .unwrap_or(0);
-    let avail = term_width().saturating_sub(2);
+    let avail = term_width().saturating_sub(4);
+
     for (i, item) in comp.results[start..end].iter().enumerate() {
         let idx = start + i;
-        let _ = out.queue(Print("  "));
+        let selected = idx == comp.selected;
         let raw = format!("{}{}", prefix, item.label);
         let label: String = raw.chars().take(avail).collect();
-        if idx == comp.selected {
-            let _ = out.queue(SetForegroundColor(theme::accent()));
-            let _ = out.queue(Print(&label));
-            if let Some(ref desc) = item.description {
-                let pad = max_label - label.len() + 2;
+
+        if is_color_picker {
+            let _ = out.queue(Print("  "));
+            if selected {
+                let ansi = item.ansi_color.unwrap_or(theme::accent_value());
+                let _ = out.queue(SetForegroundColor(Color::AnsiValue(ansi)));
+                let _ = out.queue(Print(format!("● {}", label)));
                 let _ = out.queue(ResetColor);
+            } else {
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(format!("  {}", label)));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+            }
+            if let Some(ref desc) = item.description {
+                let pad = (max_label + 2).saturating_sub(label.len());
                 let _ = out.queue(SetAttribute(Attribute::Dim));
                 let _ = out.queue(Print(format!("{:>width$}{}", "", desc, width = pad)));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
             }
-            let _ = out.queue(ResetColor);
         } else {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(Print(&label));
-            if let Some(ref desc) = item.description {
-                let pad = max_label - label.len() + 2;
-                let _ = out.queue(Print(format!("{:>width$}{}", "", desc, width = pad)));
+            let _ = out.queue(Print("  "));
+            if selected {
+                let _ = out.queue(SetForegroundColor(theme::accent()));
+                let _ = out.queue(Print(&label));
+                if let Some(ref desc) = item.description {
+                    let pad = max_label - label.len() + 2;
+                    let _ = out.queue(ResetColor);
+                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    let _ = out.queue(Print(format!("{:>width$}{}", "", desc, width = pad)));
+                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                }
+                let _ = out.queue(ResetColor);
+            } else {
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(&label));
+                if let Some(ref desc) = item.description {
+                    let pad = max_label - label.len() + 2;
+                    let _ = out.queue(Print(format!("{:>width$}{}", "", desc, width = pad)));
+                }
+                let _ = out.queue(SetAttribute(Attribute::Reset));
             }
-            let _ = out.queue(SetAttribute(Attribute::Reset));
         }
+
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
         if i < last {
             let _ = out.queue(Print("\r\n"));
@@ -3669,12 +3710,7 @@ fn draw_completions(
     max_rows
 }
 
-fn draw_menu(
-    out: &mut RenderOut,
-    ms: &crate::input::MenuState,
-    max_rows: usize,
-    reasoning_effort: protocol::ReasoningEffort,
-) -> usize {
+fn draw_menu(out: &mut RenderOut, ms: &crate::input::MenuState, max_rows: usize) -> usize {
     if max_rows == 0 {
         return 0;
     }
@@ -3720,126 +3756,9 @@ fn draw_menu(
             }
             drawn
         }
-        MenuKind::Theme { presets, .. } | MenuKind::Color { presets, .. } => {
-            draw_color_presets(out, presets, selected, max_rows)
-        }
         MenuKind::Stats { left, right } => draw_stats(out, left, right, max_rows),
         MenuKind::Cost { lines } => draw_stats_sequential(out, lines, 0, max_rows),
-        MenuKind::Model { models, query, .. } => {
-            let mut drawn = 0;
-
-            // Show filter query if active.
-            if !query.is_empty() && drawn < max_rows {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print("  filter: "));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
-                let _ = out.queue(SetForegroundColor(theme::accent()));
-                let _ = out.queue(Print(query));
-                let _ = out.queue(ResetColor);
-                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-                drawn += 1;
-            }
-
-            if models.is_empty() {
-                if drawn > 0 && drawn < max_rows {
-                    let _ = out.queue(Print("\r\n"));
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
-                    let _ = out.queue(Print("  no matches"));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
-                    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-                    drawn += 1;
-                }
-            } else {
-                let max_visible = 5.min(max_rows.saturating_sub(drawn));
-                let total = models.len();
-                let col = models
-                    .iter()
-                    .map(|(_, name, _)| name.len())
-                    .max()
-                    .unwrap_or(0)
-                    + 4;
-
-                // Scroll window around selected item.
-                let mut start = 0;
-                if total > max_visible {
-                    let half = max_visible / 2;
-                    start = selected.saturating_sub(half);
-                    if start + max_visible > total {
-                        start = total - max_visible;
-                    }
-                }
-                let end = (start + max_visible).min(total);
-
-                for (idx, (_, model_name, provider_name)) in
-                    models.iter().enumerate().skip(start).take(end - start)
-                {
-                    if drawn > 0 {
-                        let _ = out.queue(Print("\r\n"));
-                    }
-                    draw_menu_row(out, model_name, provider_name, col, idx == selected);
-                    drawn += 1;
-                }
-            }
-
-            // Always show thinking line.
-            if drawn > 0 && drawn + 2 <= max_rows {
-                let _ = out.queue(Print("\r\n"));
-                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-                drawn += 1;
-                let _ = out.queue(Print("\r\n"));
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print("  thinking: "));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
-                let _ = out.queue(SetForegroundColor(reasoning_color(reasoning_effort)));
-                let _ = out.queue(Print(reasoning_effort.label()));
-                let _ = out.queue(ResetColor);
-                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-                drawn += 1;
-            }
-            drawn
-        }
     }
-}
-
-fn draw_color_presets(
-    out: &mut RenderOut,
-    presets: &[(&str, &str, u8)],
-    selected: usize,
-    max_rows: usize,
-) -> usize {
-    let col = presets
-        .iter()
-        .map(|(name, _, _)| name.len())
-        .max()
-        .unwrap_or(0)
-        + 4;
-    let mut drawn = 0;
-    for (idx, (name, detail, ansi)) in presets.iter().enumerate() {
-        if drawn >= max_rows {
-            break;
-        }
-        if drawn > 0 {
-            let _ = out.queue(Print("\r\n"));
-        }
-        let _ = out.queue(Print("  "));
-        if idx == selected {
-            let _ = out.queue(SetForegroundColor(Color::AnsiValue(*ansi)));
-            let _ = out.queue(Print(format!("● {name}")));
-            let _ = out.queue(ResetColor);
-        } else {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(Print(format!("  {name}")));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-        }
-        let label_len = name.len() + 2;
-        let padding = " ".repeat(col.saturating_sub(label_len - 2));
-        let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(Print(format!("{padding}{detail}")));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-        drawn += 1;
-    }
-    drawn
 }
 
 fn draw_menu_row(out: &mut RenderOut, label: &str, detail: &str, col: usize, selected: bool) {

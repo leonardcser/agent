@@ -116,7 +116,7 @@ impl App {
                     .map(|m| (m.key.clone(), m.model_name.clone(), m.provider_name.clone()))
                     .collect();
                 if !models.is_empty() {
-                    self.input.open_model_picker(models);
+                    self.input.open_model_completer(&models);
                     self.screen.mark_dirty();
                 }
                 CommandAction::Continue
@@ -143,12 +143,12 @@ impl App {
                 CommandAction::Continue
             }
             "/theme" => {
-                self.input.open_theme_picker();
+                self.input.open_theme_completer();
                 self.screen.mark_dirty();
                 CommandAction::Continue
             }
             "/color" => {
-                self.input.open_color_picker();
+                self.input.open_color_completer();
                 self.screen.mark_dirty();
                 CommandAction::Continue
             }

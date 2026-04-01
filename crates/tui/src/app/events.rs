@@ -452,7 +452,7 @@ impl App {
             }
         }
 
-        // Esc: use resolve_agent_esc for the running-mode logic.
+        // Esc: dismiss any open picker completer first, then run agent-mode logic.
         if matches!(
             ev,
             Event::Key(KeyEvent {
@@ -460,6 +460,11 @@ impl App {
                 ..
             })
         ) {
+            if self.input.has_modal() {
+                let action = self.input.handle_event(ev, None);
+                self.screen.mark_dirty();
+                return self.dispatch_input_action(action);
+            }
             match resolve_agent_esc(
                 self.input.vim_mode(),
                 !self.queued_messages.is_empty(),

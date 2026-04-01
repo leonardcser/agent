@@ -409,59 +409,41 @@ impl InputState {
         });
     }
 
-    pub fn open_model_picker(&mut self, models: Vec<(String, String, String)>) {
-        let len = models.len();
-        self.completer = None;
-        self.menu = Some(MenuState {
-            nav: Menu {
-                selected: 0,
-                len,
-                select_on_enter: true,
-            },
-            kind: MenuKind::Model {
-                all_models: models.clone(),
-                models,
-                query: String::new(),
-            },
-        });
+    pub fn open_model_completer(&mut self, models: &[(String, String, String)]) {
+        self.menu = None;
+        self.history_saved_buf = Some((self.buf.clone(), self.cpos));
+        let mut comp = Completer::models(models);
+        comp.update_query(self.buf.clone());
+        self.completer = Some(comp);
     }
 
-    pub fn open_theme_picker(&mut self) {
-        self.open_preset_picker(crate::theme::accent_value(), |presets, original| {
-            MenuKind::Theme { presets, original }
-        });
+    pub fn open_theme_completer(&mut self) {
+        self.menu = None;
+        self.history_saved_buf = Some((self.buf.clone(), self.cpos));
+        let mut comp = Completer::themes(crate::theme::accent_value());
+        comp.update_query(self.buf.clone());
+        self.completer = Some(comp);
     }
 
-    pub fn open_color_picker(&mut self) {
-        self.open_preset_picker(crate::theme::slug_color_value(), |presets, original| {
-            MenuKind::Color { presets, original }
-        });
-    }
-
-    fn open_preset_picker(
-        &mut self,
-        current: u8,
-        make_kind: impl FnOnce(Vec<(&'static str, &'static str, u8)>, u8) -> MenuKind,
-    ) {
-        let presets: Vec<_> = crate::theme::PRESETS.to_vec();
-        let len = presets.len();
-        let selected = presets
-            .iter()
-            .position(|(_, _, v)| *v == current)
-            .unwrap_or(0);
-        self.completer = None;
-        self.menu = Some(MenuState {
-            nav: Menu {
-                selected,
-                len,
-                select_on_enter: true,
-            },
-            kind: make_kind(presets, current),
-        });
+    pub fn open_color_completer(&mut self) {
+        self.menu = None;
+        self.history_saved_buf = Some((self.buf.clone(), self.cpos));
+        let mut comp = Completer::colors(crate::theme::slug_color_value());
+        comp.update_query(self.buf.clone());
+        self.completer = Some(comp);
     }
 
     pub fn has_modal(&self) -> bool {
         self.menu.is_some()
+            || self.completer.as_ref().is_some_and(|c| {
+                matches!(
+                    c.kind,
+                    CompleterKind::Model
+                        | CompleterKind::Theme
+                        | CompleterKind::Color
+                        | CompleterKind::History
+                )
+            })
     }
 
     /// Dismiss the current menu, returning the appropriate result.
@@ -487,16 +469,6 @@ impl InputState {
                 show_slug,
                 restrict_to_workspace,
             },
-            MenuKind::Model { .. } => MenuResult::Dismissed,
-            MenuKind::Theme { original, .. } => {
-                // Restore original accent on dismiss
-                crate::theme::set_accent(original);
-                MenuResult::Dismissed
-            }
-            MenuKind::Color { original, .. } => {
-                crate::theme::set_slug_color(original);
-                MenuResult::Dismissed
-            }
             MenuKind::Stats { .. } => MenuResult::Stats,
             MenuKind::Cost { .. } => MenuResult::Cost,
         })
@@ -507,46 +479,10 @@ impl InputState {
         match &self.menu {
             Some(ms) => match &ms.kind {
                 MenuKind::Settings { .. } => ms.nav.len,
-                MenuKind::Model { models, query, .. } => {
-                    // 5 model rows max + separator + thinking + optional query line
-                    let model_rows = models.len().min(5);
-                    let query_row = if query.is_empty() { 0 } else { 1 };
-                    model_rows + 2 + query_row
-                }
-                MenuKind::Theme { presets, .. } => presets.len().min(14),
-                MenuKind::Color { presets, .. } => presets.len().min(14),
                 MenuKind::Stats { left, right } => crate::metrics::stats_row_count(left, right),
                 MenuKind::Cost { lines } => lines.len(),
             },
             None => 0,
-        }
-    }
-
-    /// Returns the model filter query if a model picker is active.
-    pub fn model_query(&self) -> Option<&str> {
-        self.menu.as_ref().and_then(|ms| match &ms.kind {
-            MenuKind::Model { query, .. } if !query.is_empty() => Some(query.as_str()),
-            _ => None,
-        })
-    }
-
-    fn filter_models(
-        all_models: &[(String, String, String)],
-        models: &mut Vec<(String, String, String)>,
-        query: &str,
-    ) {
-        if query.is_empty() {
-            *models = all_models.to_vec();
-        } else {
-            let mut scored: Vec<_> = all_models
-                .iter()
-                .filter_map(|m| {
-                    let score = crate::fuzzy::fuzzy_score(&m.1, query)?;
-                    Some((score, m.clone()))
-                })
-                .collect();
-            scored.sort_by_key(|(s, _)| *s);
-            *models = scored.into_iter().map(|(_, m)| m).collect();
         }
     }
 
@@ -1204,38 +1140,7 @@ impl InputState {
 
     fn handle_menu_event(&mut self, ev: &Event) -> Action {
         let ms = self.menu.as_mut().unwrap();
-        let filterable = matches!(ms.kind, MenuKind::Model { .. });
-        match ms.nav.handle_event(ev, filterable) {
-            MenuAction::Typed(c) => {
-                if let MenuKind::Model {
-                    ref all_models,
-                    ref mut models,
-                    ref mut query,
-                } = ms.kind
-                {
-                    query.push(c);
-                    Self::filter_models(all_models, models, query);
-                    ms.nav.len = models.len();
-                    ms.nav.selected = 0;
-                }
-                Action::Redraw
-            }
-            MenuAction::Backspace => {
-                if let MenuKind::Model {
-                    ref all_models,
-                    ref mut models,
-                    ref mut query,
-                } = ms.kind
-                {
-                    query.pop();
-                    Self::filter_models(all_models, models, query);
-                    ms.nav.len = models.len();
-                    if ms.nav.selected >= models.len() {
-                        ms.nav.selected = 0;
-                    }
-                }
-                Action::Redraw
-            }
+        match ms.nav.handle_event(ev) {
             MenuAction::Toggle(idx) => {
                 if let MenuKind::Settings {
                     ref mut vim_enabled,
@@ -1262,72 +1167,53 @@ impl InputState {
                 }
                 Action::Redraw
             }
-            MenuAction::Tab => {
-                if matches!(ms.kind, MenuKind::Model { .. }) {
-                    Action::CycleReasoning
-                } else {
-                    Action::Redraw
-                }
-            }
-            MenuAction::Select(idx) => {
-                let ms = self.menu.take().unwrap();
-                match ms.kind {
-                    MenuKind::Model { ref models, .. } => {
-                        if let Some((key, _, _)) = models.get(idx) {
-                            Action::MenuResult(MenuResult::ModelSelect(key.clone()))
-                        } else {
-                            Action::Redraw
-                        }
-                    }
-                    MenuKind::Theme { ref presets, .. } => {
-                        if let Some(&(_, _, value)) = presets.get(idx) {
-                            crate::theme::set_accent(value);
-                            Action::MenuResult(MenuResult::ThemeSelect(value))
-                        } else {
-                            Action::Redraw
-                        }
-                    }
-                    MenuKind::Color { ref presets, .. } => {
-                        if let Some(&(_, _, value)) = presets.get(idx) {
-                            crate::theme::set_slug_color(value);
-                            Action::MenuResult(MenuResult::ColorSelect(value))
-                        } else {
-                            Action::Redraw
-                        }
-                    }
-                    _ => Action::Redraw,
-                }
-            }
+            MenuAction::Tab => Action::Redraw,
+            MenuAction::Select(_) => Action::Redraw,
             MenuAction::Dismiss => Action::MenuResult(self.dismiss_menu().unwrap()),
-            MenuAction::Redraw => {
-                // Live-preview theme/color while scrolling
-                if let Some(ref ms) = self.menu {
-                    match ms.kind {
-                        MenuKind::Theme { ref presets, .. } => {
-                            if let Some(&(_, _, value)) = presets.get(ms.nav.selected) {
-                                crate::theme::set_accent(value);
-                            }
-                        }
-                        MenuKind::Color { ref presets, .. } => {
-                            if let Some(&(_, _, value)) = presets.get(ms.nav.selected) {
-                                crate::theme::set_slug_color(value);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Action::Redraw
-            }
+            MenuAction::Redraw => Action::Redraw,
             MenuAction::Noop => Action::Noop,
+        }
+    }
+
+    /// Accept the selected item from a Model/Theme/Color picker, clear the buffer,
+    /// apply side effects, and return the appropriate action.
+    fn accept_picker(&mut self, comp: Completer) -> Action {
+        self.history_saved_buf = None;
+        self.buf.clear();
+        self.cpos = 0;
+        match comp.kind {
+            CompleterKind::Model => match comp.accept_extra().map(|s| s.to_string()) {
+                Some(k) => Action::MenuResult(MenuResult::ModelSelect(k)),
+                None => Action::Redraw,
+            },
+            CompleterKind::Theme => match comp.selected_item().and_then(|i| i.ansi_color) {
+                Some(v) => {
+                    crate::theme::set_accent(v);
+                    Action::MenuResult(MenuResult::ThemeSelect(v))
+                }
+                None => Action::Redraw,
+            },
+            CompleterKind::Color => match comp.selected_item().and_then(|i| i.ansi_color) {
+                Some(v) => {
+                    crate::theme::set_slug_color(v);
+                    Action::MenuResult(MenuResult::ColorSelect(v))
+                }
+                None => Action::Redraw,
+            },
+            _ => Action::Redraw,
         }
     }
 
     /// Try to handle the event as a completer navigation. Returns Some if consumed.
     fn handle_completer_event(&mut self, ev: &Event) -> Option<Action> {
-        let is_history = self
-            .completer
-            .as_ref()
-            .is_some_and(|c| c.kind == CompleterKind::History);
+        let kind = self.completer.as_ref().map(|c| c.kind)?;
+        let is_picker = matches!(
+            kind,
+            CompleterKind::History
+                | CompleterKind::Model
+                | CompleterKind::Theme
+                | CompleterKind::Color
+        );
 
         match ev {
             Event::Key(KeyEvent {
@@ -1335,47 +1221,66 @@ impl InputState {
                 modifiers,
                 ..
             }) if !modifiers.contains(KeyModifiers::SHIFT) => {
-                if is_history {
-                    let comp = self.completer.take().unwrap();
-                    if let Some(label) = comp.accept() {
-                        self.buf = label.to_string();
-                        self.cpos = self.buf.len();
-                    }
-                    self.history_saved_buf = None;
-                    Some(Action::Redraw)
-                } else {
-                    let comp = self.completer.take().unwrap();
-                    let kind = comp.kind;
-                    self.accept_completion(&comp);
-                    if kind == CompleterKind::Command {
-                        let display = self.message_display_text();
-                        let content = self.build_content();
-                        self.clear();
-                        Some(Action::Submit { content, display })
-                    } else {
-                        // File: accept and keep editing
+                let comp = self.completer.take().unwrap();
+                match comp.kind {
+                    CompleterKind::History => {
+                        if let Some(label) = comp.accept() {
+                            self.buf = label.to_string();
+                            self.cpos = self.buf.len();
+                        }
+                        self.history_saved_buf = None;
                         Some(Action::Redraw)
+                    }
+                    CompleterKind::Model | CompleterKind::Theme | CompleterKind::Color => {
+                        Some(self.accept_picker(comp))
+                    }
+                    _ => {
+                        let kind = comp.kind;
+                        self.accept_completion(&comp);
+                        if kind == CompleterKind::Command {
+                            let display = self.message_display_text();
+                            let content = self.build_content();
+                            self.clear();
+                            Some(Action::Submit { content, display })
+                        } else {
+                            Some(Action::Redraw)
+                        }
                     }
                 }
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Esc, ..
             }) => {
-                if is_history {
+                let comp = self.completer.take().unwrap();
+                // Restore original theme/color on dismiss.
+                match comp.kind {
+                    CompleterKind::Theme => {
+                        if let Some(orig) = comp.original_value {
+                            crate::theme::set_accent(orig);
+                        }
+                    }
+                    CompleterKind::Color => {
+                        if let Some(orig) = comp.original_value {
+                            crate::theme::set_slug_color(orig);
+                        }
+                    }
+                    _ => {}
+                }
+                // Restore saved buffer for all picker types.
+                if is_picker {
                     if let Some((buf, cpos)) = self.history_saved_buf.take() {
                         self.buf = buf;
                         self.cpos = cpos;
                     }
                 }
-                self.completer = None;
                 Some(Action::Redraw)
             }
-            // Ctrl+R cycles forward through history matches
+            // Ctrl+R cycles forward through history matches.
             Event::Key(KeyEvent {
                 code: KeyCode::Char('r'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
-            }) if is_history => {
+            }) if kind == CompleterKind::History => {
                 let comp = self.completer.as_mut().unwrap();
                 comp.move_down();
                 Some(Action::Redraw)
@@ -1389,10 +1294,11 @@ impl InputState {
                 ..
             }) => {
                 let comp = self.completer.as_mut().unwrap();
-                if comp.results.len() <= 1 {
-                    return None; // let history handle it
+                if comp.results.len() <= 1 && !is_picker {
+                    return None;
                 }
                 comp.move_up();
+                self.live_preview_picker();
                 Some(Action::Redraw)
             }
             Event::Key(KeyEvent {
@@ -1405,27 +1311,34 @@ impl InputState {
                 ..
             }) => {
                 let comp = self.completer.as_mut().unwrap();
-                if comp.results.len() <= 1 {
-                    return None; // let history handle it
+                if comp.results.len() <= 1 && !is_picker {
+                    return None;
                 }
                 comp.move_down();
+                self.live_preview_picker();
                 Some(Action::Redraw)
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Tab, ..
             }) => {
                 let comp = self.completer.take().unwrap();
-                if comp.kind == CompleterKind::History {
-                    if let Some(label) = comp.accept() {
-                        self.buf = label.to_string();
-                        self.cpos = self.buf.len();
+                match comp.kind {
+                    CompleterKind::History => {
+                        if let Some(label) = comp.accept() {
+                            self.buf = label.to_string();
+                            self.cpos = self.buf.len();
+                        }
+                        self.history_saved_buf = None;
                     }
-                    self.history_saved_buf = None;
-                } else {
-                    let was_command = comp.kind == CompleterKind::Command;
-                    self.accept_completion(&comp);
-                    if was_command {
-                        self.sync_completer();
+                    CompleterKind::Model | CompleterKind::Theme | CompleterKind::Color => {
+                        return Some(self.accept_picker(comp));
+                    }
+                    _ => {
+                        let was_command = comp.kind == CompleterKind::Command;
+                        self.accept_completion(&comp);
+                        if was_command {
+                            self.sync_completer();
+                        }
                     }
                 }
                 Some(Action::Redraw)
@@ -1475,17 +1388,43 @@ impl InputState {
         }
     }
 
+    /// Live-preview theme/color while navigating in a picker completer.
+    fn live_preview_picker(&self) {
+        if let Some(comp) = &self.completer {
+            if let Some(item) = comp.results.get(comp.selected) {
+                match comp.kind {
+                    CompleterKind::Theme => {
+                        if let Some(c) = item.ansi_color {
+                            crate::theme::set_accent(c);
+                        }
+                    }
+                    CompleterKind::Color => {
+                        if let Some(c) = item.ansi_color {
+                            crate::theme::set_slug_color(c);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// Recompute the completer based on where the cursor currently sits.
     /// Shows the file or command picker if the cursor is inside an @/slash zone,
-    /// hides it otherwise. Never touches a history completer.
+    /// hides it otherwise. Never touches a history/picker completer.
     fn recompute_completer(&mut self) {
-        if self
-            .completer
-            .as_ref()
-            .is_some_and(|c| c.kind == CompleterKind::History)
-        {
+        if self.completer.as_ref().is_some_and(|c| {
+            matches!(
+                c.kind,
+                CompleterKind::History
+                    | CompleterKind::Model
+                    | CompleterKind::Theme
+                    | CompleterKind::Color
+            )
+        }) {
             let query = self.buf.clone();
             self.completer.as_mut().unwrap().update_query(query);
+            self.live_preview_picker();
             return;
         }
         if let Some(at_pos) = cursor_in_at_zone(&self.buf, self.cpos) {
