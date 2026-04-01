@@ -610,11 +610,125 @@ fn split_impl(cmd: &str) -> (Vec<String>, Vec<String>) {
     (commands, operators)
 }
 
+/// Strip heredoc bodies from a command string so that downstream parsing
+/// (e.g. `extract_embedded_commands`) does not misinterpret content inside
+/// heredocs as shell constructs like `(...)` subshells.
+fn strip_heredoc_bodies(cmd: &str) -> String {
+    let bytes = cmd.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0;
+
+    while i < len {
+        match bytes[i] {
+            b'\'' => {
+                let start = i;
+                i += 1;
+                while i < len && bytes[i] != b'\'' {
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
+                }
+                out.push_str(&cmd[start..i]);
+            }
+            b'"' => {
+                let start = i;
+                i += 1;
+                while i < len && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' && i + 1 < len {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
+                }
+                out.push_str(&cmd[start..i]);
+            }
+            b'\\' if i + 1 < len => {
+                out.push_str(&cmd[i..i + 2]);
+                i += 2;
+            }
+            _ => {
+                let rest = &cmd[i..];
+                if rest.starts_with("<<") {
+                    let mut hi = 2;
+                    if hi < rest.len() && rest.as_bytes()[hi] == b'-' {
+                        hi += 1;
+                    }
+                    while hi < rest.len() && rest.as_bytes()[hi] == b' ' {
+                        hi += 1;
+                    }
+                    let mut delim_start = hi;
+                    let mut strip_quotes = false;
+                    if hi < rest.len()
+                        && (rest.as_bytes()[hi] == b'\'' || rest.as_bytes()[hi] == b'"')
+                    {
+                        let q = rest.as_bytes()[hi];
+                        strip_quotes = true;
+                        hi += 1;
+                        delim_start = hi;
+                        while hi < rest.len() && rest.as_bytes()[hi] != q {
+                            hi += 1;
+                        }
+                    } else {
+                        while hi < rest.len()
+                            && !rest.as_bytes()[hi].is_ascii_whitespace()
+                            && rest.as_bytes()[hi] != b';'
+                            && rest.as_bytes()[hi] != b'&'
+                            && rest.as_bytes()[hi] != b'|'
+                        {
+                            hi += 1;
+                        }
+                    }
+                    let delim = &rest[delim_start..hi];
+                    if strip_quotes && hi < rest.len() {
+                        hi += 1;
+                    }
+                    if !delim.is_empty() {
+                        // Keep the << DELIM part, skip the body until closing delimiter.
+                        out.push_str(&cmd[i..i + hi]);
+                        let search_from = i + hi;
+                        let mut si = search_from;
+                        while si < len {
+                            if bytes[si] == b'\n' {
+                                let line_start = si + 1;
+                                let line_end = cmd[line_start..]
+                                    .find('\n')
+                                    .map(|p| line_start + p)
+                                    .unwrap_or(len);
+                                let line = cmd[line_start..line_end].trim();
+                                if line == delim {
+                                    // Keep the closing delimiter line.
+                                    out.push_str(&cmd[si..line_end]);
+                                    i = line_end;
+                                    break;
+                                }
+                            }
+                            si += 1;
+                        }
+                        if si >= len {
+                            i = len;
+                        }
+                        continue;
+                    }
+                }
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Extract commands embedded in $(...), `...`, and (...) subshells.
 /// Returns additional commands found inside these constructs.
 /// The original command is kept as-is (for pattern matching); these are extras
 /// that also need permission checks.
-fn extract_embedded_commands(cmd: &str) -> Vec<String> {
+fn extract_embedded_commands(raw_cmd: &str) -> Vec<String> {
+    let stripped = strip_heredoc_bodies(raw_cmd);
+    let cmd: &str = &stripped;
     let mut extra = Vec::new();
     let bytes = cmd.as_bytes();
     let len = bytes.len();
@@ -1543,6 +1657,15 @@ mod tests {
             split_shell_commands(cmd),
             vec!["cat << 'EOF'\nhello world\nsome content\nEOF"]
         );
+    }
+
+    #[test]
+    fn heredoc_with_chained_command_not_split() {
+        let cmd = "cd /tmp && uv run python3 << 'EOF'\nfrom main import load\ndata = load(num_features=25)\nEOF";
+        let cmds = split_shell_commands(cmd);
+        assert_eq!(cmds.len(), 2, "Expected [cd, uv], got: {cmds:?}");
+        assert!(cmds[0].starts_with("cd "), "first: {:?}", cmds[0]);
+        assert!(cmds[1].starts_with("uv "), "second: {:?}", cmds[1]);
     }
 
     #[test]

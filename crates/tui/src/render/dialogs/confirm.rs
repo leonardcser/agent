@@ -316,7 +316,17 @@ impl ConfirmDialog {
         let ta_visible = self.editing || !self.textarea.is_empty();
         let (selected_label, _) = &self.options[self.selected];
         let digits = format!("{}", self.selected + 1).len();
-        let text_indent = (2 + digits + 2 + selected_label.len() + 2) as u16;
+        let prefix_cols = 2 + digits + 2;
+        let avail = w.saturating_sub(prefix_cols);
+        let last_line_len = if avail > 0 {
+            wrap_line(selected_label, avail)
+                .last()
+                .map(|l| l.len())
+                .unwrap_or(0)
+        } else {
+            selected_label.len()
+        };
+        let text_indent = (prefix_cols + last_line_len + 2) as u16;
         let wrap_w = width.saturating_sub(text_indent) as usize;
         let ta_extra: u16 = if ta_visible {
             self.textarea.visual_row_count(wrap_w).saturating_sub(1)
@@ -349,14 +359,23 @@ impl ConfirmDialog {
         } else {
             1 // blank line
         };
-        let fixed_rows: u16 = 1
-            + title_rows
-            + summary_rows
-            + separator_rows
-            + 1
-            + self.options.len() as u16
-            + ta_extra
-            + 2;
+        let option_rows: u16 = self
+            .options
+            .iter()
+            .enumerate()
+            .map(|(i, (label, _))| {
+                let digits = format!("{}", i + 1).len();
+                let prefix_cols = 2 + digits + 2; // "  N. "
+                let avail = w.saturating_sub(prefix_cols);
+                if avail == 0 {
+                    1
+                } else {
+                    wrap_line(label, avail).len() as u16
+                }
+            })
+            .sum();
+        let fixed_rows: u16 =
+            1 + title_rows + summary_rows + separator_rows + 1 + option_rows + ta_extra + 2;
 
         let total_preview = self.preview.total_rows(w);
         let viewport_rows: u16 = if has_preview {
@@ -674,26 +693,48 @@ impl super::Dialog for ConfirmDialog {
         let mut cursor_pos: Option<(u16, u16)> = None;
 
         for (i, (label, _)) in self.options.iter().enumerate() {
-            let _ = out.queue(Print("  "));
-            let highlighted = i == self.selected;
-            if highlighted {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print(format!("{}.", i + 1)));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
-                let _ = out.queue(Print(" "));
-                let _ = out.queue(SetForegroundColor(theme::accent()));
-                let _ = out.queue(Print(label));
-                let _ = out.queue(ResetColor);
+            let digits = format!("{}", i + 1).len();
+            let prefix_cols = 2 + digits + 2; // "  N. "
+            let avail = w.saturating_sub(prefix_cols);
+            let lines = if avail > 0 {
+                wrap_line(label, avail)
             } else {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print(format!("{}. ", i + 1)));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
-                let _ = out.queue(Print(label));
+                vec![label.clone()]
+            };
+            let highlighted = i == self.selected;
+
+            for (li, line) in lines.iter().enumerate() {
+                if li == 0 {
+                    let _ = out.queue(Print("  "));
+                    if highlighted {
+                        let _ = out.queue(SetAttribute(Attribute::Dim));
+                        let _ = out.queue(Print(format!("{}.", i + 1)));
+                        let _ = out.queue(SetAttribute(Attribute::Reset));
+                        let _ = out.queue(Print(" "));
+                    } else {
+                        let _ = out.queue(SetAttribute(Attribute::Dim));
+                        let _ = out.queue(Print(format!("{}. ", i + 1)));
+                        let _ = out.queue(SetAttribute(Attribute::Reset));
+                    }
+                } else {
+                    let _ = out.queue(Print(" ".repeat(prefix_cols)));
+                }
+                if highlighted {
+                    let _ = out.queue(SetForegroundColor(theme::accent()));
+                    let _ = out.queue(Print(line));
+                    let _ = out.queue(ResetColor);
+                } else {
+                    let _ = out.queue(Print(line));
+                }
+                if li < lines.len() - 1 {
+                    crlf(&mut out);
+                    row += 1;
+                }
             }
 
             if i == self.selected && ta_visible {
-                let digits = format!("{}", i + 1).len();
-                let text_col = (2 + digits + 2 + label.len() + 2) as u16;
+                let last_line_len = lines.last().map(|l| l.len()).unwrap_or(0);
+                let text_col = (prefix_cols + last_line_len + 2) as u16;
                 let wrap_w = (w as u16).saturating_sub(text_col) as usize;
                 let (new_row, cpos) = render_inline_textarea(
                     &mut out,
