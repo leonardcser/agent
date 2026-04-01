@@ -63,6 +63,7 @@ impl App {
                     }
                     let anchor = d.anchor_row();
                     self.handle_dialog_result(result, anchor, agent);
+                    self.input.restore_stash();
                 } else {
                     *active_dialog = Some(d);
                 }
@@ -232,8 +233,8 @@ impl App {
                         }
                     }
                 }
-                // Restore stash unless a menu was opened (it will restore on menu close).
-                if self.input.menu_rows() == 0 {
+                // Restore stash unless a modal/dialog was opened (it will restore on close).
+                if !self.input.has_modal() && active_dialog.is_none() {
                     self.input.restore_stash();
                 }
                 false
