@@ -8,7 +8,7 @@ mod harness;
 use std::collections::HashMap;
 
 use harness::TestHarness;
-use tui::render::{Block, ConfirmDialog, ConfirmRequest, Dialog, ToolStatus};
+use tui::render::{Block, ConfirmDialog, ConfirmRequest, Dialog, RewindDialog, ToolStatus};
 
 #[test]
 fn single_block() {
@@ -569,6 +569,69 @@ fn dialog_overlay_replaced_by_live_tool() {
         panic!(
             "Expected 1 occurrence of tool summary, found {count}.\n\
              Output saved to: {dump_dir}/output.txt\n\n{text}"
+        );
+    }
+}
+
+/// Opening and closing the rewind dialog (non-blocking) should not shift
+/// the prompt down. The prompt must stay at the same position.
+#[test]
+fn rewind_dialog_does_not_shift_prompt() {
+    let mut h = TestHarness::new(80, 24, "rewind_dialog_no_shift");
+
+    // Build a small conversation.
+    h.push_and_render(Block::User {
+        text: "What is 2+2?".into(),
+        image_labels: vec![],
+    });
+    h.push_and_render(Block::Text {
+        content: "The answer is 4.".into(),
+    });
+
+    // Draw prompt to establish stable position.
+    h.draw_prompt();
+    h.draw_prompt(); // second draw to stabilize
+
+    // Capture prompt position before dialog.
+    let before = harness::extract_full_content(&mut h.parser);
+
+    // Open the rewind dialog (non-blocking, like Esc-Esc or /rewind).
+    let turns = vec![(0, "What is 2+2?".to_string())];
+    let mut dialog = RewindDialog::new(turns, false, Some(12));
+
+    // Simulate the real app flow: erase_prompt → dialog draws → tick with dialog.
+    h.screen.erase_prompt();
+    let sync = h.screen.take_sync_started();
+    let dr = h.screen.dialog_row();
+    dialog.draw(dr, sync, h.screen.backend());
+    h.drain_sink();
+
+    // Dismiss the dialog.
+    let anchor = dialog.anchor_row();
+    h.screen.clear_dialog_area(anchor);
+    h.drain_sink();
+
+    // Redraw prompt after dismiss.
+    h.draw_prompt();
+
+    let after = harness::extract_full_content(&mut h.parser);
+
+    if before != after {
+        let dump_dir = "target/test-frames/rewind_dialog_no_shift";
+        let _ = std::fs::create_dir_all(dump_dir);
+        let _ = std::fs::write(format!("{dump_dir}/before.txt"), &before);
+        let _ = std::fs::write(format!("{dump_dir}/after.txt"), &after);
+
+        use similar::TextDiff;
+        let diff = TextDiff::from_lines(&before, &after);
+        let mut diff_str = String::new();
+        diff_str.push_str("--- before dialog\n+++ after dialog\n");
+        for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
+            diff_str.push_str(&format!("{hunk}"));
+        }
+        panic!(
+            "Prompt shifted after rewind dialog dismiss!\n\
+             Saved to: {dump_dir}/\n\n{diff_str}"
         );
     }
 }

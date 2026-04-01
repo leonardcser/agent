@@ -606,6 +606,9 @@ impl App {
             if let Some(ref mut rx) = ctx_rx {
                 if let Ok(result) = rx.try_recv() {
                     self.context_window = result;
+                    if let Some(w) = result {
+                        self.screen.set_context_window(w);
+                    }
                     ctx_rx = None;
                 }
             }

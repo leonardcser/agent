@@ -535,6 +535,7 @@ pub struct Screen {
     prompt: PromptState,
     working: WorkingState,
     context_tokens: Option<u32>,
+    context_window: Option<u32>,
     session_cost_usd: f64,
     model_label: Option<String>,
     reasoning_effort: protocol::ReasoningEffort,
@@ -619,6 +620,7 @@ impl Screen {
             prompt: PromptState::new(),
             working: WorkingState::new(),
             context_tokens: None,
+            context_window: None,
             session_cost_usd: 0.0,
             model_label: None,
             reasoning_effort: Default::default(),
@@ -969,10 +971,17 @@ impl Screen {
         self.defer_pending_render = true;
         self.defer_redraw = true;
         self.show_tool_in_dialog = false;
-        self.prompt.anchor_row = Some(clear_from);
+        // Only reset anchor/prev_rows when the dialog caused ScrollUp
+        // (prompt was physically moved). For non-scrolled dialogs the
+        // prompt is still in its original position — just mark dirty so
+        // it redraws in place.
+        let scrolled_by_dialog = screen_anchor == 0 && self.has_scrollback;
+        if scrolled_by_dialog || self.prompt.anchor_row.is_none() {
+            self.prompt.anchor_row = Some(clear_from);
+            self.prompt.prev_rows = 0;
+        }
         self.prompt.drawn = false;
         self.prompt.dirty = true;
-        self.prompt.prev_rows = 0;
         self.prompt.prev_dialog_row = None;
     }
 
@@ -1430,6 +1439,11 @@ impl Screen {
 
     pub fn set_context_tokens(&mut self, tokens: u32) {
         self.context_tokens = Some(tokens);
+        self.prompt.dirty = true;
+    }
+
+    pub fn set_context_window(&mut self, window: u32) {
+        self.context_window = Some(window);
         self.prompt.dirty = true;
     }
 
@@ -2201,45 +2215,6 @@ impl Screen {
         // Build all bar spans with priorities. draw_bar drops highest
         // priority first until everything fits.
         // Priorities: 0 = always, 1 = context tokens, 2 = model, 3 = tok/s
-        let mut throbber_spans = self.working.throbber_spans(self.show_tps);
-
-        if self.show_slug {
-            if let Some(ref label) = self.task_label {
-                let is_compacting = self.working.throbber == Some(Throbber::Compacting);
-                let slug_text = if let Some(spinner) = self.working.spinner_char() {
-                    if !throbber_spans.is_empty() {
-                        throbber_spans.remove(0);
-                    }
-                    // Keep "compacting" visible after the tag.
-                    if is_compacting {
-                        throbber_spans.insert(
-                            0,
-                            BarSpan {
-                                text: " compacting".into(),
-                                color: Color::Reset,
-                                bg: None,
-                                attr: None,
-                                priority: 1,
-                            },
-                        );
-                    }
-                    format!(" {} {} ", spinner, label)
-                } else {
-                    format!(" {} ", label)
-                };
-                throbber_spans.insert(
-                    0,
-                    BarSpan {
-                        text: slug_text,
-                        color: Color::Black,
-                        bg: Some(theme::slug_color()),
-                        attr: None,
-                        priority: 1,
-                    },
-                );
-            }
-        }
-
         let mut right_spans = Vec::new();
         if let Some(ref model) = self.model_label {
             right_spans.push(BarSpan {
@@ -2271,8 +2246,18 @@ impl Screen {
                         priority: 2,
                     });
                 }
+                let token_text = if let Some(window) = self.context_window {
+                    if window > 0 {
+                        let pct = (tokens as f64 / window as f64 * 100.0) as u32;
+                        format!(" {} ({}%)", format_tokens(tokens), pct)
+                    } else {
+                        format!(" {}", format_tokens(tokens))
+                    }
+                } else {
+                    format!(" {}", format_tokens(tokens))
+                };
                 right_spans.push(BarSpan {
-                    text: format!(" {}", format_tokens(tokens)),
+                    text: token_text,
                     color: theme::muted(),
                     bg: None,
                     attr: None,
@@ -2298,32 +2283,10 @@ impl Screen {
                 priority: 1,
             });
         }
-        if self.pending_dialog {
-            if !throbber_spans.is_empty() {
-                throbber_spans.push(BarSpan {
-                    text: " · ".into(),
-                    color: bar_color,
-                    bg: None,
-                    attr: None,
-                    priority: 0,
-                });
-            }
-            throbber_spans.push(BarSpan {
-                text: "permission pending".into(),
-                color: theme::accent(),
-                bg: None,
-                attr: Some(Attribute::Bold),
-                priority: 0,
-            });
-        }
         draw_bar(
             out,
             width,
-            if throbber_spans.is_empty() {
-                None
-            } else {
-                Some(&throbber_spans)
-            },
+            None,
             if right_spans.is_empty() {
                 None
             } else {
@@ -2557,57 +2520,114 @@ impl Screen {
             let _ = out.queue(Print("\r\n"));
         }
 
-        let mode_spans: Vec<BarSpan> = match mode {
-            protocol::Mode::Plan => vec![BarSpan {
-                text: " plan".into(),
-                color: theme::PLAN,
-                bg: None,
-                attr: None,
-                priority: 0,
-            }],
-            protocol::Mode::Apply => vec![BarSpan {
-                text: " apply".into(),
-                color: theme::APPLY,
-                bg: None,
-                attr: None,
-                priority: 0,
-            }],
-            protocol::Mode::Yolo => vec![BarSpan {
-                text: " yolo".into(),
-                color: theme::YOLO,
-                bg: None,
-                attr: None,
-                priority: 0,
-            }],
-            protocol::Mode::Normal => vec![],
-        };
-        draw_bar(
-            out,
-            width,
-            None,
-            if mode_spans.is_empty() {
-                None
-            } else {
-                Some(&mode_spans)
-            },
-            bar_color,
-        );
+        draw_bar(out, width, None, None, bar_color);
 
-        // Status line below the prompt: vim mode + procs + agents.
-        // Always shown unless completions or menus are visible.
+        // Status line below the prompt:
+        // pill(spinner+slug) mode vim_mode · status time · speed · procs · agents
         let status_line_rows = if comp_rows == 0 {
-            let vim_label = vim_mode_label(state.vim_mode());
-
             let _ = out.queue(Print("\r\n"));
-            let _ = out.queue(Print(" "));
-            if let Some(label) = vim_label {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print(label));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+            let status_bg = Color::AnsiValue(233);
+
+            // ── Slug pill (far left) ──
+            let is_compacting = self.working.throbber == Some(Throbber::Compacting);
+            let spinner = self.working.spinner_char();
+            let has_slug = self.show_slug && self.task_label.is_some();
+
+            let pill_label: Option<String> = if has_slug {
+                let label = self.task_label.as_ref().unwrap();
+                Some(if let Some(sp) = spinner {
+                    format!(" {} {} ", sp, label)
+                } else {
+                    format!(" {} ", label)
+                })
+            } else if let Some(sp) = spinner {
+                let state_name = if is_compacting {
+                    "compacting"
+                } else {
+                    "working"
+                };
+                Some(format!(" {} {} ", sp, state_name))
+            } else {
+                None
+            };
+
+            if let Some(ref pill_text) = pill_label {
+                let _ = out.queue(SetBackgroundColor(theme::slug_color()));
+                let _ = out.queue(SetForegroundColor(Color::Black));
+                let _ = out.queue(Print(pill_text));
+                let _ = out.queue(ResetColor);
             }
+
+            // ── Dark bg for the middle section ──
+            let _ = out.queue(SetBackgroundColor(status_bg));
+
+            // ── Vim mode (nvim colors, darker bg) ──
+            let vim_label = vim_mode_label(state.vim_mode()).unwrap_or("NORMAL");
+            let vim_fg = match state.vim_mode() {
+                Some(crate::vim::ViMode::Insert) => Color::AnsiValue(78),
+                Some(crate::vim::ViMode::Visual) | Some(crate::vim::ViMode::VisualLine) => {
+                    Color::AnsiValue(176)
+                }
+                _ => Color::AnsiValue(74),
+            };
+            let _ = out.queue(SetBackgroundColor(Color::AnsiValue(236)));
+            let _ = out.queue(SetForegroundColor(vim_fg));
+            let _ = out.queue(Print(format!(" {vim_label} ")));
+
+            // ── Mode indicator (mode color, lighter bg) ──
+            let (mode_icon, mode_name, mode_fg) = match mode {
+                protocol::Mode::Plan => ("◇ ", "plan", theme::PLAN),
+                protocol::Mode::Apply => ("→ ", "apply", theme::APPLY),
+                protocol::Mode::Yolo => ("⚡", "yolo", theme::YOLO),
+                protocol::Mode::Normal => ("○ ", "normal", theme::muted()),
+            };
+            let _ = out.queue(SetBackgroundColor(Color::AnsiValue(234)));
+            let _ = out.queue(SetForegroundColor(mode_fg));
+            let _ = out.queue(Print(format!(" {mode_icon}{mode_name} ")));
+            let _ = out.queue(SetBackgroundColor(status_bg));
+            let mut has_prev = true;
+
+            // ── Throbber status (done/interrupted/time/speed) ──
+            let throbber_spans = self.working.throbber_spans(self.show_tps);
+            let status_spans: &[BarSpan] = if spinner.is_some() && !throbber_spans.is_empty() {
+                &throbber_spans[1..]
+            } else {
+                &throbber_spans
+            };
+            if !status_spans.is_empty() {
+                for span in status_spans {
+                    if let Some(attr) = span.attr {
+                        let _ = out.queue(SetAttribute(attr));
+                    }
+                    let _ = out.queue(SetForegroundColor(span.color));
+                    let _ = out.queue(Print(&span.text));
+                    if span.attr.is_some() {
+                        let _ = out.queue(SetAttribute(Attribute::Reset));
+                        let _ = out.queue(SetBackgroundColor(status_bg));
+                    }
+                }
+                has_prev = true;
+            }
+
+            // ── Permission pending ──
+            if self.pending_dialog {
+                if has_prev {
+                    let _ = out.queue(SetForegroundColor(theme::muted()));
+                    let _ = out.queue(Print(" · "));
+                }
+                let _ = out.queue(SetForegroundColor(theme::accent()));
+                let _ = out.queue(SetAttribute(Attribute::Bold));
+                let _ = out.queue(Print("permission pending"));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                let _ = out.queue(SetBackgroundColor(status_bg));
+                has_prev = true;
+            }
+
+            // ── Running procs ──
             if self.running_procs > 0 {
-                if vim_label.is_some() {
-                    let _ = out.queue(Print("  "));
+                if has_prev {
+                    let _ = out.queue(SetForegroundColor(theme::muted()));
+                    let _ = out.queue(Print(" · "));
                 }
                 let _ = out.queue(SetForegroundColor(theme::accent()));
                 let label = if self.running_procs == 1 {
@@ -2616,15 +2636,14 @@ impl Screen {
                     format!("{} procs", self.running_procs)
                 };
                 let _ = out.queue(Print(&label));
-                let _ = out.queue(ResetColor);
+                has_prev = true;
             }
+
+            // ── Running agents ──
             if self.running_agents > 0 {
-                if self.running_procs > 0 {
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                if has_prev {
+                    let _ = out.queue(SetForegroundColor(theme::muted()));
                     let _ = out.queue(Print(" · "));
-                    let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
-                } else if vim_label.is_some() {
-                    let _ = out.queue(Print("  "));
                 }
                 let _ = out.queue(SetForegroundColor(theme::AGENT));
                 let label = if self.running_agents == 1 {
@@ -2633,9 +2652,11 @@ impl Screen {
                     format!("{} agents", self.running_agents)
                 };
                 let _ = out.queue(Print(&label));
-                let _ = out.queue(ResetColor);
             }
+
+            // Fill the rest of the line with the dark bg
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            let _ = out.queue(ResetColor);
             1
         } else {
             0
@@ -2713,9 +2734,9 @@ impl Screen {
 
 fn vim_mode_label(mode: Option<crate::vim::ViMode>) -> Option<&'static str> {
     match mode {
-        Some(crate::vim::ViMode::Insert) => Some("-- INSERT --"),
-        Some(crate::vim::ViMode::Visual) => Some("-- VISUAL --"),
-        Some(crate::vim::ViMode::VisualLine) => Some("-- VISUAL LINE --"),
+        Some(crate::vim::ViMode::Insert) => Some("INSERT"),
+        Some(crate::vim::ViMode::Visual) => Some("VISUAL"),
+        Some(crate::vim::ViMode::VisualLine) => Some("VISUAL LINE"),
         _ => None,
     }
 }
@@ -3267,10 +3288,10 @@ pub(super) fn draw_bar(
                     .map(|s| s.text.chars().count())
                     .sum();
                 if inner > 0 {
-                    1 + inner + 1
+                    inner + 1
                 } else {
                     0
-                } // dash + spans + space
+                } // spans + trailing space
             })
             .unwrap_or(0);
         let right_chars: usize = right
@@ -3304,11 +3325,11 @@ pub(super) fn draw_bar(
     let left_len: usize = if left_filtered.is_empty() {
         0
     } else {
-        1 + left_filtered
+        left_filtered
             .iter()
             .map(|s| s.text.chars().count())
             .sum::<usize>()
-            + 1
+            + 1 // trailing space
     };
     let right_len: usize = if right_filtered.is_empty() {
         0
@@ -3322,9 +3343,6 @@ pub(super) fn draw_bar(
     let bar_len = width.saturating_sub(left_len + right_len);
 
     if !left_filtered.is_empty() {
-        let _ = out.queue(SetForegroundColor(bar_color));
-        let _ = out.queue(Print(dash));
-        let _ = out.queue(ResetColor);
         for span in &left_filtered {
             if let Some(attr) = span.attr {
                 let _ = out.queue(SetAttribute(attr));

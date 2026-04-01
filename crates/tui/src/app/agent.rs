@@ -264,8 +264,9 @@ impl App {
             // was already set before this turn, keep it.
             if self.pending_title {
                 self.pending_title = false;
-                self.session.slug = None;
-                self.screen.clear_task_label();
+                // Only clear the slug if it wasn't already set before this
+                // turn's title generation request. If a slug existed before,
+                // keep it — we're just discarding the in-flight update.
             }
             let leftover = std::mem::take(&mut self.queued_messages);
             if !leftover.is_empty() {
