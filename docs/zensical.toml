@@ -22,6 +22,7 @@ nav = [
     { "Keybindings" = "reference/keybindings.md" },
     { "Permissions" = "reference/permissions.md" },
   ]},
+  { "Benchmarks" = "benchmarks.md" },
   { "Advanced" = [
     { "Headless" = "advanced/headless.md" },
     { "Multi-Agent" = "advanced/multi-agent.md" },

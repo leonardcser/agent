@@ -79,6 +79,15 @@ smelt --model claude-opus-4-5 --api-base https://api.anthropic.com/v1 --api-key-
 - **Interactive setup** — guided first-run wizard and `smelt auth` for managing
   providers
 
+## Benchmarks
+
+[SWE-bench Verified](https://www.swebench.com/) (500 instances):
+
+| Agent                                               | Version | Model       | Resolved  | Date       |
+| --------------------------------------------------- | ------- | ----------- | --------- | ---------- |
+| **smelt**                                           | 0.4.0   | Qwen3.5-27B | **69.4%** | 2026-02-17 |
+| [opencode](https://github.com/opencode-ai/opencode) | 1.3.9   | Qwen3.5-27B | 67.2%     | 2026-02-17 |
+
 ## Configuration
 
 Config file: `~/.config/smelt/config.yaml` (respects `$XDG_CONFIG_HOME`).
