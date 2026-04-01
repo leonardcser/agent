@@ -144,9 +144,7 @@ impl ProviderError {
     fn is_retryable(&self) -> bool {
         matches!(
             self,
-            ProviderError::RateLimited { .. }
-                | ProviderError::Server { .. }
-                | ProviderError::Network(_)
+            ProviderError::Server { .. } | ProviderError::Network(_)
         )
     }
 
@@ -612,7 +610,8 @@ impl Provider {
         let result = match self.kind {
             ProviderKind::Anthropic => self.fetch_context_window_anthropic(model).await,
             ProviderKind::Local => self.fetch_context_window_local(model).await,
-            ProviderKind::OpenAi | ProviderKind::Codex => None,
+            ProviderKind::OpenAi => None,
+            ProviderKind::Codex => codex::cached_context_window(model),
         };
         crate::log::entry(
             crate::log::Level::Info,

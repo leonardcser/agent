@@ -51,11 +51,14 @@ impl CodexTokens {
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
 
         if keyring_save(&json).is_ok() {
+            println!("  Credentials saved to keyring ({KEYRING_SERVICE})");
             let _ = file_save(&json);
             return Ok(());
         }
 
-        file_save(&json)
+        file_save(&json)?;
+        println!("  Credentials saved to {}", token_path().display());
+        Ok(())
     }
 
     pub fn load() -> Option<Self> {
@@ -464,6 +467,7 @@ pub struct CodexModel {
     pub slug: String,
     pub display_name: String,
     pub description: Option<String>,
+    pub context_window: Option<u32>,
 }
 
 /// Fetch the list of models available to the logged-in Codex account.
@@ -509,6 +513,7 @@ pub async fn fetch_models(client: &reqwest::Client) -> Result<Vec<CodexModel>, S
             let slug = m["slug"].as_str()?.to_string();
             let display_name = m["display_name"].as_str().unwrap_or(&slug).to_string();
             let description = m["description"].as_str().map(|s| s.to_string());
+            let context_window = m["context_window"].as_u64().map(|v| v as u32);
             let visibility = m["visibility"].as_str().unwrap_or("none");
             let priority = m["priority"].as_i64().unwrap_or(999);
 
@@ -523,6 +528,7 @@ pub async fn fetch_models(client: &reqwest::Client) -> Result<Vec<CodexModel>, S
                     slug,
                     display_name,
                     description,
+                    context_window,
                 },
             ))
         })
@@ -531,6 +537,14 @@ pub async fn fetch_models(client: &reqwest::Client) -> Result<Vec<CodexModel>, S
     result.sort_by_key(|(p, _)| *p);
 
     Ok(result.into_iter().map(|(_, m)| m).collect())
+}
+
+/// Look up the context window for a model from the disk cache.
+pub fn cached_context_window(model: &str) -> Option<u32> {
+    load_cached_models()
+        .into_iter()
+        .find(|m| m.slug == model)
+        .and_then(|m| m.context_window)
 }
 
 /// Load cached models from disk (fast, synchronous).
@@ -595,8 +609,28 @@ async fn fetch_codex_version(client: &reqwest::Client) -> Result<String, String>
 #[derive(Deserialize)]
 struct DeviceCodeResponse {
     device_auth_id: String,
+    #[serde(alias = "usercode")]
     user_code: String,
+    #[serde(default, deserialize_with = "deserialize_interval")]
     interval: Option<u64>,
+}
+
+fn deserialize_interval<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    use serde::de;
+    let v = serde_json::Value::deserialize(deserializer)?;
+    match v {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Number(n) => Ok(n.as_u64()),
+        serde_json::Value::String(s) => s
+            .trim()
+            .parse::<u64>()
+            .map(Some)
+            .map_err(de::Error::custom),
+        _ => Err(de::Error::custom("expected number or string for interval")),
+    }
 }
 
 #[derive(Deserialize)]
@@ -621,15 +655,21 @@ pub async fn device_code_login(client: &reqwest::Client) -> Result<CodexTokens, 
         .await
         .map_err(|e| format!("device code request failed: {e}"))?;
 
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("device code error: {text}"));
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+
+    if status.as_u16() == 404 {
+        return Err(
+            "device code login is not enabled for this server — use browser login instead"
+                .to_string(),
+        );
+    }
+    if !status.is_success() {
+        return Err(format!("device code error (HTTP {status}): {text}"));
     }
 
-    let dc: DeviceCodeResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("bad device code response: {e}"))?;
+    let dc: DeviceCodeResponse = serde_json::from_str(&text)
+        .map_err(|e| format!("bad device code response: {e}\nBody: {text}"))?;
 
     println!("\n  Open this URL in a browser:\n");
     println!("    {ISSUER}/codex/device\n");
@@ -657,11 +697,11 @@ pub async fn device_code_login(client: &reqwest::Client) -> Result<CodexTokens, 
             .await
             .map_err(|e| format!("device code poll failed: {e}"))?;
 
-        if resp.status().as_u16() == 200 {
-            let poll: DeviceCodePollResponse = resp
-                .json()
-                .await
-                .map_err(|e| format!("bad poll response: {e}"))?;
+        let poll_status = resp.status();
+        if poll_status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let poll: DeviceCodePollResponse = serde_json::from_str(&body)
+                .map_err(|e| format!("bad poll response: {e}\nBody: {body}"))?;
 
             let code = poll
                 .authorization_code
@@ -674,7 +714,13 @@ pub async fn device_code_login(client: &reqwest::Client) -> Result<CodexTokens, 
             return exchange_code(client, &code, &verifier, &redirect_uri).await;
         }
 
-        // Non-200 means "authorization_pending" — keep polling.
+        // 403/404 = authorization pending, keep polling. Other errors = bail.
+        if poll_status.as_u16() != 403 && poll_status.as_u16() != 404 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "device auth failed (HTTP {poll_status}): {body}"
+            ));
+        }
     }
 }
 

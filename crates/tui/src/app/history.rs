@@ -162,6 +162,7 @@ impl App {
                 })) => {
                     if let Some(result) = dialog.handle_key(code, modifiers) {
                         terminal::disable_raw_mode().ok();
+                        let _ = std::io::stdout().execute(crossterm::cursor::Show);
                         if let render::DialogResult::Resume {
                             session_id: Some(id),
                         } = result

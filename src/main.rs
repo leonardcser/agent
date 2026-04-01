@@ -187,24 +187,17 @@ async fn main() {
     let mut available_models = cfg.resolve_models();
 
     // For Codex providers, fetch models dynamically from the API (with cache).
-    // Codex: load cached models for fast startup, refresh in background.
+    // Use cached models for instant startup; always refresh in background.
     if cfg.has_codex_provider() {
         let cached = engine::provider::codex::load_cached_models();
-        if cached.is_empty() {
-            // No cache — must fetch synchronously so we have models to show.
-            let client = reqwest::Client::new();
-            let fresh = engine::provider::codex::refresh_models_cache(&client).await;
-            let slugs: Vec<String> = fresh.into_iter().map(|m| m.slug).collect();
-            cfg.inject_codex_models(&mut available_models, &slugs);
-        } else {
+        if !cached.is_empty() {
             let slugs: Vec<String> = cached.into_iter().map(|m| m.slug).collect();
             cfg.inject_codex_models(&mut available_models, &slugs);
-            // Refresh in background so the cache is fresh for next time.
-            tokio::spawn(async move {
-                let client = reqwest::Client::new();
-                let _ = engine::provider::codex::refresh_models_cache(&client).await;
-            });
         }
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let _ = engine::provider::codex::refresh_models_cache(&client).await;
+        });
     }
 
     // Resolve the active model: CLI flags > defaults.model (if set) > last_used (if no default) > first in config
