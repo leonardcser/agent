@@ -5,24 +5,14 @@ use crossterm::{event::Event, terminal};
 
 impl App {
     fn apply_settings_result(&mut self, s: &crate::input::SettingsState) {
+        let needs_redraw = self.settings.show_thinking != s.show_thinking;
         self.input.set_vim_enabled(s.vim);
-        state::set_vim_enabled(s.vim);
-        self.auto_compact = s.auto_compact;
-        self.show_tps = s.show_tps;
-        self.screen.set_show_tps(s.show_tps);
-        self.show_tokens = s.show_tokens;
-        self.screen.set_show_tokens(s.show_tokens);
-        self.show_cost = s.show_cost;
-        self.screen.set_show_cost(s.show_cost);
-        self.show_prediction = s.show_prediction;
-        self.show_slug = s.show_slug;
-        self.screen.set_show_slug(s.show_slug);
-        if self.show_thinking != s.show_thinking {
-            self.show_thinking = s.show_thinking;
-            self.screen.set_show_thinking(s.show_thinking);
+        self.screen.apply_settings(s);
+        self.settings = s.clone();
+        state::save_settings(s);
+        if needs_redraw {
             self.screen.redraw(true);
         }
-        self.restrict_to_workspace = s.restrict_to_workspace;
     }
 
     // ── Terminal event dispatch ───────────────────────────────────────────

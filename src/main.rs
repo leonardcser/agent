@@ -356,15 +356,11 @@ async fn main() {
             })
         });
 
-    let vim_enabled = cfg.settings.vim_mode.unwrap_or(false);
-    let auto_compact = args.subagent || args.headless || cfg.settings.auto_compact.unwrap_or(false);
-    let show_tps = cfg.settings.show_tps.unwrap_or(true);
-    let show_tokens = cfg.settings.show_tokens.unwrap_or(true);
-    let show_cost = cfg.settings.show_cost.unwrap_or(true);
-    let input_prediction = cfg.settings.input_prediction.unwrap_or(true);
-    let task_slug = cfg.settings.task_slug.unwrap_or(true);
-    let show_thinking = cfg.settings.show_thinking.unwrap_or(true);
-    let restrict_to_workspace = cfg.settings.restrict_to_workspace.unwrap_or(true);
+    let mut settings = app_state.settings.resolve(&cfg.settings);
+    // Force auto_compact on for subagent/headless mode.
+    if args.subagent || args.headless {
+        settings.auto_compact = true;
+    }
 
     // Apply CLI sampling overrides to model_config
     if let Some(v) = args.temperature {
@@ -516,7 +512,7 @@ async fn main() {
     let workspace = engine::paths::git_root(&cwd).unwrap_or_else(|| cwd.clone());
     let mut permissions = engine::Permissions::load();
     permissions.set_workspace(workspace);
-    permissions.set_restrict_to_workspace(restrict_to_workspace);
+    permissions.set_restrict_to_workspace(settings.restrict_to_workspace);
     let permissions = Arc::new(permissions);
     let initial_api_base = api_base.clone();
     let initial_provider_type = provider_type.clone();
@@ -575,7 +571,7 @@ async fn main() {
             let loader = engine::SkillLoader::load(&extra_paths);
             Some(Arc::new(loader))
         },
-        auto_compact,
+        auto_compact: settings.auto_compact,
         context_window: cfg.settings.context_window,
     });
     engine_injector = engine_handle.injector();
@@ -619,15 +615,7 @@ async fn main() {
         initial_provider_type,
         Arc::clone(&permissions),
         engine_handle,
-        vim_enabled,
-        auto_compact,
-        show_tps,
-        show_tokens,
-        show_cost,
-        input_prediction,
-        task_slug,
-        show_thinking,
-        restrict_to_workspace,
+        settings,
         multi_agent,
         reasoning_effort,
         reasoning_cycle,

@@ -30,7 +30,10 @@ use std::io::{self, BufWriter, Write};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
-use blocks::{gap_between, render_block, render_tool, Element};
+use blocks::{
+    animated_dots, collect_trailing_thinking, gap_between, render_block, render_thinking_summary,
+    render_tool, thinking_summary, Element,
+};
 
 /// Maximum number of lines to re-render during a full redraw (e.g. purge).
 /// Older blocks beyond this limit are dropped to avoid flooding the terminal.
@@ -482,12 +485,15 @@ impl BlockHistory {
         let last_idx = self.blocks.len().saturating_sub(1);
         let mut first = true;
         for i in self.flushed..self.blocks.len() {
-            let gap = if first && self.suppress_leading_gap {
+            // Skip gaps for hidden thinking blocks (they render 0 rows).
+            let is_hidden_thinking =
+                !show_thinking && matches!(self.blocks[i], Block::Thinking { .. });
+            let gap = if is_hidden_thinking || (first && self.suppress_leading_gap) {
                 0
             } else {
                 self.block_gap(i)
             };
-            first = false;
+            first = first && is_hidden_thinking;
             for _ in 0..gap {
                 crlf(out);
             }
@@ -567,6 +573,10 @@ pub struct Screen {
     show_cost: bool,
     show_slug: bool,
     show_thinking: bool,
+    /// Cached state for rendering the status line during dialogs.
+    last_vim_enabled: bool,
+    last_vim_mode: Option<crate::vim::ViMode>,
+    last_mode: protocol::Mode,
     /// Whether to render the active tool above the dialog in content-only
     /// mode.  Set when tool + dialog fit on screen; cleared on dialog close.
     show_tool_in_dialog: bool,
@@ -638,6 +648,9 @@ impl Screen {
             show_cost: true,
             show_slug: true,
             show_thinking: true,
+            last_vim_enabled: false,
+            last_vim_mode: None,
+            last_mode: protocol::Mode::Normal,
             show_tool_in_dialog: false,
             btw: None,
             notification: None,
@@ -770,27 +783,13 @@ impl Screen {
         self.notification.is_some()
     }
 
-    pub fn set_show_tps(&mut self, show: bool) {
-        self.show_tps = show;
-        self.prompt.dirty = true;
-    }
-
-    pub fn set_show_thinking(&mut self, show: bool) {
-        self.show_thinking = show;
-    }
-
-    pub fn set_show_tokens(&mut self, show: bool) {
-        self.show_tokens = show;
-        self.prompt.dirty = true;
-    }
-
-    pub fn set_show_cost(&mut self, show: bool) {
-        self.show_cost = show;
-        self.prompt.dirty = true;
-    }
-
-    pub fn set_show_slug(&mut self, show: bool) {
-        self.show_slug = show;
+    /// Apply all toggle settings from a resolved settings snapshot.
+    pub fn apply_settings(&mut self, s: &crate::state::ResolvedSettings) {
+        self.show_tps = s.show_tps;
+        self.show_tokens = s.show_tokens;
+        self.show_cost = s.show_cost;
+        self.show_slug = s.show_slug;
+        self.show_thinking = s.show_thinking;
         self.prompt.dirty = true;
     }
 
@@ -937,6 +936,156 @@ impl Screen {
         }
         self.has_scrollback = true;
         self.prompt.prev_dialog_row = Some(actual);
+    }
+
+    /// Render the status line at the very last row of the terminal.
+    /// Called after a dialog is drawn so the status bar stays visible.
+    pub fn draw_dialog_status_line(&mut self) {
+        let (_, h) = self.size();
+        let mut out = self.scroll_output();
+        let _ = out.queue(cursor::SavePosition);
+        let _ = out.queue(cursor::MoveTo(0, h - 1));
+        self.render_status_line(&mut out);
+        let _ = out.queue(cursor::RestorePosition);
+        let _ = out.flush();
+    }
+
+    /// Render the status line content at the current cursor position.
+    fn render_status_line(&self, out: &mut RenderOut) {
+        let status_bg = Color::AnsiValue(233);
+
+        // ── Slug pill (far left) ──
+        let is_compacting = self.working.throbber == Some(Throbber::Compacting);
+        let spinner = self.working.spinner_char();
+        let has_slug = self.show_slug && self.task_label.is_some();
+
+        let pill_label: Option<String> = if is_compacting {
+            let sp = spinner.unwrap_or(SPINNER_FRAMES[0]);
+            Some(format!(" {} compacting ", sp))
+        } else if has_slug {
+            let label = self.task_label.as_ref().unwrap();
+            Some(if let Some(sp) = spinner {
+                format!(" {} {} ", sp, label)
+            } else {
+                format!(" {} ", label)
+            })
+        } else {
+            spinner.map(|sp| format!(" {} working ", sp))
+        };
+
+        if let Some(ref pill_text) = pill_label {
+            let pill_bg = if is_compacting {
+                Color::White
+            } else {
+                theme::slug_color()
+            };
+            let _ = out.queue(SetBackgroundColor(pill_bg));
+            let _ = out.queue(SetForegroundColor(Color::Black));
+            let _ = out.queue(Print(pill_text));
+            let _ = out.queue(ResetColor);
+        }
+
+        // ── Dark bg for the middle section ──
+        let _ = out.queue(SetBackgroundColor(status_bg));
+
+        // ── Vim mode ──
+        if self.last_vim_enabled {
+            let vim_label = vim_mode_label(self.last_vim_mode).unwrap_or("NORMAL");
+            let vim_fg = match self.last_vim_mode {
+                Some(crate::vim::ViMode::Insert) => Color::AnsiValue(78),
+                Some(crate::vim::ViMode::Visual) | Some(crate::vim::ViMode::VisualLine) => {
+                    Color::AnsiValue(176)
+                }
+                _ => Color::AnsiValue(74),
+            };
+            let _ = out.queue(SetBackgroundColor(Color::AnsiValue(236)));
+            let _ = out.queue(SetForegroundColor(vim_fg));
+            let _ = out.queue(Print(format!(" {vim_label} ")));
+        }
+
+        // ── Mode indicator ──
+        let (mode_icon, mode_name, mode_fg) = match self.last_mode {
+            protocol::Mode::Plan => ("◇ ", "plan", theme::PLAN),
+            protocol::Mode::Apply => ("→ ", "apply", theme::APPLY),
+            protocol::Mode::Yolo => ("⚡", "yolo", theme::YOLO),
+            protocol::Mode::Normal => ("○ ", "normal", theme::muted()),
+        };
+        let _ = out.queue(SetBackgroundColor(Color::AnsiValue(234)));
+        let _ = out.queue(SetForegroundColor(mode_fg));
+        let _ = out.queue(Print(format!(" {mode_icon}{mode_name} ")));
+        let _ = out.queue(SetBackgroundColor(status_bg));
+        let mut has_prev = true;
+
+        // ── Throbber status ──
+        let throbber_spans = self.working.throbber_spans(self.show_tps);
+        let status_spans: &[BarSpan] = if spinner.is_some() && !throbber_spans.is_empty() {
+            &throbber_spans[1..]
+        } else {
+            &throbber_spans
+        };
+        if !status_spans.is_empty() {
+            for span in status_spans {
+                if let Some(attr) = span.attr {
+                    let _ = out.queue(SetAttribute(attr));
+                }
+                let _ = out.queue(SetForegroundColor(span.color));
+                let _ = out.queue(Print(&span.text));
+                if span.attr.is_some() {
+                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                    let _ = out.queue(SetBackgroundColor(status_bg));
+                }
+            }
+            has_prev = true;
+        }
+
+        // ── Permission pending ──
+        if self.pending_dialog {
+            if has_prev {
+                let _ = out.queue(SetForegroundColor(theme::muted()));
+                let _ = out.queue(Print(" · "));
+            }
+            let _ = out.queue(SetForegroundColor(theme::accent()));
+            let _ = out.queue(SetAttribute(Attribute::Bold));
+            let _ = out.queue(Print("permission pending"));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+            let _ = out.queue(SetBackgroundColor(status_bg));
+            has_prev = true;
+        }
+
+        // ── Running procs ──
+        if self.running_procs > 0 {
+            if has_prev {
+                let _ = out.queue(SetForegroundColor(theme::muted()));
+                let _ = out.queue(Print(" · "));
+            }
+            let _ = out.queue(SetForegroundColor(theme::accent()));
+            let label = if self.running_procs == 1 {
+                "1 proc".to_string()
+            } else {
+                format!("{} procs", self.running_procs)
+            };
+            let _ = out.queue(Print(&label));
+            has_prev = true;
+        }
+
+        // ── Running agents ──
+        if self.running_agents > 0 {
+            if has_prev {
+                let _ = out.queue(SetForegroundColor(theme::muted()));
+                let _ = out.queue(Print(" · "));
+            }
+            let _ = out.queue(SetForegroundColor(theme::AGENT));
+            let label = if self.running_agents == 1 {
+                "1 agent".to_string()
+            } else {
+                format!("{} agents", self.running_agents)
+            };
+            let _ = out.queue(Print(&label));
+        }
+
+        // Fill the rest of the line with the dark bg
+        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+        let _ = out.queue(ResetColor);
     }
 
     /// Dismiss a dialog overlay.
@@ -1116,7 +1265,50 @@ impl Screen {
                     content: trimmed.to_string(),
                 });
             }
+            // When thinking is hidden, commit a summary block for the
+            // entire trailing thinking sequence (like tables: silent
+            // accumulation → committed summary).
+            if !self.show_thinking {
+                self.commit_thinking_summary();
+            }
             self.prompt.dirty = true;
+        }
+    }
+
+    /// Aggregate trailing hidden Thinking blocks into a single Hint summary.
+    fn commit_thinking_summary(&mut self) {
+        let combined = collect_trailing_thinking(&self.history.blocks);
+        if combined.is_empty() {
+            return;
+        }
+        let (mut label, line_count) = thinking_summary(&combined);
+        if label == "thinking" {
+            label = "thought".to_string();
+        }
+        self.history.push(Block::Hint {
+            content: format!(" \u{2502} {label} ({line_count} lines)"),
+        });
+    }
+
+    /// Gap before a thinking summary overlay, skipping over hidden thinking blocks.
+    fn thinking_summary_gap(&self) -> u16 {
+        if let Some(last) = self
+            .history
+            .blocks
+            .iter()
+            .rev()
+            .find(|b| !matches!(b, Block::Thinking { .. }))
+        {
+            gap_between(
+                &Element::Block(last),
+                &Element::Block(&Block::Thinking {
+                    content: String::new(),
+                }),
+            )
+        } else if self.history.blocks.is_empty() {
+            0
+        } else {
+            1
         }
     }
 
@@ -1932,7 +2124,7 @@ impl Screen {
 
         let mut overlay_blocks: Vec<Block> = Vec::new();
 
-        // Current thinking line (incomplete — no \n yet).
+        // Current thinking overlay.
         if let Some(ref at) = self.active_thinking {
             let text = match (at.paragraph.is_empty(), at.current_line.is_empty()) {
                 (true, true) => String::new(),
@@ -1940,8 +2132,30 @@ impl Screen {
                 (false, true) => at.paragraph.clone(),
                 (false, false) => format!("{}\n{}", at.paragraph, at.current_line),
             };
-            if !text.trim().is_empty() {
-                overlay_blocks.push(Block::Thinking { content: text });
+            if self.show_thinking {
+                if !text.trim().is_empty() {
+                    overlay_blocks.push(Block::Thinking { content: text });
+                }
+            } else {
+                // Animated summary while streaming. Always render from
+                // committed blocks even when active text is momentarily
+                // empty (right after a paragraph commit) to avoid flicker.
+                let mut combined = collect_trailing_thinking(&self.history.blocks);
+                if !text.trim().is_empty() {
+                    if !combined.is_empty() {
+                        combined.push('\n');
+                    }
+                    combined.push_str(&text);
+                }
+                if !combined.is_empty() {
+                    let (label, line_count) = thinking_summary(&combined);
+                    let gap = self.thinking_summary_gap();
+                    for _ in 0..gap {
+                        crlf(&mut out);
+                    }
+                    let rows = render_thinking_summary(&mut out, width, &label, line_count, true);
+                    streaming_rows += gap + rows;
+                }
             }
         }
 
@@ -1952,14 +2166,7 @@ impl Screen {
 
             if in_table {
                 let n = at.table_data_rows;
-                let dot_count = (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_millis()
-                    / 333) as usize
-                    % 3
-                    + 1;
-                let dots = &"..."[..dot_count];
+                let dots = animated_dots();
                 overlay_blocks.push(Block::Hint {
                     content: format!(" building table ({n} rows){dots}"),
                 });
@@ -2204,6 +2411,10 @@ impl Screen {
         pre_prompt_rows: u16,
     ) -> (u16, u16, bool) {
         let _perf = crate::perf::begin("draw_prompt");
+        // Cache state for dialog-mode status line rendering.
+        self.last_vim_enabled = state.vim_enabled();
+        self.last_vim_mode = state.vim_mode();
+        self.last_mode = mode;
         let usable = width.saturating_sub(2);
         let height = (self.size().1 as usize).saturating_sub(pre_prompt_rows as usize);
         let mut extra_rows = 0u16;
@@ -2543,141 +2754,7 @@ impl Screen {
         // pill(spinner+slug) mode vim_mode · status time · speed · procs · agents
         let status_line_rows = if comp_rows == 0 {
             let _ = out.queue(Print("\r\n"));
-            let status_bg = Color::AnsiValue(233);
-
-            // ── Slug pill (far left) ──
-            let is_compacting = self.working.throbber == Some(Throbber::Compacting);
-            let spinner = self.working.spinner_char();
-            let has_slug = self.show_slug && self.task_label.is_some();
-
-            let pill_label: Option<String> = if is_compacting {
-                // Compacting overrides the task slug pill.
-                let sp = spinner.unwrap_or(SPINNER_FRAMES[0]);
-                Some(format!(" {} compacting ", sp))
-            } else if has_slug {
-                let label = self.task_label.as_ref().unwrap();
-                Some(if let Some(sp) = spinner {
-                    format!(" {} {} ", sp, label)
-                } else {
-                    format!(" {} ", label)
-                })
-            } else {
-                spinner.map(|sp| format!(" {} working ", sp))
-            };
-
-            if let Some(ref pill_text) = pill_label {
-                let pill_bg = if is_compacting {
-                    Color::White
-                } else {
-                    theme::slug_color()
-                };
-                let _ = out.queue(SetBackgroundColor(pill_bg));
-                let _ = out.queue(SetForegroundColor(Color::Black));
-                let _ = out.queue(Print(pill_text));
-                let _ = out.queue(ResetColor);
-            }
-
-            // ── Dark bg for the middle section ──
-            let _ = out.queue(SetBackgroundColor(status_bg));
-
-            // ── Vim mode (nvim colors, darker bg) — only when vim is enabled ──
-            if state.vim_enabled() {
-                let vim_label = vim_mode_label(state.vim_mode()).unwrap_or("NORMAL");
-                let vim_fg = match state.vim_mode() {
-                    Some(crate::vim::ViMode::Insert) => Color::AnsiValue(78),
-                    Some(crate::vim::ViMode::Visual) | Some(crate::vim::ViMode::VisualLine) => {
-                        Color::AnsiValue(176)
-                    }
-                    _ => Color::AnsiValue(74),
-                };
-                let _ = out.queue(SetBackgroundColor(Color::AnsiValue(236)));
-                let _ = out.queue(SetForegroundColor(vim_fg));
-                let _ = out.queue(Print(format!(" {vim_label} ")));
-            }
-
-            // ── Mode indicator (mode color, lighter bg) ──
-            let (mode_icon, mode_name, mode_fg) = match mode {
-                protocol::Mode::Plan => ("◇ ", "plan", theme::PLAN),
-                protocol::Mode::Apply => ("→ ", "apply", theme::APPLY),
-                protocol::Mode::Yolo => ("⚡", "yolo", theme::YOLO),
-                protocol::Mode::Normal => ("○ ", "normal", theme::muted()),
-            };
-            let _ = out.queue(SetBackgroundColor(Color::AnsiValue(234)));
-            let _ = out.queue(SetForegroundColor(mode_fg));
-            let _ = out.queue(Print(format!(" {mode_icon}{mode_name} ")));
-            let _ = out.queue(SetBackgroundColor(status_bg));
-            let mut has_prev = true;
-
-            // ── Throbber status (done/interrupted/time/speed) ──
-            let throbber_spans = self.working.throbber_spans(self.show_tps);
-            let status_spans: &[BarSpan] = if spinner.is_some() && !throbber_spans.is_empty() {
-                &throbber_spans[1..]
-            } else {
-                &throbber_spans
-            };
-            if !status_spans.is_empty() {
-                for span in status_spans {
-                    if let Some(attr) = span.attr {
-                        let _ = out.queue(SetAttribute(attr));
-                    }
-                    let _ = out.queue(SetForegroundColor(span.color));
-                    let _ = out.queue(Print(&span.text));
-                    if span.attr.is_some() {
-                        let _ = out.queue(SetAttribute(Attribute::Reset));
-                        let _ = out.queue(SetBackgroundColor(status_bg));
-                    }
-                }
-                has_prev = true;
-            }
-
-            // ── Permission pending ──
-            if self.pending_dialog {
-                if has_prev {
-                    let _ = out.queue(SetForegroundColor(theme::muted()));
-                    let _ = out.queue(Print(" · "));
-                }
-                let _ = out.queue(SetForegroundColor(theme::accent()));
-                let _ = out.queue(SetAttribute(Attribute::Bold));
-                let _ = out.queue(Print("permission pending"));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
-                let _ = out.queue(SetBackgroundColor(status_bg));
-                has_prev = true;
-            }
-
-            // ── Running procs ──
-            if self.running_procs > 0 {
-                if has_prev {
-                    let _ = out.queue(SetForegroundColor(theme::muted()));
-                    let _ = out.queue(Print(" · "));
-                }
-                let _ = out.queue(SetForegroundColor(theme::accent()));
-                let label = if self.running_procs == 1 {
-                    "1 proc".to_string()
-                } else {
-                    format!("{} procs", self.running_procs)
-                };
-                let _ = out.queue(Print(&label));
-                has_prev = true;
-            }
-
-            // ── Running agents ──
-            if self.running_agents > 0 {
-                if has_prev {
-                    let _ = out.queue(SetForegroundColor(theme::muted()));
-                    let _ = out.queue(Print(" · "));
-                }
-                let _ = out.queue(SetForegroundColor(theme::AGENT));
-                let label = if self.running_agents == 1 {
-                    "1 agent".to_string()
-                } else {
-                    format!("{} agents", self.running_agents)
-                };
-                let _ = out.queue(Print(&label));
-            }
-
-            // Fill the rest of the line with the dark bg
-            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-            let _ = out.queue(ResetColor);
+            self.render_status_line(out);
             1
         } else {
             0

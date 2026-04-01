@@ -56,7 +56,8 @@ impl App {
             "/vim" => {
                 let enabled = !self.input.vim_enabled();
                 self.input.set_vim_enabled(enabled);
-                state::set_vim_enabled(enabled);
+                self.settings.vim = enabled;
+                state::save_settings(&self.settings);
                 self.screen.mark_dirty();
                 CommandAction::Continue
             }

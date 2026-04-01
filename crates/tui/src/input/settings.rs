@@ -1,18 +1,7 @@
 use crate::keymap::{nav_lookup, NavAction};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
-#[derive(Clone, Debug)]
-pub struct SettingsState {
-    pub vim: bool,
-    pub auto_compact: bool,
-    pub show_tps: bool,
-    pub show_tokens: bool,
-    pub show_cost: bool,
-    pub show_prediction: bool,
-    pub show_slug: bool,
-    pub show_thinking: bool,
-    pub restrict_to_workspace: bool,
-}
+pub type SettingsState = crate::state::ResolvedSettings;
 
 /// Generic navigation result from a menu.
 pub enum MenuAction {

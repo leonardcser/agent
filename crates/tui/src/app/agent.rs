@@ -283,7 +283,7 @@ impl App {
             // Fire async prediction for the user's next input.
             // Skip predictions on subagent tabs — they're independent.
             self.input_prediction = None;
-            if self.show_prediction {
+            if self.settings.show_prediction {
                 // Collect last 3 user messages + last assistant message for
                 // richer prediction context.
                 let mut context: Vec<protocol::Message> = self

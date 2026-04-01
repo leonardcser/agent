@@ -604,23 +604,26 @@ pub(crate) fn begin_dialog_draw(
     }
     let _ = out.queue(cursor::Hide);
 
+    // Reserve the last row for the status bar.
+    let usable_height = height.saturating_sub(1);
+
     let granted = if let Some(cap) = max_rows {
         content_rows.min(cap)
     } else {
         content_rows
     };
-    let granted = granted.min(height);
+    let granted = granted.min(usable_height);
 
     let bar_row = if let Some(anchor) = *anchor_row {
         anchor
     } else {
-        let available = height.saturating_sub(start_row);
+        let available = usable_height.saturating_sub(start_row);
         let row = if granted <= available {
             start_row
         } else {
             let deficit = granted.saturating_sub(available);
             let _ = out.queue(terminal::ScrollUp(deficit));
-            height.saturating_sub(granted)
+            usable_height.saturating_sub(granted)
         };
         *anchor_row = Some(row);
         row

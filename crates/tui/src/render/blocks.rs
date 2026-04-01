@@ -19,6 +19,84 @@ use super::{
     ToolOutput, ToolStatus,
 };
 
+/// Animated trailing dots for streaming indicators.
+pub(super) fn animated_dots() -> &'static str {
+    let n = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_millis()
+        / 333) as usize
+        % 3
+        + 1;
+    &"..."[..n]
+}
+
+/// Concatenate trailing `Block::Thinking` content from the end of a block list.
+pub(super) fn collect_trailing_thinking(blocks: &[super::Block]) -> String {
+    let parts: Vec<&str> = blocks
+        .iter()
+        .rev()
+        .map_while(|b| match b {
+            super::Block::Thinking { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    // Parts are in reverse order — join forward.
+    let mut out = String::new();
+    for part in parts.into_iter().rev() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(part);
+    }
+    out
+}
+
+/// Extract a title and non-empty line count from thinking content.
+/// If the first non-empty line is a markdown bold title (`**...**`), use it as the label.
+pub(super) fn thinking_summary(content: &str) -> (String, usize) {
+    let mut label = None;
+    let mut lines = 0usize;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        lines += 1;
+        if label.is_none()
+            && trimmed.starts_with("**")
+            && trimmed.ends_with("**")
+            && trimmed.len() > 4
+        {
+            label = Some(trimmed[2..trimmed.len() - 2].trim().to_string());
+        }
+    }
+    (label.unwrap_or_else(|| "thinking".to_string()), lines)
+}
+
+/// Render a single hidden-thinking summary row with optional animated dots.
+pub(super) fn render_thinking_summary(
+    out: &mut RenderOut,
+    width: usize,
+    label: &str,
+    line_count: usize,
+    animated: bool,
+) -> u16 {
+    let dots = if animated { animated_dots() } else { "" };
+    let summary = format!("{label} ({line_count} lines){dots}");
+    let max_cols = width.saturating_sub(4).max(1);
+    let mut rows = 0u16;
+    for seg in &wrap_line(&summary, max_cols) {
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(SetAttribute(Attribute::Italic));
+        let _ = out.queue(Print(format!(" \u{2502} {}", seg)));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        crlf(out);
+        rows += 1;
+    }
+    rows
+}
+
 /// Element types for spacing calculation.
 pub(super) enum Element<'a> {
     Block(&'a Block),
@@ -163,13 +241,7 @@ pub(super) fn render_block(
         }
         Block::Thinking { content } => {
             if !show_thinking {
-                let line_count = content.lines().count();
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(SetAttribute(Attribute::Italic));
-                let _ = out.queue(Print(format!(" \u{2502} thinking ({line_count} lines)")));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
-                crlf(out);
-                return 1;
+                return 0;
             }
             let max_cols = width.saturating_sub(4).max(1); // "│ " prefix + 1 margin
             let mut rows = 0u16;

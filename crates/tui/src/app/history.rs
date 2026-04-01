@@ -517,7 +517,7 @@ impl App {
     }
 
     pub(super) fn maybe_auto_compact(&mut self) {
-        if !self.auto_compact {
+        if !self.settings.auto_compact {
             return;
         }
         let Some(ctx) = self.context_window else {

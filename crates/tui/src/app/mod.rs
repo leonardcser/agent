@@ -93,14 +93,7 @@ pub struct App {
     pub session: session::Session,
     pub shared_session: Arc<Mutex<Option<Session>>>,
     pub context_window: Option<u32>,
-    pub auto_compact: bool,
-    pub show_tps: bool,
-    pub show_tokens: bool,
-    pub show_cost: bool,
-    pub show_prediction: bool,
-    pub show_slug: bool,
-    pub show_thinking: bool,
-    pub restrict_to_workspace: bool,
+    pub settings: state::ResolvedSettings,
     pub multi_agent: bool,
     /// Human-readable name for this agent.
     pub agent_id: String,
@@ -390,15 +383,7 @@ impl App {
         provider_type: String,
         permissions: Arc<Permissions>,
         engine: EngineHandle,
-        vim_from_config: bool,
-        auto_compact: bool,
-        show_tps: bool,
-        show_tokens: bool,
-        show_cost: bool,
-        input_prediction: bool,
-        task_slug: bool,
-        show_thinking: bool,
-        restrict_to_workspace: bool,
+        settings: state::ResolvedSettings,
         multi_agent: bool,
         reasoning_effort: protocol::ReasoningEffort,
         reasoning_cycle: Vec<protocol::ReasoningEffort>,
@@ -411,9 +396,8 @@ impl App {
     ) -> Self {
         let saved = state::State::load();
         let mode = saved.mode();
-        let vim_enabled = saved.vim_enabled() || vim_from_config;
         let mut input = InputState::new();
-        if vim_enabled {
+        if settings.vim {
             input.set_vim_enabled(true);
         }
         let theme_names: Vec<String> = crate::theme::PRESETS
@@ -444,11 +428,7 @@ impl App {
         let mut screen = Screen::new();
         screen.set_model_label(model.clone());
         screen.set_reasoning_effort(reasoning_effort);
-        screen.set_show_tps(show_tps);
-        screen.set_show_tokens(show_tokens);
-        screen.set_show_cost(show_cost);
-        screen.set_show_slug(task_slug);
-        screen.set_show_thinking(show_thinking);
+        screen.apply_settings(&settings);
 
         let cwd = std::env::current_dir()
             .ok()
@@ -481,14 +461,7 @@ impl App {
             session: session::Session::new(),
             shared_session,
             context_window: None,
-            auto_compact,
-            show_tps,
-            show_tokens,
-            show_cost,
-            show_prediction: input_prediction,
-            show_slug: task_slug,
-            show_thinking,
-            restrict_to_workspace,
+            settings,
             multi_agent,
             agent_id: String::new(),
             agents: Vec::new(),
@@ -525,17 +498,9 @@ impl App {
     }
 
     pub fn settings_state(&self) -> crate::input::SettingsState {
-        crate::input::SettingsState {
-            vim: self.input.vim_enabled(),
-            auto_compact: self.auto_compact,
-            show_tps: self.show_tps,
-            show_tokens: self.show_tokens,
-            show_cost: self.show_cost,
-            show_prediction: self.show_prediction,
-            show_slug: self.show_slug,
-            show_thinking: self.show_thinking,
-            restrict_to_workspace: self.restrict_to_workspace,
-        }
+        let mut s = self.settings.clone();
+        s.vim = self.input.vim_enabled();
+        s
     }
 
     // ── Unified event loop ───────────────────────────────────────────────
@@ -871,6 +836,7 @@ impl App {
                 let sync = scr.take_sync_started();
                 d.draw(scr.dialog_row(), sync, scr.backend());
                 self.screen.sync_dialog_anchor(d.anchor_row());
+                self.screen.draw_dialog_status_line();
             }
 
             // ── Wait for next event ──────────────────────────────────────
@@ -903,6 +869,7 @@ impl App {
                         let sync = scr.take_sync_started();
                         d.draw(scr.dialog_row(), sync, scr.backend());
                         self.screen.sync_dialog_anchor(d.anchor_row());
+                        self.screen.draw_dialog_status_line();
                     }
                 }
 
@@ -933,6 +900,7 @@ impl App {
                         let scr = &mut self.screen;
                         let sync = scr.take_sync_started();
                         d.draw(scr.dialog_row(), sync, scr.backend());
+                        self.screen.draw_dialog_status_line();
                     }
                 }
 
