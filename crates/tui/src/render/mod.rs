@@ -60,8 +60,11 @@ impl RenderCache {
         use flate2::write::DeflateEncoder;
         use flate2::Compression;
 
-        let payload_size: usize =
-            7 + self.entries.iter().map(|e| 7 + e.bytes.len()).sum::<usize>();
+        let payload_size: usize = 7 + self
+            .entries
+            .iter()
+            .map(|e| 7 + e.bytes.len())
+            .sum::<usize>();
         let mut payload = Vec::with_capacity(payload_size);
         payload.extend_from_slice(&self.width.to_le_bytes());
         payload.push(self.show_thinking as u8);
@@ -74,7 +77,7 @@ impl RenderCache {
         }
 
         let mut out = Vec::with_capacity(4 + payload.len() / 4);
-        out.extend_from_slice(b"RCz1");
+        out.extend_from_slice(b"RCz2");
         let mut enc = DeflateEncoder::new(out, Compression::fast());
         std::io::Write::write_all(&mut enc, &payload).ok();
         enc.finish().unwrap_or_default()
@@ -87,7 +90,7 @@ impl RenderCache {
         if data.len() < 4 {
             return None;
         }
-        let payload = if &data[0..4] == b"RCz1" {
+        let payload = if &data[0..4] == b"RCz2" {
             let mut dec = DeflateDecoder::new(&data[4..]);
             let mut buf = Vec::new();
             dec.read_to_end(&mut buf).ok()?;
@@ -602,15 +605,18 @@ pub enum Throbber {
 
 struct BlockHistory {
     blocks: Vec<Block>,
-    /// Cached row count for each block (from its last render).
-    row_counts: Vec<u16>,
-    /// Cached rendered bytes for each block (scroll-mode ANSI output).
-    /// `None` means the block hasn't been cached yet.
-    cached_bytes: Vec<Option<Vec<u8>>>,
+    /// Cached row count for each block in thinking-visible mode.
+    row_counts_visible: Vec<u16>,
+    /// Cached row count for each block in thinking-hidden mode.
+    row_counts_hidden: Vec<u16>,
+    /// Cached rendered bytes for each block (scroll-mode ANSI output) in
+    /// thinking-visible mode.
+    cached_bytes_visible: Vec<Option<Vec<u8>>>,
+    /// Cached rendered bytes for each block (scroll-mode ANSI output) in
+    /// thinking-hidden mode.
+    cached_bytes_hidden: Vec<Option<Vec<u8>>>,
     /// Terminal width when caches were built. Mismatch invalidates all caches.
     cache_width: usize,
-    /// `show_thinking` flag when caches were built.
-    cache_show_thinking: bool,
     flushed: usize,
     last_block_rows: u16,
     /// When true, the leading gap of the next unflushed block is suppressed.
@@ -622,10 +628,11 @@ impl BlockHistory {
     fn new() -> Self {
         Self {
             blocks: Vec::new(),
-            row_counts: Vec::new(),
-            cached_bytes: Vec::new(),
+            row_counts_visible: Vec::new(),
+            row_counts_hidden: Vec::new(),
+            cached_bytes_visible: Vec::new(),
+            cached_bytes_hidden: Vec::new(),
             cache_width: 0,
-            cache_show_thinking: true,
             flushed: 0,
             last_block_rows: 0,
             suppress_leading_gap: false,
@@ -634,8 +641,10 @@ impl BlockHistory {
 
     fn push(&mut self, block: Block) {
         self.blocks.push(block);
-        self.row_counts.push(0);
-        self.cached_bytes.push(None);
+        self.row_counts_visible.push(0);
+        self.row_counts_hidden.push(0);
+        self.cached_bytes_visible.push(None);
+        self.cached_bytes_hidden.push(None);
     }
 
     fn has_unflushed(&self) -> bool {
@@ -644,15 +653,52 @@ impl BlockHistory {
 
     fn clear(&mut self) {
         self.blocks.clear();
-        self.row_counts.clear();
-        self.cached_bytes.clear();
+        self.row_counts_visible.clear();
+        self.row_counts_hidden.clear();
+        self.cached_bytes_visible.clear();
+        self.cached_bytes_hidden.clear();
         self.flushed = 0;
         self.last_block_rows = 0;
     }
 
     fn invalidate_caches(&mut self) {
-        for c in &mut self.cached_bytes {
+        for c in &mut self.cached_bytes_visible {
             *c = None;
+        }
+        for c in &mut self.cached_bytes_hidden {
+            *c = None;
+        }
+    }
+
+    fn row_counts(&self, show_thinking: bool) -> &[u16] {
+        if show_thinking {
+            &self.row_counts_visible
+        } else {
+            &self.row_counts_hidden
+        }
+    }
+
+    fn row_counts_mut(&mut self, show_thinking: bool) -> &mut Vec<u16> {
+        if show_thinking {
+            &mut self.row_counts_visible
+        } else {
+            &mut self.row_counts_hidden
+        }
+    }
+
+    fn cached_bytes_mut(&mut self, show_thinking: bool) -> &mut Vec<Option<Vec<u8>>> {
+        if show_thinking {
+            &mut self.cached_bytes_visible
+        } else {
+            &mut self.cached_bytes_hidden
+        }
+    }
+
+    fn cached_bytes(&self, show_thinking: bool) -> &[Option<Vec<u8>>] {
+        if show_thinking {
+            &self.cached_bytes_visible
+        } else {
+            &self.cached_bytes_hidden
         }
     }
 
@@ -670,11 +716,12 @@ impl BlockHistory {
 
     /// Find the earliest block index such that rendering from that index to
     /// the end stays within `max_lines`, using cached row counts.
-    fn redraw_start(&self, max_lines: u16) -> usize {
+    fn redraw_start(&self, max_lines: u16, show_thinking: bool) -> usize {
+        let row_counts = self.row_counts(show_thinking);
         let mut budget = max_lines;
         let mut start = self.blocks.len();
         for i in (0..self.blocks.len()).rev() {
-            let total = self.block_gap(i) + self.row_counts[i];
+            let total = self.block_gap(i) + row_counts[i];
             if total > budget {
                 break;
             }
@@ -686,8 +733,10 @@ impl BlockHistory {
 
     fn truncate(&mut self, idx: usize) {
         self.blocks.truncate(idx);
-        self.row_counts.truncate(idx);
-        self.cached_bytes.truncate(idx);
+        self.row_counts_visible.truncate(idx);
+        self.row_counts_hidden.truncate(idx);
+        self.cached_bytes_visible.truncate(idx);
+        self.cached_bytes_hidden.truncate(idx);
         self.flushed = self.flushed.min(idx);
     }
 
@@ -701,53 +750,49 @@ impl BlockHistory {
         }
         let use_cache = out.row.is_none();
 
-        // Invalidate caches when rendering parameters change.
-        if use_cache && (width != self.cache_width || show_thinking != self.cache_show_thinking) {
+        // Invalidate caches when terminal width changes.
+        if use_cache && width != self.cache_width {
             self.invalidate_caches();
             self.cache_width = width;
-            self.cache_show_thinking = show_thinking;
         }
 
         let mut total = 0u16;
         let last_idx = self.blocks.len().saturating_sub(1);
         let mut first = true;
         for i in self.flushed..self.blocks.len() {
-            // Skip gaps for hidden thinking blocks (they render 0 rows).
-            let is_hidden_thinking =
-                !show_thinking && matches!(self.blocks[i], Block::Thinking { .. });
-            let gap = if is_hidden_thinking || (first && self.suppress_leading_gap) {
+            let gap = if first && self.suppress_leading_gap {
                 0
             } else {
                 self.block_gap(i)
             };
-            first = first && is_hidden_thinking;
+            first = false;
             for _ in 0..gap {
                 crlf(out);
             }
 
             if use_cache {
-                if let Some(ref cached) = self.cached_bytes[i] {
-                    // Replay cached bytes — skip render_block entirely.
-                    let _ = out.write_all(cached);
+                let cached = self.cached_bytes(show_thinking)[i].clone();
+                if let Some(cached) = cached {
+                    let _ = out.write_all(&cached);
                     out.invalidate_style();
                 } else {
-                    // Render into a capture buffer, cache, and write to output.
                     let mut buf = RenderOut::buffer();
                     let rows = render_block(&mut buf, &self.blocks[i], width, show_thinking);
                     let bytes = buf.into_bytes();
                     let _ = out.write_all(&bytes);
                     out.invalidate_style();
-                    self.cached_bytes[i] = Some(bytes);
-                    self.row_counts[i] = rows;
+                    self.cached_bytes_mut(show_thinking)[i] = Some(bytes);
+                    self.row_counts_mut(show_thinking)[i] = rows;
                 }
             } else {
                 let rows = render_block(out, &self.blocks[i], width, show_thinking);
-                self.row_counts[i] = rows;
+                self.row_counts_mut(show_thinking)[i] = rows;
             }
 
-            total += gap + self.row_counts[i];
+            let rows = self.row_counts(show_thinking)[i];
+            total += gap + rows;
             if i == last_idx {
-                self.last_block_rows = self.row_counts[i] + gap;
+                self.last_block_rows = rows + gap;
             }
         }
         self.suppress_leading_gap = false;
@@ -1511,29 +1556,8 @@ impl Screen {
                     content: trimmed.to_string(),
                 });
             }
-            // When thinking is hidden, commit a summary block for the
-            // entire trailing thinking sequence (like tables: silent
-            // accumulation → committed summary).
-            if !self.show_thinking {
-                self.commit_thinking_summary();
-            }
             self.prompt.dirty = true;
         }
-    }
-
-    /// Aggregate trailing hidden Thinking blocks into a single Hint summary.
-    fn commit_thinking_summary(&mut self) {
-        let combined = collect_trailing_thinking(&self.history.blocks);
-        if combined.is_empty() {
-            return;
-        }
-        let (mut label, line_count) = thinking_summary(&combined);
-        if label == "thinking" {
-            label = "thought".to_string();
-        }
-        self.history.push(Block::Hint {
-            content: format!(" \u{2502} {label} ({line_count} lines)"),
-        });
     }
 
     /// Gap before a thinking summary overlay, skipping over hidden thinking blocks.
@@ -2199,7 +2223,9 @@ impl Screen {
             row
         };
         let (w, height) = self.size();
-        let start_idx = self.history.redraw_start(MAX_REDRAW_LINES);
+        let start_idx = self
+            .history
+            .redraw_start(MAX_REDRAW_LINES, self.show_thinking);
         self.history.flushed = start_idx;
         self.history.last_block_rows = 0;
         let block_rows = self
@@ -2264,9 +2290,9 @@ impl Screen {
             return None;
         }
         let entries = h
-            .cached_bytes
+            .cached_bytes(self.show_thinking)
             .iter()
-            .zip(h.row_counts.iter())
+            .zip(h.row_counts(self.show_thinking).iter())
             .map(|(bytes, &rows)| RenderCacheEntry {
                 cached: bytes.is_some(),
                 row_count: rows,
@@ -2275,7 +2301,7 @@ impl Screen {
             .collect();
         Some(RenderCache {
             width: h.cache_width as u16,
-            show_thinking: h.cache_show_thinking,
+            show_thinking: self.show_thinking,
             entries,
         })
     }
@@ -2286,13 +2312,12 @@ impl Screen {
             return;
         }
         h.cache_width = cache.width as usize;
-        h.cache_show_thinking = cache.show_thinking;
         for (i, entry) in cache.entries.into_iter().enumerate() {
             if !entry.cached {
                 continue;
             }
-            h.row_counts[i] = entry.row_count;
-            h.cached_bytes[i] = Some(entry.bytes);
+            h.row_counts_mut(cache.show_thinking)[i] = entry.row_count;
+            h.cached_bytes_mut(cache.show_thinking)[i] = Some(entry.bytes);
         }
     }
 
@@ -2836,15 +2861,8 @@ impl Screen {
         let menu_rows = state.menu_rows();
         let comp_total = if menu_rows > 0 {
             menu_rows
-        } else if let Some(c) = state.completer.as_ref() {
-            let visible = c.results.len().min(c.max_visible_rows());
-            if visible == 0 && c.is_picker() {
-                1
-            } else {
-                visible
-            }
         } else {
-            0
+            completion_reserved_rows(state.completer.as_ref())
         };
         let mut comp_rows = comp_total;
 
@@ -3989,6 +4007,25 @@ fn render_styled_chars(
     }
 }
 
+fn completion_layout(completer: &crate::completer::Completer) -> (usize, usize, usize) {
+    let show_hints = completer.kind == crate::completer::CompleterKind::Settings;
+    let hint_rows = usize::from(show_hints) * 2;
+    let empty_gap = usize::from(show_hints);
+    let list_rows = completer.max_visible_rows();
+    (list_rows, hint_rows, empty_gap)
+}
+
+fn completion_reserved_rows(completer: Option<&crate::completer::Completer>) -> usize {
+    let Some(comp) = completer else {
+        return 0;
+    };
+    let (list_rows, hint_rows, empty_gap) = completion_layout(comp);
+    if list_rows == 0 {
+        return 0;
+    }
+    list_rows + hint_rows + empty_gap
+}
+
 fn draw_completions(
     out: &mut RenderOut,
     completer: Option<&crate::completer::Completer>,
@@ -4004,9 +4041,9 @@ fn draw_completions(
         return 0;
     }
 
-    let show_hints = comp.kind == CompleterKind::Settings;
-    let hint_rows = usize::from(show_hints) * 2;
-    let list_rows = max_rows.saturating_sub(hint_rows);
+    let (_, hint_rows, empty_gap) = completion_layout(comp);
+    let show_hints = hint_rows > 0;
+    let list_rows = max_rows.saturating_sub(hint_rows + empty_gap);
 
     if comp.results.is_empty() {
         if comp.is_picker() {
@@ -4014,9 +4051,10 @@ fn draw_completions(
             let _ = out.queue(Print("  no results"));
             let _ = out.queue(SetAttribute(Attribute::Reset));
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-            if show_hints && max_rows >= 3 {
+            if show_hints && max_rows > hint_rows + empty_gap {
+                let _ = out.queue(Print("\r\n"));
                 draw_settings_hints(out, vim_enabled);
-                return 3;
+                return 1 + empty_gap + hint_rows;
             }
             return 1;
         }
@@ -4381,5 +4419,111 @@ mod selection_tests {
         );
         assert_eq!(cursor_line, 0);
         assert_eq!(cursor_col, 8);
+    }
+
+    #[test]
+    fn settings_empty_results_leave_blank_line_before_hints() {
+        let state = crate::input::SettingsState {
+            vim: true,
+            auto_compact: false,
+            show_tps: true,
+            show_tokens: true,
+            show_cost: true,
+            show_prediction: true,
+            show_slug: true,
+            show_thinking: true,
+            restrict_to_workspace: false,
+        };
+        let mut comp = crate::completer::Completer::settings(&state);
+        comp.update_query("zzzzzz".into());
+        let mut out = RenderOut::buffer();
+        let rows = draw_completions(
+            &mut out,
+            Some(&comp),
+            completion_reserved_rows(Some(&comp)),
+            true,
+        );
+        let rendered = String::from_utf8(out.into_bytes()).unwrap();
+        assert!(rows >= 4);
+        assert!(
+            rendered.contains("no results")
+                && rendered.contains("\r\n\u{1b}[K\r\n")
+                && rendered.contains("ctrl+j/k: navigate"),
+            "rendered: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn completion_reserved_rows_is_stable_for_settings_filtering() {
+        let state = crate::input::SettingsState {
+            vim: true,
+            auto_compact: false,
+            show_tps: true,
+            show_tokens: true,
+            show_cost: true,
+            show_prediction: true,
+            show_slug: true,
+            show_thinking: true,
+            restrict_to_workspace: false,
+        };
+        let mut comp = crate::completer::Completer::settings(&state);
+        let rows_before = completion_reserved_rows(Some(&comp));
+        comp.update_query("thi".into());
+        let rows_after = completion_reserved_rows(Some(&comp));
+        assert_eq!(rows_before, rows_after);
+    }
+
+    #[test]
+    fn hidden_thinking_keeps_gap_above_summary() {
+        let mut history = BlockHistory::new();
+        history.push(Block::Text {
+            content: "hello".into(),
+        });
+        history.push(Block::Thinking {
+            content: "alpha\nbeta".into(),
+        });
+
+        let mut out = RenderOut::buffer();
+        history.render(&mut out, 80, false);
+        let rendered = String::from_utf8(out.into_bytes()).unwrap();
+        assert!(rendered.contains("hello"));
+        assert!(rendered.contains("thinking (2 lines)"));
+        assert!(
+            rendered.contains("hello\r\n\r\n │ thinking (2 lines)")
+                || rendered.contains("hello\n\n │ thinking (2 lines)"),
+            "rendered: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn import_render_cache_is_mode_specific() {
+        let mut screen = Screen::new();
+        screen.push(Block::Thinking {
+            content: "alpha\nbeta".into(),
+        });
+        screen.show_thinking = true;
+        screen.history.render(&mut RenderOut::buffer(), 80, true);
+        let visible = screen.export_render_cache().unwrap();
+        assert!(visible.show_thinking);
+        assert!(visible.entries[0].row_count > 0);
+
+        screen.show_thinking = false;
+        screen.history.flushed = 0;
+        screen.history.render(&mut RenderOut::buffer(), 80, false);
+        let hidden = screen.export_render_cache().unwrap();
+        assert!(!hidden.show_thinking);
+        assert!(hidden.entries[0].row_count > 0);
+
+        let mut restored = Screen::new();
+        restored.push(Block::Thinking {
+            content: "alpha\nbeta".into(),
+        });
+        restored.import_render_cache(hidden);
+        assert!(restored.history.row_counts(false)[0] > 0);
+        assert_eq!(restored.history.row_counts(true)[0], 0);
+
+        restored.import_render_cache(visible);
+        assert!(restored.history.row_counts(true)[0] > 0);
+        assert!(restored.history.row_counts(false)[0] > 0);
     }
 }

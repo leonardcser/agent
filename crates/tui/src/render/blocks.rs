@@ -83,7 +83,7 @@ pub(super) fn render_thinking_summary(
     animated: bool,
 ) -> u16 {
     let dots = if animated { animated_dots() } else { "" };
-    let summary = format!("{label} ({line_count} lines){dots}");
+    let summary = format!("{label} ({}){dots}", pluralize(line_count, "line", "lines"));
     let max_cols = width.saturating_sub(4).max(1);
     let mut rows = 0u16;
     for seg in &wrap_line(&summary, max_cols) {
@@ -252,7 +252,8 @@ pub(super) fn render_block(
         }
         Block::Thinking { content } => {
             if !show_thinking {
-                return 0;
+                let (label, line_count) = thinking_summary(content);
+                return render_thinking_summary(out, width, &label, line_count, false);
             }
             let max_cols = width.saturating_sub(4).max(1); // "│ " prefix + 1 margin
             let mut rows = 0u16;
@@ -260,7 +261,7 @@ pub(super) fn render_block(
                 let segments = wrap_line(line, max_cols);
                 for seg in &segments {
                     out.set_dim_italic();
-                    let _ = out.queue(Print(format!(" \u{2502} {}", seg)));
+                    let _ = out.queue(Print(format!(" │ {}", seg)));
                     out.reset_style();
                     crlf(out);
                     rows += 1;
@@ -296,6 +297,7 @@ pub(super) fn render_block(
         }
         Block::Hint { content } => {
             let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(SetAttribute(Attribute::Italic));
             let _ = out.queue(Print(content));
             let _ = out.queue(SetAttribute(Attribute::Reset));
             crlf(out);
@@ -706,7 +708,10 @@ fn print_tool_line(
         if total > MAX_TOOL_SUMMARY_ROWS {
             let skipped = total - MAX_TOOL_SUMMARY_ROWS;
             let _ = out.queue(Print(" ".repeat(ly.prefix_len)));
-            print_dim(out, &format!("... {} lines below", skipped));
+            print_dim(
+                out,
+                &format!("... {} below", pluralize(skipped, "line", "lines")),
+            );
             crlf(out);
             line_num += 1;
         }
@@ -1300,7 +1305,10 @@ fn render_wrapped_output(out: &mut RenderOut, content: &str, is_error: bool, wid
     let mut rows = 0u16;
     if total > MAX_VISUAL_ROWS {
         let skipped = total - MAX_VISUAL_ROWS;
-        print_dim(out, &format!("   ... {} lines above", skipped));
+        print_dim(
+            out,
+            &format!("   ... {} above", pluralize(skipped, "line", "lines")),
+        );
         crlf(out);
         rows += 1;
     }
@@ -1351,9 +1359,9 @@ fn result_preview(content: &str, max_lines: usize) -> String {
         lines.join(" | ")
     } else {
         format!(
-            "{} ... ({} lines)",
+            "{} ... ({})",
             lines[..max_lines].join(" | "),
-            lines.len()
+            pluralize(lines.len(), "line", "lines")
         )
     }
 }

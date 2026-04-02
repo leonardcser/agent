@@ -336,6 +336,7 @@ impl Completer {
             CompletionItem {
                 label: "show thinking".into(),
                 description: Some(on_off(state.show_thinking).into()),
+                search_terms: Some("thinking reasoning thought thoughts show_thinking".into()),
                 extra: Some("show_thinking".into()),
                 ..Default::default()
             },
@@ -434,8 +435,27 @@ impl Completer {
         }
     }
 
+    fn search_fields(&self, item: &CompletionItem) -> Vec<String> {
+        let mut fields = vec![item.label.to_lowercase()];
+        if let Some(terms) = item.search_terms.as_deref() {
+            if !terms.is_empty() {
+                fields.push(terms.to_lowercase());
+            }
+        }
+        if self.kind == CompleterKind::Settings {
+            if let Some(extra) = item.extra.as_deref() {
+                if !extra.is_empty() {
+                    fields.push(extra.to_lowercase());
+                }
+            }
+        }
+        fields
+    }
+
     pub fn update_query(&mut self, query: String) {
         self.query = query;
+        self.selected = 0;
+        self.selected_key = None;
         self.filter();
     }
 
@@ -460,38 +480,9 @@ impl Completer {
                 .filter_map(|(i, item)| {
                     let score = if self.kind == CompleterKind::History {
                         history_score(&item.label, &self.query, i)
-                    } else if self.kind == CompleterKind::Settings {
-                        let label = item.label.to_lowercase();
-                        let terms = item.search_terms.as_deref().unwrap_or("").to_lowercase();
-                        let label_words = split_words(&label);
-                        let terms_words = split_words(&terms);
-                        let label_prefix = label_words.iter().any(|w| w.starts_with(&query));
-                        let terms_exact = terms_words.iter().any(|w| *w == query);
-                        if label_prefix || terms_exact {
-                            Some(if label_prefix { 0 } else { 10 })
-                        } else if !query_words.is_empty()
-                            && query_words.iter().all(|qw| {
-                                label_words.iter().any(|lw| lw.starts_with(qw))
-                                    || terms_words.contains(qw)
-                            })
-                        {
-                            Some(5)
-                        } else {
-                            None
-                        }
                     } else {
-                        let haystack = match item.search_terms.as_deref() {
-                            Some(terms) => format!("{} {terms}", item.label.to_lowercase()),
-                            None => item.label.to_lowercase(),
-                        };
-                        if haystack.contains(&query)
-                            || (!query_words.is_empty()
-                                && query_words.iter().all(|word| haystack.contains(word)))
-                        {
-                            Some(0)
-                        } else {
-                            crate::fuzzy::fuzzy_score(&item.label, &self.query)
-                        }
+                        let fields = self.search_fields(item);
+                        query_match_score(&query, &query_words, &fields)
                     }?;
                     Some((score, i, item.clone()))
                 })
@@ -501,7 +492,7 @@ impl Completer {
         }
         if preserve_selection {
             self.restore_selected_key();
-        } else if self.selected >= self.results.len() {
+        } else {
             self.selected = 0;
         }
     }
@@ -527,6 +518,49 @@ impl Completer {
     pub fn accept(&self) -> Option<&str> {
         self.results.get(self.selected).map(|i| i.label.as_str())
     }
+}
+
+fn query_match_score(query: &str, query_words: &[&str], fields: &[String]) -> Option<u32> {
+    let field_words: Vec<Vec<&str>> = fields.iter().map(|field| split_words(field)).collect();
+    let exact_primary = field_words
+        .first()
+        .is_some_and(|words| words.contains(&query));
+    let exact_secondary = field_words
+        .iter()
+        .skip(1)
+        .any(|words| words.contains(&query));
+    let prefix_primary = field_words
+        .first()
+        .is_some_and(|words| words.iter().any(|word| word.starts_with(query)));
+    let prefix_secondary = field_words
+        .iter()
+        .skip(1)
+        .any(|words| words.iter().any(|word| word.starts_with(query)));
+    let all_words_match = !query_words.is_empty()
+        && query_words.iter().all(|word| {
+            field_words
+                .iter()
+                .any(|words| words.iter().any(|candidate| candidate.starts_with(word)))
+        });
+
+    if exact_primary {
+        return Some(0);
+    }
+    if exact_secondary {
+        return Some(1);
+    }
+    if prefix_primary {
+        return Some(2);
+    }
+    if prefix_secondary {
+        return Some(3);
+    }
+    if all_words_match {
+        return Some(4);
+    }
+
+    let haystack = fields.join(" ");
+    crate::fuzzy::fuzzy_score(&haystack, query).map(|score| score + 100)
 }
 
 fn history_score(text: &str, query: &str, recency_rank: usize) -> Option<u32> {
@@ -839,7 +873,6 @@ mod settings_tests {
     fn filter_auto_shows_auto_compact() {
         let mut comp = Completer::settings(&test_state(false));
         comp.update_query("auto".into());
-        assert_eq!(comp.results.len(), 1);
         assert_eq!(comp.results[0].extra.as_deref(), Some("auto_compact"));
         assert_eq!(comp.results[0].description.as_deref(), Some("off"));
     }
@@ -858,11 +891,65 @@ mod settings_tests {
     }
 
     #[test]
+    fn filter_vim_prefers_vim_mode() {
+        let mut comp = Completer::settings(&test_state(true));
+        comp.update_query("vim".into());
+        assert_eq!(comp.results[0].extra.as_deref(), Some("vim"));
+    }
+
+    #[test]
     fn filter_speed_shows_tps() {
         let mut comp = Completer::settings(&test_state(false));
         comp.update_query("speed".into());
-        assert_eq!(comp.results.len(), 1);
         assert_eq!(comp.results[0].extra.as_deref(), Some("show_tps"));
+    }
+
+    #[test]
+    fn filter_thinking_shows_show_thinking() {
+        let mut comp = Completer::settings(&test_state(false));
+        comp.update_query("thinking".into());
+        assert!(
+            comp.results
+                .iter()
+                .any(|item| item.extra.as_deref() == Some("show_thinking")),
+            "results: {:?}",
+            comp.results.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn filter_thinking_prefers_show_thinking() {
+        let mut comp = Completer::settings(&test_state(false));
+        comp.update_query("thinking".into());
+        assert_eq!(comp.results[0].extra.as_deref(), Some("show_thinking"));
+    }
+
+    #[test]
+    fn filter_query_change_from_selected_item_selects_first_visible_result() {
+        let mut comp = Completer::settings(&test_state(false));
+        comp.update_query("th".into());
+        let show_tps_idx = comp
+            .results
+            .iter()
+            .position(|item| item.extra.as_deref() == Some("show_tps"))
+            .unwrap();
+        comp.selected = show_tps_idx;
+
+        comp.update_query("thi".into());
+        assert_eq!(comp.selected, 0);
+        assert_eq!(comp.results[0].extra.as_deref(), Some("show_thinking"));
+    }
+
+    #[test]
+    fn update_query_resets_selection_to_first_result() {
+        let mut comp = Completer::settings(&test_state(false));
+        comp.move_down();
+        comp.move_down();
+        assert_ne!(comp.selected, 0);
+
+        comp.update_query("thinking".into());
+        assert_eq!(comp.selected, 0);
+        assert_eq!(comp.results[0].extra.as_deref(), Some("show_thinking"));
     }
 
     #[test]
@@ -891,7 +978,6 @@ mod settings_tests {
     fn accept_extra_on_filtered_single_result() {
         let mut comp = Completer::settings(&test_state(false));
         comp.update_query("auto".into());
-        assert_eq!(comp.results.len(), 1);
         assert_eq!(comp.selected, 0);
         let key = comp.accept_extra();
         assert_eq!(key, Some("auto_compact"));

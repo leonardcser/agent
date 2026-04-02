@@ -985,6 +985,7 @@ impl App {
                             self.screen.set_context_tokens(tokens);
                         }
                         self.screen.flush_blocks();
+                        self.persist_render_cache();
                         clear = false;
                     }
                 }
