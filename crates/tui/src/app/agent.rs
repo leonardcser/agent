@@ -980,7 +980,7 @@ impl App {
                 if let Some(id) = session_id {
                     if let Some(loaded) = session::load(&id) {
                         self.load_session(loaded);
-                        self.rebuild_screen_from_history();
+                        self.restore_screen();
                         if let Some(tokens) = self.session.context_tokens {
                             self.screen.set_context_tokens(tokens);
                         }

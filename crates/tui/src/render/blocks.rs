@@ -87,10 +87,9 @@ pub(super) fn render_thinking_summary(
     let max_cols = width.saturating_sub(4).max(1);
     let mut rows = 0u16;
     for seg in &wrap_line(&summary, max_cols) {
-        let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(SetAttribute(Attribute::Italic));
+        out.set_dim_italic();
         let _ = out.queue(Print(format!(" \u{2502} {}", seg)));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        out.reset_style();
         crlf(out);
         rows += 1;
     }
@@ -169,7 +168,20 @@ pub(super) fn render_block(
     width: usize,
     show_thinking: bool,
 ) -> u16 {
-    let _perf = crate::perf::begin("render_block");
+    let label = match block {
+        Block::User { .. } => "render:user",
+        Block::Thinking { .. } => "render:thinking",
+        Block::Text { .. } => "render:text",
+        Block::CodeLine { .. } => "render:code_line",
+        Block::ToolCall { .. } => "render:tool_call",
+        Block::Confirm { .. } => "render:confirm",
+        Block::Hint { .. } => "render:hint",
+        Block::Compacted { .. } => "render:compacted",
+        Block::Exec { .. } => "render:exec",
+        Block::AgentMessage { .. } => "render:agent_msg",
+        Block::Agent { .. } => "render:agent",
+    };
+    let _perf = crate::perf::begin(label);
     match block {
         Block::User { text, image_labels } => {
             let is_command = crate::completer::Completer::is_command(text.trim());
@@ -206,14 +218,14 @@ pub(super) fn render_block(
             } else {
                 0
             };
+            let user_bg = theme::user_bg();
             let mut rows = 0u16;
             for logical_line in &logical_lines {
                 if logical_line.is_empty() {
                     let fill = if block_w > 0 { block_w + 1 } else { 2 };
-                    let _ = out.queue(SetBackgroundColor(theme::user_bg()));
+                    out.set_bg(user_bg);
                     let _ = out.queue(Print(" ".repeat(fill)));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
-                    let _ = out.queue(ResetColor);
+                    out.reset_style();
                     crlf(out);
                     rows += 1;
                     continue;
@@ -226,13 +238,12 @@ pub(super) fn render_block(
                     } else {
                         1
                     };
-                    let _ = out.queue(SetBackgroundColor(theme::user_bg()));
-                    let _ = out.queue(SetAttribute(Attribute::Bold));
+                    out.set_bg(user_bg);
+                    out.set_bold();
                     let _ = out.queue(Print(" "));
                     print_user_highlights(out, chunk, image_labels, is_command);
                     let _ = out.queue(Print(" ".repeat(trailing)));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
-                    let _ = out.queue(ResetColor);
+                    out.reset_style();
                     crlf(out);
                     rows += 1;
                 }
@@ -248,10 +259,9 @@ pub(super) fn render_block(
             for line in content.lines() {
                 let segments = wrap_line(line, max_cols);
                 for seg in &segments {
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
-                    let _ = out.queue(SetAttribute(Attribute::Italic));
+                    out.set_dim_italic();
                     let _ = out.queue(Print(format!(" \u{2502} {}", seg)));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                    out.reset_style();
                     crlf(out);
                     rows += 1;
                 }
@@ -930,6 +940,7 @@ pub(crate) fn render_markdown_inner(
     dim: bool,
     bctx: Option<&super::BoxContext>,
 ) -> u16 {
+    let _perf = crate::perf::begin("render_markdown");
     let max_cols = if let Some(b) = bctx {
         b.inner_w
     } else {
@@ -1272,6 +1283,7 @@ fn render_plan_output(
 }
 
 fn render_wrapped_output(out: &mut RenderOut, content: &str, is_error: bool, width: usize) -> u16 {
+    let _perf = crate::perf::begin("render_wrapped_output");
     const MAX_VISUAL_ROWS: usize = 20;
     let max_cols = width.saturating_sub(4); // "   " prefix + 1 margin
 

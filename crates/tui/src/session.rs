@@ -223,6 +223,21 @@ pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
     }
 }
 
+/// Save the render cache alongside the session.
+pub fn save_render_cache(session: &Session, cache: &crate::render::RenderCache) {
+    let session_dir = dir_for(session);
+    let _ = fs::create_dir_all(&session_dir);
+    let path = session_dir.join("render_cache.bin");
+    let _ = fs::write(path, cache.serialize());
+}
+
+/// Load the render cache for a session.
+pub fn load_render_cache(session: &Session) -> Option<crate::render::RenderCache> {
+    let path = dir_for(session).join("render_cache.bin");
+    let data = fs::read(path).ok()?;
+    crate::render::RenderCache::deserialize(&data)
+}
+
 /// Load a session by exact ID or unique prefix (git-style).
 pub fn load(id_or_prefix: &str) -> Option<Session> {
     let id = resolve_prefix(id_or_prefix)?;

@@ -39,6 +39,102 @@ use blocks::{
 /// Older blocks beyond this limit are dropped to avoid flooding the terminal.
 const MAX_REDRAW_LINES: u16 = 2000;
 
+/// Persisted render cache: pre-rendered ANSI bytes for each block.
+/// Stored alongside the session so resuming skips expensive rendering
+/// (syntax highlighting, file reads for diffs, etc.).
+pub struct RenderCache {
+    pub width: u16,
+    pub show_thinking: bool,
+    pub entries: Vec<RenderCacheEntry>,
+}
+
+pub struct RenderCacheEntry {
+    /// True if this block was actually rendered (even if to 0 bytes).
+    pub cached: bool,
+    pub row_count: u16,
+    pub bytes: Vec<u8>,
+}
+
+impl RenderCache {
+    pub fn serialize(&self) -> Vec<u8> {
+        use flate2::write::DeflateEncoder;
+        use flate2::Compression;
+
+        let payload_size: usize =
+            7 + self.entries.iter().map(|e| 7 + e.bytes.len()).sum::<usize>();
+        let mut payload = Vec::with_capacity(payload_size);
+        payload.extend_from_slice(&self.width.to_le_bytes());
+        payload.push(self.show_thinking as u8);
+        payload.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
+        for entry in &self.entries {
+            payload.push(entry.cached as u8);
+            payload.extend_from_slice(&entry.row_count.to_le_bytes());
+            payload.extend_from_slice(&(entry.bytes.len() as u32).to_le_bytes());
+            payload.extend_from_slice(&entry.bytes);
+        }
+
+        let mut out = Vec::with_capacity(4 + payload.len() / 4);
+        out.extend_from_slice(b"RCz1");
+        let mut enc = DeflateEncoder::new(out, Compression::fast());
+        std::io::Write::write_all(&mut enc, &payload).ok();
+        enc.finish().unwrap_or_default()
+    }
+
+    pub fn deserialize(data: &[u8]) -> Option<Self> {
+        use flate2::read::DeflateDecoder;
+        use std::io::Read;
+
+        if data.len() < 4 {
+            return None;
+        }
+        let payload = if &data[0..4] == b"RCz1" {
+            let mut dec = DeflateDecoder::new(&data[4..]);
+            let mut buf = Vec::new();
+            dec.read_to_end(&mut buf).ok()?;
+            buf
+        } else {
+            return None;
+        };
+
+        if payload.len() < 7 {
+            return None;
+        }
+        let width = u16::from_le_bytes([payload[0], payload[1]]);
+        let show_thinking = payload[2] != 0;
+        let num = u32::from_le_bytes([payload[3], payload[4], payload[5], payload[6]]) as usize;
+        let mut pos = 7;
+        let mut entries = Vec::with_capacity(num);
+        for _ in 0..num {
+            if pos + 7 > payload.len() {
+                return None;
+            }
+            let cached = payload[pos] != 0;
+            let row_count = u16::from_le_bytes([payload[pos + 1], payload[pos + 2]]);
+            let len = u32::from_le_bytes([
+                payload[pos + 3],
+                payload[pos + 4],
+                payload[pos + 5],
+                payload[pos + 6],
+            ]) as usize;
+            pos += 7;
+            if pos + len > payload.len() {
+                return None;
+            }
+            entries.push(RenderCacheEntry {
+                cached,
+                row_count,
+                bytes: payload[pos..pos + len].to_vec(),
+            });
+            pos += len;
+        }
+        Some(RenderCache {
+            width,
+            show_thinking,
+            entries,
+        })
+    }
+}
+
 /// Parameters for rendering the prompt section in `draw_frame`.
 /// When `None` is passed instead, only content (blocks + active tool) is drawn.
 pub struct FramePrompt<'a> {
@@ -84,6 +180,16 @@ pub struct RenderOut {
     pub out: Box<dyn Write>,
     pub row: Option<u16>,
     capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+    /// Tracked foreground color (for skipping redundant style commands).
+    cur_fg: Option<Color>,
+    /// Tracked background color.
+    cur_bg: Option<Color>,
+    /// Tracked bold attribute.
+    cur_bold: bool,
+    /// Tracked dim attribute.
+    cur_dim: bool,
+    /// Tracked italic attribute.
+    cur_italic: bool,
 }
 
 impl RenderOut {
@@ -91,9 +197,14 @@ impl RenderOut {
     /// Dialogs switch to overlay mode by setting `out.row = Some(r)`.
     pub fn scroll() -> Self {
         Self {
-            out: Box::new(BufWriter::with_capacity(1 << 16, io::stdout())),
+            out: Box::new(BufWriter::with_capacity(1 << 20, io::stdout())),
             row: None,
             capture: None,
+            cur_fg: None,
+            cur_bg: None,
+            cur_bold: false,
+            cur_dim: false,
+            cur_italic: false,
         }
     }
 
@@ -103,6 +214,11 @@ impl RenderOut {
             out: Box::new(SharedWriter(sink)),
             row: None,
             capture: None,
+            cur_fg: None,
+            cur_bg: None,
+            cur_bold: false,
+            cur_dim: false,
+            cur_italic: false,
         }
     }
 
@@ -113,6 +229,11 @@ impl RenderOut {
             out: Box::new(SharedWriter(buf.clone())),
             row: None,
             capture: Some(buf),
+            cur_fg: None,
+            cur_bg: None,
+            cur_bold: false,
+            cur_dim: false,
+            cur_italic: false,
         }
     }
 
@@ -123,6 +244,81 @@ impl RenderOut {
             .and_then(|arc| std::sync::Arc::try_unwrap(arc).ok())
             .and_then(|m| m.into_inner().ok())
             .unwrap_or_default()
+    }
+
+    pub fn set_fg(&mut self, color: Color) {
+        if self.cur_fg != Some(color) {
+            self.cur_fg = Some(color);
+            let _ = self.queue(SetForegroundColor(color));
+        }
+    }
+
+    pub fn set_bg(&mut self, color: Color) {
+        if self.cur_bg != Some(color) {
+            self.cur_bg = Some(color);
+            let _ = self.queue(SetBackgroundColor(color));
+        }
+    }
+
+    pub fn set_bold(&mut self) {
+        if !self.cur_bold {
+            self.cur_bold = true;
+            let _ = self.queue(SetAttribute(Attribute::Bold));
+        }
+    }
+
+    pub fn set_dim(&mut self) {
+        if !self.cur_dim {
+            self.cur_dim = true;
+            let _ = self.queue(SetAttribute(Attribute::Dim));
+        }
+    }
+
+    pub fn set_italic(&mut self) {
+        if !self.cur_italic {
+            self.cur_italic = true;
+            let _ = self.queue(SetAttribute(Attribute::Italic));
+        }
+    }
+
+    /// Set dim+italic, skipping if both are already active.
+    pub fn set_dim_italic(&mut self) {
+        if self.cur_dim && self.cur_italic {
+            return;
+        }
+        if !self.cur_dim {
+            self.cur_dim = true;
+            let _ = self.queue(SetAttribute(Attribute::Dim));
+        }
+        if !self.cur_italic {
+            self.cur_italic = true;
+            let _ = self.queue(SetAttribute(Attribute::Italic));
+        }
+    }
+
+    pub fn reset_style(&mut self) {
+        if self.cur_fg.is_some()
+            || self.cur_bg.is_some()
+            || self.cur_bold
+            || self.cur_dim
+            || self.cur_italic
+        {
+            let _ = self.queue(SetAttribute(Attribute::Reset));
+            let _ = self.queue(ResetColor);
+            self.cur_fg = None;
+            self.cur_bg = None;
+            self.cur_bold = false;
+            self.cur_dim = false;
+            self.cur_italic = false;
+        }
+    }
+
+    pub fn invalidate_style(&mut self) {
+        self.cur_fg = None;
+        self.cur_bg = None;
+        self.cur_bold = false;
+        self.cur_dim = false;
+        self.cur_italic = false;
     }
 }
 
@@ -408,6 +604,13 @@ struct BlockHistory {
     blocks: Vec<Block>,
     /// Cached row count for each block (from its last render).
     row_counts: Vec<u16>,
+    /// Cached rendered bytes for each block (scroll-mode ANSI output).
+    /// `None` means the block hasn't been cached yet.
+    cached_bytes: Vec<Option<Vec<u8>>>,
+    /// Terminal width when caches were built. Mismatch invalidates all caches.
+    cache_width: usize,
+    /// `show_thinking` flag when caches were built.
+    cache_show_thinking: bool,
     flushed: usize,
     last_block_rows: u16,
     /// When true, the leading gap of the next unflushed block is suppressed.
@@ -420,6 +623,9 @@ impl BlockHistory {
         Self {
             blocks: Vec::new(),
             row_counts: Vec::new(),
+            cached_bytes: Vec::new(),
+            cache_width: 0,
+            cache_show_thinking: true,
             flushed: 0,
             last_block_rows: 0,
             suppress_leading_gap: false,
@@ -429,6 +635,7 @@ impl BlockHistory {
     fn push(&mut self, block: Block) {
         self.blocks.push(block);
         self.row_counts.push(0);
+        self.cached_bytes.push(None);
     }
 
     fn has_unflushed(&self) -> bool {
@@ -438,8 +645,15 @@ impl BlockHistory {
     fn clear(&mut self) {
         self.blocks.clear();
         self.row_counts.clear();
+        self.cached_bytes.clear();
         self.flushed = 0;
         self.last_block_rows = 0;
+    }
+
+    fn invalidate_caches(&mut self) {
+        for c in &mut self.cached_bytes {
+            *c = None;
+        }
     }
 
     /// Gap (in rows) before the block at `i`, based on adjacency rules.
@@ -473,14 +687,27 @@ impl BlockHistory {
     fn truncate(&mut self, idx: usize) {
         self.blocks.truncate(idx);
         self.row_counts.truncate(idx);
+        self.cached_bytes.truncate(idx);
         self.flushed = self.flushed.min(idx);
     }
 
     /// Render unflushed blocks. Returns total rows printed.
+    ///
+    /// In scroll mode (`out.row` is `None`), rendered bytes are cached per
+    /// block and replayed on subsequent redraws instead of re-rendering.
     fn render(&mut self, out: &mut RenderOut, width: usize, show_thinking: bool) -> u16 {
         if !self.has_unflushed() {
             return 0;
         }
+        let use_cache = out.row.is_none();
+
+        // Invalidate caches when rendering parameters change.
+        if use_cache && (width != self.cache_width || show_thinking != self.cache_show_thinking) {
+            self.invalidate_caches();
+            self.cache_width = width;
+            self.cache_show_thinking = show_thinking;
+        }
+
         let mut total = 0u16;
         let last_idx = self.blocks.len().saturating_sub(1);
         let mut first = true;
@@ -497,11 +724,30 @@ impl BlockHistory {
             for _ in 0..gap {
                 crlf(out);
             }
-            let rows = render_block(out, &self.blocks[i], width, show_thinking);
-            self.row_counts[i] = rows;
-            total += gap + rows;
+
+            if use_cache {
+                if let Some(ref cached) = self.cached_bytes[i] {
+                    // Replay cached bytes — skip render_block entirely.
+                    let _ = out.write_all(cached);
+                    out.invalidate_style();
+                } else {
+                    // Render into a capture buffer, cache, and write to output.
+                    let mut buf = RenderOut::buffer();
+                    let rows = render_block(&mut buf, &self.blocks[i], width, show_thinking);
+                    let bytes = buf.into_bytes();
+                    let _ = out.write_all(&bytes);
+                    out.invalidate_style();
+                    self.cached_bytes[i] = Some(bytes);
+                    self.row_counts[i] = rows;
+                }
+            } else {
+                let rows = render_block(out, &self.blocks[i], width, show_thinking);
+                self.row_counts[i] = rows;
+            }
+
+            total += gap + self.row_counts[i];
             if i == last_idx {
-                self.last_block_rows = rows + gap;
+                self.last_block_rows = self.row_counts[i] + gap;
             }
         }
         self.suppress_leading_gap = false;
@@ -1770,6 +2016,10 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
+    pub fn is_dirty(&self) -> bool {
+        self.prompt.dirty || self.history.has_unflushed()
+    }
+
     /// Center the input viewport on the cursor (vim `zz`).
     pub fn center_input_scroll(&mut self) {
         // The actual centering happens in draw_prompt_sections using a
@@ -2006,6 +2256,44 @@ impl Screen {
 
     pub fn has_history(&self) -> bool {
         !self.history.blocks.is_empty()
+    }
+
+    pub fn export_render_cache(&self) -> Option<RenderCache> {
+        let h = &self.history;
+        if h.blocks.is_empty() || h.cache_width == 0 {
+            return None;
+        }
+        let entries = h
+            .cached_bytes
+            .iter()
+            .zip(h.row_counts.iter())
+            .map(|(bytes, &rows)| RenderCacheEntry {
+                cached: bytes.is_some(),
+                row_count: rows,
+                bytes: bytes.as_ref().cloned().unwrap_or_default(),
+            })
+            .collect();
+        Some(RenderCache {
+            width: h.cache_width as u16,
+            show_thinking: h.cache_show_thinking,
+            entries,
+        })
+    }
+
+    pub fn import_render_cache(&mut self, cache: RenderCache) {
+        let h = &mut self.history;
+        if cache.entries.len() != h.blocks.len() {
+            return;
+        }
+        h.cache_width = cache.width as usize;
+        h.cache_show_thinking = cache.show_thinking;
+        for (i, entry) in cache.entries.into_iter().enumerate() {
+            if !entry.cached {
+                continue;
+            }
+            h.row_counts[i] = entry.row_count;
+            h.cached_bytes[i] = Some(entry.bytes);
+        }
     }
 
     /// Returns (block_index, full_text) for each User block.

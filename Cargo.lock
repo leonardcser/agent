@@ -2567,6 +2567,7 @@ dependencies = [
  "base64",
  "crossterm",
  "engine",
+ "flate2",
  "futures-core",
  "glob",
  "libc",

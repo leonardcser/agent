@@ -523,7 +523,7 @@ impl App {
         let _ = io::stdout().execute(EnableBracketedPaste);
 
         if !self.history.is_empty() {
-            self.rebuild_screen_from_history();
+            self.restore_screen();
             if let Some(tokens) = self.session.context_tokens {
                 self.screen.set_context_tokens(tokens);
             }
@@ -572,6 +572,8 @@ impl App {
             last_keypress: None,
         };
         let mut pending_dialogs: VecDeque<DeferredDialog> = VecDeque::new();
+        let mut last_frame = Instant::now();
+        const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
         'main: loop {
             // ── Background polls ─────────────────────────────────────────
@@ -827,7 +829,11 @@ impl App {
             }
 
             // ── Render ───────────────────────────────────────────────────
+            let will_render = self.screen.is_dirty();
             let redirtied = self.tick(agent.is_some(), active_dialog.is_some());
+            if will_render {
+                last_frame = Instant::now();
+            }
             if let Some(d) = active_dialog.as_mut() {
                 if redirtied {
                     d.mark_dirty();
@@ -863,6 +869,7 @@ impl App {
 
                     // Render immediately after terminal events for responsive typing.
                     let redirtied = self.tick(agent.is_some(), active_dialog.is_some());
+                    last_frame = Instant::now(); // Always update — terminal events trigger real renders
                     if let Some(d) = active_dialog.as_mut() {
                         if redirtied { d.mark_dirty(); }
                         let scr = &mut self.screen;
@@ -894,14 +901,9 @@ impl App {
                         // No active turn — handle out-of-band events.
                         self.handle_engine_event_idle(ev);
                     }
-                    let redirtied = self.tick(agent.is_some(), active_dialog.is_some());
-                    if let Some(d) = active_dialog.as_mut() {
-                        if redirtied { d.mark_dirty(); }
-                        let scr = &mut self.screen;
-                        let sync = scr.take_sync_started();
-                        d.draw(scr.dialog_row(), sync, scr.backend());
-                        self.screen.draw_dialog_status_line();
-                    }
+                    // Don't render here — deferred to the frame timer or
+                    // top-of-loop render to batch rapid engine events into
+                    // fewer frames and reduce flicker.
                 }
 
                 Some(ev) = async {
@@ -923,23 +925,39 @@ impl App {
                     }
                 }
 
-                _ = tokio::time::sleep(Duration::from_millis(80)) => {
-                    // Timer tick for spinner animation.
-                    // Mark dialog dirty so elapsed timers update live (e.g. PsDialog).
+                _ = tokio::time::sleep({
+                    // When the screen is dirty (deferred engine events), fire
+                    // at the next frame deadline (~60 fps).  When idle, use a
+                    // longer interval for spinner / timer animations.
+                    let since = last_frame.elapsed();
+                    if self.screen.is_dirty() {
+                        MIN_FRAME_INTERVAL.saturating_sub(since)
+                    } else {
+                        Duration::from_millis(80).saturating_sub(since)
+                    }
+                }) => {
+                    // Mark time-based animations dirty.
                     if let Some(d) = active_dialog.as_mut() {
                         d.mark_dirty();
                     }
-                    // Animate btw "thinking..." dots.
                     if self.screen.has_btw() {
                         self.screen.mark_dirty();
                     }
-                    // Redraw active exec for elapsed time update.
                     if self.screen.has_active_exec() {
                         self.screen.mark_dirty();
                     }
-                    // Redraw if any background agent's block may need updating.
                     if self.agents.iter().any(|a| a.status == AgentTrackStatus::Working) {
                         self.screen.mark_dirty();
+                    }
+                    // Render deferred engine events + animations.
+                    let redirtied = self.tick(agent.is_some(), active_dialog.is_some());
+                    last_frame = Instant::now();
+                    if let Some(d) = active_dialog.as_mut() {
+                        if redirtied { d.mark_dirty(); }
+                        let scr = &mut self.screen;
+                        let sync = scr.take_sync_started();
+                        d.draw(scr.dialog_row(), sync, scr.backend());
+                        self.screen.draw_dialog_status_line();
                     }
                 }
             }

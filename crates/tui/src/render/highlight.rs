@@ -42,6 +42,7 @@ pub(crate) fn render_code_block(
     dim: bool,
     bctx: Option<&super::BoxContext>,
 ) -> u16 {
+    let _perf = crate::perf::begin("render_code_block");
     let ext = match lang {
         "" => "txt",
         "js" | "javascript" => "js",
@@ -116,6 +117,7 @@ pub(super) fn render_highlighted(
     skip: u16,
     max_rows: u16,
 ) -> u16 {
+    let _perf = crate::perf::begin("render_highlighted");
     let indent = "   ";
     let theme = syntax_theme();
     let gutter_width = format!("{}", lines.len()).len();
@@ -165,6 +167,7 @@ pub(super) fn print_syntax_file(
     skip: u16,
     max_rows: u16,
 ) -> u16 {
+    let _perf = crate::perf::begin("print_syntax_file");
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -303,6 +306,7 @@ pub(super) fn print_inline_diff(
     skip: u16,
     max_rows: u16,
 ) -> u16 {
+    let _perf = crate::perf::begin("print_inline_diff");
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())

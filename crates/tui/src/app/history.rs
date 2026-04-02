@@ -204,7 +204,15 @@ impl App {
 
     // ── History / session ────────────────────────────────────────────────
 
-    pub fn rebuild_screen_from_history(&mut self) {
+    /// Rebuild the screen from session history and import persisted render cache.
+    pub fn restore_screen(&mut self) {
+        self.rebuild_screen_from_history();
+        if let Some(cache) = session::load_render_cache(&self.session) {
+            self.screen.import_render_cache(cache);
+        }
+    }
+
+    fn rebuild_screen_from_history(&mut self) {
         self.screen.clear();
         if let Some(ref slug) = self.session.slug {
             self.screen.set_task_label(slug.clone());
@@ -419,6 +427,9 @@ impl App {
         self.session.turn_metas = self.turn_metas.clone();
         self.sync_session_snapshot();
         session::save(&self.session, &self.input.store);
+        if let Some(cache) = self.screen.export_render_cache() {
+            session::save_render_cache(&self.session, &cache);
+        }
     }
 
     pub(super) fn maybe_generate_title(&mut self, current_message: Option<&str>) {
