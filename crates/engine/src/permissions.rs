@@ -347,6 +347,9 @@ impl Permissions {
         let escalate_redirect = matches!(mode, Mode::Normal | Mode::Plan);
         let subcmds = split_shell_commands(command);
         if subcmds.len() <= 1 {
+            if is_cd_command(command) {
+                return Decision::Allow;
+            }
             let d = check_ruleset(&perms.bash, command);
             if escalate_redirect && d == Decision::Allow && has_output_redirection(command) {
                 return Decision::Ask;
@@ -355,6 +358,11 @@ impl Permissions {
         }
         let mut worst = Decision::Allow;
         for subcmd in subcmds {
+            // `cd` is always allowed at the command level; the workspace
+            // path restriction in `decide()` handles outside-workspace paths.
+            if is_cd_command(&subcmd) {
+                continue;
+            }
             let d = check_ruleset(&perms.bash, &subcmd);
             let d = if escalate_redirect && d == Decision::Allow && has_output_redirection(&subcmd)
             {
@@ -1055,6 +1063,15 @@ fn check_ruleset(ruleset: &RuleSet, value: &str) -> Decision {
     }
 }
 
+/// Check whether a sub-command is a bare `cd` invocation (e.g. `cd /tmp`,
+/// `cd`, `cd -`).  Permission for the target directory is handled by the
+/// workspace path restriction in [`Permissions::decide`], so `cd` itself
+/// is always allowed at the command level.
+fn is_cd_command(subcmd: &str) -> bool {
+    let trimmed = subcmd.trim();
+    trimmed == "cd" || trimmed.starts_with("cd ") || trimmed.starts_with("cd\t")
+}
+
 /// Check whether a command contains an output redirection (`>`, `>>`, `&>`, `&>>`).
 /// Quote-aware: ignores redirection operators inside single or double quotes.
 fn has_output_redirection(cmd: &str) -> bool {
@@ -1198,6 +1215,8 @@ fn extract_tool_paths(tool_name: &str, args: &HashMap<String, Value>) -> Vec<Str
 /// Extract tokens that look like absolute paths from a shell command.
 /// Relative paths are fine (they resolve within the workspace).
 fn extract_paths_from_command(cmd: &str) -> Vec<String> {
+    // Strip heredoc bodies — they are data, not shell commands.
+    let cmd = strip_heredoc_bodies(cmd);
     let mut paths = Vec::new();
     for token in cmd.split_whitespace() {
         let clean = token.trim_matches(|c: char| c == '\'' || c == '"' || c == ';');
@@ -2355,5 +2374,92 @@ mod tests {
         };
         let tightened = perms.with_overrides(&overrides);
         assert_eq!(tightened.check_tool(Mode::Yolo, "bash"), Decision::Ask);
+    }
+
+    // --- cd command handling ---
+
+    #[test]
+    fn cd_alone_is_allowed() {
+        let p = perms_with_bash(&[], &[], &[]);
+        assert_eq!(p.check_bash(Mode::Normal, "cd /tmp"), Decision::Allow);
+    }
+
+    #[test]
+    fn cd_no_args_is_allowed() {
+        let p = perms_with_bash(&[], &[], &[]);
+        assert_eq!(p.check_bash(Mode::Normal, "cd"), Decision::Allow);
+    }
+
+    #[test]
+    fn cd_in_chain_does_not_escalate() {
+        // cd should not contribute to the worst decision; only ls matters
+        let p = perms_with_bash(&["ls *"], &[], &[]);
+        assert_eq!(
+            p.check_bash(Mode::Normal, "cd /tmp && ls -la"),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn cd_with_denied_command_still_denies() {
+        let p = perms_with_bash(&[], &[], &["rm *"]);
+        assert_eq!(
+            p.check_bash(Mode::Normal, "cd /tmp && rm -rf foo"),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn cd_outside_workspace_downgrades_to_ask() {
+        // cd itself is Allow, but the workspace path restriction catches /tmp
+        let p = perms_with_workspace("/home/user/project");
+        let args = args_with("command", "cd /tmp && ls");
+        assert_eq!(p.decide(Mode::Normal, "bash", &args, false), Decision::Ask);
+    }
+
+    #[test]
+    fn cd_inside_workspace_stays_allowed() {
+        let p = perms_with_workspace("/home/user/project");
+        let args = args_with("command", "cd /home/user/project/src && ls");
+        assert_eq!(
+            p.decide(Mode::Normal, "bash", &args, false),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn cd_workspace_root_stays_allowed() {
+        let p = perms_with_workspace("/home/user/project");
+        let args = args_with("command", "cd /home/user/project && cargo build");
+        assert_eq!(
+            p.decide(Mode::Normal, "bash", &args, false),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn heredoc_paths_not_extracted() {
+        // Paths inside heredoc bodies are data, not shell arguments.
+        let cmd = "python3 << 'PYEOF'\nwith open('/tmp/secret') as f:\n    pass\nPYEOF";
+        let paths = extract_paths_from_command(cmd);
+        assert!(paths.is_empty(), "got: {paths:?}");
+    }
+
+    #[test]
+    fn heredoc_paths_outside_body_still_extracted() {
+        let cmd = "cd /tmp && python3 << 'EOF'\nopen('/etc/passwd')\nEOF";
+        let paths = extract_paths_from_command(cmd);
+        assert_eq!(paths, vec!["/tmp"]);
+    }
+
+    #[test]
+    fn is_cd_command_variants() {
+        assert!(is_cd_command("cd"));
+        assert!(is_cd_command("cd /tmp"));
+        assert!(is_cd_command("cd\t/tmp"));
+        assert!(is_cd_command("  cd /tmp  "));
+        assert!(!is_cd_command("cdr /tmp"));
+        assert!(!is_cd_command("echo cd"));
+        assert!(!is_cd_command("cdx"));
     }
 }

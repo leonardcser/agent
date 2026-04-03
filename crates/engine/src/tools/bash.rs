@@ -47,7 +47,8 @@ impl Tool for BashTool {
         for subcmd in &subcmds {
             let bin = subcmd.split_whitespace().next().unwrap_or("");
             let base = bin.rsplit('/').next().unwrap_or(bin);
-            if !base.is_empty() {
+            // `cd` is handled as a path permission, not a command permission.
+            if !base.is_empty() && base != "cd" {
                 let pat = format!("{base} *");
                 if !is_default_allowed_pattern(&pat) && !patterns.contains(&pat) {
                     patterns.push(pat);
@@ -260,7 +261,8 @@ mod tests {
 
     #[test]
     fn chain_different_binaries() {
-        assert_eq!(patterns("cd /tmp; rm -rf foo"), vec!["cd *", "rm *"]);
+        // cd is treated as a path permission, not a command permission
+        assert_eq!(patterns("cd /tmp; rm -rf foo"), vec!["rm *"]);
     }
 
     #[test]
@@ -272,9 +274,10 @@ mod tests {
     #[test]
     fn mixed() {
         // grep is in default allowed patterns, so it's filtered out
+        // cd is treated as a path permission, not a command permission
         assert_eq!(
             patterns("cd /tmp && rm -rf * | grep err; echo done"),
-            vec!["cd *", "rm *", "echo *"]
+            vec!["rm *", "echo *"]
         );
     }
 
