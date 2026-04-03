@@ -100,11 +100,12 @@ impl KillRing {
 const PASTE_LINE_THRESHOLD: usize = 12;
 
 /// Snapshot of the input buffer state (used for Ctrl+S stash).
+/// Owns its attachment data so it survives store clears across sessions.
 #[derive(Clone, Debug)]
 pub struct InputSnapshot {
     pub buf: String,
     pub cpos: usize,
-    pub attachment_ids: Vec<AttachmentId>,
+    pub attachments: Vec<Attachment>,
     from_paste: bool,
 }
 
@@ -303,18 +304,27 @@ impl InputState {
     }
 
     /// Toggle stash: if no stash, save current buf and clear; if stashed, restore.
+    /// Attachments are cloned out of the store so the stash survives store clears.
     pub fn toggle_stash(&mut self) {
         if let Some(snap) = self.stash.take() {
             self.buf = snap.buf;
             self.cpos = snap.cpos;
-            self.attachment_ids = snap.attachment_ids;
+            self.attachment_ids = snap
+                .attachments
+                .into_iter()
+                .map(|a| self.store.insert(a))
+                .collect();
             self.from_paste = snap.from_paste;
             self.completer = None;
         } else if !self.buf.is_empty() || !self.attachment_ids.is_empty() {
+            let attachments = std::mem::take(&mut self.attachment_ids)
+                .into_iter()
+                .filter_map(|id| self.store.get(id).cloned())
+                .collect();
             self.stash = Some(InputSnapshot {
                 buf: std::mem::take(&mut self.buf),
                 cpos: std::mem::replace(&mut self.cpos, 0),
-                attachment_ids: std::mem::take(&mut self.attachment_ids),
+                attachments,
                 from_paste: self.from_paste,
             });
             self.completer = None;
@@ -327,7 +337,11 @@ impl InputState {
         if let Some(snap) = self.stash.take() {
             self.buf = snap.buf;
             self.cpos = snap.cpos;
-            self.attachment_ids = snap.attachment_ids;
+            self.attachment_ids = snap
+                .attachments
+                .into_iter()
+                .map(|a| self.store.insert(a))
+                .collect();
             self.from_paste = snap.from_paste;
         }
     }
