@@ -1430,15 +1430,13 @@ impl Screen {
             for span in status_spans {
                 out.push_style(StyleState {
                     fg: Some(span.color),
+                    bg: Some(status_bg),
                     bold: span.bold,
                     dim: span.dim,
                     ..StyleState::default()
                 });
                 let _ = out.queue(Print(&span.text));
                 out.pop_style();
-                if span.bold || span.dim {
-                    out.set_bg(status_bg);
-                }
             }
             has_prev = true;
         }
@@ -1451,12 +1449,12 @@ impl Screen {
             }
             out.push_style(StyleState {
                 fg: Some(theme::accent()),
+                bg: Some(status_bg),
                 bold: true,
                 ..StyleState::default()
             });
             let _ = out.queue(Print("permission pending"));
             out.pop_style();
-            out.set_bg(status_bg);
             has_prev = true;
         }
 
@@ -1466,13 +1464,18 @@ impl Screen {
                 out.set_fg(theme::muted());
                 let _ = out.queue(Print(" · "));
             }
-            out.set_fg(theme::accent());
+            out.push_style(StyleState {
+                fg: Some(theme::accent()),
+                bg: Some(status_bg),
+                ..StyleState::default()
+            });
             let label = if self.running_procs == 1 {
                 "1 proc".to_string()
             } else {
                 format!("{} procs", self.running_procs)
             };
             let _ = out.queue(Print(&label));
+            out.pop_style();
             has_prev = true;
         }
 
@@ -1482,13 +1485,18 @@ impl Screen {
                 out.set_fg(theme::muted());
                 let _ = out.queue(Print(" · "));
             }
-            out.set_fg(theme::AGENT);
+            out.push_style(StyleState {
+                fg: Some(theme::AGENT),
+                bg: Some(status_bg),
+                ..StyleState::default()
+            });
             let label = if self.running_agents == 1 {
                 "1 agent".to_string()
             } else {
                 format!("{} agents", self.running_agents)
             };
             let _ = out.queue(Print(&label));
+            out.pop_style();
         }
 
         // Fill the rest of the line with the dark bg
