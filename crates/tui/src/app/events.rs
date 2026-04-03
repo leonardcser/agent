@@ -777,6 +777,7 @@ impl App {
         let _perf = crate::perf::begin("tick");
         let w = render::term_width();
         let show_queued = agent_running || self.is_compacting();
+        self.screen.set_dialog_open(has_dialog);
         let screen = &mut self.screen;
 
         if has_dialog {

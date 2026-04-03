@@ -764,6 +764,8 @@ pub struct Screen {
     defer_redraw: bool,
     /// A permission dialog is waiting for the user to stop typing.
     pending_dialog: bool,
+    /// A dialog is currently open (confirm, rewind, etc.).
+    dialog_open: bool,
     /// Set when `draw_frame` issues `BeginSynchronizedUpdate` in content-only
     /// mode.  The dialog that follows skips its own `BeginSync`, ensuring a
     /// single atomic sync block covers both the tool overlay and the dialog.
@@ -842,6 +844,7 @@ impl Screen {
             defer_pending_render: false,
             defer_redraw: false,
             pending_dialog: false,
+            dialog_open: false,
             sync_started: false,
             running_procs: 0,
             running_agents: 0,
@@ -1220,7 +1223,13 @@ impl Screen {
 
         // ── Throbber status ──
         let throbber_spans = self.working.throbber_spans(self.show_tps);
-        let status_spans: &[BarSpan] = if spinner.is_some() && !throbber_spans.is_empty() {
+        // The first span for active states (Working/Compacting/Retrying)
+        // contains the spinner + label which is already shown in the pill.
+        let is_active = matches!(
+            self.working.throbber,
+            Some(Throbber::Working) | Some(Throbber::Compacting) | Some(Throbber::Retrying { .. })
+        );
+        let status_spans: &[BarSpan] = if is_active && !throbber_spans.is_empty() {
             &throbber_spans[1..]
         } else {
             &throbber_spans
@@ -1240,8 +1249,8 @@ impl Screen {
             has_prev = true;
         }
 
-        // ── Permission pending ──
-        if self.pending_dialog {
+        // ── Permission pending (only when no dialog is open) ──
+        if self.pending_dialog && !self.dialog_open {
             if has_prev {
                 let _ = out.queue(SetForegroundColor(theme::muted()));
                 let _ = out.queue(Print(" · "));
@@ -1950,6 +1959,19 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
+    pub fn set_dialog_open(&mut self, open: bool) {
+        if open == self.dialog_open {
+            return;
+        }
+        self.dialog_open = open;
+        if open {
+            self.working.pause();
+        } else {
+            self.working.resume();
+        }
+        self.prompt.dirty = true;
+    }
+
     pub fn mark_dirty(&mut self) {
         self.prompt.dirty = true;
     }
@@ -2248,8 +2270,8 @@ impl Screen {
     pub fn draw_frame(&mut self, width: usize, prompt: Option<FramePrompt>) -> bool {
         let _perf = crate::perf::begin("draw_frame");
 
-        if let Some(start) = self.working.since {
-            let frame = (start.elapsed().as_millis() / 150) as usize % SPINNER_FRAMES.len();
+        if let Some(elapsed) = self.working.elapsed() {
+            let frame = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
             if frame != self.working.last_spinner_frame {
                 self.working.last_spinner_frame = frame;
                 self.prompt.dirty = true;

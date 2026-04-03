@@ -12,6 +12,7 @@ pub(super) struct WorkingState {
     pub last_spinner_frame: usize,
     retry_deadline: Option<Instant>,
     tps_samples: Vec<f64>,
+    paused_at: Option<Instant>,
 }
 
 impl WorkingState {
@@ -23,6 +24,7 @@ impl WorkingState {
             last_spinner_frame: usize::MAX,
             retry_deadline: None,
             tps_samples: Vec::new(),
+            paused_at: None,
         }
     }
 
@@ -37,8 +39,9 @@ impl WorkingState {
             self.tps_samples.clear();
         }
         if !is_active {
-            self.final_elapsed = self.since.map(|s| s.elapsed());
+            self.final_elapsed = self.elapsed();
             self.since = None;
+            self.paused_at = None;
         }
         self.retry_deadline = match state {
             Throbber::Retrying { delay, .. } => Some(Instant::now() + delay),
@@ -63,7 +66,7 @@ impl WorkingState {
         let throbber = self.throbber?;
         let elapsed = match throbber {
             Throbber::Done | Throbber::Interrupted => self.final_elapsed?,
-            _ => self.since?.elapsed(),
+            _ => self.elapsed()?,
         };
         Some(TurnMeta {
             elapsed_ms: elapsed.as_millis() as u64,
@@ -87,20 +90,52 @@ impl WorkingState {
         });
     }
 
+    pub fn pause(&mut self) {
+        if self.paused_at.is_none() && self.since.is_some() {
+            self.paused_at = Some(Instant::now());
+        }
+    }
+
+    pub fn resume(&mut self) {
+        if let (Some(paused), Some(since)) = (self.paused_at.take(), self.since) {
+            let paused_dur = paused.elapsed();
+            self.since = Some(since + paused_dur);
+        }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused_at.is_some()
+    }
+
+    /// Elapsed time, frozen at the pause point if paused.
+    pub(super) fn elapsed(&self) -> Option<Duration> {
+        let start = self.since?;
+        Some(if let Some(paused) = self.paused_at {
+            paused.duration_since(start)
+        } else {
+            start.elapsed()
+        })
+    }
+
     pub fn clear(&mut self) {
         self.throbber = None;
         self.since = None;
         self.final_elapsed = None;
         self.tps_samples.clear();
+        self.paused_at = None;
     }
 
     /// Returns the current spinner character if actively working/compacting.
+    /// Returns `None` when paused so the status bar shows a static pill.
     pub fn spinner_char(&self) -> Option<&'static str> {
+        if self.is_paused() {
+            return None;
+        }
         let state = self.throbber?;
         match state {
             Throbber::Working | Throbber::Compacting | Throbber::Retrying { .. } => {
-                let start = self.since?;
-                let idx = (start.elapsed().as_millis() / 150) as usize % SPINNER_FRAMES.len();
+                let elapsed = self.elapsed()?;
+                let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
                 Some(SPINNER_FRAMES[idx])
             }
             _ => None,
@@ -113,10 +148,9 @@ impl WorkingState {
         };
         match state {
             Throbber::Compacting => {
-                let Some(start) = self.since else {
+                let Some(elapsed) = self.elapsed() else {
                     return vec![];
                 };
-                let elapsed = start.elapsed();
                 let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
                 vec![
                     BarSpan {
@@ -136,10 +170,9 @@ impl WorkingState {
                 ]
             }
             Throbber::Working | Throbber::Retrying { .. } => {
-                let Some(start) = self.since else {
+                let Some(elapsed) = self.elapsed() else {
                     return vec![];
                 };
-                let elapsed = start.elapsed();
                 let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
                 let spinner_color = if matches!(state, Throbber::Retrying { .. }) {
                     theme::muted()
