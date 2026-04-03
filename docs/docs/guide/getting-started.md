@@ -71,7 +71,7 @@ SGLang, llama.cpp.
 
     ```bash
     read -s ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY
-    smelt --model claude-opus-4-5 \
+    smelt --model claude-opus-4-6 \
           --api-base https://api.anthropic.com/v1 \
           --api-key-env ANTHROPIC_API_KEY
     ```
@@ -105,9 +105,12 @@ providers:
     models:
       - gpt-5.4
 
-  - name: codex
-    type: codex # models fetched automatically from the API
-    api_base: https://chatgpt.com/backend-api/codex
+  - name: anthropic
+    type: openai-compatible
+    api_base: https://api.anthropic.com/v1
+    api_key_env: ANTHROPIC_API_KEY
+    models:
+      - claude-opus-4-6
 
 defaults:
   model: ollama/qwen3.5:27b # provider_name/model_name
