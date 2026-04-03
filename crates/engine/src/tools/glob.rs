@@ -1,4 +1,4 @@
-use super::{str_arg, Tool, ToolContext, ToolFuture, ToolResult};
+use super::{display_path, str_arg, Tool, ToolContext, ToolFuture, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -28,6 +28,16 @@ impl Tool for GlobTool {
             },
             "required": ["pattern"]
         })
+    }
+
+    fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let pattern = str_arg(args, "pattern");
+        let path = str_arg(args, "path");
+        if path.is_empty() {
+            Some(pattern)
+        } else {
+            Some(format!("{} in {}", pattern, display_path(&path)))
+        }
     }
 
     fn execute<'a>(

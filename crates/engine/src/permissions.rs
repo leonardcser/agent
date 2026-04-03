@@ -599,7 +599,9 @@ impl RuntimeApprovals {
         paths.iter().all(|p| {
             let path = Path::new(p);
             let dir = path.parent().unwrap_or(path);
-            all_dirs.iter().any(|ad| dir.starts_with(ad))
+            all_dirs
+                .iter()
+                .any(|ad| dir.starts_with(ad) || path.starts_with(ad))
         })
     }
 }

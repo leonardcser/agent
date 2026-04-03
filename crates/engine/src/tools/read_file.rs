@@ -1,5 +1,6 @@
 use super::{
-    hash_content, int_arg, notebook, str_arg, FileHashes, Tool, ToolContext, ToolFuture, ToolResult,
+    display_path, hash_content, int_arg, notebook, str_arg, FileHashes, Tool, ToolContext,
+    ToolFuture, ToolResult,
 };
 use crate::image;
 use serde_json::Value;
@@ -37,6 +38,10 @@ impl Tool for ReadFileTool {
             },
             "required": ["file_path"]
         })
+    }
+
+    fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
+        Some(display_path(&str_arg(args, "file_path")))
     }
 
     fn execute<'a>(

@@ -971,6 +971,13 @@ impl<'a> Turn<'a> {
                     }
                 }
 
+                // Pre-flight validation: catch errors before showing the
+                // permission dialog (e.g. stale file hash).
+                if let Some(err) = tool.preflight(&args) {
+                    self.push_tool_result(&tc.id, &err, true, None);
+                    continue;
+                }
+
                 let idx = slots.len();
                 match decision {
                     Decision::Allow => {

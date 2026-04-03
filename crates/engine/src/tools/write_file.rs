@@ -39,6 +39,17 @@ impl Tool for WriteFileTool {
         Some(display_path(&str_arg(args, "file_path")))
     }
 
+    fn preflight(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let path = str_arg(args, "file_path");
+        if Path::new(&path).exists() {
+            let has_hash = self.hashes.lock().is_ok_and(|map| map.contains_key(&path));
+            if !has_hash {
+                return Some("File already exists. Use edit_file to modify existing files, or read_file then write_file to replace.".into());
+            }
+        }
+        None
+    }
+
     fn execute<'a>(
         &'a self,
         args: HashMap<String, Value>,

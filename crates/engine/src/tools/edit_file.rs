@@ -47,6 +47,27 @@ impl Tool for EditFileTool {
         Some(display_path(&str_arg(args, "file_path")))
     }
 
+    fn preflight(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let path = str_arg(args, "file_path");
+        if let Ok(map) = self.hashes.lock() {
+            match map.get(&path) {
+                None => {
+                    return Some(
+                        "You must use read_file before editing. Read the file first.".into(),
+                    );
+                }
+                Some(&stored_hash) => {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if stored_hash != hash_content(&content) {
+                            return Some("File has been modified since last read. You must use read_file to read the current contents before editing.".into());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn execute<'a>(
         &'a self,
         args: HashMap<String, Value>,

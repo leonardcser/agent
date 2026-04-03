@@ -146,6 +146,12 @@ pub trait Tool: Send + Sync {
     fn is_mcp(&self) -> bool {
         false
     }
+
+    /// Pre-flight validation run before showing the permission dialog.
+    /// Return `Some(error)` to skip the dialog and fail the tool immediately.
+    fn preflight(&self, _args: &HashMap<String, Value>) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Default)]
