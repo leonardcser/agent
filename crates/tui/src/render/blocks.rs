@@ -907,6 +907,22 @@ fn render_notebook_output(out: &mut RenderOut, output: &ToolOutput, width: usize
 
     if data.edit_mode == "insert" {
         rows += print_syntax_file(out, &data.new_source, &data.path, 0, 0);
+    } else if let Some(crate::render::ToolOutputRenderCache::NotebookEdit(ref nb)) =
+        output.render_cache
+    {
+        if let Some(ref cache) = nb.diff {
+            rows += print_cached_inline_diff(out, cache, 0, 0);
+        } else {
+            rows += print_inline_diff(
+                out,
+                &data.old_source,
+                &data.new_source,
+                &data.path,
+                &data.old_source,
+                0,
+                0,
+            );
+        }
     } else {
         rows += print_inline_diff(
             out,

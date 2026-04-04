@@ -45,6 +45,7 @@ pub use cache::{
 /// Older blocks beyond this limit are dropped to avoid flooding the terminal.
 const MAX_REDRAW_LINES: u16 = 2000;
 
+
 /// Parameters for rendering the prompt section in `draw_frame`.
 /// When `None` is passed instead, only content (blocks + active tool) is drawn.
 pub struct FramePrompt<'a> {
@@ -783,6 +784,18 @@ impl BlockHistory {
         }
     }
 
+    /// Invalidate render caches **and** reset row counts so that
+    /// `redraw_start` does not use stale heights from a different width.
+    fn invalidate_all(&mut self) {
+        self.invalidate_caches();
+        for r in &mut self.row_counts_visible {
+            *r = 0;
+        }
+        for r in &mut self.row_counts_hidden {
+            *r = 0;
+        }
+    }
+
     fn row_counts(&self, show_thinking: bool) -> &[u16] {
         if show_thinking {
             &self.row_counts_visible
@@ -1332,6 +1345,9 @@ impl Screen {
     /// so the status bar is painted atomically with dialog content.
     pub fn queue_status_line(&self, out: &mut RenderOut) {
         let (_, h) = self.size();
+        if h == 0 {
+            return;
+        }
         let _ = out.queue(cursor::SavePosition);
         let _ = out.queue(cursor::MoveTo(0, h - 1));
         self.render_status_line(out);
@@ -2331,6 +2347,13 @@ impl Screen {
             row
         };
         let (w, height) = self.size();
+        // Invalidate caches before computing redraw_start so that stale
+        // row counts from a previous terminal width don't cause blocks to
+        // be skipped.
+        if w as usize != self.history.cache_width {
+            self.history.invalidate_all();
+            self.history.cache_width = w as usize;
+        }
         let start_idx = self
             .history
             .redraw_start(MAX_REDRAW_LINES, self.show_thinking);
@@ -3036,12 +3059,12 @@ impl Screen {
         // display buffer contributes 1 additional char between logical lines.
         let line_char_offsets = compute_visual_line_offsets(&display_buf, &visual_lines);
 
-        let has_scrollbar = total_content_rows > content_rows;
+        let has_scrollbar = total_content_rows > content_rows && content_rows > 0;
         let (thumb_start, thumb_end) = if has_scrollbar {
             let thumb_size = (content_rows * content_rows / total_content_rows).max(1);
             let max_scroll = total_content_rows - content_rows;
             let thumb_pos = if max_scroll > 0 {
-                scroll_offset * (content_rows - thumb_size) / max_scroll
+                scroll_offset * content_rows.saturating_sub(thumb_size) / max_scroll
             } else {
                 0
             };
@@ -3147,7 +3170,7 @@ impl Screen {
                 } else {
                     theme::scrollbar_track()
                 };
-                let _ = out.queue(cursor::MoveToColumn(width as u16 - 1));
+                let _ = out.queue(cursor::MoveToColumn((width as u16).saturating_sub(1)));
                 out.push_bg(bg);
                 let _ = out.queue(Print(" "));
                 out.pop_style();

@@ -115,7 +115,7 @@ pub(super) fn render_highlighted(
     let theme = syntax_theme();
     let gutter_width = format!("{}", lines.len()).len();
     let prefix_len = indent.len() + 1 + gutter_width + 3;
-    let max_content = term_width().saturating_sub(prefix_len + 1);
+    let max_content = term_width().saturating_sub(prefix_len + 1).max(1);
     let limit = lines.len();
 
     let blank_gutter = " ".repeat(1 + gutter_width + 3);
@@ -513,6 +513,7 @@ fn print_cached_spans(out: &mut RenderOut, spans: &[CachedSpan], bg: Option<Colo
 }
 
 fn split_cached_spans_into_rows(spans: &[CachedSpan], max_width: usize) -> Vec<Vec<CachedSpan>> {
+    let max_width = max_width.max(1);
     let mut rows: Vec<Vec<CachedSpan>> = Vec::new();
     let mut current_row: Vec<CachedSpan> = Vec::new();
     let mut col = 0;
@@ -558,7 +559,9 @@ pub(super) fn print_cached_inline_diff(
     let gutter_width = format!("{}", cache.max_display_lineno).len();
     let prefix_len = indent.len() + 1 + gutter_width + 3;
     let right_margin = indent.len();
-    let max_content = term_width().saturating_sub(prefix_len + right_margin);
+    let max_content = term_width()
+        .saturating_sub(prefix_len + right_margin)
+        .max(1);
     let emit_limit = if max_rows == 0 { u16::MAX } else { max_rows };
     let bg_del = Color::Rgb {
         r: 60,
@@ -680,6 +683,7 @@ fn split_regions_into_rows(
     regions: &[(Style, &str)],
     max_width: usize,
 ) -> Vec<Vec<(Style, String)>> {
+    let max_width = max_width.max(1);
     let mut rows: Vec<Vec<(Style, String)>> = Vec::new();
     let mut current_row: Vec<(Style, String)> = Vec::new();
     let mut col = 0;
