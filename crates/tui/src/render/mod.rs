@@ -45,7 +45,6 @@ pub use cache::{
 /// Older blocks beyond this limit are dropped to avoid flooding the terminal.
 const MAX_REDRAW_LINES: u16 = 2000;
 
-
 /// Parameters for rendering the prompt section in `draw_frame`.
 /// When `None` is passed instead, only content (blocks + active tool) is drawn.
 pub struct FramePrompt<'a> {

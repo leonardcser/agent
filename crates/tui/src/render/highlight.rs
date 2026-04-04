@@ -160,11 +160,24 @@ pub(super) fn print_syntax_file(
     skip: u16,
     max_rows: u16,
 ) -> u16 {
+    print_syntax_file_ext(out, content, path, None, skip, max_rows)
+}
+
+pub(super) fn print_syntax_file_ext(
+    out: &mut RenderOut,
+    content: &str,
+    path: &str,
+    syntax_ext: Option<&str>,
+    skip: u16,
+    max_rows: u16,
+) -> u16 {
     let _perf = crate::perf::begin("print_syntax_file");
-    let ext = Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("txt");
+    let ext = syntax_ext.unwrap_or_else(|| {
+        Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("txt")
+    });
     let syntax = SYNTAX_SET
         .find_syntax_by_extension(ext)
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
@@ -244,6 +257,16 @@ pub(super) fn build_inline_diff_cache(
     path: &str,
     anchor: &str,
 ) -> CachedInlineDiff {
+    build_inline_diff_cache_ext(old, new, path, anchor, None)
+}
+
+pub(super) fn build_inline_diff_cache_ext(
+    old: &str,
+    new: &str,
+    path: &str,
+    anchor: &str,
+    syntax_ext: Option<&str>,
+) -> CachedInlineDiff {
     let dv = compute_diff_view(old, new, path, anchor);
     let expanded_lines: Vec<String> = dv
         .file_content
@@ -267,10 +290,12 @@ pub(super) fn build_inline_diff_cache(
         .count();
     let extra_indent = " ".repeat(file_indent.saturating_sub(lookup_indent));
 
-    let ext = Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("txt");
+    let ext = syntax_ext.unwrap_or_else(|| {
+        Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("txt")
+    });
     let syntax = SYNTAX_SET
         .find_syntax_by_extension(ext)
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
