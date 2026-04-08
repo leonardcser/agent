@@ -210,7 +210,7 @@ impl WorkingState {
                             priority: 3, // drop first
                         });
                         spans.push(BarSpan {
-                            text: format!(" {:.1} tok/s ", avg),
+                            text: format!(" {:.1} tok/s", avg),
                             color: theme::muted(),
                             bg: None,
                             bold: false,
@@ -256,7 +256,7 @@ impl WorkingState {
                             priority: 3,
                         });
                         spans.push(BarSpan {
-                            text: format!(" {:.1} tok/s ", avg),
+                            text: format!(" {:.1} tok/s", avg),
                             color: theme::muted(),
                             bg: None,
                             bold: false,
