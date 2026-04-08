@@ -581,6 +581,10 @@ pub(crate) fn begin_dialog_draw(
     anchor_row: &mut Option<u16>,
 ) -> (u16, u16) {
     let _ = out.queue(cursor::Hide);
+    // Dialogs paint after conversation content that may have left SGR
+    // attributes active in the terminal. Frames use a fresh `RenderOut`, so
+    // reset the terminal unconditionally before drawing the overlay.
+    out.force_reset_style();
     // Reserve the last row for the status bar.
     let usable_height = height.saturating_sub(1);
 

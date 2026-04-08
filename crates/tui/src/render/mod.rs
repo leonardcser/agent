@@ -355,6 +355,18 @@ impl RenderOut {
         }
     }
 
+    /// Emit an unconditional terminal style reset and forget any saved scopes.
+    ///
+    /// Use this at render boundaries where terminal state may have drifted
+    /// from `self.current` — for example across frames, or after drawing raw
+    /// ANSI bytes that bypass `RenderOut`'s diff engine.
+    pub fn force_reset_style(&mut self) {
+        let _ = self.queue(SetAttribute(Attribute::Reset));
+        let _ = self.queue(ResetColor);
+        self.current = StyleState::default();
+        self.stack.clear();
+    }
+
     /// Diff to `target` and replace `current` without growing the
     /// push/pop stack. Used by the paint stage which emits flat
     /// sequences rather than nested style scopes.
@@ -1651,6 +1663,9 @@ impl Screen {
         }
         let _ = out.queue(cursor::SavePosition);
         let _ = out.queue(cursor::MoveTo(0, h - 1));
+        // Status-line frames also use a fresh `RenderOut`, so force a real
+        // terminal reset before styling the row.
+        out.force_reset_style();
         self.render_status_line(out);
         let _ = out.queue(cursor::RestorePosition);
     }
@@ -3350,11 +3365,13 @@ impl Screen {
         self.last_mode = mode;
         let usable = width.saturating_sub(2);
         let height = (self.size().1 as usize).saturating_sub(pre_prompt_rows as usize);
-        // Reset SGR state before painting any prompt section: a prior
-        // overlay (thinking, code line, active tool) may have left a
-        // colour or attribute (e.g. dim+italic from a thinking block)
-        // that would otherwise bleed into the prompt bar and input row.
-        out.reset_style();
+        // Reset SGR state before painting any prompt section. The previous
+        // frame may have ended with styled content (for example a dim/italic
+        // thinking line or a dialog/status-line row), and `self.current`
+        // only tracks what this `RenderOut` instance emitted. Prompt frames
+        // get a fresh `RenderOut`, so we must force a terminal reset here
+        // instead of relying on the diff engine's cached state.
+        out.force_reset_style();
         let mut extra_rows = 0u16;
         let notification_rows = render_notification(out, self.notification.as_ref(), usable);
         extra_rows += notification_rows;
@@ -5162,6 +5179,62 @@ mod selection_tests {
         );
         assert_eq!(cursor_line, 0);
         assert_eq!(cursor_col, 8);
+    }
+
+    #[test]
+    fn force_reset_style_emits_reset_even_when_state_looks_clean() {
+        let mut out = RenderOut::buffer();
+        out.force_reset_style();
+        let rendered = String::from_utf8(out.into_bytes()).unwrap();
+        assert_eq!(rendered, "\u{1b}[0m\u{1b}[0m");
+    }
+
+    #[test]
+    fn dialog_render_resets_terminal_style_before_first_line() {
+        let mut out = RenderOut::buffer();
+        let mut dialog = crate::render::HelpDialog::new(false);
+        dialog.draw(&mut out, 0, 40, 12);
+        let rendered = String::from_utf8(out.into_bytes()).unwrap();
+        assert!(
+            rendered.starts_with("\u{1b}[?25l\u{1b}[0m\u{1b}[0m"),
+            "rendered: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn status_line_resets_terminal_style_before_rendering() {
+        let mut screen = Screen::with_backend(Box::new(StdioBackend));
+        screen.set_running_procs(1);
+        let mut out = RenderOut::buffer();
+        screen.queue_status_line(&mut out);
+        let rendered = String::from_utf8(out.into_bytes()).unwrap();
+        assert!(
+            rendered.contains("\u{1b}[0m\u{1b}[0m"),
+            "rendered: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_sections_reset_terminal_style_before_rendering() {
+        let mut screen = Screen::with_backend(Box::new(StdioBackend));
+        screen.set_anchor_row(0);
+        let input = crate::input::InputState::default();
+        let mut out = RenderOut::buffer();
+        screen.draw_frame(
+            &mut out,
+            40,
+            Some(FramePrompt {
+                state: &input,
+                mode: protocol::Mode::Normal,
+                queued: &[],
+                prediction: None,
+            }),
+        );
+        let rendered = String::from_utf8(out.into_bytes()).unwrap();
+        assert!(
+            rendered.contains("\u{1b}[0m\u{1b}[0m"),
+            "rendered: {rendered:?}"
+        );
     }
 
     #[test]
