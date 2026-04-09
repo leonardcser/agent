@@ -541,31 +541,22 @@ impl io::Write for RenderOut {
 /// by the subsequent `Print`. This avoids a visible blank→content
 /// flash on terminals that don't fully support synchronized updates.
 ///
-/// **Scroll-mode invariant**: every code path that writes via scroll-mode
-/// `crlf` must first clear the destination region. The two callers are
-/// `Screen::redraw` (which emits `Clear::All` + `Clear::Purge` before
-/// painting) and `render_pending_blocks` (which emits
-/// `Clear::FromCursorDown`). New scroll-mode call sites must preserve
-/// this invariant or they'll inherit stale row content from whatever was
-/// previously on screen — `crlf` no longer emits `Clear::UntilNewLine`
-/// per row because the per-op cost dominated large redraws.
+/// Both modes emit `Clear::UntilNewLine` before advancing so every
+/// painted row cleans up its own trailing residue. Callers must ensure
+/// the current background color is either unset or is the color they
+/// want the cleared tail to carry (`paint_block` resets bg explicitly;
+/// the prompt-section helpers pop their style scope before calling).
 pub(super) fn crlf(out: &mut RenderOut) {
-    if out.row.is_some() {
-        // Overlay mode: must clear because we're painting over a live
-        // screen area that may have stale content to the right.
-        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-        if let Some(r) = &mut out.row {
-            *r += 1;
-            let next = *r;
-            let _ = out.queue(cursor::MoveTo(0, next));
-        }
+    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+    if let Some(r) = &mut out.row {
+        // Overlay mode: reposition with MoveTo so we don't rely on the
+        // terminal's linefeed behaviour at the bottom of the viewport.
+        *r += 1;
+        let next = *r;
+        let _ = out.queue(cursor::MoveTo(0, next));
     } else {
-        // Scroll mode: paths that enter scroll-mode `crlf` always do so
-        // after a full clear (`redraw(true)` → Clear::Purge, or
-        // `render_pending_blocks` → Clear::FromCursorDown), so the row
-        // below the cursor is already blank and `Clear::UntilNewLine`
-        // would be a no-op. Skipping ~2000 clear ops saves terminal
-        // parse work on large redraws.
+        // Scroll mode: linefeed, which goes through tmux's collect
+        // write list (not tty_write) and is gated by MODE_SYNC.
         let _ = out.queue(Print("\r\n"));
     }
     out.line_cols = 0;
@@ -3024,18 +3015,10 @@ impl Screen {
             out.row = Some(draw_start_row);
         }
 
-        // ── Clear stale volatile area before painting ───────────────────
-        // Scroll-mode `crlf` no longer issues a per-line clear, so any new
-        // block / overlay / active-tool / prompt content shorter than the
-        // previous frame's row would leave trailing characters behind from
-        // the old prompt bar, status line, or active tool.  Wipe the area
-        // below the cursor up front so painting starts on clean rows.
-        // Skipped in dialog (overlay) mode where `crlf` clears each row
-        // itself and the dialog draws over its own area.
-        if !is_dialog && self.prompt.prev_rows > 0 {
-            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-            self.prompt.prev_rows = 0;
-        }
+        // Each painted row cleans its own tail via `crlf`'s
+        // `Clear::UntilNewLine`, so there is no blanket pre-paint clear
+        // here. Trailing rows left over from a shrinking frame are
+        // handled in `draw_prompt_sections` using per-row clears.
 
         // ── Render blocks ───────────────────────────────────────────────
         let block_rows = self.history.render(out, width, self.show_thinking);
@@ -3751,11 +3734,6 @@ impl Screen {
                 let _ = out.queue(Print("\r\n"));
                 let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
             }
-            // Clear anything remaining below.
-            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-        } else if comp_rows > 0 {
-            // Completions already moved past the bar; safe to clear below.
-            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
         }
 
         let rows_below: u16 = prev_rows.saturating_sub(new_rows);
