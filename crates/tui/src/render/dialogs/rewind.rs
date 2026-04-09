@@ -7,6 +7,10 @@ use crossterm::{terminal, QueueableCommand};
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
 
+/// Chrome rows around the item list: bar + "Rewind to:" header +
+/// blank separator + hints footer.
+const LIST_OVERHEAD: u16 = 4;
+
 pub struct RewindDialog {
     turns: Vec<(usize, String)>,
     list: ListState,
@@ -21,7 +25,7 @@ impl RewindDialog {
     ) -> Self {
         // +1 for the "(current)" sentinel entry at the end.
         let total = turns.len() + 1;
-        let mut list = ListState::new(total, max_height, 4);
+        let mut list = ListState::new(total, max_height, LIST_OVERHEAD);
         list.selected = total.saturating_sub(1);
         list.scroll_offset = total.saturating_sub(list.max_visible);
         Self {

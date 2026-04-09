@@ -170,7 +170,7 @@ impl App {
                 if let Some(value) = crate::theme::preset_by_name(name) {
                     crate::theme::set_accent(value);
                     state::set_accent(value);
-                    self.screen.redraw(true);
+                    self.screen.redraw();
                 } else {
                     self.screen.notify_error(format!("unknown theme: {}", name));
                 }

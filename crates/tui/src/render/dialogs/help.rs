@@ -7,6 +7,12 @@ use crossterm::{terminal, QueueableCommand};
 
 use super::{end_dialog_draw, DialogResult, ListState, RenderOut};
 
+/// Chrome rows around the item list: bar + "help" header + blank
+/// separator below header + blank separator above hints + hints
+/// footer. One row taller than the other dialogs because help has an
+/// extra blank line between its header and content.
+const LIST_OVERHEAD: u16 = 5;
+
 pub struct HelpDialog {
     list: ListState,
     sections: Vec<(&'static str, Vec<(&'static str, &'static str)>)>,
@@ -23,7 +29,7 @@ impl HelpDialog {
             .map(|(i, (_, entries))| entries.len() + if i + 1 < sections.len() { 1 } else { 0 })
             .sum();
         Self {
-            list: ListState::new(0, None, 5),
+            list: ListState::new(0, None, LIST_OVERHEAD),
             sections,
             total_rows,
             vim_enabled,

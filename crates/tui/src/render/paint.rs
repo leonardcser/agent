@@ -4,7 +4,7 @@
 //! `PaintContext`, so a single redraw stays internally consistent and
 //! cached layouts survive theme changes without invalidation.
 
-use super::display::{ColorRole, ColorValue, DisplayBlock, SpanStyle};
+use super::display::{ColorRole, ColorValue, DisplayBlock, DisplayLine, SpanStyle};
 use super::layout_out::display_width;
 use super::{crlf, PaintContext, RenderOut, StyleState};
 use crate::theme::Theme;
@@ -18,39 +18,51 @@ use crossterm::QueueableCommand;
 const PAD_SPACES: &str =
     "                                                                                                                                                                                                                                                                ";
 
-pub(super) fn paint_block(out: &mut RenderOut, block: &DisplayBlock, ctx: &PaintContext) {
-    for line in &block.lines {
-        let mut visible_cols: u16 = 0;
-        for span in &line.spans {
-            apply_style(out, &span.style, ctx.theme);
-            let _ = out.queue(Print(&span.text));
-            visible_cols = visible_cols.saturating_add(display_width(&span.text) as u16);
-        }
-        if let Some(fill) = line.fill_bg {
-            let pad = ctx
-                .term_width
-                .saturating_sub(visible_cols)
-                .saturating_sub(line.fill_right_margin);
-            if pad > 0 {
-                out.set_bg_only(Some(resolve(fill, ctx.theme, true)));
-                let mut remaining = pad as usize;
-                while remaining > 0 {
-                    let chunk = remaining.min(PAD_SPACES.len());
-                    let _ = out.queue(Print(&PAD_SPACES[..chunk]));
-                    remaining -= chunk;
-                }
+/// Paint a block, optionally dropping the first `skip` lines. The
+/// skip path is used by the purge/redraw flow when a single block
+/// exceeds the redraw budget — its head is cropped so the tail still
+/// fits, tmux-style. `skip = 0` is the common case.
+pub(super) fn paint_block(
+    out: &mut RenderOut,
+    block: &DisplayBlock,
+    ctx: &PaintContext,
+    skip: usize,
+) {
+    if skip >= block.lines.len() {
+        return;
+    }
+    for line in &block.lines[skip..] {
+        paint_line(out, line, ctx);
+    }
+}
+
+/// Paint a single `DisplayLine`: emit its spans, fill the row bg if
+/// requested, then advance via `crlf`. Drops the bg before `crlf` so
+/// `Clear::UntilNewLine` doesn't bleed the fill color into scrollback.
+pub(super) fn paint_line(out: &mut RenderOut, line: &DisplayLine, ctx: &PaintContext) {
+    let mut visible_cols: u16 = 0;
+    for span in &line.spans {
+        apply_style(out, &span.style, ctx.theme);
+        let _ = out.queue(Print(&span.text));
+        visible_cols = visible_cols.saturating_add(display_width(&span.text) as u16);
+    }
+    if let Some(fill) = line.fill_bg {
+        let pad = ctx
+            .term_width
+            .saturating_sub(visible_cols)
+            .saturating_sub(line.fill_right_margin);
+        if pad > 0 {
+            out.set_bg_only(Some(resolve(fill, ctx.theme, true)));
+            let mut remaining = pad as usize;
+            while remaining > 0 {
+                let chunk = remaining.min(PAD_SPACES.len());
+                let _ = out.queue(Print(&PAD_SPACES[..chunk]));
+                remaining -= chunk;
             }
         }
-        // Drop only the background color before crlf — `crlf` emits
-        // `Clear::UntilNewLine` which fills the rest of the row with the
-        // current bg, and we don't want that bleed extending into
-        // scrollback. Foreground / bold / italic / etc. are cheap for
-        // the diff engine to reconcile on the next line, so we leave
-        // them alone and let the subsequent `apply_style` call emit
-        // only what actually changes.
-        out.set_bg_only(None);
-        crlf(out);
     }
+    out.set_bg_only(None);
+    crlf(out);
 }
 
 #[inline]

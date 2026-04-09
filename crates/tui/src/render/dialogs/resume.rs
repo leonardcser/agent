@@ -8,6 +8,10 @@ use std::time::Instant;
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
 
+/// Chrome rows around the item list: bar + "Resume" header + blank
+/// separator + hints footer.
+const LIST_OVERHEAD: u16 = 4;
+
 pub struct ResumeDialog {
     entries: Vec<ResumeEntry>,
     current_cwd: String,
@@ -28,7 +32,7 @@ impl ResumeDialog {
         vim_enabled: bool,
     ) -> Self {
         let filtered = filter_resume_entries(&entries, "", true, &current_cwd);
-        let list = ListState::new(filtered.len().max(1), max_height, 4);
+        let list = ListState::new(filtered.len().max(1), max_height, LIST_OVERHEAD);
         Self {
             entries,
             current_cwd,

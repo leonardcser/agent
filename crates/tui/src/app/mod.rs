@@ -1426,8 +1426,9 @@ impl App {
         active_dialog: &mut Option<Box<dyn render::Dialog>>,
     ) {
         if let Some(d) = active_dialog.as_mut() {
+            let dialog_height = d.height();
             let mut frame = render::Frame::begin(self.screen.backend());
-            let redirtied = self.tick_dialog(&mut frame);
+            let redirtied = self.tick_dialog(&mut frame, dialog_height);
             if redirtied {
                 d.mark_dirty();
             }
@@ -1445,20 +1446,11 @@ impl App {
         &mut self,
         mut dialog: Box<dyn render::Dialog>,
         active_dialog: &mut Option<Box<dyn render::Dialog>>,
-        tool_call_id: Option<&str>,
     ) {
         // Flush pending blocks to scroll mode so they persist in scrollback.
         let scr = &mut self.screen;
         scr.render_pending_blocks();
-        let overlay_id = tool_call_id.and_then(|cid| {
-            if scr.tool_overlay_fits_with_dialog(cid, dialog.height()) {
-                Some(cid.to_string())
-            } else {
-                None
-            }
-        });
         scr.erase_prompt();
-        scr.set_dialog_tool_call_id(overlay_id);
         // Share the kill ring so Ctrl+K/Y work across input ↔ dialog.
         dialog.set_kill_ring(self.input.take_kill_ring());
         *active_dialog = Some(dialog);

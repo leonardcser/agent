@@ -22,7 +22,7 @@ impl App {
             }
         }
         self.last_purge_redraw = Some(now);
-        self.screen.redraw(true);
+        self.screen.redraw();
     }
 
     fn apply_settings_result(&mut self, s: &crate::input::SettingsState) {
@@ -33,7 +33,7 @@ impl App {
         state::save_settings(s);
         if needs_rebuild {
             self.restore_screen();
-            self.screen.redraw(true);
+            self.screen.redraw();
         }
     }
 
@@ -184,10 +184,10 @@ impl App {
                         // state.
                         crate::theme::set_accent(value);
                         state::set_accent(value);
-                        self.screen.redraw(true);
+                        self.screen.redraw();
                     }
                     MenuResult::ColorSelect(_) => {
-                        self.screen.redraw(true);
+                        self.screen.redraw();
                     }
                     MenuResult::Stats | MenuResult::Cost | MenuResult::Dismissed => {}
                 }
@@ -602,7 +602,7 @@ impl App {
             }
             Action::EditInEditor => {
                 self.edit_in_editor();
-                self.screen.redraw(true);
+                self.screen.redraw();
             }
             Action::CenterScroll => {
                 self.screen.center_input_scroll();
@@ -637,7 +637,7 @@ impl App {
             }
             Action::EditInEditor => {
                 self.edit_in_editor();
-                self.screen.redraw(true);
+                self.screen.redraw();
                 EventOutcome::Noop
             }
             Action::CenterScroll => {
@@ -719,11 +719,11 @@ impl App {
         self.last_width = w;
         self.last_height = h;
         if width_changed {
-            self.screen.redraw(true);
+            self.screen.redraw();
         } else {
             // Height-only: block layouts are still valid at this width.
             // Soft redraw skips Clear::Purge and reuses cached layouts.
-            self.screen.redraw(false);
+            self.screen.redraw();
         }
     }
 
@@ -842,11 +842,11 @@ impl App {
 
     /// Render a dialog-mode frame into the provided output buffer.
     /// Returns true if content was drawn (caller should re-dirty the dialog).
-    pub(super) fn tick_dialog(&mut self, out: &mut render::RenderOut) -> bool {
+    pub(super) fn tick_dialog(&mut self, out: &mut render::RenderOut, dialog_height: u16) -> bool {
         let _perf = crate::perf::begin("app:tick");
         let w = render::term_width();
         self.screen.set_dialog_open(true);
-        self.screen.draw_frame(out, w, None)
+        self.screen.draw_frame(out, w, None, Some(dialog_height))
     }
 
     /// Render a full-mode frame (content + prompt) in its own sync frame.
@@ -880,6 +880,7 @@ impl App {
                 queued,
                 prediction,
             }),
+            None,
         );
     }
 }

@@ -2,7 +2,9 @@
 // Shared across multiple test binaries; not all items are used in each.
 #![allow(dead_code)]
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,28 +15,49 @@ use tui::render::{
 
 // ── TestBackend ──────────────────────────────────────────────────────
 
+/// Shared size state so the harness can resize the backend while the
+/// `Screen` still owns it via `Box<dyn TerminalBackend>`.
+pub type SharedSize = Rc<Cell<(u16, u16)>>;
+pub type SharedCursor = Rc<Cell<u16>>;
+
 pub struct TestBackend {
-    width: u16,
-    height: u16,
+    size: SharedSize,
+    cursor: SharedCursor,
     sink: Arc<Mutex<Vec<u8>>>,
 }
 
 impl TestBackend {
     pub fn new(width: u16, height: u16, sink: Arc<Mutex<Vec<u8>>>) -> Self {
         Self {
-            width,
-            height,
+            size: Rc::new(Cell::new((width, height))),
+            cursor: Rc::new(Cell::new(0)),
             sink,
         }
+    }
+
+    pub fn new_with_state(
+        size: SharedSize,
+        cursor: SharedCursor,
+        sink: Arc<Mutex<Vec<u8>>>,
+    ) -> Self {
+        Self { size, cursor, sink }
+    }
+
+    pub fn shared_size(&self) -> SharedSize {
+        self.size.clone()
+    }
+
+    pub fn shared_cursor(&self) -> SharedCursor {
+        self.cursor.clone()
     }
 }
 
 impl TerminalBackend for TestBackend {
     fn size(&self) -> (u16, u16) {
-        (self.width, self.height)
+        self.size.get()
     }
     fn cursor_y(&self) -> u16 {
-        0
+        self.cursor.get()
     }
     fn make_output(&self) -> RenderOut {
         RenderOut::shared_sink(self.sink.clone())
@@ -69,14 +92,30 @@ pub fn extract_full_content(parser: &mut vt100::Parser) -> String {
     all_lines.join("\n")
 }
 
-fn fresh_render(
+pub fn visible_content(parser: &vt100::Parser) -> String {
+    let (_rows, cols) = parser.screen().size();
+    let lines: Vec<String> = parser.screen().rows(0, cols).collect();
+    if lines.iter().all(|l| l.trim().is_empty()) {
+        return String::new();
+    }
+    let start = lines.iter().position(|l| !l.trim().is_empty()).unwrap_or(0);
+    let end = lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .unwrap_or(start);
+    lines[start..=end].join("\n")
+}
+
+fn fresh_render_bytes(
     blocks: &[Block],
     tool_states: &HashMap<String, ToolState>,
     width: u16,
     height: u16,
-) -> String {
+) -> Vec<u8> {
     let sink = Arc::new(Mutex::new(Vec::new()));
-    let backend = TestBackend::new(width, height, sink.clone());
+    let size = Rc::new(Cell::new((width, height)));
+    let cursor = Rc::new(Cell::new(0));
+    let backend = TestBackend::new_with_state(size, cursor, sink.clone());
     let mut screen = Screen::with_backend(Box::new(backend));
     screen.set_anchor_row(0);
 
@@ -103,13 +142,36 @@ fn fresh_render(
                 queued: &[],
                 prediction: None,
             }),
+            None,
         );
     }
 
     let bytes = sink.lock().unwrap().clone();
+    bytes
+}
+
+fn fresh_render(
+    blocks: &[Block],
+    tool_states: &HashMap<String, ToolState>,
+    width: u16,
+    height: u16,
+) -> String {
+    let bytes = fresh_render_bytes(blocks, tool_states, width, height);
     let mut parser = vt100::Parser::new(height, width, 10_000);
     parser.process(&bytes);
     extract_full_content(&mut parser)
+}
+
+fn fresh_visible_render(
+    blocks: &[Block],
+    tool_states: &HashMap<String, ToolState>,
+    width: u16,
+    height: u16,
+) -> String {
+    let bytes = fresh_render_bytes(blocks, tool_states, width, height);
+    let mut parser = vt100::Parser::new(height, width, 10_000);
+    parser.process(&bytes);
+    visible_content(&parser)
 }
 
 fn build_diff(expected: &str, actual: &str) -> String {
@@ -156,6 +218,8 @@ pub struct TestHarness {
     pub parser: vt100::Parser,
     pub width: u16,
     pub height: u16,
+    size: SharedSize,
+    cursor: SharedCursor,
     test_name: String,
     actions: Vec<String>,
     assert_count: usize,
@@ -166,6 +230,8 @@ impl TestHarness {
     pub fn new(width: u16, height: u16, test_name: &str) -> Self {
         let sink = Arc::new(Mutex::new(Vec::new()));
         let backend = TestBackend::new(width, height, sink.clone());
+        let size = backend.shared_size();
+        let cursor = backend.shared_cursor();
         let mut screen = Screen::with_backend(Box::new(backend));
         screen.set_anchor_row(0);
 
@@ -175,11 +241,58 @@ impl TestHarness {
             parser: vt100::Parser::new(height, width, 10_000),
             width,
             height,
+            size,
+            cursor,
             test_name: test_name.to_string(),
             actions: Vec::new(),
             assert_count: 0,
             mode: protocol::Mode::Normal,
         }
+    }
+
+    /// Resize the terminal and the vt100 parser simultaneously, then
+    /// run the same `redraw` the real event loop uses.
+    ///
+    /// On a height shrink the harness first emits `CSI N S` (SU, scroll
+    /// up) so vt100 pushes the top rows into scrollback before
+    /// truncating — matching iTerm/tmux/Ghostty/WezTerm behaviour.
+    /// vt100's `set_size` alone would drop the bottom rows, which no
+    /// real terminal does.
+    pub fn resize(&mut self, width: u16, height: u16) {
+        self.actions.push(format!("resize({width}, {height})"));
+        let old_h = self.height;
+        if width == self.width && height < old_h {
+            let delta = old_h - height;
+            let seq = format!("\x1b[{delta}S");
+            self.parser.process(seq.as_bytes());
+            let (row, col) = self.parser.screen().cursor_position();
+            let cursor_row = row.saturating_sub(delta).min(height.saturating_sub(1));
+            self.parser
+                .process(format!("\x1b[{};{}H", cursor_row + 1, col + 1).as_bytes());
+        }
+        self.width = width;
+        self.height = height;
+        self.size.set((width, height));
+        self.parser.screen_mut().set_size(height, width);
+        let (cursor_row, _) = self.parser.screen().cursor_position();
+        self.cursor.set(cursor_row.min(height.saturating_sub(1)));
+        self.screen.redraw();
+        self.drain_sink();
+    }
+
+    /// Resize, then if the screen is dirty, draw a prompt frame.
+    pub fn resize_then_tick_prompt(&mut self, width: u16, height: u16) {
+        self.resize(width, height);
+        if self.screen.needs_draw(false) {
+            self.draw_prompt();
+        }
+    }
+
+    /// Simulate a Ctrl+L purge redraw (independent of resize).
+    pub fn purge_redraw(&mut self) {
+        self.actions.push("purge_redraw".into());
+        self.screen.redraw();
+        self.drain_sink();
     }
 
     pub fn push(&mut self, block: Block) {
@@ -210,10 +323,18 @@ impl TestHarness {
         self.render_pending();
     }
 
-    /// Assert incremental rendering matches a fresh re-render.
-    pub fn assert_scrollback_integrity(&mut self) {
-        self.assert_count += 1;
+    /// Assert the currently visible viewport matches a fresh render.
+    pub fn assert_visible_matches_fresh_render(&mut self) {
+        self.draw_prompt();
+        let incremental = visible_content(&self.parser);
+        let blocks = self.screen.blocks();
+        let tool_states = self.screen.tool_states_snapshot();
+        let fresh = fresh_visible_render(&blocks, &tool_states, self.width, self.height);
+        self.compare_and_panic("Visible render mismatch", incremental, fresh);
+    }
 
+    /// Assert incremental rendering matches a fresh re-render (viewport + scrollback).
+    pub fn assert_scrollback_integrity(&mut self) {
         // Draw a prompt frame so both sides end in the same state.
         let input = tui::input::InputState::default();
         {
@@ -227,6 +348,7 @@ impl TestHarness {
                     queued: &[],
                     prediction: None,
                 }),
+                None,
             );
         }
         self.drain_sink();
@@ -235,11 +357,14 @@ impl TestHarness {
         let blocks = self.screen.blocks();
         let tool_states = self.screen.tool_states_snapshot();
         let fresh = fresh_render(&blocks, &tool_states, self.width, self.height);
+        self.compare_and_panic("Scrollback integrity failed", incremental, fresh);
+    }
 
+    fn compare_and_panic(&mut self, label: &str, incremental: String, fresh: String) {
+        self.assert_count += 1;
         if incremental == fresh {
             return;
         }
-
         let diff = build_diff(&fresh, &incremental);
         let dump_dir = format!(
             "target/test-frames/{}/assert_{:03}",
@@ -250,18 +375,79 @@ impl TestHarness {
         let _ = std::fs::write(format!("{dump_dir}/actual.txt"), &incremental);
         let _ = std::fs::write(format!("{dump_dir}/diff.txt"), &diff);
         let _ = std::fs::write(format!("{dump_dir}/actions.txt"), self.actions.join("\n"));
-
         let preview: String = diff.lines().take(40).collect::<Vec<_>>().join("\n");
         panic!(
-            "Scrollback integrity failed at assertion #{}\n\
-             Blocks: {}, Frames: {dump_dir}/\n\n\
-             {preview}",
+            "{label} at assertion #{}\nBlocks: {}, Frames: {dump_dir}/\n\n{preview}",
             self.assert_count,
             self.screen.block_count(),
         );
     }
 
+    /// Start a bash tool with a summary string. Logs into `actions`.
+    pub fn start_bash_tool(&mut self, call_id: &str, summary: &str) {
+        self.actions
+            .push(format!("start_bash_tool({call_id}, {summary})"));
+        self.screen.start_tool(
+            call_id.into(),
+            "bash".into(),
+            summary.into(),
+            HashMap::new(),
+        );
+    }
+
+    /// Draw a prompt frame and snapshot the current visible viewport.
+    pub fn visible(&mut self) -> String {
+        self.draw_prompt();
+        visible_content(&self.parser)
+    }
+
     // ── Dialog lifecycle helpers ───────────────────────────────────
+
+    /// Open a confirm dialog for `call_id` and draw a single combined
+    /// frame (content + overlay + dialog). Leaves the dialog open and
+    /// the vt100 parser updated. Returns the `ConfirmDialog` and the
+    /// dialog's anchor row, so callers can either dismiss with
+    /// `clear_dialog_area` or interact with the dialog further.
+    pub fn open_confirm_dialog(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        summary: &str,
+    ) -> (ConfirmDialog, Option<u16>) {
+        self.actions
+            .push(format!("open_confirm_dialog({call_id}, {name}, {summary})"));
+
+        let req = ConfirmRequest {
+            call_id: call_id.into(),
+            tool_name: name.into(),
+            desc: summary.into(),
+            args: HashMap::new(),
+            approval_patterns: vec![],
+            outside_dir: None,
+            summary: Some(summary.into()),
+            request_id: 1,
+        };
+        let mut dialog = ConfirmDialog::new(&req, false);
+        dialog.set_term_size(self.width, self.height);
+
+        self.screen.set_active_status(call_id, ToolStatus::Confirm);
+        self.screen.render_pending_blocks();
+        self.screen.erase_prompt();
+        let dialog_height = dialog.height();
+
+        {
+            let mut frame = tui::render::Frame::begin(self.screen.backend());
+            self.screen
+                .draw_frame(&mut frame, self.width as usize, None, Some(dialog_height));
+            let dr = self.screen.dialog_row();
+            dialog.draw(&mut frame, dr, self.width, self.height);
+        }
+        let da = dialog.anchor_row();
+        self.screen.sync_dialog_anchor(da);
+        self.drain_sink();
+
+        (dialog, da)
+    }
 
     /// Run a full confirm dialog cycle: open, draw, dismiss, finish tool.
     ///
@@ -278,50 +464,7 @@ impl TestHarness {
 
         self.screen
             .start_tool(call_id.into(), name.into(), summary.into(), HashMap::new());
-        self.screen.set_active_status(call_id, ToolStatus::Confirm);
-        self.screen.render_pending_blocks();
-        self.drain_sink();
-
-        // Create dialog and set its term_size to match the test backend
-        // (ConfirmDialog::new uses terminal::size() which is the real terminal).
-        let req = ConfirmRequest {
-            call_id: call_id.into(),
-            tool_name: name.into(),
-            desc: summary.into(),
-            args: HashMap::new(),
-            approval_patterns: vec![],
-            outside_dir: None,
-            summary: Some(summary.into()),
-            request_id: 1,
-        };
-        let mut dialog = ConfirmDialog::new(&req, false);
-        dialog.set_term_size(self.width, self.height);
-
-        // Open dialog.
-        self.screen.render_pending_blocks();
-        self.screen.erase_prompt();
-        let overlay_id = if self
-            .screen
-            .tool_overlay_fits_with_dialog(call_id, dialog.height())
-        {
-            Some(call_id.to_string())
-        } else {
-            None
-        };
-        self.screen.set_dialog_tool_call_id(overlay_id);
-
-        // Draw content + dialog in a single frame.
-        {
-            let mut frame = tui::render::Frame::begin(self.screen.backend());
-            self.screen
-                .draw_frame(&mut frame, self.width as usize, None);
-            let dr = self.screen.dialog_row();
-            dialog.draw(&mut frame, dr, self.width, self.height);
-        }
-        self.drain_sink();
-        let da = dialog.anchor_row();
-        self.screen.sync_dialog_anchor(da);
-        self.drain_sink();
+        let (_dialog, da) = self.open_confirm_dialog(call_id, name, summary);
 
         // Dismiss dialog.
         self.screen.clear_dialog_area(da);
@@ -345,21 +488,7 @@ impl TestHarness {
         // flush_blocks may be deferred after dialog dismiss; a tick
         // (draw_frame with prompt) picks up the deferred render — this
         // mirrors the real event loop which calls tick() after every event.
-        let input = tui::input::InputState::default();
-        {
-            let mut frame = tui::render::Frame::begin(self.screen.backend());
-            self.screen.draw_frame(
-                &mut frame,
-                self.width as usize,
-                Some(tui::render::FramePrompt {
-                    state: &input,
-                    mode: self.mode,
-                    queued: &[],
-                    prediction: None,
-                }),
-            );
-        }
-        self.drain_sink();
+        self.draw_prompt();
     }
 
     /// Draw a prompt frame (simulates the prompt being visible).
@@ -377,6 +506,7 @@ impl TestHarness {
                     queued: &[],
                     prediction: None,
                 }),
+                None,
             );
         }
         self.drain_sink();
@@ -409,6 +539,7 @@ impl TestHarness {
                         queued: &[],
                         prediction: None,
                     }),
+                    None,
                 );
             }
             self.drain_sink();
@@ -471,7 +602,36 @@ impl TestHarness {
             b
         };
         if !bytes.is_empty() {
-            self.parser.process(&bytes);
+            // vt100 ignores `ESC[3J` (Clear::Purge). Real terminals
+            // wipe scrollback on it. Simulate that: process bytes up
+            // to each purge marker, snapshot the visible grid into a
+            // fresh parser (dropping scrollback), then continue. Any
+            // scroll-mode output after the purge refills the fresh
+            // scrollback normally.
+            const PURGE: &[u8] = b"\x1b[3J";
+            let mut cursor = 0usize;
+            while cursor < bytes.len() {
+                let rel = bytes[cursor..]
+                    .windows(PURGE.len())
+                    .position(|w| w == PURGE);
+                match rel {
+                    Some(rel) => {
+                        let end = cursor + rel + PURGE.len();
+                        self.parser.process(&bytes[cursor..end]);
+                        let (rows, cols) = self.parser.screen().size();
+                        let snapshot = self.parser.screen().contents_formatted();
+                        self.parser = vt100::Parser::new(rows, cols, 10_000);
+                        self.parser.process(&snapshot);
+                        cursor = end;
+                    }
+                    None => {
+                        self.parser.process(&bytes[cursor..]);
+                        break;
+                    }
+                }
+            }
+            let (row, _) = self.parser.screen().cursor_position();
+            self.cursor.set(row);
         }
     }
 }

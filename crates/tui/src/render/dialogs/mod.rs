@@ -81,6 +81,12 @@ pub(crate) struct ListState {
 }
 
 impl ListState {
+    /// `overhead` = chrome rows the dialog draws around the item list:
+    /// title bar, header label, blank lines, hint footer, etc. The
+    /// item area gets `max_height - overhead` rows when `max_height`
+    /// is set; otherwise items can grow unbounded. Each dialog
+    /// declares its own overhead constant so the value isn't a magic
+    /// integer at the call site.
     pub fn new(item_count: usize, max_height: Option<u16>, overhead: u16) -> Self {
         let max_visible = Self::cap(max_height, overhead, item_count);
         Self {

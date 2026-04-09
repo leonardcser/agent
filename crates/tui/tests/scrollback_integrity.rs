@@ -5,9 +5,8 @@
 
 mod harness;
 
-use std::collections::HashMap;
-
 use harness::TestHarness;
+use std::collections::HashMap;
 use tui::render::{Block, ConfirmDialog, ConfirmRequest, Dialog, RewindDialog, ToolStatus};
 
 #[test]
@@ -480,8 +479,8 @@ fn confirm_dialog_no_duplicate_tool_when_nearly_full() {
     // Draw prompt to establish anchor row
     h.draw_prompt();
 
-    // Now run a confirm cycle. The harness uses the real fit calculation,
-    // so tool_overlay_fits_with_dialog() should return false here.
+    // Now run a confirm cycle. Overlay always shows streaming tool state and
+    // tail-crops above the dialog; no more single-tool pre-check.
     let summary = "unique-tool-summary-12345";
     let output = "unique-tool-output-67890";
     h.confirm_cycle("c1", "bash", summary, output);
@@ -552,18 +551,11 @@ fn dialog_overlay_replaced_by_live_tool() {
     dialog.set_term_size(h.width, h.height);
     h.screen.render_pending_blocks();
     h.screen.erase_prompt();
-    let overlay_id = if h
-        .screen
-        .tool_overlay_fits_with_dialog("c1", dialog.height())
-    {
-        Some("c1".to_string())
-    } else {
-        None
-    };
-    h.screen.set_dialog_tool_call_id(overlay_id);
+    let dialog_height = dialog.height();
     {
         let mut frame = tui::render::Frame::begin(h.screen.backend());
-        h.screen.draw_frame(&mut frame, h.width as usize, None);
+        h.screen
+            .draw_frame(&mut frame, h.width as usize, None, Some(dialog_height));
         let dr = h.screen.dialog_row();
         dialog.draw(&mut frame, dr, h.width, h.height);
     }
@@ -576,7 +568,6 @@ fn dialog_overlay_replaced_by_live_tool() {
     h.screen.clear_dialog_area(da);
     h.drain_sink();
     h.screen.set_active_status("c1", ToolStatus::Pending);
-    h.screen.set_dialog_tool_call_id(None);
     h.draw_prompt(); // tool now live-updating
 
     // The summary should appear exactly once (the live overlay).
@@ -656,4 +647,294 @@ fn rewind_dialog_does_not_shift_prompt() {
              Saved to: {dump_dir}/\n\n{diff_str}"
         );
     }
+}
+
+// ── Resize integrity tests ──────────────────────────────────────────
+
+fn big_table_markdown(rows: usize) -> String {
+    let mut s = String::new();
+    s.push_str("| ID | Name    | Age | City         | Country     |\n");
+    s.push_str("|----|---------|-----|--------------|-------------|\n");
+    let names = [
+        ("Alice", 28, "New York", "USA"),
+        ("Bob", 34, "London", "UK"),
+        ("Charlie", 22, "Paris", "France"),
+        ("Diana", 31, "Tokyo", "Japan"),
+        ("Eve", 27, "Berlin", "Germany"),
+        ("Frank", 45, "Sydney", "Australia"),
+        ("Grace", 29, "Toronto", "Canada"),
+        ("Henry", 38, "Rome", "Italy"),
+        ("Ivy", 24, "Madrid", "Spain"),
+        ("Jack", 33, "Moscow", "Russia"),
+    ];
+    for i in 0..rows {
+        let n = &names[i % names.len()];
+        s.push_str(&format!(
+            "| {:<2} | {:<7} | {:<3} | {:<12} | {:<11} |\n",
+            i + 1,
+            n.0,
+            n.1,
+            n.2,
+            n.3,
+        ));
+    }
+    s
+}
+
+/// After a purge redraw, a later height-only shrink/expand cycle must not
+/// duplicate prompt/status rows in scrollback. We approximate that by checking
+/// the visible viewport still matches a fresh render after the resize cycle.
+#[test]
+fn purge_then_height_resize_keeps_single_status_bar() {
+    let mut h = TestHarness::new(120, 30, "purge_then_height_resize_keeps_single_status_bar");
+
+    h.push_and_render(Block::User {
+        text: "reply with a table with 20 rows".into(),
+        image_labels: vec![],
+    });
+    h.push_and_render(Block::Text {
+        content: big_table_markdown(20),
+    });
+    h.draw_prompt();
+
+    h.purge_redraw();
+    h.draw_prompt();
+
+    h.resize_then_tick_prompt(120, 12);
+
+    h.resize_then_tick_prompt(120, 40);
+    h.assert_visible_matches_fresh_render();
+}
+
+/// Height-only resize must not duplicate prompt/status rows. We check that
+/// the visible viewport still matches a fresh render after shrinking and
+/// re-expanding.
+#[test]
+fn height_only_resize_keeps_single_status_bar() {
+    let mut h = TestHarness::new(120, 40, "height_only_resize_keeps_single_status_bar");
+
+    h.push_and_render(Block::User {
+        text: "reply with a table with 20 rows".into(),
+        image_labels: vec![],
+    });
+    h.push_and_render(Block::Text {
+        content: big_table_markdown(20),
+    });
+    h.draw_prompt();
+
+    h.resize_then_tick_prompt(120, 12);
+
+    h.resize_then_tick_prompt(120, 40);
+    h.assert_visible_matches_fresh_render();
+}
+
+/// Streaming an overlay (markdown table) that outgrows the visible viewport
+/// must push committed content into scrollback and then crop the overlay's
+/// own head once the viewport is full. We verify by asking for the full
+/// extracted text (viewport + scrollback) to contain the original user
+/// message and an early committed row — those must only be accessible
+/// through scrollback after the overlay has grown past the viewport.
+#[test]
+fn overlay_push_up_pushes_committed_into_scrollback() {
+    let mut h = TestHarness::new(80, 14, "overlay_push_up_pushes_committed_into_scrollback");
+    // Committed: user message + short reply.
+    h.push_and_render(Block::User {
+        text: "Make me a 20-row table".into(),
+        image_labels: vec![],
+    });
+    h.push_and_render(Block::Text {
+        content: "Sure, here it is:".into(),
+    });
+    h.draw_prompt();
+
+    // Stream a 20-row markdown table one line at a time with a tick
+    // after each line. The overlay grows past the viewport; committed
+    // content should end up in real scrollback.
+    let table = big_table_markdown(20);
+    h.stream_lines_with_ticks(&table);
+
+    // Final full text (visible + scrollback) must still contain every
+    // data row and the user message — no content lost, just repositioned.
+    h.assert_contains_all(&[
+        "Make me a 20-row table",
+        "Sure, here it is:",
+        "Alice",
+        "Jack",
+    ]);
+}
+
+/// When committed content has already filled the viewport to the
+/// prompt area, a subsequent streaming overlay must still be visible
+/// during streaming — not only after it commits. Exercises the case
+/// where `base_anchor >= viewport_bottom` and the overlay only has
+/// room after a `ScrollUp`.
+#[test]
+fn streaming_overlay_visible_after_viewport_full() {
+    let mut h = TestHarness::new(80, 14, "streaming_overlay_visible_after_viewport_full");
+    // Fill committed history until the prompt sits at the bottom of
+    // the viewport — committed content reaches the prompt reserve.
+    h.push_and_render(Block::User {
+        text: "make a table with 20 rows".into(),
+        image_labels: vec![],
+    });
+    h.push_and_render(Block::Text {
+        content: big_table_markdown(20),
+    });
+    h.push_and_render(Block::User {
+        text: "make it 30".into(),
+        image_labels: vec![],
+    });
+    h.draw_prompt();
+
+    // Stream a second, longer table. During streaming the overlay
+    // must be visible — not blank.
+    h.screen.append_streaming_text(
+        "| ID | Name    | Age |\n|----|---------|-----|\n| 1  | Alice   | 28  |\n",
+    );
+    h.draw_prompt();
+    h.drain_sink();
+
+    // Mid-stream visible viewport must contain at least one table row.
+    // Before the fix, nothing showed until commit.
+    let visible = {
+        let (_rows, cols) = h.parser.screen().size();
+        let lines: Vec<String> = h.parser.screen().rows(0, cols).collect();
+        lines.join("\n")
+    };
+    assert!(
+        visible.contains("Alice"),
+        "Mid-stream overlay is invisible — nothing shows until commit.\n\
+         Visible viewport:\n{visible}"
+    );
+}
+
+/// Multi-block history where the LAST block alone is bigger than the
+/// redraw budget. Earlier blocks should be excluded entirely; the last
+/// block has its head cropped so its tail is visible.
+#[test]
+fn redraw_multi_block_oversized_last_crops_last() {
+    let mut h = TestHarness::new(80, 14, "redraw_multi_block_oversized_last");
+
+    // Two short blocks that together fit easily.
+    h.push_and_render(Block::User {
+        text: "OLD_BLOCK_AAA".into(),
+        image_labels: vec![],
+    });
+    h.push_and_render(Block::Text {
+        content: "OLD_BLOCK_BBB".into(),
+    });
+    // Then a 3000-line user message — past MAX_REDRAW_LINES.
+    let huge: String = (0..3000)
+        .map(|i| format!("BIG_{i:04}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    h.push_and_render(Block::User {
+        text: huge,
+        image_labels: vec![],
+    });
+    h.draw_prompt();
+    h.drain_sink();
+
+    h.purge_redraw();
+    h.draw_prompt();
+
+    let full = h.full_text();
+    // Tail of the huge block must be visible.
+    assert!(
+        full.contains("BIG_2999"),
+        "tail of huge block missing after redraw"
+    );
+    // The earlier blocks should NOT be in scrollback or viewport — they
+    // were excluded by `redraw_start` to make room for the cropped huge.
+    assert!(
+        !full.contains("OLD_BLOCK_AAA"),
+        "earlier block should be excluded after redraw with oversized tail"
+    );
+    assert!(
+        !full.contains("OLD_BLOCK_BBB"),
+        "earlier block should be excluded after redraw with oversized tail"
+    );
+    // Head of the huge block should be cropped.
+    assert!(
+        !full.contains("BIG_0000"),
+        "head of huge block should be cropped after redraw"
+    );
+}
+
+/// A single user message taller than the redraw budget must still be
+/// visible after a `redraw()` (Ctrl+L / resize). Earlier behavior:
+/// `redraw_start` excluded the oversized block entirely and the
+/// viewport went blank. Expected behavior: tail-crop the block (head
+/// rows dropped) so its tail still appears, tmux-style.
+#[test]
+fn redraw_with_oversized_block_crops_head_not_drops() {
+    let mut h = TestHarness::new(80, 14, "redraw_with_oversized_block_crops_head");
+
+    // 3000-line user message — comfortably past MAX_REDRAW_LINES (2000).
+    let huge: String = (0..3000)
+        .map(|i| format!("LINE_{i:04}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    h.push_and_render(Block::User {
+        text: huge,
+        image_labels: vec![],
+    });
+    h.draw_prompt();
+    h.drain_sink();
+
+    // Force a redraw (e.g. user hit Ctrl+L or resized).
+    h.purge_redraw();
+    h.draw_prompt();
+
+    let full = h.full_text();
+    // The TAIL of the message must be visible — these are the very
+    // last data lines, well past the 2000-row budget.
+    assert!(
+        full.contains("LINE_2999"),
+        "tail of oversized block missing after redraw:\n{}",
+        // Don't dump 3000 lines on failure — show the last 30 lines.
+        full.lines().rev().take(30).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        full.contains("LINE_2900"),
+        "expected line LINE_2900 in tail after redraw"
+    );
+    // The very first lines should NOT be present — they were cropped.
+    assert!(
+        !full.contains("LINE_0000"),
+        "head of oversized block should be cropped after redraw"
+    );
+}
+
+/// Shrink + re-expand while a streaming overlay is active must not
+/// corrupt the visible viewport.
+#[test]
+fn resize_during_active_overlay_visible_matches_fresh() {
+    let mut h = TestHarness::new(80, 30, "resize_during_active_overlay_visible_matches_fresh");
+    h.push_and_render(Block::User {
+        text: "Make a table".into(),
+        image_labels: vec![],
+    });
+    h.draw_prompt();
+
+    // Start streaming a table that will outgrow the final (small) viewport.
+    h.screen.append_streaming_text(
+        "| ID | Name    | Age |\n|----|---------|-----|\n| 1  | Alice   | 28  |\n| 2  | Bob     | 34  |\n| 3  | Charlie | 22  |\n",
+    );
+    h.draw_prompt();
+    h.drain_sink();
+
+    // Resize smaller while the overlay is live.
+    h.resize_then_tick_prompt(80, 15);
+    // Resize back larger.
+    h.resize_then_tick_prompt(80, 30);
+
+    // Flush the streamed text (commits the table).
+    h.screen.flush_streaming_text();
+    h.screen.render_pending_blocks();
+    h.drain_sink();
+
+    // The visible viewport after the resize cycle should match a
+    // fresh render at the current size.
+    h.assert_visible_matches_fresh_render();
 }

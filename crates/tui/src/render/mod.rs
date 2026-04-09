@@ -36,22 +36,23 @@ use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
 use blocks::{
-    animated_dots, collect_trailing_thinking, gap_between, layout_block, render_thinking_summary,
-    render_tool, thinking_summary, Element,
+    collect_trailing_thinking, gap_between, layout_block, render_active_exec, render_block,
+    render_thinking_summary, render_tool, thinking_summary, Element,
 };
 
 pub use context::{LayoutContext, PaintContext};
 pub use display::DisplayBlock;
 pub use highlight::warm_up_syntect;
-use paint::paint_block;
+use layout_out::LayoutSink;
+use layout_out::SpanCollector;
+use paint::{paint_block, paint_line};
 
 pub use cache::{
     build_tool_output_render_cache, session_render_hash, CachedNotebookEdit, PersistedLayoutCache,
     RenderCache, ToolOutputRenderCache, LAYOUT_CACHE_VERSION, RENDER_CACHE_VERSION,
 };
 
-/// Maximum number of lines to re-render during a full redraw (e.g. purge).
-/// Older blocks beyond this limit are dropped to avoid flooding the terminal.
+/// Cap on rows painted by a single redraw, regardless of history length.
 const MAX_REDRAW_LINES: u16 = 2000;
 
 /// Parameters for rendering the prompt section in `draw_frame`.
@@ -623,6 +624,13 @@ impl BoxContext {
     }
 }
 
+/// Emit `n` blank rows via the sink's native `newline()`.
+fn emit_newlines<S: layout_out::LayoutSink>(out: &mut S, n: u16) {
+    for _ in 0..n {
+        out.newline();
+    }
+}
+
 fn reasoning_color(effort: protocol::ReasoningEffort) -> Color {
     match effort {
         protocol::ReasoningEffort::Off => theme::reason_off(),
@@ -933,6 +941,10 @@ struct BlockHistory {
     /// When true, the leading gap of the next unflushed block is suppressed.
     /// Set after a dialog dismiss where ScrollUp pushed the gap into scrollback.
     suppress_leading_gap: bool,
+    /// Rows to skip from the top of the next-rendered first block.
+    /// Set by `redraw` when a single block exceeds the redraw budget;
+    /// consumed by the next `render` call and reset to 0 afterwards.
+    pending_head_skip: u16,
 }
 
 impl BlockHistory {
@@ -947,6 +959,7 @@ impl BlockHistory {
             flushed: 0,
             last_block_rows: 0,
             suppress_leading_gap: false,
+            pending_head_skip: 0,
         }
     }
 
@@ -1082,10 +1095,17 @@ impl BlockHistory {
         rows
     }
 
-    /// Find the earliest block index such that rendering from that index to
-    /// the end stays within `max_lines`. Lays out blocks that have no
-    /// cached layout yet so the render that follows can cache-hit.
-    fn redraw_start(&mut self, max_lines: u16, key: LayoutKey) -> usize {
+    /// Earliest block index such that `[start_idx..len()]` fits in
+    /// `max_lines` rows. Walks backwards and stops early — O(tail),
+    /// not O(history).
+    ///
+    /// Returns `(start_idx, head_skip)`. When a single block at the
+    /// tail is taller than the entire budget, that block is still
+    /// included and `head_skip` is the number of rows to drop from
+    /// its top so the painted slice fits the budget. This keeps very
+    /// long messages visible (tail-cropped, tmux-style) instead of
+    /// disappearing entirely.
+    fn redraw_start(&mut self, max_lines: u16, key: LayoutKey) -> (usize, u16) {
         let _perf = crate::perf::begin("history:redraw_start");
         let mut budget = max_lines;
         let mut start = self.order.len();
@@ -1093,12 +1113,20 @@ impl BlockHistory {
             let rows = self.ensure_rows(i, key);
             let total = self.block_gap(i) + rows;
             if total > budget {
+                if start == self.order.len() {
+                    // Even the last block is bigger than the budget —
+                    // include it and crop its head to fit. The gap is
+                    // dropped by `render` when `head_skip > 0`, so the
+                    // budget here is purely block rows, not gap+rows.
+                    let head_skip = rows.saturating_sub(budget);
+                    return (i, head_skip);
+                }
                 break;
             }
             budget -= total;
             start = i;
         }
-        start
+        (start, 0)
     }
 
     fn truncate(&mut self, idx: usize) {
@@ -1161,8 +1189,13 @@ impl BlockHistory {
         let mut total = 0u16;
         let last_idx = self.order.len().saturating_sub(1);
         let mut first = true;
+        // Consume any pending head-skip set by the redraw path. Skip
+        // the leading gap on the first block too, since we're starting
+        // mid-block visually.
+        let head_skip = std::mem::take(&mut self.pending_head_skip);
         for i in self.flushed..self.order.len() {
-            let gap = if first && self.suppress_leading_gap {
+            let head_skip_block = if first { head_skip } else { 0 };
+            let gap = if first && (self.suppress_leading_gap || head_skip > 0) {
                 0
             } else {
                 self.block_gap(i)
@@ -1183,8 +1216,8 @@ impl BlockHistory {
             let rows = if use_cache {
                 if let Some(cached) = self.artifacts.get(&id).and_then(|a| a.get(key)) {
                     let _p = crate::perf::begin("history:cache_hit");
-                    paint_block(out, cached, &pctx);
-                    cached.rows()
+                    paint_block(out, cached, &pctx, head_skip_block as usize);
+                    cached.rows().saturating_sub(head_skip_block)
                 } else {
                     let _p = crate::perf::begin("history:cache_miss");
                     let lctx = LayoutContext {
@@ -1192,8 +1225,8 @@ impl BlockHistory {
                         show_thinking,
                     };
                     let display = layout_block(block, tool_state, &lctx);
-                    paint_block(out, &display, &pctx);
-                    let rows = display.rows();
+                    paint_block(out, &display, &pctx, head_skip_block as usize);
+                    let rows = display.rows().saturating_sub(head_skip_block);
                     let artifact = self.artifacts.get_mut(&id).unwrap();
                     artifact.insert(key, display);
                     self.cache_dirty = true;
@@ -1206,8 +1239,8 @@ impl BlockHistory {
                     show_thinking,
                 };
                 let display = layout_block(block, tool_state, &lctx);
-                paint_block(out, &display, &pctx);
-                display.rows()
+                paint_block(out, &display, &pctx, head_skip_block as usize);
+                display.rows().saturating_sub(head_skip_block)
             };
 
             total += gap + rows;
@@ -1267,10 +1300,6 @@ pub struct Screen {
     /// causes scrollback pollution on some terminals).  The blocks are
     /// rendered by the next `draw_frame` instead.
     defer_pending_render: bool,
-    /// Downgrade the next `redraw(purge=true)` to `redraw(purge=false)`.
-    /// Set by `clear_dialog_area` so that spurious resize events in the
-    /// same event batch don't purge scrollback (causing pollution on Ghostty).
-    defer_redraw: bool,
     /// A permission dialog is waiting for the user to stop typing.
     pending_dialog: bool,
     /// A dialog is currently open (confirm, rewind, etc.).
@@ -1286,10 +1315,6 @@ pub struct Screen {
     last_vim_enabled: bool,
     last_vim_mode: Option<crate::vim::ViMode>,
     last_mode: protocol::Mode,
-    /// When a confirm dialog is open, the call ID of the tool to overlay
-    /// above it.  Only the matching tool is shown (not all parallel tools)
-    /// so the overlay + dialog fit on screen.  `None` = hide all tools.
-    dialog_tool_call_id: Option<String>,
     /// Ephemeral btw side-question state, rendered above the prompt.
     btw: Option<BtwBlock>,
     /// Ephemeral notification shown above the prompt, dismissed on any key.
@@ -1348,7 +1373,6 @@ impl Screen {
             has_scrollback: false,
             content_start_row: None,
             defer_pending_render: false,
-            defer_redraw: false,
             pending_dialog: false,
             dialog_open: false,
             running_procs: 0,
@@ -1361,7 +1385,6 @@ impl Screen {
             last_vim_enabled: false,
             last_vim_mode: None,
             last_mode: protocol::Mode::Normal,
-            dialog_tool_call_id: None,
             btw: None,
             notification: None,
             task_label: None,
@@ -1451,7 +1474,7 @@ impl Screen {
         if btw.wrapped.is_empty() {
             return false;
         }
-        let max_lines = (term_h / 2).saturating_sub(4).max(1);
+        let max_lines = btw_max_body_rows(term_h);
         let max = btw.wrapped.len().saturating_sub(max_lines);
         let old = btw.scroll_offset;
         if delta < 0 {
@@ -1612,13 +1635,6 @@ impl Screen {
                 elapsed: Some(elapsed),
             });
         }
-        self.prompt.dirty = true;
-    }
-
-    /// Set the call ID of the single active tool to show above a dialog overlay.
-    /// Pass `None` to hide all tools.
-    pub fn set_dialog_tool_call_id(&mut self, call_id: Option<String>) {
-        self.dialog_tool_call_id = call_id;
         self.prompt.dirty = true;
     }
 
@@ -1860,21 +1876,13 @@ impl Screen {
 
     /// Dismiss a dialog overlay.
     ///
-    /// Clears from the dialog's anchor row down and lets the prompt redraw
-    /// at that position on the next tick.
+    /// Clears from the screen anchor (or the dialog row, whichever is
+    /// higher) down, so any ephemeral overlay shifted upward by
+    /// `ScrollUp` is wiped along with the dialog bar itself.
     pub fn clear_dialog_area(&mut self, dialog_anchor: Option<u16>) {
         let dialog_row = dialog_anchor.unwrap_or(0);
-
-        // When the tool overlay was shown above the dialog and the dialog's
-        // begin_dialog_draw used ScrollUp, the overlay was shifted upward
-        // and now sits between the screen anchor and the dialog bar.
-        // Extend the clear range to wipe the ghost.
-        let clear_from = if self.dialog_tool_call_id.is_some() {
-            let screen_anchor = self.prompt.anchor_row.unwrap_or(dialog_row);
-            screen_anchor.min(dialog_row)
-        } else {
-            dialog_row
-        };
+        let screen_anchor = self.prompt.anchor_row.unwrap_or(dialog_row);
+        let clear_from = screen_anchor.min(dialog_row);
 
         let height = self.size().1;
         let mut frame = Frame::begin(&*self.backend);
@@ -1888,13 +1896,10 @@ impl Screen {
         // double blank line (one in scrollback, one in visible).  Suppress
         // the leading gap when the anchor was pushed to row 0 — meaning
         // the previous block's trailing gap is now in scrollback.
-        let screen_anchor = self.prompt.anchor_row.unwrap_or(dialog_row);
         if screen_anchor == 0 && self.has_scrollback {
             self.history.suppress_leading_gap = true;
         }
         self.defer_pending_render = true;
-        self.defer_redraw = true;
-        self.dialog_tool_call_id = None;
         // Only reset anchor/prev_rows when the dialog caused ScrollUp
         // (prompt was physically moved). For non-scrolled dialogs the
         // prompt is still in its original position — just mark dirty so
@@ -2411,36 +2416,6 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
-    /// Returns whether a single tool overlay fits on screen above a
-    /// dialog of the given height.
-    pub fn tool_overlay_fits_with_dialog(&self, call_id: &str, dialog_height: u16) -> bool {
-        let (width, height) = self.size();
-        let w = width as usize;
-        let tool_rows = self
-            .active_tools
-            .iter()
-            .find(|t| t.call_id == call_id)
-            .map(|t| {
-                let mut rows = blocks::tool_line_rows(&t.name, &t.summary, w);
-                if t.name == "web_fetch" {
-                    if let Some(prompt) = t.args.get("prompt").and_then(|v| v.as_str()) {
-                        rows += wrap_line(prompt, w.saturating_sub(4)).len() as u16;
-                    }
-                }
-                rows
-            })
-            .unwrap_or(0);
-        if tool_rows == 0 {
-            return true;
-        }
-        let gap_above = if let Some(last) = self.history.last_block() {
-            blocks::gap_between(&blocks::Element::Block(last), &blocks::Element::ActiveTool)
-        } else {
-            0
-        };
-        gap_above + tool_rows + 1 + dialog_height <= height
-    }
-
     pub fn clear_context_tokens(&mut self) {
         self.context_tokens = None;
         self.prompt.dirty = true;
@@ -2630,12 +2605,7 @@ impl Screen {
     /// the prompt.  Used to decide whether to emit a 1-line gap before the
     /// prompt bar.
     fn has_content(&self) -> bool {
-        !self.history.is_empty()
-            || self.active_thinking.is_some()
-            || self.active_text.is_some()
-            || !self.active_tools.is_empty()
-            || !self.active_agents.is_empty()
-            || self.active_exec.is_some()
+        !self.history.is_empty() || self.has_ephemeral()
     }
 
     pub fn render_pending_blocks(&mut self) {
@@ -2682,76 +2652,48 @@ impl Screen {
         }
     }
 
-    /// Re-render all blocks. When `purge` is true, clears scrollback and
-    /// screen first — necessary after resize or when content has overflowed.
-    /// When false, redraws over the current viewport (faster, no flash).
-    pub fn redraw(&mut self, purge: bool) {
-        let purge = if self.defer_redraw {
-            self.defer_redraw = false;
-            false
-        } else {
-            purge
-        };
-        let _perf = if purge {
-            crate::perf::begin("redraw:purge")
-        } else {
-            crate::perf::begin("redraw:soft")
-        };
+    /// Clear screen + scrollback and repaint the last
+    /// `MAX_REDRAW_LINES` rows of committed history in scroll mode.
+    /// Rows past the viewport scroll into the fresh scrollback so the
+    /// user can scroll back through recent history. Purging scrollback
+    /// is what keeps a resize from leaving duplicate rows across the
+    /// viewport and scrollback.
+    pub fn redraw(&mut self) {
+        let _perf = crate::perf::begin("redraw");
+        let (w, height) = self.size();
         let mut frame = Frame::begin(&*self.backend);
         let _ = frame.queue(cursor::Hide);
-        let start = if purge {
-            let _ = frame.queue(cursor::MoveTo(0, 0));
-            let _ = frame.queue(terminal::Clear(terminal::ClearType::All));
-            let _ = frame.queue(terminal::Clear(terminal::ClearType::Purge));
-            0
-        } else {
-            let row = self.content_start_row.unwrap_or(0);
-            let _ = frame.queue(cursor::MoveTo(0, row));
-            row
-        };
-        let (w, height) = self.size();
-        // Width-aware invalidation before computing redraw_start so that
-        // stale row counts from a previous terminal width don't cause
-        // blocks to be skipped. Blocks whose cached bytes are still valid
-        // at the new width are preserved.
+        let _ = frame.queue(cursor::MoveTo(0, 0));
+        let _ = frame.queue(terminal::Clear(terminal::ClearType::All));
+        let _ = frame.queue(terminal::Clear(terminal::ClearType::Purge));
+        // Drop stale layouts from a previous width before laying out
+        // anything new.
         if w as usize != self.history.cache_width {
             let _p = crate::perf::begin("redraw:invalidate");
             self.history.invalidate_for_width(w as usize);
         }
-        let start_idx = {
+        let key = LayoutKey {
+            width: w,
+            show_thinking: self.show_thinking,
+        };
+        let (start_idx, head_skip) = {
             let _p = crate::perf::begin("redraw:start_idx");
-            self.history.redraw_start(
-                MAX_REDRAW_LINES,
-                LayoutKey {
-                    width: w,
-                    show_thinking: self.show_thinking,
-                },
-            )
+            self.history.redraw_start(MAX_REDRAW_LINES, key)
         };
         self.history.flushed = start_idx;
         self.history.last_block_rows = 0;
+        self.history.pending_head_skip = head_skip;
         let block_rows = {
             let _p = crate::perf::begin("redraw:render_blocks");
             self.history
                 .render(&mut frame, w as usize, self.show_thinking)
         };
-        if !purge {
-            let cur_row = start + block_rows;
-            for row in cur_row..height {
-                let _ = frame.queue(cursor::MoveTo(0, row));
-                let _ = frame.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-            }
-        }
         self.prompt.drawn = false;
         self.prompt.dirty = true;
         self.prompt.prev_rows = 0;
-        if purge {
-            self.has_scrollback = false;
-            self.content_start_row = Some(0);
-            self.prompt.anchor_row = Some(block_rows.min(height.saturating_sub(1)));
-        } else {
-            self.prompt.anchor_row = Some((start + block_rows).min(height.saturating_sub(1)));
-        }
+        self.content_start_row = Some(0);
+        self.has_scrollback = false;
+        self.prompt.anchor_row = Some(block_rows.min(height.saturating_sub(1)));
     }
 
     pub fn clear(&mut self) {
@@ -2928,7 +2870,7 @@ impl Screen {
         self.history.truncate(block_idx);
         self.active_tools.clear();
         self.active_agents.clear();
-        self.redraw(true);
+        self.redraw();
     }
 
     pub fn draw_prompt(&mut self, state: &InputState, mode: protocol::Mode, width: usize) {
@@ -2942,6 +2884,7 @@ impl Screen {
                 queued: &[],
                 prediction: None,
             }),
+            None,
         );
     }
 
@@ -2960,25 +2903,234 @@ impl Screen {
     pub fn needs_draw(&self, is_dialog: bool) -> bool {
         let has_new_blocks = self.history.has_unflushed();
         if is_dialog {
-            has_new_blocks || (self.dialog_tool_call_id.is_some() && self.prompt.dirty)
+            has_new_blocks || (self.has_ephemeral() && self.prompt.dirty)
         } else {
             has_new_blocks || self.prompt.dirty
         }
     }
 
-    /// Unified rendering entry point. Renders pending blocks + active tool,
-    /// then either the prompt (`Some`) or nothing (`None` = dialog covers it).
+    /// Whether any streaming overlay element is active.
+    fn has_ephemeral(&self) -> bool {
+        self.active_thinking.is_some()
+            || self.active_text.is_some()
+            || !self.active_tools.is_empty()
+            || !self.active_agents.is_empty()
+            || self.active_exec.is_some()
+    }
+
+    /// Write every ephemeral element into `out` with `newline()` for
+    /// inter-item gaps. The caller feeds a `SpanCollector` and then
+    /// tail-crops the flat line stream — content-agnostic cropping,
+    /// so streaming bash output, a partial markdown table, and a
+    /// multi-line tool command are all dropped oldest-first together.
+    fn render_ephemeral_into<S: LayoutSink>(&self, out: &mut S, width: usize) {
+        // `last_committed` is borrowed — no clone. As streaming items
+        // are emitted they are also stored in `prev_synth` so the next
+        // item's gap is computed against the most recently emitted
+        // element rather than the last committed one.
+        let last_committed: Option<&Block> = self.history.last_block();
+        let mut prev_synth: Option<Block> = None;
+        let mut had_streaming = false;
+
+        // ── Active thinking ─────────────────────────────────────────
+        if let Some(ref at) = self.active_thinking {
+            if self.show_thinking {
+                let content = match (at.paragraph.is_empty(), at.current_line.is_empty()) {
+                    (true, true) => None,
+                    (true, false) => Some(at.current_line.clone()),
+                    (false, true) => Some(at.paragraph.clone()),
+                    (false, false) => Some(format!("{}\n{}", at.paragraph, at.current_line)),
+                };
+                if let Some(content) = content.filter(|t| !t.trim().is_empty()) {
+                    let block = Block::Thinking { content };
+                    let gap = prev_synth
+                        .as_ref()
+                        .or(last_committed)
+                        .map(|p| gap_between(&Element::Block(p), &Element::Block(&block)))
+                        .unwrap_or(0);
+                    emit_newlines(out, gap);
+                    render_block(out, &block, None, width, self.show_thinking);
+                    prev_synth = Some(block);
+                    had_streaming = true;
+                }
+            } else {
+                // Animated summary: aggregate committed Thinking blocks
+                // with the in-flight text so the count keeps ticking
+                // even right after a paragraph commit.
+                let mut combined = collect_trailing_thinking(
+                    self.history.order.iter().map(|id| &self.history.blocks[id]),
+                );
+                if !at.paragraph.is_empty() {
+                    if !combined.is_empty() {
+                        combined.push('\n');
+                    }
+                    combined.push_str(&at.paragraph);
+                }
+                if !at.current_line.is_empty() {
+                    if !combined.is_empty() {
+                        combined.push('\n');
+                    }
+                    combined.push_str(&at.current_line);
+                }
+                if !combined.is_empty() {
+                    let (label, line_count) = thinking_summary(&combined);
+                    emit_newlines(out, self.thinking_summary_gap());
+                    render_thinking_summary(out, width, &label, line_count, true);
+                    had_streaming = true;
+                }
+            }
+        }
+
+        // ── Active text (paragraph, code line, or partial table) ───
+        if let Some(ref at) = self.active_text {
+            let in_table =
+                !at.table_rows.is_empty() || at.current_line.trim_start().starts_with('|');
+
+            let block_opt: Option<Block> = if in_table {
+                // Partial markdown table rendered live. Paint cropping
+                // handles overflow; commits normally when complete.
+                let mut total = at.table_rows.iter().map(|r| r.len() + 1).sum::<usize>();
+                let cur_trim = at.current_line.trim_start();
+                let append_cur = cur_trim.starts_with('|');
+                if append_cur {
+                    total += at.current_line.len() + 1;
+                }
+                if total == 0 {
+                    None
+                } else {
+                    let mut content = String::with_capacity(total);
+                    for row in &at.table_rows {
+                        if !content.is_empty() {
+                            content.push('\n');
+                        }
+                        content.push_str(row);
+                    }
+                    if append_cur {
+                        if !content.is_empty() {
+                            content.push('\n');
+                        }
+                        content.push_str(&at.current_line);
+                    }
+                    Some(Block::Text { content })
+                }
+            } else if at.in_code_block.is_some() && !at.current_line.is_empty() {
+                Some(Block::CodeLine {
+                    content: at.current_line.clone(),
+                    lang: at.in_code_block.clone().unwrap_or_default(),
+                })
+            } else if !at.paragraph.is_empty() || !at.current_line.trim().is_empty() {
+                let mut content =
+                    String::with_capacity(at.paragraph.len() + at.current_line.len() + 1);
+                content.push_str(&at.paragraph);
+                if !at.current_line.is_empty() {
+                    if !content.is_empty() {
+                        content.push('\n');
+                    }
+                    content.push_str(&at.current_line);
+                }
+                (!content.trim().is_empty()).then_some(Block::Text { content })
+            } else {
+                None
+            };
+
+            if let Some(block) = block_opt {
+                let gap = prev_synth
+                    .as_ref()
+                    .or(last_committed)
+                    .map(|p| gap_between(&Element::Block(p), &Element::Block(&block)))
+                    .unwrap_or(0);
+                emit_newlines(out, gap);
+                render_block(out, &block, None, width, self.show_thinking);
+                prev_synth = Some(block);
+                had_streaming = true;
+            }
+        }
+
+        // ── Active tools ───────────────────────────────────────────
+        let mut tool_count = 0usize;
+        for tool in self.active_tools.iter() {
+            let tool_gap = if tool_count == 0 {
+                if had_streaming {
+                    1
+                } else if let Some(p) = prev_synth.as_ref().or(last_committed) {
+                    gap_between(&Element::Block(p), &Element::ActiveTool)
+                } else {
+                    0
+                }
+            } else {
+                gap_between(&Element::ActiveTool, &Element::ActiveTool)
+            };
+            emit_newlines(out, tool_gap);
+            render_tool(
+                out,
+                &tool.call_id,
+                &tool.name,
+                &tool.summary,
+                &tool.args,
+                tool.status,
+                Some(tool.start_time.elapsed()),
+                tool.output.as_deref(),
+                tool.user_message.as_deref(),
+                width,
+            );
+            tool_count += 1;
+        }
+
+        // ── Active blocking agents ─────────────────────────────────
+        for (i, agent) in self.active_agents.iter().enumerate() {
+            let agent_gap = if i > 0 || tool_count > 0 {
+                1
+            } else if let Some(p) = prev_synth.as_ref().or(last_committed) {
+                gap_between(&Element::Block(p), &Element::ActiveTool)
+            } else {
+                0
+            };
+            emit_newlines(out, agent_gap);
+            let elapsed = agent
+                .final_elapsed
+                .unwrap_or_else(|| agent.start_time.elapsed());
+            let agent_block = Block::Agent {
+                agent_id: agent.agent_id.clone(),
+                slug: agent.slug.clone(),
+                blocking: true,
+                tool_calls: agent.tool_calls.clone(),
+                status: agent.status,
+                elapsed: Some(elapsed),
+            };
+            render_block(out, &agent_block, None, width, self.show_thinking);
+        }
+
+        // ── Active exec ────────────────────────────────────────────
+        if let Some(ref exec) = self.active_exec {
+            let exec_gap = if !self.active_agents.is_empty() || tool_count > 0 {
+                1
+            } else if let Some(p) = prev_synth.as_ref().or(last_committed) {
+                gap_between(&Element::Block(p), &Element::ActiveExec)
+            } else {
+                0
+            };
+            emit_newlines(out, exec_gap);
+            render_active_exec(out, exec, width);
+        }
+    }
+
+    /// Unified rendering entry point. Renders pending blocks + active
+    /// overlay, then either the prompt (`Some`) or nothing (`None` =
+    /// dialog covers it). `dialog_height` is the height of the active
+    /// dialog in dialog mode — used to reserve space so the overlay
+    /// tail-crops above it instead of fighting the dialog's own layout.
     ///
-    /// The caller owns the `Frame` (sync lifecycle). This method only queues
-    /// draw commands into the provided output buffer.
+    /// The caller owns the `Frame` (sync lifecycle). This method only
+    /// queues draw commands into the provided output buffer.
     ///
-    /// Returns `true` when content-only mode drew something (caller should
-    /// re-dirty any overlay dialog so it repaints on top).
+    /// Returns `true` when content-only mode drew something (caller
+    /// should re-dirty any overlay dialog so it repaints on top).
     pub fn draw_frame(
         &mut self,
         out: &mut RenderOut,
         width: usize,
         prompt: Option<FramePrompt>,
+        dialog_height: Option<u16>,
     ) -> bool {
         let _perf = crate::perf::begin("render:frame");
 
@@ -2986,13 +3138,11 @@ impl Screen {
 
         let has_new_blocks = self.history.has_unflushed();
         let is_dialog = prompt.is_none();
+        let has_ephemeral = self.has_ephemeral();
 
-        // Content-only (dialog overlay): only render when new blocks arrived
-        // or when the active tool should be shown and has changes.
-        if is_dialog
-            && !has_new_blocks
-            && !(self.dialog_tool_call_id.is_some() && self.prompt.dirty)
-        {
+        // Dialog mode: only redraw when new blocks land or the overlay
+        // has streaming content and something is dirty.
+        if is_dialog && !has_new_blocks && !(has_ephemeral && self.prompt.dirty) {
             return false;
         }
         // Full mode: skip if nothing changed.
@@ -3023,220 +3173,85 @@ impl Screen {
         // ── Render blocks ───────────────────────────────────────────────
         let block_rows = self.history.render(out, width, self.show_thinking);
 
-        // ── Render streaming overlay ─────────────────────────────────────
-        // Only the current incomplete line lives here (tables and completed
-        // lines are committed to block history immediately).
-        let mut streaming_rows: u16 = 0;
+        // ── Render ephemeral overlay ────────────────────────────────
+        // Reserve `dialog_height + 1` rows in dialog mode (dialog +
+        // status bar) or the previously-measured prompt UI height in
+        // non-dialog mode, and tail-crop the overlay above that band.
+        // ScrollUp first pushes committed content into scrollback;
+        // only when no committed rows remain do we drop overlay rows
+        // from the head.
+        let (_term_w, term_h) = self.size();
+        // `prev_prompt_ui_rows` is the prompt section's height from
+        // the previous frame (input + queued + status), measured —
+        // not guessed. On the very first frame it's 0 and no streaming
+        // overlay can be active yet, so the value only starts
+        // mattering once at least one prompt has landed. `.max(1)`
+        // preserves the status bar row no matter what.
+        let prompt_reserve: u16 = dialog_height
+            .map(|h| h.saturating_add(1))
+            .unwrap_or_else(|| self.prompt.prev_prompt_ui_rows.max(1));
+        let viewport_bottom = term_h.saturating_sub(prompt_reserve);
+        let base_anchor = draw_start_row
+            .saturating_add(block_rows)
+            .min(term_h.saturating_sub(1));
 
-        let mut overlay_blocks: Vec<Block> = Vec::new();
+        // Lay out any streaming overlay content upfront — `overlay_rows`
+        // drives both the ScrollUp amount and head-cropping.
+        let (overlay_flat, overlay_rows) = if has_ephemeral {
+            let mut col = SpanCollector::new(width as u16);
+            self.render_ephemeral_into(&mut col, width);
+            let flat = col.finish();
+            let rows = flat.lines.len() as u16;
+            (Some(flat), rows)
+        } else {
+            (None, 0)
+        };
 
-        // Current thinking overlay.
-        if let Some(ref at) = self.active_thinking {
-            let text = match (at.paragraph.is_empty(), at.current_line.is_empty()) {
-                (true, true) => String::new(),
-                (true, false) => at.current_line.clone(),
-                (false, true) => at.paragraph.clone(),
-                (false, false) => format!("{}\n{}", at.paragraph, at.current_line),
-            };
-            if self.show_thinking {
-                if !text.trim().is_empty() {
-                    overlay_blocks.push(Block::Thinking { content: text });
-                }
-            } else {
-                // Animated summary while streaming. Always render from
-                // committed blocks even when active text is momentarily
-                // empty (right after a paragraph commit) to avoid flicker.
-                let mut combined = collect_trailing_thinking(
-                    self.history.order.iter().map(|id| &self.history.blocks[id]),
-                );
-                if !text.trim().is_empty() {
-                    if !combined.is_empty() {
-                        combined.push('\n');
-                    }
-                    combined.push_str(&text);
-                }
-                if !combined.is_empty() {
-                    let (label, line_count) = thinking_summary(&combined);
-                    let gap = self.thinking_summary_gap();
-                    for _ in 0..gap {
-                        crlf(out);
-                    }
-                    let rows = render_thinking_summary(out, width, &label, line_count, true);
-                    streaming_rows += gap + rows;
-                }
-            }
+        // Overflow = committed-end + overlay_rows past the reserve band.
+        // When there's no overlay, `overflow` is purely "committed needs
+        // to move up to make room for the dialog/prompt" — so we still
+        // ScrollUp in that case and the dialog doesn't paint on top of
+        // committed content.
+        let needed_end = base_anchor.saturating_add(overlay_rows);
+        let overflow = needed_end.saturating_sub(viewport_bottom);
+        // `scroll_amount` pushes committed content up into scrollback;
+        // the remainder drops from the overlay head (tail-crop).
+        let scroll_amount = overflow.min(base_anchor);
+        let crop_head = overflow - scroll_amount;
+        let mut scroll_compensation: u16 = 0;
+        if scroll_amount > 0 {
+            let _ = out.queue(terminal::ScrollUp(scroll_amount));
+            scroll_compensation = scroll_amount;
         }
 
-        // Current text overlay.
-        if let Some(ref at) = self.active_text {
-            let in_table =
-                !at.table_rows.is_empty() || at.current_line.trim_start().starts_with('|');
+        let final_anchor = base_anchor - scroll_amount;
+        let ephemeral_rows: u16 = overlay_rows.saturating_sub(crop_head);
 
-            if in_table {
-                let n = at.table_data_rows;
-                let dots = animated_dots();
-                overlay_blocks.push(Block::Hint {
-                    content: format!(" building table ({n} rows){dots}"),
-                });
-            } else if at.in_code_block.is_some() && !at.current_line.is_empty() {
-                let lang = at.in_code_block.as_deref().unwrap_or("").to_string();
-                overlay_blocks.push(Block::CodeLine {
-                    content: at.current_line.clone(),
-                    lang,
-                });
-            } else {
-                let mut overlay_content = String::new();
-                if !at.paragraph.is_empty() {
-                    overlay_content.push_str(&at.paragraph);
-                }
-                if !at.current_line.is_empty() {
-                    if !overlay_content.is_empty() {
-                        overlay_content.push('\n');
-                    }
-                    overlay_content.push_str(&at.current_line);
-                }
-                if !overlay_content.trim().is_empty() {
-                    overlay_blocks.push(Block::Text {
-                        content: overlay_content,
-                    });
-                }
-            }
-        }
-
-        // Render overlay blocks with correct gaps.
-        for (i, block) in overlay_blocks.iter().enumerate() {
-            let gap = if i == 0 {
-                if let Some(last) = self.history.last_block() {
-                    gap_between(&Element::Block(last), &Element::Block(block))
-                } else {
-                    0
-                }
-            } else {
-                gap_between(
-                    &Element::Block(&overlay_blocks[i - 1]),
-                    &Element::Block(block),
-                )
-            };
-            for _ in 0..gap {
-                crlf(out);
-            }
-            let lctx = LayoutContext {
-                width: width as u16,
-                show_thinking: self.show_thinking,
-            };
+        if let Some(flat) = overlay_flat {
             let theme = crate::theme::snapshot();
             let pctx = PaintContext {
                 theme: &theme,
                 term_width: width as u16,
             };
-            let display = layout_block(block, None, &lctx);
-            paint_block(out, &display, &pctx);
-            streaming_rows += gap + display.rows();
-        }
-
-        // ── Render active tools ─────────────────────────────────────────
-        let mut active_rows: u16 = 0;
-        // During a dialog, only show the single tool that owns the dialog.
-        let dialog_filter = if is_dialog {
-            self.dialog_tool_call_id.as_deref()
-        } else {
-            None
-        };
-        let tools_to_show: Vec<_> = if let Some(cid) = dialog_filter {
-            self.active_tools
-                .iter()
-                .filter(|t| t.call_id == cid)
-                .collect()
-        } else {
-            self.active_tools.iter().collect()
-        };
-        for (i, tool) in tools_to_show.iter().enumerate() {
-            let tool_gap = if i == 0 {
-                if streaming_rows > 0 {
-                    1
-                } else if let Some(last) = self.history.last_block() {
-                    gap_between(&Element::Block(last), &Element::ActiveTool)
-                } else {
-                    0
-                }
-            } else {
-                gap_between(&Element::ActiveTool, &Element::ActiveTool)
-            };
-            for _ in 0..tool_gap {
-                crlf(out);
+            // Overlay mode: `crlf` uses `MoveTo`, not `\r\n`.
+            let switched_to_overlay = out.row.is_none();
+            out.row = Some(final_anchor);
+            let _ = out.queue(cursor::MoveTo(0, final_anchor));
+            for line in &flat.lines[crop_head as usize..] {
+                paint_line(out, line, &pctx);
             }
-            let rows = render_tool(
-                out,
-                &tool.call_id,
-                &tool.name,
-                &tool.summary,
-                &tool.args,
-                tool.status,
-                Some(tool.start_time.elapsed()),
-                tool.output.as_deref(),
-                tool.user_message.as_deref(),
-                width,
-            );
-            active_rows += tool_gap + rows;
-        }
-
-        // ── Render active blocking agents ──────────────────────────
-        let show_agents = dialog_filter.is_none();
-        if show_agents {
-            for (i, agent) in self.active_agents.iter().enumerate() {
-                let agent_gap = if i > 0 || !self.active_tools.is_empty() {
-                    1
-                } else if let Some(last) = self.history.last_block() {
-                    gap_between(&Element::Block(last), &Element::ActiveTool)
-                } else {
-                    0
-                };
-                for _ in 0..agent_gap {
-                    crlf(out);
-                }
-                let elapsed = agent
-                    .final_elapsed
-                    .unwrap_or_else(|| agent.start_time.elapsed());
-                let agent_block = Block::Agent {
-                    agent_id: agent.agent_id.clone(),
-                    slug: agent.slug.clone(),
-                    blocking: true,
-                    tool_calls: agent.tool_calls.clone(),
-                    status: agent.status,
-                    elapsed: Some(elapsed),
-                };
-                let lctx = LayoutContext {
-                    width: width as u16,
-                    show_thinking: self.show_thinking,
-                };
-                let theme = crate::theme::snapshot();
-                let pctx = PaintContext {
-                    theme: &theme,
-                    term_width: width as u16,
-                };
-                let display = layout_block(&agent_block, None, &lctx);
-                paint_block(out, &display, &pctx);
-                active_rows += agent_gap + display.rows();
+            // Wipe stale rows left by a previous taller overlay;
+            // the prompt section draws over the cleared area next.
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+            if switched_to_overlay {
+                out.row = None;
             }
         }
 
-        // ── Render active exec ──────────────────────────────────────
-        if show_agents {
-            if let Some(ref exec) = self.active_exec {
-                let exec_gap = if !self.active_agents.is_empty() || !self.active_tools.is_empty() {
-                    1
-                } else if let Some(last) = self.history.last_block() {
-                    gap_between(&Element::Block(last), &Element::ActiveExec)
-                } else {
-                    0
-                };
-                for _ in 0..exec_gap {
-                    crlf(out);
-                }
-                let rows = blocks::render_active_exec(out, exec, width);
-                active_rows += exec_gap + rows;
-            }
-        }
+        // `ScrollUp` shifted committed content up by
+        // `scroll_compensation`; shadow `draw_start_row` so the prompt
+        // section's anchor math reflects the new layout.
+        let draw_start_row = draw_start_row.saturating_sub(scroll_compensation);
 
         if let Some(p) = prompt {
             // ── Full mode: render prompt ────────────────────────────────
@@ -3248,7 +3263,7 @@ impl Screen {
                 crlf(out);
             }
 
-            let pre_prompt = block_rows + streaming_rows + active_rows + gap;
+            let pre_prompt = block_rows + ephemeral_rows + gap;
             let (top_row, new_rows, scrolled) = self.draw_prompt_sections(
                 out,
                 p.state,
@@ -3267,11 +3282,12 @@ impl Screen {
                 self.content_start_row = Some(top_row);
             }
             self.prompt.prev_rows = (pre_prompt - block_rows) + new_rows;
+            self.prompt.prev_prompt_ui_rows = new_rows;
 
             // anchor_row: where the next frame starts drawing.  Points to
             // the end of flushed block content — the gap is always emitted
             // fresh by draw_frame, never baked into anchor_row.
-            let prompt_section_rows = streaming_rows + active_rows + gap + new_rows;
+            let prompt_section_rows = ephemeral_rows + gap + new_rows;
             if scrolled {
                 let height = self.size().1;
                 self.prompt.anchor_row = Some(height.saturating_sub(prompt_section_rows));
@@ -3281,19 +3297,18 @@ impl Screen {
             // prev_dialog_row: where the prompt bar actually starts (after active
             // tool + gap).  Dialogs render here to line up with the prompt.
             let anchor = self.prompt.anchor_row.unwrap_or(0);
-            self.prompt.prev_dialog_row = Some(anchor + streaming_rows + active_rows + gap);
+            self.prompt.prev_dialog_row = Some(anchor + ephemeral_rows + gap);
             self.prompt.drawn = true;
             self.prompt.dirty = false;
 
             let _ = out.queue(cursor::Show);
             false
         } else {
-            // ── Content-only mode (dialog inline) ───────────────────────
-            // Render blocks + active tool, then leave a gap line before
-            // the dialog that follows.  The dialog renders inline at
-            // `anchor_row`, pushing conversation up via terminal scroll
-            // rather than overlaying it.
-            let gap: u16 = if block_rows > 0 || streaming_rows > 0 || active_rows > 0 {
+            // ── Dialog mode ─────────────────────────────────────────
+            // The overlay already tail-cropped and ScrollUp'd so
+            // committed + overlay sit above the reserved dialog band.
+            // The dialog itself will render at `prev_dialog_row`.
+            let gap: u16 = if block_rows > 0 || ephemeral_rows > 0 {
                 // Clear the gap row (stale prompt content may linger) and
                 // advance past it.  crlf no longer clears the next row, so
                 // we handle it explicitly here.  The dialog bar row (after
@@ -3307,19 +3322,19 @@ impl Screen {
                 0
             };
 
-            let content_rows = block_rows + streaming_rows + active_rows + gap;
-            let height = self.size().1;
-            let scrolled = draw_start_row + content_rows > height;
-
-            let anchor = if scrolled {
+            let content_rows = block_rows + ephemeral_rows + gap;
+            // `final_anchor` is the end of committed content after the
+            // ScrollUp pass — identical to `draw_start_row + block_rows`
+            // when nothing was cropped, but correct even when committed
+            // content got fully pushed off (fullscreen dialog case).
+            let overlay_end = final_anchor + ephemeral_rows;
+            let dialog_row = (overlay_end + gap).min(viewport_bottom);
+            if scroll_compensation > 0 || dialog_row < overlay_end + gap {
                 self.has_scrollback = true;
-                height.saturating_sub(streaming_rows + active_rows + gap)
-            } else {
-                draw_start_row + block_rows
-            };
-            self.prompt.anchor_row = Some(anchor);
-            self.prompt.prev_dialog_row = Some(anchor + streaming_rows + active_rows + gap);
-            self.prompt.prev_rows = streaming_rows + active_rows + gap;
+            }
+            self.prompt.anchor_row = Some(final_anchor);
+            self.prompt.prev_dialog_row = Some(dialog_row);
+            self.prompt.prev_rows = ephemeral_rows + gap;
             self.prompt.drawn = true;
             self.prompt.dirty = false;
 
@@ -3365,8 +3380,7 @@ impl Screen {
         extra_rows += stash_rows;
         let term_h = self.size().1 as usize;
         let btw_visual = if let Some(ref mut btw) = self.btw {
-            // Cap btw to half the terminal height, minus overhead for bar+input.
-            let max_btw = (term_h / 2).saturating_sub(4);
+            let max_btw = btw_max_body_rows(term_h);
             let rows = render_btw(out, btw, usable, max_btw, state.vim_enabled());
             extra_rows += rows;
             rows as usize
@@ -3500,10 +3514,13 @@ impl Screen {
         // Reserve space for the status line (always shown when no completions/menus).
         let status_line_reserve: usize = if comp_total == 0 { 1 } else { 0 };
 
+        // 2 = top bar (above input) + bottom bar (below input).
+        const PROMPT_BARS: usize = 2;
         let fixed_base = notification_rows as usize
             + stash_rows as usize
             + queued_rows
-            + 2
+            + btw_visual
+            + PROMPT_BARS
             + status_line_reserve;
         let mut fixed = fixed_base + comp_rows;
         let mut max_content_rows = height.saturating_sub(fixed);
@@ -3715,13 +3732,15 @@ impl Screen {
             )
         };
 
+        // Mirror of `fixed_base`'s structure: extras, top bar, input
+        // content, bottom bar, status line / completions.
         let total_rows = notification_rows as usize
             + stash_rows as usize
             + queued_rows
             + btw_visual
-            + 1
+            + 1 // top bar (above input)
             + content_rows
-            + 1
+            + 1 // bottom bar (below input)
             + status_line_rows
             + comp_rows;
         let new_rows = total_rows as u16;
@@ -3898,6 +3917,17 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
         }
     }
     rows
+}
+
+/// Chrome rows the BTW block reserves around its body content (header
+/// row + bar row + input rows etc., before the body fills the rest).
+const BTW_CHROME_ROWS: usize = 4;
+
+/// Maximum body lines the BTW block displays at the given terminal
+/// height. Capped at half the terminal so the BTW never dominates the
+/// screen, with `BTW_CHROME_ROWS` taken out for header/input chrome.
+fn btw_max_body_rows(term_h: usize) -> usize {
+    (term_h / 2).saturating_sub(BTW_CHROME_ROWS).max(1)
 }
 
 fn render_btw(
@@ -5207,6 +5237,7 @@ mod selection_tests {
                 queued: &[],
                 prediction: None,
             }),
+            None,
         );
         let rendered = String::from_utf8(out.into_bytes()).unwrap();
         assert!(

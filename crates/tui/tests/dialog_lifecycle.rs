@@ -392,122 +392,6 @@ fn single_gap_above_confirm_tool_overlay() {
     );
 }
 
-/// When the dialog is so tall that the tool overlay can't be shown
-/// (show_tool_in_dialog=false), the committed tool block after the dialog
-/// should still have exactly 1 blank line above it — not 2.
-#[test]
-fn no_double_gap_when_overlay_hidden() {
-    // Terminal where tool+dialog doesn't fit → overlay hidden, but
-    // enough room that the dialog doesn't need much ScrollUp.
-    let height = 11;
-    let mut h = TestHarness::new(80, height, "no_double_gap_overlay_hidden");
-
-    h.push_and_render(Block::Text {
-        content: "Sure.".into(),
-    });
-    // Call draw_prompt to establish anchor, then manually do confirm
-    // cycle WITHOUT the extra draw_prompt at the start of confirm_cycle.
-    h.draw_prompt();
-
-    // Manual confirm cycle (no extra draw_prompt at start).
-    h.screen.start_tool(
-        "c1".into(),
-        "bash".into(),
-        "ls".into(),
-        std::collections::HashMap::new(),
-    );
-    h.screen
-        .set_active_status("c1", tui::render::ToolStatus::Confirm);
-    h.screen.render_pending_blocks();
-    h.drain_sink();
-
-    let req = tui::render::ConfirmRequest {
-        call_id: "c1".into(),
-        tool_name: "bash".into(),
-        desc: "ls".into(),
-        args: std::collections::HashMap::new(),
-        approval_patterns: vec![],
-        outside_dir: None,
-        summary: Some("ls".into()),
-        request_id: 1,
-    };
-    let mut dialog = tui::render::ConfirmDialog::new(&req, false);
-    dialog.set_term_size(80, height);
-
-    h.screen.render_pending_blocks();
-    h.screen.erase_prompt();
-    let overlay_id = if h
-        .screen
-        .tool_overlay_fits_with_dialog("c1", dialog.height())
-    {
-        Some("c1".to_string())
-    } else {
-        None
-    };
-    h.screen.set_dialog_tool_call_id(overlay_id.clone());
-    {
-        let mut frame = tui::render::Frame::begin(h.screen.backend());
-        h.screen.draw_frame(&mut frame, 80, None);
-        let dr = h.screen.dialog_row();
-        dialog.draw(&mut frame, dr, 80, height);
-    }
-    h.drain_sink();
-    let da = dialog.anchor_row();
-    h.screen.sync_dialog_anchor(da);
-    h.drain_sink();
-
-    h.screen.clear_dialog_area(da);
-    h.drain_sink();
-    h.screen.finish_tool(
-        "c1",
-        tui::render::ToolStatus::Ok,
-        Some(Box::new(tui::render::ToolOutput {
-            content: "output".into(),
-            is_error: false,
-            metadata: None,
-            render_cache: None,
-        })),
-        Some(std::time::Duration::from_millis(100)),
-    );
-    h.screen.flush_blocks();
-    h.drain_sink();
-    h.draw_prompt();
-
-    let text = h.full_text();
-
-    // Find the tool line and count blank lines above it.
-    let lines: Vec<&str> = text.lines().collect();
-    let tool_idx = lines
-        .iter()
-        .position(|l| l.contains("bash") && l.contains("ls"))
-        .unwrap_or_else(|| panic!("Could not find tool line in output:\n{text}"));
-
-    let mut blanks = 0;
-    for i in (0..tool_idx).rev() {
-        if lines[i].trim().is_empty() {
-            blanks += 1;
-        } else {
-            break;
-        }
-    }
-
-    let vrows = visible_rows(&h.parser, height);
-    let sb = {
-        h.parser.screen_mut().set_scrollback(usize::MAX);
-        let n = h.parser.screen().scrollback();
-        h.parser.screen_mut().set_scrollback(0);
-        n
-    };
-    assert_eq!(
-        blanks,
-        1,
-        "Expected 1 blank line above tool when overlay was hidden, found {blanks}.\n\
-         overlay={overlay_id:?}, dialog_height={}, scrollback={sb}\n\
-         Full output:\n{text}\n\nVisible rows:\n{vrows}",
-        dialog.height()
-    );
-}
-
 #[test]
 fn no_double_gap_nearly_full_terminal() {
     let mut h = TestHarness::new(80, 24, "no_double_gap_nearly_full_terminal");
@@ -527,12 +411,13 @@ fn no_double_gap_nearly_full_terminal() {
     assert_no_double_gaps(&text, "no_double_gap_nearly_full_terminal");
 }
 
-/// With parallel tool calls, the confirm dialog overlay should only show
-/// the tool that owns the dialog — not the other parallel tools.
+/// With parallel tool calls, the confirm dialog overlay shows every
+/// active tool. The viewport reserves dialog height + 1 (status bar)
+/// and the overlay tail-crops above that band.
 #[test]
-fn parallel_tools_only_dialog_owner_shown() {
+fn parallel_tools_all_visible_during_dialog() {
     let height = 24;
-    let mut h = TestHarness::new(80, height, "parallel_tools_only_dialog_owner");
+    let mut h = TestHarness::new(80, height, "parallel_tools_all_visible_during_dialog");
 
     h.push_and_render(Block::Text {
         content: "I'll run three commands.".into(),
@@ -574,18 +459,11 @@ fn parallel_tools_only_dialog_owner_shown() {
 
     h.screen.render_pending_blocks();
     h.screen.erase_prompt();
-    let overlay_id = if h
-        .screen
-        .tool_overlay_fits_with_dialog("c2", dialog.height())
-    {
-        Some("c2".to_string())
-    } else {
-        None
-    };
-    h.screen.set_dialog_tool_call_id(overlay_id);
+    let dialog_height = dialog.height();
     {
         let mut frame = tui::render::Frame::begin(h.screen.backend());
-        h.screen.draw_frame(&mut frame, 80, None);
+        h.screen
+            .draw_frame(&mut frame, 80, None, Some(dialog_height));
         let dr = h.screen.dialog_row();
         dialog.draw(&mut frame, dr, 80, height);
     }
@@ -596,32 +474,24 @@ fn parallel_tools_only_dialog_owner_shown() {
 
     let text = h.full_text();
 
-    // The dialog-owning tool (c2 / MARKER_BBB) should be visible.
-    assert!(
-        text.contains("MARKER_BBB"),
-        "Dialog's own tool overlay should be visible.\n{text}"
-    );
-    // The other parallel tools should NOT be in the output.
-    assert!(
-        !text.contains("MARKER_AAA"),
-        "Parallel tool c1 should be hidden during dialog.\n{text}"
-    );
-    assert!(
-        !text.contains("MARKER_CCC"),
-        "Parallel tool c3 should be hidden during dialog.\n{text}"
-    );
+    // Every parallel tool is visible above the dialog.
+    for marker in ["MARKER_AAA", "MARKER_BBB", "MARKER_CCC"] {
+        assert!(
+            text.contains(marker),
+            "Parallel tool {marker} should be visible during dialog.\n{text}"
+        );
+    }
 
-    // After dialog dismiss, all tools reappear.
+    // After dialog dismiss, every tool is still there.
     h.screen.clear_dialog_area(da);
     h.drain_sink();
-    h.screen.set_dialog_tool_call_id(None);
     h.draw_prompt();
 
     let text_after = h.full_text();
     for marker in ["MARKER_AAA", "MARKER_BBB", "MARKER_CCC"] {
         assert!(
             text_after.contains(marker),
-            "All tools should reappear after dialog dismiss. Missing: {marker}\n{text_after}"
+            "All tools should remain after dialog dismiss. Missing: {marker}\n{text_after}"
         );
     }
 }

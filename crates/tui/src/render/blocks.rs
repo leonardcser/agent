@@ -12,8 +12,25 @@ use super::highlight::{
 use super::layout_out::{LayoutSink, SpanCollector};
 use super::{
     truncate_str, wrap_line, ActiveExec, ApprovalScope, Block, ConfirmChoice, LayoutContext,
-    RenderOut, ToolOutput, ToolState, ToolStatus,
+    ToolOutput, ToolState, ToolStatus,
 };
+
+/// Cap on the number of rows a single tool block contributes to the
+/// overlay or scrollback. Applied separately to:
+///
+/// - the bash command summary header (`print_tool_line`), which shows
+///   the first N command lines + a "... M below" indicator,
+/// - the tool output body (`render_wrapped_output`), which shows the
+///   last N output lines + a "... M above" indicator.
+///
+/// 20 keeps a single tool block visually contained even on small
+/// terminals; the overlay tail-crop handles the rare case where two
+/// or more capped tools still don't fit.
+const MAX_TOOL_BLOCK_ROWS: usize = 20;
+
+/// Default number of lines shown in non-bash tool result previews
+/// (`render_default_output`). Joined with " | " separators.
+const DEFAULT_PREVIEW_LINES: usize = 3;
 
 /// Layout entry point: produce a `DisplayBlock` for `block` at the given
 /// width. Drives the per-variant renderers against a `SpanCollector` and
@@ -675,30 +692,6 @@ fn tool_line_layout(name: &str, suffix_len: usize, width: usize) -> ToolLineLayo
     }
 }
 
-/// Maximum visual rows for a bash tool call summary (matches
-/// `MAX_VISUAL_ROWS` used by `render_wrapped_output` for tool output).
-const MAX_TOOL_SUMMARY_ROWS: usize = 20;
-
-/// Compute the number of visual rows a tool header line would occupy
-/// without actually rendering it.
-pub(super) fn tool_line_rows(name: &str, summary: &str, width: usize) -> u16 {
-    if name != "bash" {
-        return 1;
-    }
-    let ly = tool_line_layout(name, 0, width);
-    let total: usize = summary
-        .lines()
-        .map(|line| wrap_line(line, ly.max_summary.max(1)).len())
-        .sum();
-    let total = total.max(1);
-    if total > MAX_TOOL_SUMMARY_ROWS {
-        // +1 for the "... N lines below" indicator
-        (MAX_TOOL_SUMMARY_ROWS + 1) as u16
-    } else {
-        total as u16
-    }
-}
-
 fn print_tool_line<S: LayoutSink>(
     out: &mut S,
     name: &str,
@@ -735,7 +728,7 @@ fn print_tool_line<S: LayoutSink>(
             wrapped.extend(segs);
         }
         let total = wrapped.len();
-        let show = total.min(MAX_TOOL_SUMMARY_ROWS);
+        let show = total.min(MAX_TOOL_BLOCK_ROWS);
         let mut line_num = 0;
         let mut bh = BashHighlighter::new();
 
@@ -756,8 +749,8 @@ fn print_tool_line<S: LayoutSink>(
             line_num += 1;
         }
 
-        if total > MAX_TOOL_SUMMARY_ROWS {
-            let skipped = total - MAX_TOOL_SUMMARY_ROWS;
+        if total > MAX_TOOL_BLOCK_ROWS {
+            let skipped = total - MAX_TOOL_BLOCK_ROWS;
             out.print_string(" ".repeat(ly.prefix_len));
             print_dim(
                 out,
@@ -1379,7 +1372,6 @@ fn render_wrapped_output<S: LayoutSink>(
     width: usize,
 ) -> u16 {
     let _perf = crate::perf::begin("render:wrapped_output");
-    const MAX_VISUAL_ROWS: usize = 20;
     let max_cols = width.saturating_sub(4); // "   " prefix + 1 margin
 
     // Pre-wrap all lines so we can count visual rows.
@@ -1397,8 +1389,8 @@ fn render_wrapped_output<S: LayoutSink>(
 
     let total = wrapped.len();
     let mut rows = 0u16;
-    if total > MAX_VISUAL_ROWS {
-        let skipped = total - MAX_VISUAL_ROWS;
+    if total > MAX_TOOL_BLOCK_ROWS {
+        let skipped = total - MAX_TOOL_BLOCK_ROWS;
         print_dim(
             out,
             &format!("   ... {} above", pluralize(skipped, "line", "lines")),
@@ -1406,7 +1398,7 @@ fn render_wrapped_output<S: LayoutSink>(
         out.newline();
         rows += 1;
     }
-    let start = total.saturating_sub(MAX_VISUAL_ROWS);
+    let start = total.saturating_sub(MAX_TOOL_BLOCK_ROWS);
     for seg in &wrapped[start..] {
         if is_error {
             out.push_fg(theme::ERROR.into());
@@ -1427,7 +1419,7 @@ fn render_default_output<S: LayoutSink>(
     is_error: bool,
     width: usize,
 ) -> u16 {
-    let preview = result_preview(content, 3);
+    let preview = result_preview(content, DEFAULT_PREVIEW_LINES);
     let max_cols = width.saturating_sub(4);
     let segs = wrap_line(&preview, max_cols);
     if segs.len() > 1 {
@@ -1535,7 +1527,11 @@ pub(super) fn print_user_highlights<S: LayoutSink>(
 
 // ── Active exec rendering ────────────────────────────────────────────────────
 
-pub(super) fn render_active_exec(out: &mut RenderOut, exec: &ActiveExec, width: usize) -> u16 {
+pub(super) fn render_active_exec<S: LayoutSink>(
+    out: &mut S,
+    exec: &ActiveExec,
+    width: usize,
+) -> u16 {
     let char_len = exec.command.chars().count() + 1;
     let pad_width = (char_len + 2).min(width);
     let trailing = pad_width.saturating_sub(char_len + 1);

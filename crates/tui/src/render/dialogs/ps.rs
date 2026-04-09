@@ -8,6 +8,10 @@ use engine::tools::ProcessInfo;
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
 
+/// Chrome rows around the item list: bar + "Background Processes"
+/// header + blank separator + hints footer.
+const LIST_OVERHEAD: u16 = 4;
+
 pub struct PsDialog {
     registry: engine::tools::ProcessRegistry,
     procs: Vec<ProcessInfo>,
@@ -18,7 +22,7 @@ pub struct PsDialog {
 impl PsDialog {
     pub fn new(registry: engine::tools::ProcessRegistry, max_height: Option<u16>) -> Self {
         let procs = Self::fetch_procs(&registry, &[]);
-        let list = ListState::new(procs.len().max(1), max_height, 4);
+        let list = ListState::new(procs.len().max(1), max_height, LIST_OVERHEAD);
         Self {
             registry,
             procs,
