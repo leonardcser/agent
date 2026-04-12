@@ -151,24 +151,16 @@ impl App {
                 false
             }
             EventOutcome::InterruptWithQueued => {
-                // Pop the oldest queued message, cancel the running
-                // turn, and start a fresh turn with that message.
-                // Save remaining queued messages so finish_turn's
-                // cancel path doesn't dump them into the input buffer.
-                let text = self.queued_messages.remove(0);
+                // Cancel the running turn and let the queued messages
+                // auto-start via the main loop once TurnComplete arrives.
+                // We must save the queued messages before finish_turn
+                // because the cancel path dumps them into the input buffer.
                 let remaining = std::mem::take(&mut self.queued_messages);
                 if agent.is_some() {
                     self.finish_turn(true);
                     *agent = None;
                 }
                 self.queued_messages = remaining;
-                self.screen.erase_prompt();
-                if let Some(cmd) = crate::custom_commands::resolve(text.trim()) {
-                    *agent = Some(self.begin_custom_command_turn(cmd));
-                } else {
-                    let content = Content::text(text.clone());
-                    *agent = Some(self.begin_agent_turn(&text, content));
-                }
                 false
             }
             EventOutcome::CancelAndClear => {
