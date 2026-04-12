@@ -415,16 +415,27 @@ impl App {
             let ghost = self.input_prediction.is_some() && self.input.buf.is_empty();
             let ctx = self.input.key_context(false, ghost);
 
-            // Dismiss ghost text on any key that isn't AcceptGhostText.
+            // Dismiss ghost text on keys that affect input content.
+            // Transparent actions (mode toggles, redraw, etc.) preserve it.
             if ghost {
-                if let Some(KeyAction::AcceptGhostText) = keymap::lookup(code, modifiers, &ctx) {
-                    let full = self.input_prediction.take().unwrap();
-                    self.input.buf = full.lines().next().unwrap_or(&full).to_string();
-                    self.input.cpos = self.input.buf.len();
-                    self.screen.mark_dirty();
-                    return EventOutcome::Redraw;
+                match keymap::lookup(code, modifiers, &ctx) {
+                    Some(KeyAction::AcceptGhostText) => {
+                        let full = self.input_prediction.take().unwrap();
+                        self.input.buf = full.lines().next().unwrap_or(&full).to_string();
+                        self.input.cpos = self.input.buf.len();
+                        self.screen.mark_dirty();
+                        return EventOutcome::Redraw;
+                    }
+                    Some(
+                        KeyAction::ToggleMode
+                        | KeyAction::CycleReasoning
+                        | KeyAction::PurgeRedraw
+                        | KeyAction::ToggleStash,
+                    ) => {}
+                    _ => {
+                        self.input_prediction = None;
+                    }
                 }
-                self.input_prediction = None;
             }
 
             if !self.input.has_modal() {
@@ -783,8 +794,21 @@ impl App {
                         return Some(EventOutcome::Noop);
                     }
                     _ => {
-                        self.screen.dismiss_btw();
-                        return Some(EventOutcome::Noop);
+                        // Let transparent actions (mode toggles, redraw)
+                        // pass through without dismissing.
+                        let ctx = self.input.key_context(false, false);
+                        match keymap::lookup(*code, *modifiers, &ctx) {
+                            Some(
+                                KeyAction::ToggleMode
+                                | KeyAction::CycleReasoning
+                                | KeyAction::PurgeRedraw
+                                | KeyAction::ToggleStash,
+                            ) => return None,
+                            _ => {
+                                self.screen.dismiss_btw();
+                                return Some(EventOutcome::Noop);
+                            }
+                        }
                     }
                 }
             }
