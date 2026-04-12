@@ -434,11 +434,11 @@ pub async fn refresh_tokens(
 
 fn classify_refresh_error(body: &str) -> String {
     if body.contains("refresh_token_expired") {
-        "your refresh token has expired — run `agent auth` to sign in again".into()
+        "your refresh token has expired — run `smelt auth` to sign in again".into()
     } else if body.contains("refresh_token_reused") {
-        "your refresh token was already used — run `agent auth` to sign in again".into()
+        "your refresh token was already used — run `smelt auth` to sign in again".into()
     } else if body.contains("refresh_token_invalidated") {
-        "your refresh token was revoked — run `agent auth` to sign in again".into()
+        "your refresh token was revoked — run `smelt auth` to sign in again".into()
     } else {
         format!("token refresh error: {body}")
     }
@@ -724,7 +724,7 @@ pub async fn device_code_login(client: &reqwest::Client) -> Result<CodexTokens, 
 
 /// Get valid tokens, refreshing if needed. Returns the full `CodexTokens`.
 pub async fn ensure_access_token_full(client: &reqwest::Client) -> Result<CodexTokens, String> {
-    let tokens = CodexTokens::load().ok_or("not logged in to Codex — run `agent auth` first")?;
+    let tokens = CodexTokens::load().ok_or("not logged in to Codex — run `smelt auth` first")?;
 
     if !tokens.needs_refresh() {
         return Ok(tokens);
