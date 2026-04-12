@@ -38,6 +38,7 @@ pub struct AgentSnapshot {
     pub agent_id: String,
     pub prompt: std::sync::Arc<String>,
     pub tool_calls: Vec<AgentToolEntry>,
+    pub cost_usd: f64,
 }
 
 /// Shared, live-updating list of agent snapshots.
@@ -291,7 +292,8 @@ impl super::Dialog for AgentsDialog {
                 let follow = *follow;
                 let w = self.term_size.0 as usize;
 
-                let lines = if let Some(ref snap) = self.find_snapshot(&agent_id) {
+                let snapshot = self.find_snapshot(&agent_id);
+                let lines = if let Some(ref snap) = snapshot {
                     Self::detail_lines(snap, w)
                 } else {
                     vec![DetailLine::Text("(agent not tracked)".into())]
@@ -341,6 +343,16 @@ impl super::Dialog for AgentsDialog {
                     if let Some(ref slug) = entry.task_slug {
                         out.push_dim();
                         let _ = out.queue(Print(format!(" \u{00b7} {slug}")));
+                        out.pop_style();
+                    }
+                }
+                if let Some(ref snap) = snapshot {
+                    if snap.cost_usd > 0.0 {
+                        out.push_dim();
+                        let _ = out.queue(Print(format!(
+                            "  {}",
+                            crate::metrics::format_cost(snap.cost_usd)
+                        )));
                         out.pop_style();
                     }
                 }
@@ -481,6 +493,16 @@ impl super::Dialog for AgentsDialog {
                         if let Some(slug) = &agent.task_slug {
                             let max = w.saturating_sub(name_w + 12);
                             let _ = out.queue(Print(format!("  {}", truncate_str(slug, max))));
+                        }
+                        if let Some(snap) = self.find_snapshot(&agent.agent_id) {
+                            if snap.cost_usd > 0.0 {
+                                out.push_dim();
+                                let _ = out.queue(Print(format!(
+                                    "  {}",
+                                    crate::metrics::format_cost(snap.cost_usd)
+                                )));
+                                out.pop_style();
+                            }
                         }
                         crlf(out);
                     }

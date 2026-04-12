@@ -807,6 +807,7 @@ impl App {
                 status: super::AgentTrackStatus::Working,
                 blocking: child.blocking,
                 started_at: Instant::now(),
+                cost_usd: 0.0,
             });
         }
         self.refresh_agent_counts();
@@ -815,6 +816,7 @@ impl App {
     /// Drain stdout events for all tracked agents.
     pub(super) fn drain_agent_events(&mut self) {
         let mut changed = false;
+        let mut session_cost_delta = 0.0;
 
         for agent in &mut self.agents {
             while let Ok(ev) = agent.event_rx.try_recv() {
@@ -857,12 +859,22 @@ impl App {
                     EngineEvent::TurnComplete { .. } => {
                         agent.status = super::AgentTrackStatus::Idle;
                     }
+                    EngineEvent::TokenUsage { cost_usd, .. } => {
+                        let cost = cost_usd.unwrap_or(0.0);
+                        agent.cost_usd += cost;
+                        session_cost_delta += cost;
+                    }
                     EngineEvent::TurnError { .. } => {
                         agent.status = super::AgentTrackStatus::Error;
                     }
                     _ => {}
                 }
             }
+        }
+
+        if session_cost_delta > 0.0 {
+            self.session_cost_usd += session_cost_delta;
+            self.screen.set_session_cost(self.session_cost_usd);
         }
 
         if !changed {
@@ -899,6 +911,7 @@ impl App {
                 agent_id: a.agent_id.clone(),
                 prompt: a.prompt.clone(),
                 tool_calls: a.tool_calls.clone(),
+                cost_usd: a.cost_usd,
             })
             .collect();
         *self.agent_snapshots.lock().unwrap() = snaps;
