@@ -150,6 +150,27 @@ impl App {
                 }
                 false
             }
+            EventOutcome::InterruptWithQueued => {
+                // Pop the oldest queued message, cancel the running
+                // turn, and start a fresh turn with that message.
+                // Save remaining queued messages so finish_turn's
+                // cancel path doesn't dump them into the input buffer.
+                let text = self.queued_messages.remove(0);
+                let remaining = std::mem::take(&mut self.queued_messages);
+                if agent.is_some() {
+                    self.finish_turn(true);
+                    *agent = None;
+                }
+                self.queued_messages = remaining;
+                self.screen.erase_prompt();
+                if let Some(cmd) = crate::custom_commands::resolve(text.trim()) {
+                    *agent = Some(self.begin_custom_command_turn(cmd));
+                } else {
+                    let content = Content::text(text.clone());
+                    *agent = Some(self.begin_agent_turn(&text, content));
+                }
+                false
+            }
             EventOutcome::CancelAndClear => {
                 engine::log::entry(
                     engine::log::Level::Info,
@@ -591,6 +612,11 @@ impl App {
                 }
                 self.screen.mark_dirty();
             }
+            Action::SubmitEmpty => {
+                if !self.queued_messages.is_empty() {
+                    return EventOutcome::InterruptWithQueued;
+                }
+            }
             Action::ToggleMode => {
                 self.toggle_mode();
             }
@@ -626,6 +652,7 @@ impl App {
     fn dispatch_input_action(&mut self, action: Action) -> EventOutcome {
         match action {
             Action::Submit { content, display } => EventOutcome::Submit { content, display },
+            Action::SubmitEmpty => EventOutcome::Noop,
             Action::MenuResult(result) => EventOutcome::MenuResult(result),
             Action::ToggleMode => {
                 self.toggle_mode();

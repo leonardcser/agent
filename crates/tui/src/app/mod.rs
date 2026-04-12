@@ -172,6 +172,9 @@ enum EventOutcome {
     Quit,
     CancelAgent,
     CancelAndClear,
+    /// Interrupt the running agent and immediately start a new turn
+    /// with the oldest queued message.
+    InterruptWithQueued,
     Submit {
         content: Content,
         display: String,

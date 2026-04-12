@@ -145,6 +145,7 @@ pub enum Action {
     Redraw,
     PurgeRedraw,
     Submit { content: Content, display: String },
+    SubmitEmpty,
     MenuResult(MenuResult),
     ToggleMode,
     CycleReasoning,
@@ -632,7 +633,7 @@ impl InputState {
             // ── Submit / newline ─────────────────────────────────────────
             KeyAction::Submit => {
                 if self.buf.is_empty() && self.attachment_ids.is_empty() {
-                    Action::Noop
+                    Action::SubmitEmpty
                 } else {
                     let display = self.message_display_text();
                     let content = self.build_content();
@@ -986,6 +987,9 @@ impl InputState {
                         return Action::Redraw;
                     }
                     vim::Action::Submit => {
+                        if self.buf.is_empty() && self.attachment_ids.is_empty() {
+                            return Action::SubmitEmpty;
+                        }
                         let display = self.message_display_text();
                         let content = self.build_content();
                         self.clear();
