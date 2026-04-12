@@ -4445,6 +4445,7 @@ fn render_status_spans(
     let sep_style = StyleState {
         fg: Some(crate::theme::muted()),
         bg: Some(fill_bg),
+        dim: true,
         ..StyleState::default()
     };
     let mut col = 0;
