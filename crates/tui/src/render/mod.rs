@@ -4086,7 +4086,7 @@ fn render_btw(
             if btw.wrapped.is_empty() || btw.wrap_width != render_w {
                 btw.wrapped.clear();
                 let mut buf = RenderOut::buffer();
-                blocks::render_markdown_inner(&mut buf, text, render_w, "   ", true, None);
+                blocks::render_markdown_inner(&mut buf, text, render_w, "   ", false, None);
                 let _ = std::io::Write::flush(&mut buf);
                 let bytes = buf.into_bytes();
                 let rendered = String::from_utf8_lossy(&bytes);
