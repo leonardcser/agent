@@ -84,7 +84,8 @@ pub fn list() -> Vec<(String, String)> {
 
 /// Resolve a slash-command input (e.g. "/commit" or "/commit fix typos") to a
 /// parsed CustomCommand.  Any text after the command name is appended to the
-/// body as extra user instructions.
+/// body as extra user instructions.  Custom commands take priority; builtin
+/// commands are used as a fallback.
 pub fn resolve(input: &str) -> Option<CustomCommand> {
     let after_slash = input.strip_prefix('/')?;
     let name = after_slash.split_whitespace().next()?;
@@ -93,16 +94,18 @@ pub fn resolve(input: &str) -> Option<CustomCommand> {
     }
     let extra = after_slash[name.len()..].trim();
     let path = commands_dir().join(format!("{name}.md"));
-    let mut cmd = parse_command(&path, name)?;
-    if !extra.is_empty() {
-        cmd.body.push_str("\n\n");
-        cmd.body.push_str(extra);
+    if let Some(mut cmd) = parse_command(&path, name) {
+        if !extra.is_empty() {
+            cmd.body.push_str("\n\n");
+            cmd.body.push_str(extra);
+        }
+        return Some(cmd);
     }
-    Some(cmd)
+    crate::builtin_commands::resolve(input)
 }
 
-/// Check whether `input` (e.g. "/commit") matches a custom command name,
-/// ignoring any trailing arguments.
+/// Check whether `input` (e.g. "/commit") matches a custom or builtin command
+/// name, ignoring any trailing arguments.
 pub fn is_custom_command(input: &str) -> bool {
     let name = input
         .strip_prefix('/')
@@ -112,6 +115,7 @@ pub fn is_custom_command(input: &str) -> bool {
         return false;
     }
     commands_dir().join(format!("{name}.md")).exists()
+        || crate::builtin_commands::is_builtin_command(input)
 }
 
 fn parse_command(path: &Path, name: &str) -> Option<CustomCommand> {
@@ -124,7 +128,7 @@ fn parse_command(path: &Path, name: &str) -> Option<CustomCommand> {
     })
 }
 
-fn parse_frontmatter(content: &str) -> (CommandOverrides, &str) {
+pub fn parse_frontmatter(content: &str) -> (CommandOverrides, &str) {
     if !content.starts_with("---") {
         return (CommandOverrides::default(), content);
     }

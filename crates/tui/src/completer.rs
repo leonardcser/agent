@@ -147,7 +147,19 @@ impl Completer {
                 ..Default::default()
             })
             .collect();
-        for (name, desc) in crate::custom_commands::list() {
+        let custom = crate::custom_commands::list();
+        let custom_names: HashSet<&str> = custom.iter().map(|(n, _)| n.as_str()).collect();
+        for (name, desc) in crate::builtin_commands::list() {
+            if custom_names.contains(name.as_str()) {
+                continue;
+            }
+            all_items.push(CompletionItem {
+                label: name,
+                description: if desc.is_empty() { None } else { Some(desc) },
+                ..Default::default()
+            });
+        }
+        for (name, desc) in custom {
             all_items.push(CompletionItem {
                 label: name,
                 description: if desc.is_empty() { None } else { Some(desc) },
