@@ -1340,7 +1340,14 @@ impl App {
                         expanded.parent().unwrap_or(&expanded).to_path_buf()
                     };
                     let dir = engine::paths::collapse_tilde(&abs_dir);
-                    if downgraded || self.seen_outside_dirs.contains(&dir) {
+                    let already_approved = {
+                        let rt = self.runtime_approvals.read().unwrap();
+                        rt.dirs_approved(&outside_paths)
+                    };
+                    if already_approved {
+                        // Dir is already approved — don't offer it again.
+                        None
+                    } else if downgraded || self.seen_outside_dirs.contains(&dir) {
                         self.seen_outside_dirs.insert(dir.clone());
                         Some(dir)
                     } else {
