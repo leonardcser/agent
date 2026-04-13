@@ -1,13 +1,17 @@
 {% extends "base.html" %} {% block styles %} {{ super() }}
 <style>
   /* Hide sidebar, content, footer on home page */
-  @media screen and (min-width: 76.25em) {
-    .md-sidebar {
-      display: none !important;
-    }
+  .md-sidebar,
+  .md-sidebar--secondary,
+  .md-sidebar[data-md-type="toc"] {
+    display: none !important;
   }
   .md-footer {
     display: none !important;
+  }
+
+  :root {
+    --home-header-height: 2.5rem;
   }
 
   .md-main {
@@ -15,15 +19,22 @@
     padding: 0;
   }
 
-  .md-main__inner {
-    margin: 0;
+  .md-main__inner,
+  .md-main__inner.md-grid,
+  .md-grid,
+  .md-content,
+  .md-content__inner,
+  .md-content__inner > article {
+    margin: 0 !important;
+    padding: 0 !important;
     max-width: none;
+    width: 100%;
   }
 
-  .md-content {
-    max-width: none;
-    margin: 0;
-    padding: 0;
+  .md-content__inner,
+  .md-content__inner > article {
+    min-height: auto;
+    height: auto;
   }
 
   .md-content__inner {
@@ -31,9 +42,12 @@
     padding: 0;
   }
 
-  .md-typeset > h1 {
-    display: none;
+  .md-content__inner::before,
+  .md-typeset::before {
+    display: none !important;
+    content: none !important;
   }
+
   .md-content__button {
     display: none;
   }
@@ -41,19 +55,22 @@
   .hero {
     position: relative;
     width: 100%;
-    height: calc(100vh - 4rem);
-    min-height: 500px;
+    min-height: calc(100vh - var(--home-header-height));
+    height: calc(100vh - var(--home-header-height));
     overflow: hidden;
+    background: transparent;
   }
 
-  #starfield-container {
+  #hero-lava {
     position: absolute;
     inset: 0;
   }
 
-  #starfield-canvas {
+  #lava-canvas {
     position: absolute;
     inset: 0;
+    width: 100%;
+    height: 100%;
     margin: 0;
     padding: 0;
     font-family: "JetBrains Mono", "Fira Code", "SF Mono", monospace;
@@ -65,29 +82,12 @@
     overflow: hidden;
     background: none !important;
     border: none !important;
-  }
-
-  [data-md-color-scheme="default"] #starfield-canvas {
-    color: #7b7bdf;
-  }
-  [data-md-color-scheme="slate"] #starfield-canvas {
-    color: #afafff;
-  }
-
-  /* Vignette */
-  .hero::after {
-    content: "";
-    position: absolute;
-    inset: 0;
     pointer-events: none;
-    z-index: 1;
   }
+
+  /* No page-specific background overlay */
   .hero::after {
-    background: radial-gradient(
-      ellipse at center,
-      transparent 0%,
-      var(--md-default-bg-color) 100%
-    );
+    content: none;
   }
 
   .hero-overlay {
@@ -99,7 +99,12 @@
     justify-content: center;
     z-index: 2;
     text-align: center;
-    padding: 2rem;
+    padding: 0 2rem;
+    pointer-events: none;
+  }
+
+  .hero-overlay > * {
+    pointer-events: auto;
   }
 
   .hero-ascii-title {
@@ -111,6 +116,16 @@
     border: none !important;
     font-size: 0;
     line-height: 0;
+  }
+  [data-md-color-scheme="default"] .hero-ascii-title {
+    text-shadow:
+      0 0 0.2em rgba(255, 133, 46, 0.1),
+      0 0 0.6em rgba(255, 117, 24, 0.06);
+  }
+  [data-md-color-scheme="slate"] .hero-ascii-title {
+    text-shadow:
+      0 0 0.2em rgba(255, 120, 40, 0.2),
+      0 0 0.8em rgba(255, 92, 0, 0.12);
   }
   .hero-ascii-title .line {
     display: flex;
@@ -130,10 +145,10 @@
     transform-origin: top;
   }
   [data-md-color-scheme="default"] .hero-ascii-title {
-    color: #000;
+    color: #16110f;
   }
   [data-md-color-scheme="slate"] .hero-ascii-title {
-    color: #fff;
+    color: #fff3e8;
   }
 
   .hero-subtitle {
@@ -145,10 +160,12 @@
     margin: 1.5rem 0 2rem 0;
   }
   [data-md-color-scheme="default"] .hero-subtitle {
-    color: #555;
+    color: #59453d;
+    text-shadow: 0 0 0.5rem rgba(255, 148, 84, 0.08);
   }
   [data-md-color-scheme="slate"] .hero-subtitle {
-    color: #aaa;
+    color: #d8b5a4;
+    text-shadow: 0 0 0.8rem rgba(255, 97, 32, 0.16);
   }
 
   .hero-actions {
@@ -160,6 +177,9 @@
 
   .hero-actions a {
     position: relative;
+    z-index: 0;
+    isolation: isolate;
+    display: inline-block;
     font-family: var(--md-code-font-family), monospace;
     font-size: clamp(0.7rem, 1.2vw, 0.85rem);
     font-weight: 400;
@@ -172,7 +192,7 @@
     position: absolute;
     top: 0.2em;
     left: -0.3em;
-    color: var(--md-primary-fg-color);
+    color: #ff7a1a;
     display: block;
     line-height: 1;
     transform: scaleY(1.1);
@@ -194,7 +214,7 @@
   .hero-actions .btn-bg {
     position: relative;
     z-index: 1;
-    color: var(--md-primary-fg-color);
+    color: #ff8c42;
     background: var(--md-default-bg-color);
     display: block;
     line-height: 1;
@@ -211,18 +231,15 @@
     font-weight: 700;
     padding-top: 0.3em;
     z-index: 2;
+    color: #1a0e09;
   }
-
-  .hero-actions .btn-label {
-    color: #000;
-  }
-  [data-md-color-scheme="slate"] .hero-actions a:last-child .btn-label {
-    color: #fff;
+  [data-md-color-scheme="slate"] .hero-actions .btn-label {
+    color: #fff7f2;
   }
 </style>
 {% endblock %} {% block content %}
 <section class="hero">
-  <div id="starfield-container"></div>
+  <div id="hero-lava"></div>
   <div class="hero-overlay">
     <pre class="hero-ascii-title">
                                       ░██    ░██    
@@ -284,5 +301,5 @@
     titleEl.innerHTML = html;
   }
 </script>
-<script src="javascripts/starfield.js"></script>
+<script src="javascripts/hero-lava.js"></script>
 {% endblock %} {% block footer %}{% endblock %}

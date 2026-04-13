@@ -31,8 +31,8 @@ pub fn snapshot() -> Theme {
     }
 }
 
-pub const DEFAULT_ACCENT: u8 = 147;
-pub const DEFAULT_ACCENT_LIGHT: u8 = 104;
+pub const DEFAULT_ACCENT: u8 = 208;
+pub const DEFAULT_ACCENT_LIGHT: u8 = 208;
 
 static ACCENT_VALUE: AtomicU8 = AtomicU8::new(DEFAULT_ACCENT);
 static ACCENT_LIGHT_VALUE: AtomicU8 = AtomicU8::new(DEFAULT_ACCENT_LIGHT);
@@ -307,7 +307,7 @@ pub fn scrollbar_thumb() -> Color {
     }
 }
 
-pub const HEADING: Color = Color::AnsiValue(214);
+pub const HEADING: Color = Color::AnsiValue(141);
 
 pub fn muted() -> Color {
     Color::AnsiValue(244)
@@ -334,18 +334,17 @@ pub const AGENT: Color = Color::AnsiValue(75);
 
 /// Preset themes: (name, detail, ansi value)
 pub const PRESETS: &[(&str, &str, u8)] = &[
-    ("lavender", "default", DEFAULT_ACCENT),
+    ("ember", "default", DEFAULT_ACCENT),
+    ("coral", "salmon pink", 210),
+    ("rose", "soft pink", 211),
+    ("gold", "warm yellow", 220),
+    ("ice", "cool white-blue", 159),
     ("sky", "light blue", 117),
     ("blue", "classic blue", 69),
-    ("mint", "soft green", 115),
-    ("rose", "soft pink", 211),
-    ("peach", "warm coral", 209),
+    ("lavender", "purple", 147),
     ("lilac", "purple", 183),
-    ("gold", "warm yellow", 220),
-    ("ember", "deep orange", 208),
-    ("ice", "cool white-blue", 159),
+    ("mint", "soft green", 115),
     ("sage", "muted green", 108),
-    ("coral", "salmon pink", 210),
     ("silver", "grey", 244),
 ];
 

@@ -104,11 +104,11 @@ All toggleable at runtime via `/settings`.
 
 ```yaml
 theme:
-  accent: lavender
+  accent: ember
 ```
 
-Presets: `lavender`, `sky`, `blue`, `mint`, `rose`, `peach`, `lilac`, `gold`,
-`ember`, `ice`, `sage`, `coral`, `silver`. Or a raw ANSI value (0–255).
+Presets: `ember`, `coral`, `rose`, `gold`, `ice`, `sky`, `blue`, `lavender`,
+`lilac`, `mint`, `sage`, `silver`. Or a raw ANSI value (0–255).
 
 ## MCP (Model Context Protocol)
 

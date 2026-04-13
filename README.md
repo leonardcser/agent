@@ -1,9 +1,15 @@
-# smelt
+<p align="center">
+  <img src="docs/docs/logo.png" alt="smelt logo" width="160">
+</p>
 
-A Rust TUI coding agent. Connects to any OpenAI-compatible API (Ollama, OpenAI,
-Anthropic, Google Gemini, OpenRouter, etc.) or your ChatGPT subscription via
-OpenAI Codex, and provides an interactive terminal interface for code
-generation, analysis, and assistance.
+<h1 align="center">smelt</h1>
+
+<p align="center">
+  A Rust TUI coding agent. Connects to any OpenAI-compatible API (Ollama, OpenAI,
+  Anthropic, Google Gemini, OpenRouter, etc.) or your ChatGPT subscription via
+  OpenAI Codex, and provides an interactive terminal interface for code
+  generation, analysis, and assistance.
+</p>
 
 > [!WARNING]
 >

@@ -19,8 +19,8 @@ available settings.
 
 Thirteen accent color presets:
 
-> `lavender` · `sky` · `blue` · `mint` · `rose` · `peach` · `lilac` · `gold` ·
-> `ember` · `ice` · `sage` · `coral` · `silver`
+> `ember` · `coral` · `rose` · `gold` · `ice` · `sky` · `blue` · `lavender` ·
+> `lilac` · `mint` · `sage` · `silver`
 
 Set in config:
 
