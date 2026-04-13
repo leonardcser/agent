@@ -521,12 +521,14 @@ impl RuntimeApprovals {
     }
 
     pub fn add_session_dir(&mut self, dir: PathBuf) {
+        let dir = crate::paths::expand_tilde(&dir);
         if !self.session_dirs.contains(&dir) {
             self.session_dirs.push(dir);
         }
     }
 
     pub fn add_workspace_dir(&mut self, dir: PathBuf) {
+        let dir = crate::paths::expand_tilde(&dir);
         if !self.workspace_dirs.contains(&dir) {
             self.workspace_dirs.push(dir);
         }
@@ -545,7 +547,10 @@ impl RuntimeApprovals {
         dirs: Vec<PathBuf>,
     ) {
         self.workspace_tools = tools;
-        self.workspace_dirs = dirs;
+        self.workspace_dirs = dirs
+            .into_iter()
+            .map(|d| crate::paths::expand_tilde(&d))
+            .collect();
     }
 
     /// Check whether a tool call that the config-based rules said "Ask" for
@@ -662,20 +667,23 @@ impl RuntimeApprovals {
     /// Rebuild session state from flattened entries (used by permissions sync UI).
     pub fn set_session(&mut self, tools: HashMap<String, Vec<glob::Pattern>>, dirs: Vec<PathBuf>) {
         self.session_tools = tools;
-        self.session_dirs = dirs;
+        self.session_dirs = dirs
+            .into_iter()
+            .map(|d| crate::paths::expand_tilde(&d))
+            .collect();
     }
 
     /// Check whether all given outside-workspace paths are covered by
-    /// approved directories.
+    /// approved directories.  Stored dirs are always in expanded (absolute)
+    /// form — only the incoming paths need tilde expansion.
     pub fn dirs_approved(&self, paths: &[String]) -> bool {
         if paths.is_empty() {
             return true;
         }
-        let all_dirs: Vec<PathBuf> = self
+        let all_dirs: Vec<&PathBuf> = self
             .session_dirs
             .iter()
             .chain(self.workspace_dirs.iter())
-            .map(|d| crate::paths::expand_tilde(d))
             .collect();
         if all_dirs.is_empty() {
             return false;
@@ -685,7 +693,7 @@ impl RuntimeApprovals {
             let dir = path.parent().unwrap_or(&path);
             all_dirs
                 .iter()
-                .any(|ad| dir.starts_with(ad) || path.starts_with(ad))
+                .any(|ad| dir.starts_with(ad.as_path()) || path.starts_with(ad.as_path()))
         })
     }
 }
@@ -1148,25 +1156,9 @@ fn is_cd_command(subcmd: &str) -> bool {
     trimmed == "cd" || trimmed.starts_with("cd ") || trimmed.starts_with("cd\t")
 }
 
-/// Check whether a command contains an output redirection (`>`, `>>`, `&>`, `&>>`).
+/// Check whether a command contains an output redirection (`>`, `>>`, `&>`, `&>>`)
+/// to a real file.  Redirects to `/dev/null` are harmless and ignored.
 /// Quote-aware: ignores redirection operators inside single or double quotes.
-/// Check whether a redirect operator at byte position `gt_pos` targets `/dev/null`.
-/// Skips past the `>` / `>>` operator and optional whitespace to read the target.
-fn redirect_targets_dev_null(cmd: &str, gt_pos: usize) -> bool {
-    let rest = &cmd[gt_pos..];
-    let rest = rest
-        .strip_prefix(">>")
-        .unwrap_or_else(|| rest.strip_prefix('>').unwrap_or(rest));
-    let target = rest.trim_start();
-    target == "/dev/null"
-        || target.starts_with("/dev/null ")
-        || target.starts_with("/dev/null;")
-        || target.starts_with("/dev/null&")
-        || target.starts_with("/dev/null|")
-        || target.starts_with("/dev/null\t")
-        || target.starts_with("/dev/null\n")
-}
-
 fn has_output_redirection(cmd: &str) -> bool {
     let bytes = cmd.as_bytes();
     let len = bytes.len();
@@ -1202,50 +1194,68 @@ fn has_output_redirection(cmd: &str) -> bool {
                 // Skip << (heredoc) — not an output redirection by itself.
                 if i + 1 < len && bytes[i + 1] == b'<' {
                     i += 2;
-                    // Skip past delimiter and body (already handled by split_impl,
-                    // but for standalone use, just skip the << token).
                 } else {
                     // Input redirection <, not output.
                     i += 1;
                 }
             }
-            b'&' => {
-                // &> or &>> is output redirection (unless targeting /dev/null)
-                if i + 1 < len && bytes[i + 1] == b'>' {
-                    if redirect_targets_dev_null(cmd, i + 1) {
-                        i += 2;
-                        continue;
-                    }
+            b'&' if i + 1 < len && bytes[i + 1] == b'>' => {
+                // &> or &>> — output redirection.
+                i += 1; // now on '>'
+                if !redirect_is_dev_null(bytes, &mut i) {
                     return true;
                 }
-                i += 1;
             }
             b'>' => {
-                // Check if this is >&N style fd duplication (e.g., 2>&1).
-                // These don't write to files, they just duplicate file descriptors.
-                // A standalone > or >> or N> is output redirection to a file.
+                // >&N is fd duplication (e.g. 2>&1), not file output.
                 if i + 1 < len && bytes[i + 1] == b'&' {
-                    // >& followed by a digit is fd duplication (e.g., 2>&1)
                     let j = i + 2;
                     if j < len && bytes[j].is_ascii_digit() {
-                        i += 1;
+                        i = j + 1;
                         continue;
                     }
-                    // >& without a following digit, or >&N where N isn't a digit
-                    // could still be problematic, but let's be conservative.
+                    // >& without digit — treat as real redirection.
                 }
-                // Redirecting to /dev/null is harmless — just discards output.
-                if redirect_targets_dev_null(cmd, i) {
-                    i += 1;
-                    continue;
+                if !redirect_is_dev_null(bytes, &mut i) {
+                    return true;
                 }
-                return true;
             }
             _ => {
                 i += 1;
             }
         }
     }
+    false
+}
+
+/// Starting at a `>` in `bytes[*pos]`, skip past `>` or `>>` and whitespace,
+/// then check whether the target is `/dev/null`.  Advances `*pos` past the
+/// target on match so the caller can continue scanning.
+fn redirect_is_dev_null(bytes: &[u8], pos: &mut usize) -> bool {
+    let len = bytes.len();
+    let mut j = *pos;
+    // Skip > or >>
+    if j < len && bytes[j] == b'>' {
+        j += 1;
+    }
+    if j < len && bytes[j] == b'>' {
+        j += 1; // >>
+    }
+    // Skip whitespace
+    while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
+        j += 1;
+    }
+    const DEV_NULL: &[u8] = b"/dev/null";
+    if j + DEV_NULL.len() <= len && &bytes[j..j + DEV_NULL.len()] == DEV_NULL {
+        let end = j + DEV_NULL.len();
+        // Must be followed by a word boundary (whitespace, shell operator, or end).
+        if end == len || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'/' {
+            *pos = end;
+            return true;
+        }
+    }
+    // Not /dev/null — don't advance pos; caller will return true.
+    *pos += 1;
     false
 }
 

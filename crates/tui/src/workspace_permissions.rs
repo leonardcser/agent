@@ -138,7 +138,7 @@ pub fn into_approvals(rules: &[Rule]) -> (HashMap<String, Vec<glob::Pattern>>, V
     for rule in rules {
         if rule.tool == "directory" {
             for p in &rule.patterns {
-                dirs.push(engine::paths::expand_tilde(std::path::Path::new(p)));
+                dirs.push(PathBuf::from(p));
             }
         } else {
             let compiled: Vec<glob::Pattern> = rule

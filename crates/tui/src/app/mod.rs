@@ -22,7 +22,7 @@ use crossterm::{
     },
     terminal, ExecutableCommand,
 };
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -91,8 +91,6 @@ pub struct App {
     pub runtime_approvals: Arc<std::sync::RwLock<engine::permissions::RuntimeApprovals>>,
     /// Current working directory (cached at startup).
     cwd: String,
-    /// Directories outside the workspace that have appeared in confirm dialogs.
-    pub seen_outside_dirs: HashSet<PathBuf>,
     pub session: session::Session,
     pub shared_session: Arc<Mutex<Option<Session>>>,
     pub context_window: Option<u32>,
@@ -467,7 +465,6 @@ impl App {
             pending_agent_messages: Vec::new(),
             runtime_approvals,
             cwd,
-            seen_outside_dirs: HashSet::new(),
             session: session::Session::new(),
             shared_session,
             context_window: None,

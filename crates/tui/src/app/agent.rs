@@ -1331,7 +1331,11 @@ impl App {
                 let downgraded =
                     self.permissions
                         .was_downgraded(self.mode, &req.tool_name, &req.args);
-                req.outside_dir = if !outside_paths.is_empty() {
+                req.outside_dir = if downgraded && !outside_paths.is_empty() {
+                    // Only offer the dir option when the Ask is specifically
+                    // from the workspace restriction (downgraded from Allow).
+                    // When the Ask is from the command itself (e.g. `for` loop),
+                    // a dir approval won't help — show tool patterns instead.
                     let raw = std::path::Path::new(&outside_paths[0]);
                     let expanded = engine::paths::expand_tilde(raw);
                     let abs_dir = if expanded.is_dir() {
@@ -1339,21 +1343,7 @@ impl App {
                     } else {
                         expanded.parent().unwrap_or(&expanded).to_path_buf()
                     };
-                    let dir = engine::paths::collapse_tilde(&abs_dir);
-                    let already_approved = {
-                        let rt = self.runtime_approvals.read().unwrap();
-                        rt.dirs_approved(&outside_paths)
-                    };
-                    if already_approved {
-                        // Dir is already approved — don't offer it again.
-                        None
-                    } else if downgraded || self.seen_outside_dirs.contains(&dir) {
-                        self.seen_outside_dirs.insert(dir.clone());
-                        Some(dir)
-                    } else {
-                        self.seen_outside_dirs.insert(dir);
-                        None
-                    }
+                    Some(engine::paths::collapse_tilde(&abs_dir))
                 } else {
                     None
                 };
