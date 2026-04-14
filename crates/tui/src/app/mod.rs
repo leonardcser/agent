@@ -17,8 +17,8 @@ use protocol::{Content, EngineEvent, Message, Mode, ReasoningEffort, Role, UiCom
 use crossterm::{
     cursor,
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, EventStream, KeyCode, KeyEvent,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
+        EventStream, KeyCode, KeyEvent, KeyModifiers,
     },
     terminal, ExecutableCommand,
 };
@@ -530,6 +530,7 @@ impl App {
         terminal::enable_raw_mode().ok();
         let _ = io::stdout().execute(cursor::Hide);
         let _ = io::stdout().execute(EnableBracketedPaste);
+        let _ = io::stdout().execute(EnableFocusChange);
 
         if !self.history.is_empty() {
             self.restore_screen();
@@ -913,6 +914,7 @@ impl App {
         self.screen.move_cursor_past_prompt(clear_below);
         let _ = io::stdout().execute(cursor::Show);
         let _ = io::stdout().execute(DisableBracketedPaste);
+        let _ = io::stdout().execute(DisableFocusChange);
         terminal::disable_raw_mode().ok();
     }
 

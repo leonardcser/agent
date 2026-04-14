@@ -48,6 +48,11 @@ impl App {
         t: &mut Timers,
         active_dialog: &mut Option<Box<dyn render::Dialog>>,
     ) -> bool {
+        if matches!(ev, Event::FocusGained | Event::FocusLost) {
+            self.screen.set_focused(matches!(ev, Event::FocusGained));
+            return false;
+        }
+
         // Route events to the active dialog if one is showing.
         if active_dialog.is_some() {
             // Terminal resize: full clear + redraw screen + redraw dialog.

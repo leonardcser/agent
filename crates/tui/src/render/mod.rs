@@ -1399,6 +1399,7 @@ pub struct Screen {
 
     /// Terminal I/O backend (real terminal or test buffer).
     backend: Box<dyn TerminalBackend>,
+    focused: bool,
 }
 
 /// A short ephemeral notification rendered above the prompt bar.
@@ -1465,6 +1466,7 @@ impl Screen {
             notification: None,
             task_label: None,
             backend,
+            focused: true,
         }
     }
 
@@ -1481,6 +1483,14 @@ impl Screen {
     /// Expose the backend for dialogs that need output + size.
     pub fn backend(&self) -> &dyn TerminalBackend {
         &*self.backend
+    }
+
+    pub fn set_focused(&mut self, focused: bool) {
+        if self.focused == focused {
+            return;
+        }
+        self.focused = focused;
+        self.prompt.dirty = true;
     }
 
     /// Set the prompt anchor row explicitly (used by test harness).
@@ -3839,7 +3849,7 @@ impl Screen {
                     Some((s, e))
                 }
             });
-            let line_cursor = if abs_idx == cursor_line {
+            let line_cursor = if abs_idx == cursor_line && self.focused {
                 Some(cursor_char_in_line)
             } else {
                 None

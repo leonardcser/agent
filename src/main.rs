@@ -143,6 +143,7 @@ async fn main() {
     std::panic::set_hook(Box::new(|info| {
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
+        let _ = std::io::stdout().execute(crossterm::event::DisableFocusChange);
         let _ = std::io::stdout().execute(crossterm::cursor::Show);
         eprintln!("{info}");
     }));
@@ -480,6 +481,7 @@ async fn main() {
             };
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
+            let _ = std::io::stdout().execute(crossterm::event::DisableFocusChange);
             if let Some(id) = session_id {
                 tui::session::print_resume_hint(&id);
             }
