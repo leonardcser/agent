@@ -38,32 +38,7 @@ impl App {
             self.history.pop();
         }
         self.maybe_generate_title(Some(&text));
-        self.screen.set_throbber(render::Throbber::Working);
-        engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
-
-        let turn_id = self.next_turn_id;
-        self.next_turn_id += 1;
-
-        self.engine.send(UiCommand::StartTurn {
-            turn_id,
-            content,
-            mode: self.mode,
-            model: self.model.clone(),
-            reasoning_effort: self.reasoning_effort,
-            history: self.history.clone(),
-            api_base: Some(self.api_base.clone()),
-            api_key: Some(self.api_key()),
-            session_id: self.session.id.clone(),
-            session_dir: crate::session::dir_for(&self.session),
-            model_config_overrides: None,
-            permission_overrides: None,
-        });
-
-        TurnState {
-            turn_id,
-            pending: Vec::new(),
-            _perf: crate::perf::begin("agent:turn"),
-        }
+        self.dispatch_turn(content)
     }
 
     /// Start a turn triggered by agent messages already in history.
@@ -73,16 +48,22 @@ impl App {
         self.input_prediction = None;
         self.screen.begin_turn();
         self.sync_session_snapshot();
+        // Agent messages are already in history; send empty content.
+        self.dispatch_turn(Content::text(""))
+    }
+
+    /// Mark the engine busy, allocate a turn id, and send `StartTurn` with the
+    /// current app state. Callers own any history/session prep before this.
+    fn dispatch_turn(&mut self, content: Content) -> TurnState {
         self.screen.set_throbber(render::Throbber::Working);
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
-        // Send with empty content — the Agent messages are already in history.
         self.engine.send(UiCommand::StartTurn {
             turn_id,
-            content: Content::text(""),
+            content,
             mode: self.mode,
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort,
