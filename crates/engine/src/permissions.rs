@@ -1424,6 +1424,19 @@ mod tests {
         }
     }
 
+    #[track_caller]
+    fn assert_bash(
+        allow: &[&str],
+        ask: &[&str],
+        deny: &[&str],
+        mode: Mode,
+        cmd: &str,
+        expected: Decision,
+    ) {
+        let p = perms_with_bash(allow, ask, deny);
+        assert_eq!(p.check_bash(mode, cmd), expected);
+    }
+
     #[test]
     fn yolo_allows_mcp_by_default() {
         let p = perms_with_bash(&[], &[], &[]);
@@ -1446,70 +1459,106 @@ mod tests {
 
     #[test]
     fn simple_allowed() {
-        let p = perms_with_bash(&["ls *"], &[], &[]);
-        assert_eq!(p.check_bash(Mode::Normal, "ls -la"), Decision::Allow);
+        assert_bash(&["ls *"], &[], &[], Mode::Normal, "ls -la", Decision::Allow);
     }
 
     #[test]
     fn simple_denied() {
-        let p = perms_with_bash(&[], &[], &["rm *"]);
-        assert_eq!(p.check_bash(Mode::Normal, "rm -rf /"), Decision::Deny);
+        assert_bash(
+            &[],
+            &[],
+            &["rm *"],
+            Mode::Normal,
+            "rm -rf /",
+            Decision::Deny,
+        );
     }
 
     #[test]
     fn simple_ask() {
-        let p = perms_with_bash(&[], &["rm *"], &[]);
-        assert_eq!(p.check_bash(Mode::Normal, "rm -rf /"), Decision::Ask);
+        assert_bash(&[], &["rm *"], &[], Mode::Normal, "rm -rf /", Decision::Ask);
     }
 
     // --- deny rules with chained commands ---
 
     #[test]
     fn deny_rm_simple() {
-        let p = perms_with_bash(&[], &[], &["rm *"]);
-        assert_eq!(p.check_bash(Mode::Normal, "rm -rf /"), Decision::Deny);
+        assert_bash(
+            &[],
+            &[],
+            &["rm *"],
+            Mode::Normal,
+            "rm -rf /",
+            Decision::Deny,
+        );
     }
 
     #[test]
     fn deny_rm_after_ls() {
-        let p = perms_with_bash(&["ls *"], &[], &["rm *"]);
-        assert_eq!(p.check_bash(Mode::Normal, "ls && rm -rf /"), Decision::Deny);
+        assert_bash(
+            &["ls *"],
+            &[],
+            &["rm *"],
+            Mode::Normal,
+            "ls && rm -rf /",
+            Decision::Deny,
+        );
     }
 
     #[test]
     fn deny_rm_before_ls() {
-        let p = perms_with_bash(&["ls *"], &[], &["rm *"]);
-        assert_eq!(p.check_bash(Mode::Normal, "rm -rf / && ls"), Decision::Deny);
+        assert_bash(
+            &["ls *"],
+            &[],
+            &["rm *"],
+            Mode::Normal,
+            "rm -rf / && ls",
+            Decision::Deny,
+        );
     }
 
     // --- ask rules with chained commands ---
 
     #[test]
     fn ask_rm_simple() {
-        let p = perms_with_bash(&[], &["rm *"], &[]);
-        assert_eq!(p.check_bash(Mode::Normal, "rm -rf /"), Decision::Ask);
+        assert_bash(&[], &["rm *"], &[], Mode::Normal, "rm -rf /", Decision::Ask);
     }
 
     #[test]
     fn ask_rm_after_ls() {
-        let p = perms_with_bash(&["ls *"], &["rm *"], &[]);
-        assert_eq!(p.check_bash(Mode::Normal, "ls && rm -rf /"), Decision::Ask);
+        assert_bash(
+            &["ls *"],
+            &["rm *"],
+            &[],
+            Mode::Normal,
+            "ls && rm -rf /",
+            Decision::Ask,
+        );
     }
 
     #[test]
     fn ask_rm_before_ls() {
-        let p = perms_with_bash(&["ls *"], &["rm *"], &[]);
-        assert_eq!(p.check_bash(Mode::Normal, "rm -rf / && ls"), Decision::Ask);
+        assert_bash(
+            &["ls *"],
+            &["rm *"],
+            &[],
+            Mode::Normal,
+            "rm -rf / && ls",
+            Decision::Ask,
+        );
     }
 
     // --- allow rule should not match chained commands ---
 
     #[test]
     fn allow_ls_does_not_allow_chained_rm() {
-        let p = perms_with_bash(&["ls *"], &[], &[]);
-        assert_eq!(
-            p.check_bash(Mode::Normal, "ls && rm README.md"),
-            Decision::Ask
+        assert_bash(
+            &["ls *"],
+            &[],
+            &[],
+            Mode::Normal,
+            "ls && rm README.md",
+            Decision::Ask,
         );
     }
 
@@ -1517,10 +1566,13 @@ mod tests {
 
     #[test]
     fn chained_both_allowed() {
-        let p = perms_with_bash(&["ls *", "rm *"], &[], &[]);
-        assert_eq!(
-            p.check_bash(Mode::Normal, "ls && rm README.md"),
-            Decision::Allow
+        assert_bash(
+            &["ls *", "rm *"],
+            &[],
+            &[],
+            Mode::Normal,
+            "ls && rm README.md",
+            Decision::Allow,
         );
     }
 
@@ -1528,19 +1580,25 @@ mod tests {
 
     #[test]
     fn pipe_both_allowed() {
-        let p = perms_with_bash(&["cat *", "grep *"], &[], &[]);
-        assert_eq!(
-            p.check_bash(Mode::Normal, "cat file.txt | grep foo"),
-            Decision::Allow
+        assert_bash(
+            &["cat *", "grep *"],
+            &[],
+            &[],
+            Mode::Normal,
+            "cat file.txt | grep foo",
+            Decision::Allow,
         );
     }
 
     #[test]
     fn pipe_second_not_allowed() {
-        let p = perms_with_bash(&["cat *"], &[], &[]);
-        assert_eq!(
-            p.check_bash(Mode::Normal, "cat file.txt | rm foo"),
-            Decision::Ask
+        assert_bash(
+            &["cat *"],
+            &[],
+            &[],
+            Mode::Normal,
+            "cat file.txt | rm foo",
+            Decision::Ask,
         );
     }
 
@@ -1548,10 +1606,13 @@ mod tests {
 
     #[test]
     fn semicolon_second_denied() {
-        let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-        assert_eq!(
-            p.check_bash(Mode::Normal, "echo hi; rm -rf /"),
-            Decision::Deny
+        assert_bash(
+            &["echo *"],
+            &[],
+            &["rm *"],
+            Mode::Normal,
+            "echo hi; rm -rf /",
+            Decision::Deny,
         );
     }
 
@@ -1559,10 +1620,13 @@ mod tests {
 
     #[test]
     fn or_chain_both_allowed() {
-        let p = perms_with_bash(&["make *"], &[], &[]);
-        assert_eq!(
-            p.check_bash(Mode::Normal, "make || make install"),
-            Decision::Allow
+        assert_bash(
+            &["make *"],
+            &[],
+            &[],
+            Mode::Normal,
+            "make || make install",
+            Decision::Allow,
         );
     }
 
@@ -1570,8 +1634,14 @@ mod tests {
 
     #[test]
     fn deny_wins_over_allow() {
-        let p = perms_with_bash(&["rm *"], &[], &["rm *"]);
-        assert_eq!(p.check_bash(Mode::Normal, "rm foo"), Decision::Deny);
+        assert_bash(
+            &["rm *"],
+            &[],
+            &["rm *"],
+            Mode::Normal,
+            "rm foo",
+            Decision::Deny,
+        );
     }
 
     // --- split helper ---
@@ -1591,14 +1661,12 @@ mod tests {
     // Empty / whitespace-only commands
     #[test]
     fn empty_command() {
-        let p = perms_with_bash(&["ls *"], &[], &[]);
-        assert_eq!(p.check_bash(Mode::Normal, ""), Decision::Ask);
+        assert_bash(&["ls *"], &[], &[], Mode::Normal, "", Decision::Ask);
     }
 
     #[test]
     fn whitespace_only_command() {
-        let p = perms_with_bash(&["ls *"], &[], &[]);
-        assert_eq!(p.check_bash(Mode::Normal, "   "), Decision::Ask);
+        assert_bash(&["ls *"], &[], &[], Mode::Normal, "   ", Decision::Ask);
     }
 
     // --- quote-aware splitting (shlex) ---
@@ -1682,8 +1750,7 @@ mod tests {
 
     #[test]
     fn trailing_operator() {
-        let p = perms_with_bash(&["ls *"], &[], &[]);
-        assert_eq!(p.check_bash(Mode::Normal, "ls &&"), Decision::Allow);
+        assert_bash(&["ls *"], &[], &[], Mode::Normal, "ls &&", Decision::Allow);
     }
 
     #[test]
@@ -1723,14 +1790,12 @@ mod tests {
 
     #[test]
     fn bare_command_matches_star_pattern() {
-        let p = perms_with_bash(&["ls *"], &[], &[]);
-        assert_eq!(p.check_bash(Mode::Normal, "ls"), Decision::Allow);
+        assert_bash(&["ls *"], &[], &[], Mode::Normal, "ls", Decision::Allow);
     }
 
     #[test]
     fn trailing_space_no_false_positive() {
-        let p = perms_with_bash(&["ls *"], &[], &[]);
-        assert_eq!(p.check_bash(Mode::Normal, "lsof"), Decision::Ask);
+        assert_bash(&["ls *"], &[], &[], Mode::Normal, "lsof", Decision::Ask);
     }
 
     // --- unclosed quotes ---
@@ -1816,8 +1881,14 @@ mod tests {
 
     #[test]
     fn double_semicolons_deny() {
-        let p = perms_with_bash(&["ls *"], &[], &["rm *"]);
-        assert_eq!(p.check_bash(Mode::Normal, "ls ;; rm foo"), Decision::Deny);
+        assert_bash(
+            &["ls *"],
+            &[],
+            &["rm *"],
+            Mode::Normal,
+            "ls ;; rm foo",
+            Decision::Deny,
+        );
     }
 
     // --- operator-only input ---
@@ -1973,10 +2044,13 @@ mod tests {
 
     #[test]
     fn redirect_stderr_permission() {
-        let p = perms_with_bash(&["cargo *"], &[], &[]);
-        assert_eq!(
-            p.check_bash(Mode::Normal, "cargo build 2>&1"),
-            Decision::Allow
+        assert_bash(
+            &["cargo *"],
+            &[],
+            &[],
+            Mode::Normal,
+            "cargo build 2>&1",
+            Decision::Allow,
         );
     }
 
@@ -2387,10 +2461,13 @@ mod tests {
 
     #[test]
     fn auto_allowed_with_dev_null_stays_allow() {
-        let p = perms_with_bash(&["find *"], &[], &[]);
-        assert_eq!(
-            p.check_bash(Mode::Normal, "find /tmp 2>/dev/null"),
-            Decision::Allow
+        assert_bash(
+            &["find *"],
+            &[],
+            &[],
+            Mode::Normal,
+            "find /tmp 2>/dev/null",
+            Decision::Allow,
         );
     }
 
@@ -2406,10 +2483,13 @@ mod tests {
 
     #[test]
     fn auto_allowed_with_append_redirect_escalates_to_ask() {
-        let p = perms_with_bash(&["cat *"], &[], &[]);
-        assert_eq!(
-            p.check_bash(Mode::Normal, "cat file.txt >> output.txt"),
-            Decision::Ask
+        assert_bash(
+            &["cat *"],
+            &[],
+            &[],
+            Mode::Normal,
+            "cat file.txt >> output.txt",
+            Decision::Ask,
         );
     }
 
@@ -2540,14 +2620,12 @@ mod tests {
 
     #[test]
     fn cd_alone_is_allowed() {
-        let p = perms_with_bash(&[], &[], &[]);
-        assert_eq!(p.check_bash(Mode::Normal, "cd /tmp"), Decision::Allow);
+        assert_bash(&[], &[], &[], Mode::Normal, "cd /tmp", Decision::Allow);
     }
 
     #[test]
     fn cd_no_args_is_allowed() {
-        let p = perms_with_bash(&[], &[], &[]);
-        assert_eq!(p.check_bash(Mode::Normal, "cd"), Decision::Allow);
+        assert_bash(&[], &[], &[], Mode::Normal, "cd", Decision::Allow);
     }
 
     #[test]
@@ -2562,10 +2640,13 @@ mod tests {
 
     #[test]
     fn cd_with_denied_command_still_denies() {
-        let p = perms_with_bash(&[], &[], &["rm *"]);
-        assert_eq!(
-            p.check_bash(Mode::Normal, "cd /tmp && rm -rf foo"),
-            Decision::Deny
+        assert_bash(
+            &[],
+            &[],
+            &["rm *"],
+            Mode::Normal,
+            "cd /tmp && rm -rf foo",
+            Decision::Deny,
         );
     }
 
