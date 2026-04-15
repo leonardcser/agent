@@ -1,3 +1,4 @@
+pub mod alloc;
 pub mod app;
 pub mod attachment;
 pub mod builtin_commands;

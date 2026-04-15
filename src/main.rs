@@ -5,6 +5,9 @@ use crossterm::ExecutableCommand;
 use protocol::{Mode, ReasoningEffort};
 use std::sync::{Arc, Mutex};
 
+#[global_allocator]
+static ALLOCATOR: tui::alloc::Counting = tui::alloc::Counting;
+
 #[derive(Parser)]
 #[command(name = "smelt", about = "Coding agent TUI", version)]
 #[command(args_conflicts_with_subcommands = true)]
@@ -319,6 +322,7 @@ async fn main() {
 
     if args.bench {
         tui::perf::enable();
+        tui::alloc::enable();
     }
 
     // Eager-load syntect's syntax and theme sets in the background so the

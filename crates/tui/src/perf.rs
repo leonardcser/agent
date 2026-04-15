@@ -39,7 +39,8 @@ pub fn enable() {
 }
 
 /// Returns an RAII guard that records a self-time sample for `label` when
-/// dropped. Cheap no-op if bench mode is off.
+/// dropped. Also records allocation count and bytes delta if the counting
+/// allocator is enabled. Cheap no-op if bench mode is off.
 pub fn begin(label: &'static str) -> Option<Guard> {
     if !enabled() {
         return None;
@@ -47,12 +48,14 @@ pub fn begin(label: &'static str) -> Option<Guard> {
     Some(Guard {
         label,
         start: Instant::now(),
+        allocs_start: crate::alloc::snapshot(),
     })
 }
 
 pub struct Guard {
     label: &'static str,
     start: Instant,
+    allocs_start: (u64, u64),
 }
 
 impl Drop for Guard {
@@ -61,7 +64,24 @@ impl Drop for Guard {
         if let Ok(mut s) = samples().lock() {
             s.entry(self.label).or_default().push(dur);
         }
+        if crate::alloc::enabled() {
+            let (c1, b1) = crate::alloc::snapshot();
+            let (c0, b0) = self.allocs_start;
+            if let Ok(mut m) = alloc_samples().lock() {
+                m.entry(self.label)
+                    .or_default()
+                    .push((c1.saturating_sub(c0), b1.saturating_sub(b0)));
+            }
+        }
     }
+}
+
+/// Per-label alloc samples: `(count, bytes)` deltas captured by `Guard`.
+type AllocSamples = Mutex<HashMap<&'static str, Vec<(u64, u64)>>>;
+
+fn alloc_samples() -> &'static AllocSamples {
+    static A: OnceLock<AllocSamples> = OnceLock::new();
+    A.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 // ── summary printing ─────────────────────────────────────────────────────
@@ -111,6 +131,55 @@ pub fn print_summary() {
         println!("{}", colorize_row(&row, total, max_total));
     }
     println!("{}", bar);
+
+    // Allocation samples (count + bytes deltas per Guard scope).
+    let alloc_map = alloc_samples().lock().unwrap();
+    if !alloc_map.is_empty() {
+        let mut agroups: Vec<(&'static str, Vec<(u64, u64)>)> =
+            alloc_map.iter().map(|(k, v)| (*k, v.clone())).collect();
+        drop(alloc_map);
+        // Sort by total bytes descending.
+        agroups.sort_by(|a, b| {
+            let ta: u64 = a.1.iter().map(|(_, b)| *b).sum();
+            let tb: u64 = b.1.iter().map(|(_, b)| *b).sum();
+            tb.cmp(&ta)
+        });
+        print_header("allocs", &bar);
+        for (label, samples) in agroups {
+            let mut counts: Vec<u64> = samples.iter().map(|(c, _)| *c).collect();
+            let mut bytes: Vec<u64> = samples.iter().map(|(_, b)| *b).collect();
+            counts.sort();
+            bytes.sort();
+            let total_bytes: u64 = bytes.iter().sum();
+            let avg_bytes = total_bytes / bytes.len() as u64;
+            let total_count: u64 = counts.iter().sum();
+            let avg_count = total_count / counts.len() as u64;
+            // Two rows per label: one for count, one for bytes.
+            println!(
+                "{}",
+                format_row(
+                    &format!("{label}  (n)"),
+                    &counts,
+                    total_count,
+                    avg_count,
+                    |v| v.to_string(),
+                )
+            );
+            println!(
+                "{}",
+                format_row(
+                    &format!("{label}  (bytes)"),
+                    &bytes,
+                    total_bytes,
+                    avg_bytes,
+                    fmt_bytes,
+                )
+            );
+        }
+        println!("{}", bar);
+    } else {
+        drop(alloc_map);
+    }
 
     // Value samples (byte counts etc.) in a smaller table below.
     let value_map = value_samples().lock().unwrap();
