@@ -24,6 +24,7 @@ tempfile = "3.27.0"
 libc = "0.2.183"
 flate2 = "1.1.9"
 seahash = "4.1.0"
+minijinja = "2.18.0"
 
 [dev-dependencies]
 vt100 = "0.16.2"

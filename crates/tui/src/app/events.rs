@@ -292,7 +292,9 @@ impl App {
                         // Empty submit with queued messages: pop and send the
                         // oldest one immediately.
                         let queued = self.queued_messages.remove(0);
-                        if let Some(cmd) = crate::custom_commands::resolve(queued.trim()) {
+                        if let Some(cmd) =
+                            crate::custom_commands::resolve(queued.trim(), self.multi_agent)
+                        {
                             self.screen.erase_prompt();
                             *agent = Some(self.begin_custom_command_turn(cmd));
                         } else {
@@ -874,7 +876,7 @@ impl App {
             CommandAction::Continue => {}
         }
         if trimmed.starts_with('/') {
-            if let Some(cmd) = crate::custom_commands::resolve(trimmed) {
+            if let Some(cmd) = crate::custom_commands::resolve(trimmed, self.multi_agent) {
                 return InputOutcome::CustomCommand(Box::new(cmd));
             }
             if crate::completer::Completer::is_command(trimmed) {

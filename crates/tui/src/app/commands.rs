@@ -226,7 +226,7 @@ impl App {
 
         // Custom commands need their own agent turn — queue them like regular
         // messages so they run after the current turn finishes.
-        if input.starts_with('/') && crate::custom_commands::resolve(input).is_some() {
+        if input.starts_with('/') && crate::custom_commands::is_custom_command(input) {
             return None;
         }
 

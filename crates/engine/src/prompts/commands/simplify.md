@@ -13,6 +13,7 @@ Run `git diff` (or `git diff HEAD` if there are staged changes) to see what
 changed. If there are no git changes, review the most recently modified files
 that the user mentioned or that you edited earlier in this conversation.
 
+{% if multi_agent %}
 ## Phase 2: Launch Three Review Agents in Parallel
 
 Use the agent tool to launch all three agents concurrently in a single message.
@@ -79,3 +80,70 @@ it and move on — do not argue with the finding, just skip it.
 
 When done, briefly summarize what was fixed (or confirm the code was already
 clean).
+{% else %}
+## Phase 2: Review the Changes
+
+Work through the diff yourself across three concerns. Do not launch subagents.
+
+### 1. Code Reuse
+
+For each change:
+
+- **Search for existing utilities and helpers** that could replace newly
+  written code. Look for similar patterns elsewhere in the codebase — common
+  locations are utility directories, shared modules, and files adjacent to the
+  changed ones.
+- **Flag any new function that duplicates existing functionality.** Note the
+  existing function to use instead.
+- **Flag any inline logic that could use an existing utility** — hand-rolled
+  string manipulation, manual path handling, custom environment checks, ad-hoc
+  type guards, and similar patterns are common candidates.
+
+### 2. Code Quality
+
+Review the same changes for hacky patterns:
+
+- **Redundant state**: state that duplicates existing state, cached values that
+  could be derived, observers/effects that could be direct calls
+- **Parameter sprawl**: adding new parameters to a function instead of
+  generalizing or restructuring existing ones
+- **Copy-paste with slight variation**: near-duplicate code blocks that should
+  be unified with a shared abstraction
+- **Leaky abstractions**: exposing internal details that should be
+  encapsulated, or breaking existing abstraction boundaries
+- **Stringly-typed code**: using raw strings where constants, enums, or typed
+  variants already exist in the codebase
+- **Unnecessary comments**: comments explaining WHAT the code does (well-named
+  identifiers already do that), narrating the change, or referencing the
+  task/caller — delete; keep only non-obvious WHY (hidden constraints, subtle
+  invariants, workarounds)
+
+### 3. Efficiency
+
+Review the same changes for efficiency:
+
+- **Unnecessary work**: redundant computations, repeated file reads, duplicate
+  network/API calls, N+1 patterns
+- **Missed concurrency**: independent operations run sequentially when they
+  could run in parallel
+- **Hot-path bloat**: new blocking work added to startup or
+  per-request/per-render hot paths
+- **Recurring no-op updates**: state/store updates inside polling loops,
+  intervals, or event handlers that fire unconditionally — add a
+  change-detection guard so downstream consumers aren't notified when nothing
+  changed
+- **Unnecessary existence checks**: pre-checking file/resource existence before
+  operating (TOCTOU anti-pattern) — operate directly and handle the error
+- **Memory**: unbounded data structures, missing cleanup, event listener leaks
+- **Overly broad operations**: reading entire files when only a portion is
+  needed, loading all items when filtering for one
+
+## Phase 3: Fix Issues
+
+Aggregate your findings and fix each issue directly. If a finding is a false
+positive or not worth addressing, note it and move on — do not argue with the
+finding, just skip it.
+
+When done, briefly summarize what was fixed (or confirm the code was already
+clean).
+{% endif %}

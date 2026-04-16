@@ -656,7 +656,7 @@ impl App {
             // ── Auto-start from leftover queued messages (one per turn) ──
             if agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
                 let text = self.queued_messages.remove(0);
-                if let Some(cmd) = crate::custom_commands::resolve(text.trim()) {
+                if let Some(cmd) = crate::custom_commands::resolve(text.trim(), self.multi_agent) {
                     self.screen.erase_prompt();
                     agent = Some(self.begin_custom_command_turn(cmd));
                 } else if !text.is_empty() {

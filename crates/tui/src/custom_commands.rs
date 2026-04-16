@@ -85,8 +85,9 @@ pub fn list() -> Vec<(String, String)> {
 /// Resolve a slash-command input (e.g. "/commit" or "/commit fix typos") to a
 /// parsed CustomCommand.  Any text after the command name is appended to the
 /// body as extra user instructions.  Custom commands take priority; builtin
-/// commands are used as a fallback.
-pub fn resolve(input: &str) -> Option<CustomCommand> {
+/// commands are used as a fallback. `multi_agent` is forwarded to builtin
+/// template rendering so sections gated on multi-agent mode resolve correctly.
+pub fn resolve(input: &str, multi_agent: bool) -> Option<CustomCommand> {
     let after_slash = input.strip_prefix('/')?;
     let name = after_slash.split_whitespace().next()?;
     if name.is_empty() || name.contains('/') || name.contains('.') {
@@ -101,7 +102,7 @@ pub fn resolve(input: &str) -> Option<CustomCommand> {
         }
         return Some(cmd);
     }
-    crate::builtin_commands::resolve(input)
+    crate::builtin_commands::resolve(input, multi_agent)
 }
 
 /// Check whether `input` (e.g. "/commit") matches a custom or builtin command

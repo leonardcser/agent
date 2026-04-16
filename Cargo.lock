@@ -2677,6 +2677,7 @@ dependencies = [
  "futures-core",
  "glob",
  "libc",
+ "minijinja",
  "protocol",
  "reqwest",
  "seahash",
