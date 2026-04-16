@@ -15,6 +15,22 @@ Toggle settings at runtime with `/settings`, set defaults in config under
 [Configuration Reference](../reference/configuration.md#settings) for all
 available settings.
 
+## Auxiliary Model
+
+Keep your main conversation on one model and send smaller background requests to
+another. The auxiliary model must be one you've registered under
+`providers[].models`:
+
+```yaml
+auxiliary:
+  model: openai/gpt-5.4-mini
+  use_for:
+    btw: false
+```
+
+See the [Configuration Reference](../reference/configuration.md#auxiliary-model)
+for the full option list.
+
 ## Themes
 
 Thirteen accent color presets:

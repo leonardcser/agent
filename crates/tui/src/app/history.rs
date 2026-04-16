@@ -507,9 +507,6 @@ impl App {
         self.engine.send(UiCommand::GenerateTitle {
             last_user_message,
             assistant_tail,
-            model: self.model.clone(),
-            api_base: Some(self.api_base.clone()),
-            api_key: Some(self.api_key()),
         });
     }
 
@@ -523,7 +520,6 @@ impl App {
         self.engine.send(UiCommand::Compact {
             keep_turns: 1,
             history: self.history.clone(),
-            model: self.model.clone(),
             instructions,
         });
     }

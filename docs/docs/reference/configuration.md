@@ -84,6 +84,31 @@ If `defaults.model` is set, the cached selection is ignored. Prefer the
 `provider_name/model_name` form in config. Bare model names are accepted only
 when they resolve unambiguously.
 
+## Auxiliary Model
+
+Use `auxiliary` to route small background/meta requests to a different model.
+`auxiliary.model` must be listed under `providers[].models` (codex providers can
+be referenced by provider name, since their models are fetched dynamically).
+Resolution uses the same rules as `defaults.model`.
+
+```yaml
+auxiliary:
+  model: openai/gpt-5.4-mini
+  use_for:
+    btw: false
+```
+
+Each `use_for` toggle defaults to `true`; set a task to `false` to fall back to
+your primary model. When `auxiliary.model` is omitted, no auxiliary routing
+happens.
+
+| Key          | Description                                      |
+| ------------ | ------------------------------------------------ |
+| `title`      | Generate the session title and slug              |
+| `prediction` | Input prediction / ghost text                    |
+| `compaction` | Explicit `/compact` and automatic history shrink |
+| `btw`        | `/btw` side-question requests                    |
+
 ## Settings
 
 All toggleable at runtime via `/settings`.

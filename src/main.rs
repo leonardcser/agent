@@ -207,6 +207,7 @@ async fn main() {
 
     // For Codex providers, fetch models dynamically from the API (with cache).
     // Use cached models for instant startup; always refresh in background.
+    // Done before auxiliary validation so cached codex slugs are in scope.
     if cfg.has_codex_provider() {
         let cached = engine::provider::codex::load_cached_models();
         if !cached.is_empty() {
@@ -219,36 +220,46 @@ async fn main() {
         });
     }
 
+    let auxiliary_routing = match cfg.resolve_auxiliary_routing(&available_models) {
+        Ok(routing) => routing,
+        Err(err) => {
+            eprintln!("error: auxiliary.model: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    let resolve_model_reference = |reference: &str,
+                                   models: &[tui::config::ResolvedModel],
+                                   allow_not_found: bool|
+     -> Option<tui::config::ResolvedModel> {
+        match tui::config::resolve_model_ref(models, reference) {
+            Ok(model) => Some(model.clone()),
+            Err(tui::config::ResolveModelRefError::NotFound { .. }) if allow_not_found => None,
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        }
+    };
+
     let mut startup_auth_error: Option<String> = None;
 
     // Resolve the active model: CLI flags > defaults.model (if set) > last_used (if no default) > first in config
     let (api_base, api_key, api_key_env, mut provider_type, model, mut model_config) = {
-        let resolve_required =
-            |reference: &str| match tui::config::resolve_model_ref(&available_models, reference) {
-                Ok(model) => Some(model),
-                Err(tui::config::ResolveModelRefError::NotFound { .. })
-                    if args.api_base.is_some() =>
-                {
-                    None
-                }
-                Err(err) => {
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            };
         let resolved = if let Some(ref cli_model) = args.model {
-            resolve_required(cli_model)
+            resolve_model_reference(cli_model, &available_models, args.api_base.is_some())
         } else if let Some(default) = cfg.get_default_model() {
             // Config has a default: use it, ignore cached selection
-            resolve_required(default)
+            resolve_model_reference(default, &available_models, false)
         } else if let Some(ref cached) = app_state.selected_model {
             // No config default: use last used model, fall back to first if stale
             tui::config::resolve_model_ref(&available_models, cached)
                 .ok()
-                .or(available_models.first())
+                .cloned()
+                .or_else(|| available_models.first().cloned())
         } else {
             // Fallback to first model in config
-            available_models.first()
+            available_models.first().cloned()
         };
 
         if let Some(r) = resolved {
@@ -428,6 +439,31 @@ async fn main() {
     if args.no_tool_calling {
         model_config.tool_calling = Some(false);
     }
+
+    let mut resolve_aux_request = |task: tui::config::AuxiliaryTask| {
+        auxiliary_routing.model_for(task).map(|resolved| {
+            let key = resolve_api_key(&resolved.api_key_env).unwrap_or_else(|err| {
+                startup_auth_error.get_or_insert(err);
+                String::new()
+            });
+            engine::RequestModelConfig {
+                model: resolved.model_name.clone(),
+                api: engine::ApiConfig {
+                    base: resolved.api_base.clone(),
+                    key,
+                    key_env: resolved.api_key_env.clone(),
+                    provider_type: resolved.provider_type.clone(),
+                    model_config: (&resolved.config).into(),
+                },
+            }
+        })
+    };
+    let auxiliary = engine::AuxiliaryModelConfig {
+        title: resolve_aux_request(tui::config::AuxiliaryTask::Title),
+        prediction: resolve_aux_request(tui::config::AuxiliaryTask::Prediction),
+        compaction: resolve_aux_request(tui::config::AuxiliaryTask::Compaction),
+        btw: resolve_aux_request(tui::config::AuxiliaryTask::Btw),
+    };
 
     // Reasoning effort: CLI --reasoning-effort > config defaults > saved state.
     let reasoning_effort = args
@@ -609,6 +645,8 @@ async fn main() {
             provider_type,
             model_config: (&model_config).into(),
         },
+        model: model.clone(),
+        auxiliary,
         instructions,
         system_prompt_override,
         cwd: cwd.clone(),

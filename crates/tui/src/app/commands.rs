@@ -118,9 +118,15 @@ impl App {
                 CommandAction::Continue
             }
             _ if input.starts_with("/model ") => {
-                let key = input.strip_prefix("/model ").unwrap().trim();
-                if !self.apply_model(key) {
-                    self.screen.notify_error(format!("unknown model: {}", key));
+                let reference = input.strip_prefix("/model ").unwrap().trim();
+                match crate::config::resolve_model_ref(&self.available_models, reference) {
+                    Ok(model) => {
+                        let key = model.key.clone();
+                        self.apply_model(&key);
+                    }
+                    Err(err) => {
+                        self.screen.notify_error(err.to_string());
+                    }
                 }
                 CommandAction::Continue
             }
@@ -317,11 +323,11 @@ impl App {
         Some((rx, kill))
     }
 
-    /// Switch to a model by key, updating all relevant state. Returns false
-    /// if the key was not found.
-    pub(super) fn apply_model(&mut self, key: &str) -> bool {
-        let Some(resolved) = self.available_models.iter().find(|m| m.key == key) else {
-            return false;
+    /// Switch to a model by key, updating all relevant state. Silently does
+    /// nothing if the key is not found.
+    pub(super) fn apply_model(&mut self, key: &str) {
+        let Some(resolved) = self.available_models.iter().find(|m| m.key == key).cloned() else {
+            return;
         };
         self.model = resolved.model_name.clone();
         self.api_base = resolved.api_base.clone();
@@ -330,14 +336,13 @@ impl App {
         self.model_config = (&resolved.config).into();
         self.screen.set_model_label(self.model.clone());
         let api_key = self.resolve_api_key().unwrap_or_default();
-        state::set_selected_model(key.to_string());
+        state::set_selected_model(resolved.key.clone());
         self.engine.send(UiCommand::SetModel {
             model: self.model.clone(),
             api_base: self.api_base.clone(),
             api_key,
             provider_type: self.provider_type.clone(),
         });
-        true
     }
 
     pub(super) fn start_btw(
@@ -347,17 +352,10 @@ impl App {
         image_labels: Vec<String>,
     ) {
         self.screen.set_btw(display_question, image_labels);
-        let api_key = match self.resolve_api_key() {
-            Some(key) => key,
-            None => return,
-        };
         self.engine.send(UiCommand::Btw {
             question,
             history: self.history.clone(),
-            model: self.model.clone(),
             reasoning_effort: self.reasoning_effort,
-            api_base: Some(self.api_base.clone()),
-            api_key: Some(api_key),
         });
     }
 

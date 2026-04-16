@@ -149,6 +149,7 @@ pub struct MultiAgentConfig {
 }
 
 /// API connection and model configuration, grouped for clarity.
+#[derive(Clone)]
 pub struct ApiConfig {
     pub base: String,
     pub key: String,
@@ -157,9 +158,28 @@ pub struct ApiConfig {
     pub model_config: ModelConfig,
 }
 
+#[derive(Clone)]
+pub struct RequestModelConfig {
+    pub model: String,
+    pub api: ApiConfig,
+}
+
+#[derive(Clone, Default)]
+pub struct AuxiliaryModelConfig {
+    pub title: Option<RequestModelConfig>,
+    pub prediction: Option<RequestModelConfig>,
+    pub compaction: Option<RequestModelConfig>,
+    pub btw: Option<RequestModelConfig>,
+}
+
 /// Configuration for the engine. Constructed once by the binary.
 pub struct EngineConfig {
     pub api: ApiConfig,
+    /// Initial primary model name.
+    pub model: String,
+    /// Per-task auxiliary model overrides. Tasks with `None` fall back to
+    /// the live primary at request time.
+    pub auxiliary: AuxiliaryModelConfig,
     pub instructions: Option<String>,
     /// When set, replaces the entire system prompt (skips the built-in
     /// template, mode overlays, and AGENTS.md instructions).
@@ -185,6 +205,36 @@ pub struct EngineConfig {
     /// When true, redact detected secrets from messages sent to the LLM,
     /// debug logs, and inter-agent socket communication.
     pub redact_secrets: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AuxiliaryTask {
+    Title,
+    Prediction,
+    Compaction,
+    Btw,
+}
+
+impl EngineConfig {
+    /// Resolve the model+api to use for an auxiliary task. Falls back to the
+    /// primary model when no dedicated auxiliary model is configured.
+    ///
+    /// Note: a `SetModel` applied mid-turn (via `Turn::apply_model_change`)
+    /// updates the active turn's provider but does not propagate back here,
+    /// so a `/btw` arriving in the same turn will use the pre-switch primary.
+    /// The next `SetModel` between turns re-syncs.
+    pub fn aux_or_primary(&self, task: AuxiliaryTask) -> RequestModelConfig {
+        let slot = match task {
+            AuxiliaryTask::Title => &self.auxiliary.title,
+            AuxiliaryTask::Prediction => &self.auxiliary.prediction,
+            AuxiliaryTask::Compaction => &self.auxiliary.compaction,
+            AuxiliaryTask::Btw => &self.auxiliary.btw,
+        };
+        slot.clone().unwrap_or_else(|| RequestModelConfig {
+            model: self.model.clone(),
+            api: self.api.clone(),
+        })
+    }
 }
 
 /// Handle to a running engine. Send commands, receive events.

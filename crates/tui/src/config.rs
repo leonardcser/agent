@@ -122,6 +122,40 @@ impl SettingsConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuxiliaryUseForConfig {
+    #[serde(default = "default_true")]
+    pub title: bool,
+    #[serde(default = "default_true")]
+    pub prediction: bool,
+    #[serde(default = "default_true")]
+    pub compaction: bool,
+    #[serde(default = "default_true")]
+    pub btw: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for AuxiliaryUseForConfig {
+    fn default() -> Self {
+        Self {
+            title: true,
+            prediction: true,
+            compaction: true,
+            btw: true,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct AuxiliaryConfig {
+    pub model: Option<String>,
+    pub use_for: AuxiliaryUseForConfig,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ThemeConfig {
@@ -166,6 +200,7 @@ pub struct Config {
     pub providers: Vec<ProviderConfig>,
     pub defaults: DefaultsConfig,
     pub settings: SettingsConfig,
+    pub auxiliary: AuxiliaryConfig,
     pub theme: ThemeConfig,
     /// MCP server configurations.
     #[serde(default)]
@@ -193,6 +228,37 @@ pub struct ResolvedModel {
     /// Provider type from config: "openai", "anthropic", "codex", or "openai-compatible" (default).
     pub provider_type: String,
     pub config: ModelConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuxiliaryTask {
+    Title,
+    Prediction,
+    Compaction,
+    Btw,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuxiliaryRouting {
+    pub model: Option<ResolvedModel>,
+    pub use_for: AuxiliaryUseForConfig,
+}
+
+impl AuxiliaryRouting {
+    pub fn is_enabled_for(&self, task: AuxiliaryTask) -> bool {
+        match task {
+            AuxiliaryTask::Title => self.use_for.title,
+            AuxiliaryTask::Prediction => self.use_for.prediction,
+            AuxiliaryTask::Compaction => self.use_for.compaction,
+            AuxiliaryTask::Btw => self.use_for.btw,
+        }
+    }
+
+    pub fn model_for(&self, task: AuxiliaryTask) -> Option<&ResolvedModel> {
+        self.is_enabled_for(task)
+            .then_some(self.model.as_ref())
+            .flatten()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +335,30 @@ pub fn resolve_model_ref_with_provider<'a>(
         Err(ResolveModelRefError::NotFound {
             reference: reference.to_string(),
         })
+    }
+}
+
+/// Resolve an `auxiliary.model` reference. Falls back to a provider-name
+/// lookup when the reference doesn't match any registered model AND the
+/// provider uses dynamic model discovery (e.g. `codex`), where statically
+/// listing every model under `providers[].models` is impractical.
+pub fn resolve_aux_model_ref<'a>(
+    models: &'a [ResolvedModel],
+    reference: &str,
+) -> Result<&'a ResolvedModel, ResolveModelRefError> {
+    match resolve_model_ref(models, reference) {
+        Ok(model) => Ok(model),
+        Err(ResolveModelRefError::NotFound { .. }) => {
+            let resolved = resolve_provider_ref(models, reference)?;
+            if resolved.provider_type == "codex" {
+                Ok(resolved)
+            } else {
+                Err(ResolveModelRefError::NotFound {
+                    reference: reference.to_string(),
+                })
+            }
+        }
+        Err(other) => Err(other),
     }
 }
 
@@ -428,6 +518,22 @@ impl Config {
     /// Get the default model key from defaults.model
     pub fn get_default_model(&self) -> Option<&str> {
         self.defaults.model.as_deref()
+    }
+
+    pub fn resolve_auxiliary_routing(
+        &self,
+        models: &[ResolvedModel],
+    ) -> Result<AuxiliaryRouting, ResolveModelRefError> {
+        let model = self
+            .auxiliary
+            .model
+            .as_deref()
+            .map(|reference| resolve_aux_model_ref(models, reference).cloned())
+            .transpose()?;
+        Ok(AuxiliaryRouting {
+            model,
+            use_for: self.auxiliary.use_for.clone(),
+        })
     }
 }
 

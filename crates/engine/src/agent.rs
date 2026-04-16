@@ -2,7 +2,7 @@ use crate::log;
 use crate::permissions::{Decision, Permissions, RuntimeApprovals};
 use crate::provider::{self, ChatOptions, Provider, ProviderError, ToolDefinition};
 use crate::tools::{self, ToolContext, ToolRegistry, ToolResult};
-use crate::EngineConfig;
+use crate::{ApiConfig, AuxiliaryTask, EngineConfig, ModelConfig};
 use protocol::{
     Content, EngineEvent, Message, Mode, ReasoningEffort, Role, ToolOutcome, TurnMeta, UiCommand,
 };
@@ -153,12 +153,13 @@ pub async fn engine_task(
                         // Cache the (possibly fetched) context window for future turns.
                         context_window = turn.context_window;
                     }
-                    UiCommand::Compact { keep_turns, history, model, instructions } => {
-                        let provider = build_provider(&config, &client);
+                    UiCommand::Compact { keep_turns, history, instructions } => {
+                        let request = config.aux_or_primary(AuxiliaryTask::Compaction);
+                        let provider = build_provider_from_api(&request.api, &client, config.redact_secrets);
                         let cancel = crate::cancel::CancellationToken::new();
-                        match compact_history(&provider, &history, keep_turns, &model, instructions.as_deref(), &cancel).await {
+                        match compact_history(&provider, &history, keep_turns, &request.model, instructions.as_deref(), &cancel).await {
                             Ok((messages, usage)) => {
-                                emit_usage_background(&event_tx, &config, &model, usage);
+                                emit_usage_background(&event_tx, &request.api, &request.model, usage);
                                 let _ = event_tx.send(EngineEvent::CompactionComplete { messages });
                             }
                             Err(e) => {
@@ -172,17 +173,43 @@ pub async fn engine_task(
                             }
                         }
                     }
-                    UiCommand::GenerateTitle { last_user_message, assistant_tail, model, api_base, api_key } => {
-                        spawn_title_generation(&config, &client, &model, last_user_message, assistant_tail, api_base, api_key, &event_tx);
+                    UiCommand::GenerateTitle {
+                        last_user_message,
+                        assistant_tail,
+                    } => {
+                        spawn_title_generation(
+                            &config,
+                            &client,
+                            last_user_message,
+                            assistant_tail,
+                            &event_tx,
+                        );
                     }
-                    UiCommand::Btw { question, history, model, reasoning_effort, api_base, api_key } => {
-                        spawn_btw_request(&config, &client, &model, reasoning_effort, question, history, api_base, api_key, &event_tx);
+                    UiCommand::Btw {
+                        question,
+                        history,
+                        reasoning_effort,
+                    } => {
+                        spawn_btw_request(
+                            &config,
+                            &client,
+                            reasoning_effort,
+                            question,
+                            history,
+                            &event_tx,
+                        );
                     }
-                    UiCommand::PredictInput { history, model, api_base, api_key, generation } => {
-                        spawn_predict_request(&config, &client, &model, history, api_base, api_key, &event_tx, generation);
+                    UiCommand::PredictInput {
+                        history,
+                        generation,
+                    } => {
+                        spawn_predict_request(&config, &client, history, &event_tx, generation);
                     }
-                    UiCommand::SetModel { provider_type, .. } => {
+                    UiCommand::SetModel { model, api_base, api_key, provider_type } => {
+                        config.api.base = api_base;
+                        config.api.key = api_key;
                         config.api.provider_type = provider_type;
+                        config.model = model;
                     }
                     _ => {} // Steer, Cancel, etc. only relevant during a turn
                 }
@@ -199,22 +226,18 @@ pub async fn engine_task(
 
 /// Spawn title generation as a background task so it doesn't block the engine
 /// loop or get swallowed by a running turn.
-#[allow(clippy::too_many_arguments)]
 fn spawn_title_generation(
     config: &EngineConfig,
     client: &reqwest::Client,
-    model: &str,
     last_user_message: String,
     assistant_tail: String,
-    api_base: Option<String>,
-    api_key: Option<String>,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
-    let provider =
-        build_provider_with_overrides(config, client, api_base.as_deref(), api_key.as_deref());
-    let model = model.to_string();
+    let request = config.aux_or_primary(AuxiliaryTask::Title);
+    let provider = build_provider_from_api(&request.api, client, config.redact_secrets);
+    let pricing = PricingContext::from_api(&request.api);
+    let model = request.model;
     let tx = event_tx.clone();
-    let pricing = PricingContext::from_config(config);
     let redact = config.redact_secrets;
     tokio::spawn(async move {
         let last_user_message = crate::redact::maybe_redact(last_user_message, redact);
@@ -274,23 +297,19 @@ fn spawn_title_generation(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_btw_request(
     config: &EngineConfig,
     client: &reqwest::Client,
-    model: &str,
     reasoning_effort: protocol::ReasoningEffort,
     question: String,
     history: Vec<protocol::Message>,
-    api_base: Option<String>,
-    api_key: Option<String>,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
-    let provider =
-        build_provider_with_overrides(config, client, api_base.as_deref(), api_key.as_deref());
-    let model = model.to_string();
+    let request = config.aux_or_primary(AuxiliaryTask::Btw);
+    let provider = build_provider_from_api(&request.api, client, config.redact_secrets);
+    let pricing = PricingContext::from_api(&request.api);
+    let model = request.model;
     let tx = event_tx.clone();
-    let pricing = PricingContext::from_config(config);
     let redact = config.redact_secrets;
     tokio::spawn(async move {
         let cancel = crate::cancel::CancellationToken::new();
@@ -328,22 +347,18 @@ fn spawn_btw_request(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_predict_request(
     config: &EngineConfig,
     client: &reqwest::Client,
-    model: &str,
     history: Vec<protocol::Message>,
-    api_base: Option<String>,
-    api_key: Option<String>,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
     generation: u64,
 ) {
-    let provider =
-        build_provider_with_overrides(config, client, api_base.as_deref(), api_key.as_deref());
-    let model = model.to_string();
+    let request = config.aux_or_primary(AuxiliaryTask::Prediction);
+    let provider = build_provider_from_api(&request.api, client, config.redact_secrets);
+    let pricing = PricingContext::from_api(&request.api);
+    let model = request.model;
     let tx = event_tx.clone();
-    let pricing = PricingContext::from_config(config);
     let redact = config.redact_secrets;
     tokio::spawn(async move {
         let system = "You predict what a user will type next in a coding assistant conversation. \
@@ -402,8 +417,19 @@ fn spawn_predict_request(
     });
 }
 
-fn build_provider(config: &EngineConfig, client: &reqwest::Client) -> Provider {
-    build_provider_with_overrides(config, client, None, None)
+fn build_provider_from_api(
+    api: &ApiConfig,
+    client: &reqwest::Client,
+    redact_secrets: bool,
+) -> Provider {
+    build_provider(
+        &api.base,
+        &api.key,
+        &api.provider_type,
+        &api.model_config,
+        client,
+        redact_secrets,
+    )
 }
 
 fn build_provider_with_overrides(
@@ -412,14 +438,32 @@ fn build_provider_with_overrides(
     api_base: Option<&str>,
     api_key: Option<&str>,
 ) -> Provider {
-    Provider::new(
-        api_base.unwrap_or(&config.api.base).to_string(),
-        api_key.unwrap_or(&config.api.key).to_string(),
+    build_provider(
+        api_base.unwrap_or(&config.api.base),
+        api_key.unwrap_or(&config.api.key),
         &config.api.provider_type,
+        &config.api.model_config,
+        client,
+        config.redact_secrets,
+    )
+}
+
+fn build_provider(
+    api_base: &str,
+    api_key: &str,
+    provider_type: &str,
+    model_config: &ModelConfig,
+    client: &reqwest::Client,
+    redact_secrets: bool,
+) -> Provider {
+    Provider::new(
+        api_base.to_string(),
+        api_key.to_string(),
+        provider_type,
         client.clone(),
     )
-    .with_model_config(config.api.model_config.clone())
-    .with_redact_secrets(config.redact_secrets)
+    .with_model_config(model_config.clone())
+    .with_redact_secrets(redact_secrets)
 }
 
 // ── Turn ────────────────────────────────────────────────────────────────────
@@ -529,18 +573,21 @@ impl<'a> Turn<'a> {
             "first message should be the system prompt"
         );
         let non_system = &self.messages[1..];
+        let request = self.config.aux_or_primary(AuxiliaryTask::Compaction);
+        let provider =
+            build_provider_from_api(&request.api, self.http_client, self.config.redact_secrets);
         match compact_history(
-            &self.provider,
+            &provider,
             non_system,
             1,
-            &self.model,
+            &request.model,
             self.config.instructions.as_deref(),
             &self.cancel,
         )
         .await
         {
             Ok((compacted, usage)) => {
-                emit_usage_background(self.event_tx, self.config, &self.model, usage);
+                emit_usage_background(self.event_tx, &request.api, &request.model, usage);
                 let system = self.messages[0].clone();
                 self.messages = vec![system];
                 self.messages.extend(compacted);
@@ -630,18 +677,12 @@ impl<'a> Turn<'a> {
             UiCommand::GenerateTitle {
                 last_user_message,
                 assistant_tail,
-                model,
-                api_base,
-                api_key,
             } => {
                 spawn_title_generation(
                     self.config,
                     self.http_client,
-                    &model,
                     last_user_message,
                     assistant_tail,
-                    api_base,
-                    api_key,
                     self.event_tx,
                 );
                 true
@@ -649,20 +690,14 @@ impl<'a> Turn<'a> {
             UiCommand::Btw {
                 question,
                 history,
-                model,
                 reasoning_effort,
-                api_base,
-                api_key,
             } => {
                 spawn_btw_request(
                     self.config,
                     self.http_client,
-                    &model,
                     reasoning_effort,
                     question,
                     history,
-                    api_base,
-                    api_key,
                     self.event_tx,
                 );
                 true
@@ -1479,14 +1514,14 @@ pub fn emit_usage(
 /// Cost is tracked but prompt_tokens won't update displayed context usage.
 fn emit_usage_background(
     tx: &mpsc::UnboundedSender<EngineEvent>,
-    config: &EngineConfig,
+    api: &crate::ApiConfig,
     model: &str,
     usage: protocol::TokenUsage,
 ) {
     send_usage(
         tx,
-        &config.api.provider_type,
-        &config.api.model_config,
+        &api.provider_type,
+        &api.model_config,
         model,
         usage,
         None,
@@ -1502,10 +1537,10 @@ struct PricingContext {
 }
 
 impl PricingContext {
-    fn from_config(config: &EngineConfig) -> Self {
+    fn from_api(api: &crate::ApiConfig) -> Self {
         Self {
-            provider_type: config.api.provider_type.clone(),
-            model_config: config.api.model_config.clone(),
+            provider_type: api.provider_type.clone(),
+            model_config: api.model_config.clone(),
         }
     }
 

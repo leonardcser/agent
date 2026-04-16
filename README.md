@@ -107,6 +107,11 @@ providers:
 defaults:
   model: ollama/qwen3.5:27b # provider_name/model_name
 
+auxiliary:
+  model: openai/gpt-5.4-mini
+  use_for:
+    btw: false
+
 settings:
   vim_mode: false
   auto_compact: false

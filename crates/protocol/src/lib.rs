@@ -401,7 +401,6 @@ pub enum UiCommand {
     Compact {
         keep_turns: usize,
         history: Vec<Message>,
-        model: String,
         instructions: Option<String>,
     },
 
@@ -410,27 +409,18 @@ pub enum UiCommand {
     GenerateTitle {
         last_user_message: String,
         assistant_tail: String,
-        model: String,
-        api_base: Option<String>,
-        api_key: Option<String>,
     },
 
     /// Ask an ephemeral side question (no tools, not added to history).
     Btw {
         question: String,
         history: Vec<Message>,
-        model: String,
         reasoning_effort: ReasoningEffort,
-        api_base: Option<String>,
-        api_key: Option<String>,
     },
 
     /// Predict the user's next input based on conversation history.
     PredictInput {
         history: Vec<Message>,
-        model: String,
-        api_base: Option<String>,
-        api_key: Option<String>,
         generation: u64,
     },
 

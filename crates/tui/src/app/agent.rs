@@ -109,39 +109,38 @@ impl App {
         let (model, api_base, api_key) = {
             let target_model = cmd.overrides.model.as_deref();
             let target_provider = cmd.overrides.provider.as_deref();
-            let resolved = target_model
-                .map(|reference| {
-                    crate::config::resolve_model_ref_with_provider(
+            let resolved = match (target_model, target_provider) {
+                (Some(reference), provider) => {
+                    match crate::config::resolve_model_ref_with_provider(
                         &self.available_models,
                         reference,
-                        target_provider,
-                    )
-                })
-                .transpose()
-                .map_err(|err| {
-                    self.screen.notify_error(err.to_string());
-                })
-                .ok()
-                .flatten()
-                .or_else(|| {
-                    target_provider.and_then(|provider| {
-                        match crate::config::resolve_provider_ref(&self.available_models, provider)
-                        {
-                            Ok(model) => Some(model),
-                            Err(err) => {
-                                self.screen.notify_error(err.to_string());
-                                None
-                            }
+                        provider,
+                    ) {
+                        Ok(model) => Some(model),
+                        Err(err) => {
+                            self.screen.notify_error(err.to_string());
+                            None
                         }
-                    })
-                })
-                .map(|r| {
-                    (
-                        r.model_name.clone(),
-                        r.api_base.clone(),
-                        r.api_key_env.clone(),
-                    )
-                });
+                    }
+                }
+                (None, Some(provider)) => {
+                    match crate::config::resolve_provider_ref(&self.available_models, provider) {
+                        Ok(model) => Some(model),
+                        Err(err) => {
+                            self.screen.notify_error(err.to_string());
+                            None
+                        }
+                    }
+                }
+                (None, None) => None,
+            }
+            .map(|resolved| {
+                (
+                    resolved.model_name.clone(),
+                    resolved.api_base.clone(),
+                    resolved.api_key_env.clone(),
+                )
+            });
             match resolved {
                 Some((model_name, api_base, api_key_env)) => (
                     model_name,
@@ -322,9 +321,6 @@ impl App {
                     self.predict_generation += 1;
                     self.engine.send(UiCommand::PredictInput {
                         history: context,
-                        model: self.model.clone(),
-                        api_base: Some(self.api_base.clone()),
-                        api_key: Some(self.api_key()),
                         generation: self.predict_generation,
                     });
                 }
