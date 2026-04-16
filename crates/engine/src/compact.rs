@@ -150,11 +150,8 @@ pub async fn run_compact(
             return Err(ProviderError::Cancelled);
         }
 
-        let request_messages = build_summarize_request(
-            &history[window_start..],
-            instructions,
-            SUMMARIZATION_PROMPT,
-        );
+        let request_messages =
+            build_summarize_request(&history[window_start..], instructions, SUMMARIZATION_PROMPT);
 
         let opts = ChatOptions::new(cancel);
         match provider
