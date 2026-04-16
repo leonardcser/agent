@@ -195,6 +195,116 @@ pub struct ResolvedModel {
     pub config: ModelConfig,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveModelRefError {
+    NotFound {
+        reference: String,
+    },
+    Ambiguous {
+        reference: String,
+        matches: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for ResolveModelRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound { reference } => write!(f, "unknown model or provider: {reference}"),
+            Self::Ambiguous { reference, matches } => write!(
+                f,
+                "ambiguous reference '{reference}' — use provider/model ({})",
+                matches.join(", ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolveModelRefError {}
+
+pub fn resolve_model_ref<'a>(
+    models: &'a [ResolvedModel],
+    reference: &str,
+) -> Result<&'a ResolvedModel, ResolveModelRefError> {
+    resolve_model_ref_with_provider(models, reference, None)
+}
+
+pub fn resolve_model_ref_with_provider<'a>(
+    models: &'a [ResolvedModel],
+    reference: &str,
+    provider: Option<&str>,
+) -> Result<&'a ResolvedModel, ResolveModelRefError> {
+    if let Some(model) = models
+        .iter()
+        .find(|m| m.key == reference && provider.is_none_or(|p| m.provider_name == p))
+    {
+        return Ok(model);
+    }
+
+    let mut first_match: Option<&ResolvedModel> = None;
+    let mut ambiguous_keys: Vec<String> = Vec::new();
+    for model in models
+        .iter()
+        .filter(|m| m.model_name == reference && provider.is_none_or(|p| m.provider_name == p))
+    {
+        if let Some(first) = first_match {
+            if ambiguous_keys.is_empty() {
+                ambiguous_keys.push(first.key.clone());
+            }
+            ambiguous_keys.push(model.key.clone());
+        } else {
+            first_match = Some(model);
+        }
+    }
+
+    if let Some(model) = first_match {
+        if ambiguous_keys.is_empty() {
+            Ok(model)
+        } else {
+            Err(ResolveModelRefError::Ambiguous {
+                reference: reference.to_string(),
+                matches: ambiguous_keys,
+            })
+        }
+    } else {
+        Err(ResolveModelRefError::NotFound {
+            reference: reference.to_string(),
+        })
+    }
+}
+
+pub fn resolve_provider_ref<'a>(
+    models: &'a [ResolvedModel],
+    provider: &str,
+) -> Result<&'a ResolvedModel, ResolveModelRefError> {
+    let mut first_match: Option<&ResolvedModel> = None;
+    let mut ambiguous_keys: Vec<String> = Vec::new();
+    for model in models.iter().filter(|m| m.provider_name == provider) {
+        if let Some(first) = first_match {
+            if ambiguous_keys.is_empty() {
+                ambiguous_keys.push(first.key.clone());
+            }
+            ambiguous_keys.push(model.key.clone());
+        } else {
+            first_match = Some(model);
+        }
+    }
+
+    if let Some(model) = first_match {
+        if ambiguous_keys.is_empty() {
+            Ok(model)
+        } else {
+            Err(ResolveModelRefError::Ambiguous {
+                reference: provider.to_string(),
+                matches: ambiguous_keys,
+            })
+        }
+    } else {
+        Err(ResolveModelRefError::NotFound {
+            reference: provider.to_string(),
+        })
+    }
+}
+
 impl Config {
     pub fn load() -> Self {
         Self::load_from(&config_dir().join("config.yaml"))

@@ -109,16 +109,32 @@ impl App {
         let (model, api_base, api_key) = {
             let target_model = cmd.overrides.model.as_deref();
             let target_provider = cmd.overrides.provider.as_deref();
-            let resolved = (target_model.is_some() || target_provider.is_some())
-                .then(|| {
-                    self.available_models.iter().find(|m| {
-                        let model_match =
-                            target_model.is_none_or(|tm| m.model_name == tm || m.key == tm);
-                        let prov_match = target_provider.is_none_or(|tp| m.provider_name == tp);
-                        model_match && prov_match
+            let resolved = target_model
+                .map(|reference| {
+                    crate::config::resolve_model_ref_with_provider(
+                        &self.available_models,
+                        reference,
+                        target_provider,
+                    )
+                })
+                .transpose()
+                .map_err(|err| {
+                    self.screen.notify_error(err.to_string());
+                })
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    target_provider.and_then(|provider| {
+                        match crate::config::resolve_provider_ref(&self.available_models, provider)
+                        {
+                            Ok(model) => Some(model),
+                            Err(err) => {
+                                self.screen.notify_error(err.to_string());
+                                None
+                            }
+                        }
                     })
                 })
-                .flatten()
                 .map(|r| {
                     (
                         r.model_name.clone(),

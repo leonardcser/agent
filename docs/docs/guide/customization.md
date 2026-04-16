@@ -42,7 +42,7 @@ commands. For example, `~/.config/smelt/commands/commit.md`:
 ```markdown
 ---
 description: commit staged changes
-model: gpt-4o
+model: openai/gpt-4o
 temperature: 0.2
 reasoning_effort: low
 bash:

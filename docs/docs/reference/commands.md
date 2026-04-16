@@ -12,7 +12,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/compact [instructions]` | Summarize older history to free context       |
 | `/fork`, `/branch`        | Fork the current session                      |
 | `/export`                 | Copy conversation to clipboard as markdown    |
-| `/model [name]`           | Switch model (opens picker if no name given)  |
+| `/model [provider/model]` | Switch model (opens picker if no name given)  |
 | `/settings`               | Toggle runtime settings                       |
 | `/theme [name]`           | Change accent color                           |
 | `/color [name]`           | Set task slug color                           |
@@ -47,20 +47,20 @@ commands. See the
 
 All fields are optional:
 
-| Key                | Description                                       |
-| ------------------ | ------------------------------------------------- |
-| `description`      | Shown in the `/` picker                           |
-| `model`            | Override model for this command                   |
-| `provider`         | Resolve API connection from this provider         |
-| `temperature`      | Sampling temperature                              |
-| `top_p`            | Top-p (nucleus) sampling                          |
-| `top_k`            | Top-k sampling                                    |
-| `min_p`            | Min-p sampling                                    |
-| `repeat_penalty`   | Repetition penalty                                |
-| `reasoning_effort` | Thinking depth: `off`/`low`/`medium`/`high`/`max` |
-| `tools`            | `allow`/`ask`/`deny` lists for tool permissions   |
-| `bash`             | `allow`/`ask`/`deny` glob patterns for bash       |
-| `web_fetch`        | `allow`/`ask`/`deny` glob patterns for URLs       |
+| Key                | Description                                                                                               |
+| ------------------ | --------------------------------------------------------------------------------------------------------- |
+| `description`      | Shown in the `/` picker                                                                                   |
+| `model`            | Override model for this command. Prefer `provider_name/model_name`; bare names work only when unambiguous |
+| `provider`         | Legacy compatibility field to narrow a bare `model` reference                                             |
+| `temperature`      | Sampling temperature                                                                                      |
+| `top_p`            | Top-p (nucleus) sampling                                                                                  |
+| `top_k`            | Top-k sampling                                                                                            |
+| `min_p`            | Min-p sampling                                                                                            |
+| `repeat_penalty`   | Repetition penalty                                                                                        |
+| `reasoning_effort` | Thinking depth: `off`/`low`/`medium`/`high`/`max`                                                         |
+| `tools`            | `allow`/`ask`/`deny` lists for tool permissions                                                           |
+| `bash`             | `allow`/`ask`/`deny` glob patterns for bash                                                               |
+| `web_fetch`        | `allow`/`ask`/`deny` glob patterns for URLs                                                               |
 
 ### Shell Execution in Templates
 

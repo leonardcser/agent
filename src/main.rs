@@ -223,20 +223,28 @@ async fn main() {
 
     // Resolve the active model: CLI flags > defaults.model (if set) > last_used (if no default) > first in config
     let (api_base, api_key, api_key_env, mut provider_type, model, mut model_config) = {
+        let resolve_required =
+            |reference: &str| match tui::config::resolve_model_ref(&available_models, reference) {
+                Ok(model) => Some(model),
+                Err(tui::config::ResolveModelRefError::NotFound { .. })
+                    if args.api_base.is_some() =>
+                {
+                    None
+                }
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            };
         let resolved = if let Some(ref cli_model) = args.model {
-            available_models
-                .iter()
-                .find(|m| m.model_name == *cli_model || m.key == *cli_model)
+            resolve_required(cli_model)
         } else if let Some(default) = cfg.get_default_model() {
             // Config has a default: use it, ignore cached selection
-            available_models
-                .iter()
-                .find(|m| m.key == default || m.model_name == default)
+            resolve_required(default)
         } else if let Some(ref cached) = app_state.selected_model {
             // No config default: use last used model, fall back to first if stale
-            available_models
-                .iter()
-                .find(|m| m.key == *cached)
+            tui::config::resolve_model_ref(&available_models, cached)
+                .ok()
                 .or(available_models.first())
         } else {
             // Fallback to first model in config

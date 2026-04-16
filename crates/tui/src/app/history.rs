@@ -115,19 +115,13 @@ impl App {
         if !self.cli_model_override && !self.cli_api_base_override && !self.cli_api_key_env_override
         {
             if let Some(ref model_key) = loaded.model {
-                // Prefer an exact key match (provider/model) so the original
-                // provider/auth method is restored. Fall back to model_name
-                // for sessions saved before the key was persisted.
-                let resolved_key = self
-                    .available_models
-                    .iter()
-                    .find(|m| m.key == *model_key)
-                    .or_else(|| {
-                        self.available_models
-                            .iter()
-                            .find(|m| m.model_name == *model_key)
-                    })
-                    .map(|m| m.key.clone());
+                // Prefer an exact key match so the original provider/auth method
+                // is restored. Fall back to a unique bare model name for
+                // sessions saved before the key was persisted.
+                let resolved_key =
+                    crate::config::resolve_model_ref(&self.available_models, model_key)
+                        .ok()
+                        .map(|resolved| resolved.key.clone());
                 if let Some(key) = resolved_key {
                     self.apply_model(&key);
                 }

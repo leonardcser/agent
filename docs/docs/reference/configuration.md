@@ -80,7 +80,9 @@ Model selection follows this precedence:
 3. Last used model (cached from previous session)
 4. First model in the providers list
 
-If `defaults.model` is set, the cached selection is ignored.
+If `defaults.model` is set, the cached selection is ignored. Prefer the
+`provider_name/model_name` form in config. Bare model names are accepted only
+when they resolve unambiguously.
 
 ## Settings
 

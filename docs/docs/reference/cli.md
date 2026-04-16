@@ -16,13 +16,13 @@ arguments and no config file launches the interactive setup wizard.
 
 ## Connection
 
-| Flag                  | Description                                         |
-| --------------------- | --------------------------------------------------- |
-| `--config <PATH>`     | Path to a custom config file                        |
-| `-m, --model <MODEL>` | Model to use (overrides config)                     |
-| `--api-base <URL>`    | API base URL (overrides config)                     |
-| `--api-key-env <VAR>` | Env var holding the API key                         |
-| `--type <TYPE>`       | Provider type (auto-detected from URL when omitted) |
+| Flag                  | Description                                                                                                                       |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `--config <PATH>`     | Path to a custom config file                                                                                                      |
+| `-m, --model <MODEL>` | Model to use. With configured providers, prefer `provider_name/model_name`; with `--api-base`, use the provider-native model name |
+| `--api-base <URL>`    | API base URL (overrides config)                                                                                                   |
+| `--api-key-env <VAR>` | Env var holding the API key                                                                                                       |
+| `--type <TYPE>`       | Provider type (auto-detected from URL when omitted)                                                                               |
 
 Auto-detection:
 
