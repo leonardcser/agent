@@ -1,6 +1,14 @@
-//! Secret redaction for chat content and persisted sessions.
+//! Secret redaction for chat content.
 //!
-//! Uses a layered approach sourced from gitleaks' battle-tested patterns:
+//! The policy is **redact-at-ingress**: data entering the conversation from
+//! outside the model (user input, tool results, inter-agent messages) is
+//! scrubbed once at the boundary, before it lands in history. Model-generated
+//! content (assistant text, reasoning, tool-call arguments) is never touched.
+//! This is the only layer preventing secrets from leaving the machine toward
+//! the LLM API.
+//!
+//! Detection uses a layered approach sourced from gitleaks' battle-tested
+//! patterns:
 //! 1. **Known prefix patterns** — provider tokens with distinctive prefixes (near-zero false positives)
 //! 2. **Structural patterns** — PEM keys, JWTs, database connection strings
 //! 3. **Keyword proximity** — `password = "..."`, `secret: "..."`, etc.
@@ -431,24 +439,19 @@ fn entropy_tokens(input: &str) -> Vec<(usize, usize, f64)> {
     results
 }
 
-/// Redact secrets in all messages in place.
+/// Redact secrets in a single message's content at ingress.
 ///
-/// Only mutates `content` — the entry point for newly-arrived text (user
-/// input, tool results, previously-redacted assistant output).
-/// `reasoning_content` and `tool_calls.arguments` are deliberately left
-/// alone: they reflect the model's own prior thought and actions, and
-/// re-redacting them on replay breaks the model's self-consistency
-/// without adding privacy (the provider already saw the original).
-pub fn redact_messages(messages: &mut [protocol::Message]) {
-    for msg in messages {
-        if let Some(ref mut content) = msg.content {
-            redact_content(content);
-        }
+/// Only mutates `content`. `reasoning_content` and `tool_calls.arguments`
+/// are left alone — they reflect the model's own prior thought and actions,
+/// generated from already-redacted inputs.
+pub fn redact_message(msg: &mut protocol::Message) {
+    if let Some(ref mut content) = msg.content {
+        redact_content(content);
     }
 }
 
-/// Redact secrets within a `Content` value.
-fn redact_content(content: &mut protocol::Content) {
+/// Redact secrets within a `Content` value in place.
+pub fn redact_content(content: &mut protocol::Content) {
     match content {
         protocol::Content::Text(ref mut s) => {
             let redacted = redact(s);
@@ -466,45 +469,6 @@ fn redact_content(content: &mut protocol::Content) {
                 }
             }
         }
-    }
-}
-
-/// Conditionally redact a string. Returns the input unchanged when disabled.
-pub fn maybe_redact(input: String, enabled: bool) -> String {
-    if enabled {
-        redact(&input)
-    } else {
-        input
-    }
-}
-
-/// Conditionally redact a JSON value. Returns a clone unchanged when disabled.
-pub fn maybe_redact_json(value: &serde_json::Value, enabled: bool) -> serde_json::Value {
-    if enabled {
-        redact_json(value)
-    } else {
-        value.clone()
-    }
-}
-
-/// Recursively redact all string values in a JSON value.
-pub fn redact_json(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::String(s) => {
-            let r = redact(s);
-            serde_json::Value::String(r)
-        }
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(redact_json).collect())
-        }
-        serde_json::Value::Object(map) => {
-            let mut out = serde_json::Map::with_capacity(map.len());
-            for (k, v) in map {
-                out.insert(k.clone(), redact_json(v));
-            }
-            serde_json::Value::Object(out)
-        }
-        other => other.clone(),
     }
 }
 
@@ -902,34 +866,31 @@ mod tests {
     // ── Message redaction ────────────────────────────────────────────────
 
     #[test]
-    fn redact_messages_mutates_content() {
-        let mut messages = vec![protocol::Message::user(protocol::Content::text(
+    fn redact_message_mutates_content() {
+        let mut msg = protocol::Message::user(protocol::Content::text(
             "my key is ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij",
-        ))];
-        redact_messages(&mut messages);
-        let text = messages[0].content.as_ref().unwrap().text_content();
+        ));
+        redact_message(&mut msg);
+        let text = msg.content.as_ref().unwrap().text_content();
         assert!(!text.contains("ghp_"));
         assert_redacted_with(&text, "github_pat");
     }
 
     #[test]
-    fn redact_messages_leaves_reasoning_alone() {
+    fn redact_message_leaves_reasoning_alone() {
         let secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
         let reasoning = format!("I should probably use {secret} here.");
-        let mut messages = vec![protocol::Message::assistant(
+        let mut msg = protocol::Message::assistant(
             Some(protocol::Content::text("ok")),
             Some(reasoning.clone()),
             None,
-        )];
-        redact_messages(&mut messages);
-        assert_eq!(
-            messages[0].reasoning_content.as_deref(),
-            Some(reasoning.as_str())
         );
+        redact_message(&mut msg);
+        assert_eq!(msg.reasoning_content.as_deref(), Some(reasoning.as_str()));
     }
 
     #[test]
-    fn redact_messages_leaves_tool_call_args_alone() {
+    fn redact_message_leaves_tool_call_args_alone() {
         let args = r#"{"path":"/tmp/ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij.log"}"#;
         let call = protocol::ToolCall::new(
             "call_1".to_string(),
@@ -938,20 +899,18 @@ mod tests {
                 arguments: args.to_string(),
             },
         );
-        let mut messages = vec![protocol::Message::assistant(None, None, Some(vec![call]))];
-        redact_messages(&mut messages);
-        let tc = &messages[0].tool_calls.as_ref().unwrap()[0];
+        let mut msg = protocol::Message::assistant(None, None, Some(vec![call]));
+        redact_message(&mut msg);
+        let tc = &msg.tool_calls.as_ref().unwrap()[0];
         assert_eq!(tc.function.arguments, args);
     }
 
     #[test]
-    fn redact_messages_leaves_clean_content() {
-        let mut messages = vec![protocol::Message::user(protocol::Content::text(
-            "Hello, how are you?",
-        ))];
-        redact_messages(&mut messages);
+    fn redact_message_leaves_clean_content() {
+        let mut msg = protocol::Message::user(protocol::Content::text("Hello, how are you?"));
+        redact_message(&mut msg);
         assert_eq!(
-            messages[0].content.as_ref().unwrap().text_content(),
+            msg.content.as_ref().unwrap().text_content(),
             "Hello, how are you?"
         );
     }

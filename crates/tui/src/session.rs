@@ -191,42 +191,31 @@ pub fn dir_for(session: &Session) -> PathBuf {
     sessions_dir().join(&session.id)
 }
 
-pub fn save(session: &Session, store: &crate::attachment::AttachmentStore, redact_secrets: bool) {
+pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
     let session_dir = dir_for(session);
     let _ = fs::create_dir_all(&session_dir);
     let blob_dir = session_dir.join("blobs");
     let url_to_blob = store.save_blobs(&blob_dir);
-    save_with_blobs(session, &url_to_blob, redact_secrets);
+    save_with_blobs(session, &url_to_blob);
 }
 
 /// Serialize and write `session.json` + `meta.json`, assuming blob files
 /// have already been flushed and their URL→filename mapping collected.
 /// Safe to call from a background thread — does no I/O on `store`.
-pub fn save_with_blobs(
-    session: &Session,
-    url_to_blob: &std::collections::HashMap<String, String>,
-    redact_secrets: bool,
-) {
+///
+/// Message content is redacted at ingress, so save does no extra redaction.
+pub fn save_with_blobs(session: &Session, url_to_blob: &std::collections::HashMap<String, String>) {
     let _perf = crate::perf::begin("session:write");
     let session_dir = dir_for(session);
     let _ = fs::create_dir_all(&session_dir);
     let ts = now_ms();
 
-    let needs_clone = !url_to_blob.is_empty() || redact_secrets;
-    let session_out = if needs_clone {
-        let mut s = session.clone();
-        if !url_to_blob.is_empty() {
-            externalize_blobs(&mut s.messages, url_to_blob);
-        }
-        if redact_secrets {
-            engine::redact::redact_messages(&mut s.messages);
-            if let Some(ref first_msg) = s.first_user_message {
-                s.first_user_message = Some(engine::redact::redact(first_msg));
-            }
-        }
-        std::borrow::Cow::Owned(s)
-    } else {
+    let session_out = if url_to_blob.is_empty() {
         std::borrow::Cow::Borrowed(session)
+    } else {
+        let mut s = session.clone();
+        externalize_blobs(&mut s.messages, url_to_blob);
+        std::borrow::Cow::Owned(s)
     };
 
     if let Ok(json) = serde_json::to_string(&*session_out) {

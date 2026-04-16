@@ -3,8 +3,15 @@ use super::*;
 use std::collections::HashMap;
 
 impl App {
-    pub(super) fn maybe_redact(&self, s: String) -> String {
-        engine::redact::maybe_redact(s, self.settings.redact_secrets)
+    /// Redact secrets from user-submitted text before it lands on screen or
+    /// in history. The `display` string is the rendered form of the submitted
+    /// message; `content` is what gets sent to the engine. Both are scrubbed
+    /// so the UI and the LLM see the same redacted form.
+    pub(super) fn redact_user_submission(&self, content: &mut Content, display: &mut String) {
+        if self.settings.redact_secrets {
+            engine::redact::redact_content(content);
+            *display = engine::redact::redact(display);
+        }
     }
 
     fn reset_subagents_for_new_session(&mut self) {
@@ -192,12 +199,11 @@ impl App {
         for msg in &self.history {
             if matches!(msg.role, Role::Tool) {
                 if let Some(ref id) = msg.tool_call_id {
-                    let text = self.maybe_redact(
-                        msg.content
-                            .as_ref()
-                            .map(|c| c.text_content())
-                            .unwrap_or_default(),
-                    );
+                    let text = msg
+                        .content
+                        .as_ref()
+                        .map(|c| c.text_content())
+                        .unwrap_or_default();
                     tool_outputs.insert(
                         id.clone(),
                         ToolOutput {
@@ -232,7 +238,7 @@ impl App {
             match msg.role {
                 Role::User => {
                     if let Some(ref content) = msg.content {
-                        let text = self.maybe_redact(content.text_content());
+                        let text = content.text_content();
                         if let Some(summary) =
                             text.strip_prefix("Summary of prior conversation:\n\n")
                         {
@@ -262,13 +268,13 @@ impl App {
                     if let Some(ref reasoning) = msg.reasoning_content {
                         if !reasoning.is_empty() {
                             self.screen.push(Block::Thinking {
-                                content: self.maybe_redact(reasoning.clone()),
+                                content: reasoning.clone(),
                             });
                         }
                     }
                     if let Some(ref content) = msg.content {
                         self.screen.push(Block::Text {
-                            content: self.maybe_redact(content.text_content()),
+                            content: content.text_content(),
                         });
                     }
                     if let Some(ref calls) = msg.tool_calls {
@@ -387,7 +393,7 @@ impl App {
                             self.screen.push(Block::AgentMessage {
                                 from_id,
                                 from_slug: msg.agent_from_slug.clone().unwrap_or_default(),
-                                content: self.maybe_redact(content.text_content()),
+                                content: content.text_content(),
                             });
                         }
                     }
@@ -437,7 +443,6 @@ impl App {
         self.persister.save(crate::persist::PersistRequest {
             session: self.session.clone(),
             blobs,
-            redact_secrets: self.settings.redact_secrets,
             render_cache,
             layout_cache,
         });

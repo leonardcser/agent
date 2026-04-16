@@ -95,7 +95,15 @@ impl App {
         &mut self,
         cmd: crate::custom_commands::CustomCommand,
     ) -> TurnState {
+        // Ingress: custom command bodies may inline file contents via
+        // {file:...} substitutions, so scrub before the content lands in
+        // history or is dispatched to the engine.
         let evaluated = crate::custom_commands::evaluate(&cmd.body);
+        let evaluated = if self.settings.redact_secrets {
+            engine::redact::redact(&evaluated)
+        } else {
+            evaluated
+        };
         let display = format!("/{}", cmd.name);
 
         if !evaluated.is_empty() {
@@ -390,7 +398,6 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::ToolOutput { call_id, chunk } => {
-                let chunk = self.maybe_redact(chunk);
                 self.screen.append_active_output(&call_id, &chunk);
                 SessionControl::Continue
             }
@@ -401,7 +408,7 @@ impl App {
                 self.queued_messages.drain(..drain_n);
                 if drain_n > 0 {
                     self.screen.push(Block::User {
-                        text: self.maybe_redact(text),
+                        text,
                         image_labels: vec![],
                     });
                 }
@@ -412,9 +419,7 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::Thinking { content } => {
-                self.screen.push(Block::Thinking {
-                    content: self.maybe_redact(content),
-                });
+                self.screen.push(Block::Thinking { content });
                 SessionControl::Continue
             }
             EngineEvent::TextDelta { delta } => {
@@ -423,9 +428,7 @@ impl App {
             }
             EngineEvent::Text { content } => {
                 self.screen.flush_streaming_text();
-                self.screen.push(Block::Text {
-                    content: self.maybe_redact(content),
-                });
+                self.screen.push(Block::Text { content });
                 SessionControl::Continue
             }
             EngineEvent::ToolStarted {
@@ -627,7 +630,7 @@ impl App {
                     self.screen.push(Block::AgentMessage {
                         from_id: from_id.clone(),
                         from_slug: from_slug.clone(),
-                        content: self.maybe_redact(message.clone()),
+                        content: message.clone(),
                     });
                 }
                 // Forward to engine so it enters the conversation history
@@ -702,7 +705,7 @@ impl App {
                     self.screen.push(Block::AgentMessage {
                         from_id: from_id.clone(),
                         from_slug: from_slug.clone(),
-                        content: self.maybe_redact(message.clone()),
+                        content: message.clone(),
                     });
                     // Queue as an Agent role message to trigger a turn without
                     // rendering a duplicate User block.

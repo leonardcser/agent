@@ -115,7 +115,7 @@ auxiliary:
 settings:
   vim_mode: false
   auto_compact: false
-  redact_secrets: true # on by default — redacts secrets everywhere
+  redact_secrets: true # on by default — scrubs secrets from user input and tool results before they reach the LLM
 ```
 
 See the [full documentation](https://leonardcser.github.io/smelt/) for all

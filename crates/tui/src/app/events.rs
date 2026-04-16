@@ -232,7 +232,13 @@ impl App {
                 self.exec_kill = Some(kill);
                 false
             }
-            EventOutcome::Submit { content, display } => {
+            EventOutcome::Submit {
+                mut content,
+                mut display,
+            } => {
+                // Ingress: scrub secrets from user submissions before they
+                // reach the screen, the queue, or the engine.
+                self.redact_user_submission(&mut content, &mut display);
                 // Queue messages while compaction is in progress so they
                 // are sent against the compacted history, not the old one.
                 if self.is_compacting() {
@@ -611,7 +617,12 @@ impl App {
 
         // Everything else → InputState::handle_event (type-ahead with history).
         match self.input.handle_event(ev, Some(&mut self.input_history)) {
-            Action::Submit { content, display } => {
+            Action::Submit {
+                mut content,
+                mut display,
+            } => {
+                // Ingress: scrub secrets before queueing or running commands.
+                self.redact_user_submission(&mut content, &mut display);
                 if self.try_btw_submit(&content, &display) {
                     self.screen.mark_dirty();
                     return EventOutcome::Noop;

@@ -403,8 +403,8 @@ impl App {
     }
 
     pub(super) fn format_conversation_text(&self) -> String {
-        let text = format_conversation_markdown(&self.history, &self.session);
-        self.maybe_redact(text)
+        // History is redacted at ingress; export reads straight from it.
+        format_conversation_markdown(&self.history, &self.session)
     }
 }
 

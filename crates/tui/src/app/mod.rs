@@ -1017,7 +1017,7 @@ impl App {
             match format {
                 OutputFormat::Json => {
                     // Forward every event as JSONL.
-                    emit_json(&ev, self.settings.redact_secrets);
+                    emit_json(&ev);
 
                     // Still need to handle side-effect events.
                     match ev {
@@ -1044,7 +1044,6 @@ impl App {
                 OutputFormat::Text => match ev {
                     EngineEvent::ThinkingDelta { .. } => {}
                     EngineEvent::Thinking { content } => {
-                        let content = self.maybe_redact(content);
                         log_thinking(&content);
                     }
                     EngineEvent::TextDelta { delta } => {
@@ -1077,9 +1076,9 @@ impl App {
                         let display_output = if !verbose {
                             String::new()
                         } else if result.is_error {
-                            self.maybe_redact(result.content.clone())
+                            result.content.clone()
                         } else {
-                            self.maybe_redact(output)
+                            output
                         };
                         log_tool(
                             &name,
@@ -1135,7 +1134,7 @@ impl App {
         }
 
         // Text mode: write the final message to stdout (only when piped).
-        final_message = engine::redact::maybe_redact(final_message, self.settings.redact_secrets);
+        // `final_message` is model-generated and passes through unredacted.
         if format == OutputFormat::Text && !final_message.is_empty() {
             let stdout_is_tty = std::io::stdout().is_terminal();
             let stderr_is_tty = std::io::stderr().is_terminal();
@@ -1173,14 +1172,11 @@ impl App {
 
     /// Forward an inter-agent message: emit to stdout and inject into engine.
     fn forward_agent_message(&self, from_id: &str, from_slug: &str, message: &str) {
-        emit_json(
-            &EngineEvent::AgentMessage {
-                from_id: from_id.to_string(),
-                from_slug: from_slug.to_string(),
-                message: message.to_string(),
-            },
-            self.settings.redact_secrets,
-        );
+        emit_json(&EngineEvent::AgentMessage {
+            from_id: from_id.to_string(),
+            from_slug: from_slug.to_string(),
+            message: message.to_string(),
+        });
         self.engine.send(UiCommand::AgentMessage {
             from_id: from_id.to_string(),
             from_slug: from_slug.to_string(),
@@ -1250,7 +1246,7 @@ impl App {
                         engine::socket::IncomingMessage::Query { from_id: _, question, reply_tx } => {
                             self.send_btw_query(question);
                             while let Some(ev) = self.engine.recv().await {
-                                emit_json(&ev, self.settings.redact_secrets);
+                                emit_json(&ev);
                                 if let EngineEvent::BtwResponse { content } = ev {
                                     let _ = reply_tx.send(content);
                                     break;
@@ -1357,7 +1353,7 @@ impl App {
                     };
 
                     // Forward every event to stdout as JSON.
-                    emit_json(&ev, self.settings.redact_secrets);
+                    emit_json(&ev);
 
                     // Handle side effects for events that need them.
                     match ev {
@@ -1492,16 +1488,8 @@ pub enum ColorMode {
 }
 
 /// Write a single `EngineEvent` as a JSON line to stdout.
-fn emit_json(ev: &EngineEvent, redact: bool) {
-    if redact {
-        let val = serde_json::to_value(ev).unwrap();
-        println!(
-            "{}",
-            serde_json::to_string(&engine::redact::redact_json(&val)).unwrap()
-        );
-    } else {
-        println!("{}", serde_json::to_string(ev).unwrap());
-    }
+fn emit_json(ev: &EngineEvent) {
+    println!("{}", serde_json::to_string(ev).unwrap());
 }
 
 // ── Headless / subagent log helpers ─────────────────────────────────────────

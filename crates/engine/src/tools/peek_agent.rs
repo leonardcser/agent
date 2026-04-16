@@ -35,9 +35,8 @@ impl Tool for PeekAgentTool {
     fn execute<'a>(
         &'a self,
         args: HashMap<String, Value>,
-        ctx: &'a ToolContext<'a>,
+        _ctx: &'a ToolContext<'a>,
     ) -> ToolFuture<'a> {
-        let redact = ctx.engine_config.redact_secrets;
         Box::pin(async move {
             let target_id = str_arg(&args, "target");
             let question = str_arg(&args, "question");
@@ -59,7 +58,7 @@ impl Tool for PeekAgentTool {
             );
 
             match crate::socket::send_query(&socket_path, &self.my_id, &framed).await {
-                Ok(answer) => ToolResult::ok(crate::redact::maybe_redact(answer, redact)),
+                Ok(answer) => ToolResult::ok(answer),
                 Err(e) => ToolResult::err(format!("{target_id}: {e}")),
             }
         })

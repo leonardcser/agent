@@ -26,7 +26,6 @@ pub struct Blob {
 pub struct PersistRequest {
     pub session: Session,
     pub blobs: Vec<Blob>,
-    pub redact_secrets: bool,
     pub render_cache: Option<RenderCache>,
     pub layout_cache: Option<PersistedLayoutCache>,
 }
@@ -124,7 +123,7 @@ fn write(req: &PersistRequest) {
     let _ = std::fs::create_dir_all(&session_dir);
     let blob_dir = session_dir.join("blobs");
     let url_to_blob = write_blobs(&blob_dir, &req.blobs);
-    session::save_with_blobs(&req.session, &url_to_blob, req.redact_secrets);
+    session::save_with_blobs(&req.session, &url_to_blob);
     if let Some(cache) = &req.render_cache {
         session::save_render_cache(&req.session, cache);
     }

@@ -124,7 +124,7 @@ All toggleable at runtime via `/settings`.
 | `task_slug`             | `true`  | Task label in status bar                                                  |
 | `show_thinking`         | `true`  | Show full thinking/reasoning blocks (false shows a single summary)        |
 | `restrict_to_workspace` | `true`  | Downgrade Allow → Ask outside workspace                                   |
-| `redact_secrets`        | `true`  | Redact detected secrets everywhere: display, sessions, LLM requests, logs |
+| `redact_secrets`        | `true`  | Scrub detected secrets from user input and tool results before they reach the LLM |
 | `multi_agent`           | `false` | Enable multi-agent mode                                                   |
 | `context_window`        | auto    | Override context window size (tokens); auto-detected from API             |
 

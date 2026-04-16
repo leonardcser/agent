@@ -155,7 +155,7 @@ pub async fn engine_task(
                     }
                     UiCommand::Compact { keep_turns, history, instructions } => {
                         let request = config.aux_or_primary(AuxiliaryTask::Compaction);
-                        let provider = build_provider_from_api(&request.api, &client, config.redact_secrets);
+                        let provider = build_provider_from_api(&request.api, &client);
                         let cancel = crate::cancel::CancellationToken::new();
                         match compact_history(&provider, &history, keep_turns, &request.model, instructions.as_deref(), &cancel).await {
                             Ok((messages, usage)) => {
@@ -234,14 +234,13 @@ fn spawn_title_generation(
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
     let request = config.aux_or_primary(AuxiliaryTask::Title);
-    let provider = build_provider_from_api(&request.api, client, config.redact_secrets);
+    let provider = build_provider_from_api(&request.api, client);
     let pricing = PricingContext::from_api(&request.api);
     let model = request.model;
     let tx = event_tx.clone();
-    let redact = config.redact_secrets;
     tokio::spawn(async move {
-        let last_user_message = crate::redact::maybe_redact(last_user_message, redact);
-        let assistant_tail = crate::redact::maybe_redact(assistant_tail, redact);
+        // History (source of last_user_message) is already redacted at ingress;
+        // assistant_tail is model-generated and left unredacted by policy.
         log::entry(
             log::Level::Info,
             "title_request",
@@ -306,7 +305,7 @@ fn spawn_btw_request(
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
     let request = config.aux_or_primary(AuxiliaryTask::Btw);
-    let provider = build_provider_from_api(&request.api, client, config.redact_secrets);
+    let provider = build_provider_from_api(&request.api, client);
     let pricing = PricingContext::from_api(&request.api);
     let model = request.model;
     let tx = event_tx.clone();
@@ -314,10 +313,15 @@ fn spawn_btw_request(
     tokio::spawn(async move {
         let cancel = crate::cancel::CancellationToken::new();
 
-        let mut history = history;
-        if redact {
-            crate::redact::redact_messages(&mut history);
-        }
+        // Btw questions can originate from the TUI (already redacted at
+        // submit) or from a peer agent over the socket (not yet scrubbed).
+        // Redact here so both paths land in history the same way.
+        let question = if redact {
+            crate::redact::redact(&question)
+        } else {
+            question
+        };
+
         let mut messages = Vec::with_capacity(history.len() + 2);
         messages.push(protocol::Message::system(
             "You are a helpful assistant. The user is asking a quick side question \
@@ -355,11 +359,10 @@ fn spawn_predict_request(
     generation: u64,
 ) {
     let request = config.aux_or_primary(AuxiliaryTask::Prediction);
-    let provider = build_provider_from_api(&request.api, client, config.redact_secrets);
+    let provider = build_provider_from_api(&request.api, client);
     let pricing = PricingContext::from_api(&request.api);
     let model = request.model;
     let tx = event_tx.clone();
-    let redact = config.redact_secrets;
     tokio::spawn(async move {
         let system = "You predict what a user will type next in a coding assistant conversation. \
                       Reply with ONLY the predicted message — no quotes, no explanation, \
@@ -367,6 +370,7 @@ fn spawn_predict_request(
                       reply with an empty string.";
 
         // Build context from recent user messages + last assistant response.
+        // History content is already redacted at ingress.
         let mut context_parts = Vec::new();
         for msg in &history {
             let text = msg
@@ -377,7 +381,6 @@ fn spawn_predict_request(
             if text.is_empty() {
                 continue;
             }
-            let text = crate::redact::maybe_redact(text, redact);
             // Truncate each message to keep the request small.
             let truncated = if text.len() > 500 {
                 &text[text.floor_char_boundary(text.len() - 500)..]
@@ -417,18 +420,13 @@ fn spawn_predict_request(
     });
 }
 
-fn build_provider_from_api(
-    api: &ApiConfig,
-    client: &reqwest::Client,
-    redact_secrets: bool,
-) -> Provider {
+fn build_provider_from_api(api: &ApiConfig, client: &reqwest::Client) -> Provider {
     build_provider(
         &api.base,
         &api.key,
         &api.provider_type,
         &api.model_config,
         client,
-        redact_secrets,
     )
 }
 
@@ -444,7 +442,6 @@ fn build_provider_with_overrides(
         &config.api.provider_type,
         &config.api.model_config,
         client,
-        config.redact_secrets,
     )
 }
 
@@ -454,7 +451,6 @@ fn build_provider(
     provider_type: &str,
     model_config: &ModelConfig,
     client: &reqwest::Client,
-    redact_secrets: bool,
 ) -> Provider {
     Provider::new(
         api_base.to_string(),
@@ -463,7 +459,6 @@ fn build_provider(
         client.clone(),
     )
     .with_model_config(model_config.clone())
-    .with_redact_secrets(redact_secrets)
 }
 
 // ── Turn ────────────────────────────────────────────────────────────────────
@@ -503,6 +498,17 @@ struct Turn<'a> {
 impl<'a> Turn<'a> {
     fn emit(&self, event: EngineEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    /// Push a message into history. When `redact_secrets` is enabled, content
+    /// from user/tool/agent roles — the only roles that carry data entering
+    /// from outside the model — is scrubbed at this boundary. Model-generated
+    /// messages (assistant, system) are passed through untouched.
+    fn push_message(&mut self, mut msg: Message) {
+        if self.config.redact_secrets && matches!(msg.role, Role::User | Role::Tool | Role::Agent) {
+            crate::redact::redact_message(&mut msg);
+        }
+        self.messages.push(msg);
     }
 
     /// Rebuild the system prompt after a mid-turn mode change so the LLM sees
@@ -574,8 +580,7 @@ impl<'a> Turn<'a> {
         );
         let non_system = &self.messages[1..];
         let request = self.config.aux_or_primary(AuxiliaryTask::Compaction);
-        let provider =
-            build_provider_from_api(&request.api, self.http_client, self.config.redact_secrets);
+        let provider = build_provider_from_api(&request.api, self.http_client);
         match compact_history(
             &provider,
             non_system,
@@ -715,7 +720,7 @@ impl<'a> Turn<'a> {
                     text: text.clone(),
                     count: 1,
                 });
-                self.messages.push(Message::user(Content::text(text)));
+                self.push_message(Message::user(Content::text(text)));
                 self.emit_messages_snapshot();
                 true
             }
@@ -759,8 +764,7 @@ impl<'a> Turn<'a> {
                 // already rendered the block when the socket bridge first
                 // delivered the event. Just inject into conversation history
                 // so the LLM sees it on the next API call.
-                self.messages
-                    .push(Message::agent(&from_id, &from_slug, &message));
+                self.push_message(Message::agent(&from_id, &from_slug, &message));
                 self.emit_messages_snapshot();
                 true
             }
@@ -776,7 +780,7 @@ impl<'a> Turn<'a> {
         self.messages.extend(history);
 
         if !content.is_empty() {
-            self.messages.push(Message::user(content));
+            self.push_message(Message::user(content));
         }
         self.emit_messages_snapshot();
 
@@ -1227,11 +1231,10 @@ impl<'a> Turn<'a> {
                 } = result;
 
                 if log::Level::Debug.enabled() {
-                    let preview = &content[..content.floor_char_boundary(500)];
-                    let preview = crate::redact::maybe_redact(
-                        preview.to_string(),
-                        self.config.redact_secrets,
-                    );
+                    let mut preview = content[..content.floor_char_boundary(500)].to_string();
+                    if self.config.redact_secrets {
+                        preview = crate::redact::redact(&preview);
+                    }
                     log::entry(
                         log::Level::Debug,
                         "tool_result",
@@ -1259,8 +1262,7 @@ impl<'a> Turn<'a> {
                     Some(prior_id) => tools::result_dedup::dedup_stub(prior_id),
                     None => tool_content,
                 };
-                self.messages
-                    .push(Message::tool(slot.tc.id.clone(), history_content, is_error));
+                self.push_message(Message::tool(slot.tc.id.clone(), history_content, is_error));
                 self.emit_messages_snapshot();
                 self.emit(EngineEvent::ToolFinished {
                     call_id: slot.tc.id.clone(),
@@ -1337,19 +1339,10 @@ impl<'a> Turn<'a> {
                 on_delta: Some(&on_delta),
                 response_format: None,
             };
-            let redacted_messages;
-            let chat_messages: &[Message] = if self.config.redact_secrets {
-                redacted_messages = {
-                    let mut msgs = self.messages.clone();
-                    crate::redact::redact_messages(&mut msgs);
-                    msgs
-                };
-                &redacted_messages
-            } else {
-                &self.messages
-            };
+            // History is redacted at ingress (see Turn::push_message), so we
+            // can pass self.messages straight through — no per-turn clone.
             let chat_future = self.provider.chat(
-                chat_messages,
+                &self.messages,
                 tool_defs,
                 &self.model,
                 self.reasoning_effort,
@@ -1454,7 +1447,7 @@ impl<'a> Turn<'a> {
                 Some(prior_id) => tools::result_dedup::dedup_stub(prior_id),
                 None => content.to_string(),
             };
-        self.messages.push(Message::tool(
+        self.push_message(Message::tool(
             tool_call_id.to_string(),
             history_content,
             is_error,
