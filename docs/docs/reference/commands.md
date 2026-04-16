@@ -19,6 +19,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/stats`                  | Show token usage, cost, and activity history  |
 | `/cost`                   | Show current session cost                     |
 | `/vim`                    | Toggle vim mode                               |
+| `/thinking`               | Toggle display of thinking blocks             |
 | `/permissions`            | Manage saved permissions                      |
 | `/ps`                     | Manage background processes                   |
 | `/agents`                 | Manage running agents (multi-agent only)      |

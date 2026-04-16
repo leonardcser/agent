@@ -26,13 +26,12 @@ impl App {
     }
 
     fn apply_settings_result(&mut self, s: &crate::input::SettingsState) {
-        let needs_rebuild = self.settings.show_thinking != s.show_thinking;
+        let needs_redraw = self.settings.show_thinking != s.show_thinking;
         self.input.set_vim_enabled(s.vim);
         self.settings = s.clone();
         self.screen.apply_settings(s);
         state::save_settings(s);
-        if needs_rebuild {
-            self.restore_screen();
+        if needs_redraw {
             self.screen.redraw();
         }
     }

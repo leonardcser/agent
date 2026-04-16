@@ -117,6 +117,7 @@ impl Completer {
             ("resume", "resume saved session"),
             ("rewind", "rewind to a previous turn"),
             ("vim", "toggle vim mode"),
+            ("thinking", "toggle thinking blocks"),
             ("model", "switch model"),
             ("settings", "open settings menu"),
             ("compact", "compact conversation history"),

@@ -59,6 +59,13 @@ impl App {
                 self.screen.mark_dirty();
                 CommandAction::Continue
             }
+            "/thinking" => {
+                self.settings.show_thinking = !self.settings.show_thinking;
+                self.screen.apply_settings(&self.settings);
+                state::save_settings(&self.settings);
+                self.screen.redraw();
+                CommandAction::Continue
+            }
             "/export" => {
                 self.export_to_clipboard();
                 CommandAction::Continue
