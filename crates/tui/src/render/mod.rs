@@ -3954,23 +3954,21 @@ impl Screen {
                 let mut cmd_kinds = vec![SpanKind::AtRef; prefix_len.min(line_chars)];
                 cmd_kinds.resize(line_chars, SpanKind::Plain);
                 render_styled_chars(out, line, &cmd_kinds, line_sel, line_cursor);
-                // Show hint when only "/cmd " typed with no argument yet.
-                if line_chars >= prefix_len {
-                    let rest = &line[prefix.len()..];
-                    if rest.trim().is_empty() && state.buf.ends_with(' ') {
-                        let max = usable.saturating_sub(prefix_len + 2);
-                        let truncated: String = if hint.chars().count() > max {
-                            let mut s: String = hint.chars().take(max.saturating_sub(1)).collect();
-                            s.push('…');
-                            s
-                        } else {
-                            hint.clone()
-                        };
-                        out.print(" ");
-                        out.push_dim();
-                        out.print(&truncated);
-                        out.pop_style();
-                    }
+                // Show hint only when exactly one trailing space follows /cmd —
+                // additional spaces mean the user started typing, so the hint
+                // should disappear rather than shift right.
+                if line_chars >= prefix_len && state.buf == format!("{prefix} ") {
+                    let max = usable.saturating_sub(prefix_len + 2);
+                    let truncated: String = if hint.chars().count() > max {
+                        let mut s: String = hint.chars().take(max.saturating_sub(1)).collect();
+                        s.push('…');
+                        s
+                    } else {
+                        hint.clone()
+                    };
+                    out.push_dim();
+                    out.print(&truncated);
+                    out.pop_style();
                 }
             } else if has_arg_space {
                 render_styled_chars(out, line, kinds, line_sel, line_cursor);
