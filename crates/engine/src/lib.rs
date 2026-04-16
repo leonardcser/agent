@@ -1,5 +1,6 @@
 mod agent;
 pub mod cancel;
+pub mod compact;
 pub mod config;
 pub mod config_file;
 pub mod image;
@@ -22,9 +23,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Trigger auto-compaction when prompt tokens reach this percentage of the
-/// context window.
-pub const COMPACT_THRESHOLD_PERCENT: u64 = 80;
+/// Default auto-compaction threshold, as a percentage of the context window.
+const DEFAULT_COMPACT_THRESHOLD_PERCENT: u64 = 80;
+
+/// Environment variable that overrides the auto-compaction threshold.
+/// Accepts an integer percentage in `[10, 95]`.
+pub const COMPACT_THRESHOLD_ENV: &str = "SMELT_COMPACT_THRESHOLD_PERCENT";
+
+/// Auto-compaction trigger threshold as a percentage of the context window.
+///
+/// Reads `SMELT_COMPACT_THRESHOLD_PERCENT` at call time (it's a cheap env
+/// lookup, and reading each check keeps behavior easy to verify from tests
+/// and lets the user change it without restarting the engine process).
+/// Invalid or out-of-range values fall back to the 80% default.
+pub fn compact_threshold_percent() -> u64 {
+    std::env::var(COMPACT_THRESHOLD_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|p| (10..=95).contains(p))
+        .unwrap_or(DEFAULT_COMPACT_THRESHOLD_PERCENT)
+}
 
 pub use config::ModelConfig;
 pub use mcp::McpServerConfig;

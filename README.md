@@ -68,6 +68,8 @@ smelt --model claude-opus-4-5 --api-base https://api.anthropic.com/v1 --api-key-
 - **Vim mode** — full vi keybindings for the input editor
 - **Sessions** — auto-save, resume, fork, rewind conversations
 - **Compaction** — LLM-powered summarization to stay within context limits
+  (auto-trigger threshold configurable via `SMELT_COMPACT_THRESHOLD_PERCENT`,
+  default `80`)
 - **Reasoning effort** — configurable thinking depth (off/low/medium/high/max)
 - **File references** — attach files with `@path` syntax
 - **Multi-agent** — parallel subagents with inter-agent messaging (opt-in)

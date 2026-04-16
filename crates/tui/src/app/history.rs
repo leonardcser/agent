@@ -239,9 +239,9 @@ impl App {
                 Role::User => {
                     if let Some(ref content) = msg.content {
                         let text = content.text_content();
-                        if let Some(summary) =
-                            text.strip_prefix("Summary of prior conversation:\n\n")
-                        {
+                        let prefix_marker = engine::compact::SUMMARY_PREFIX.trim_end();
+                        if let Some(rest) = text.strip_prefix(prefix_marker) {
+                            let summary = rest.trim_start_matches('\n');
                             self.screen.push(Block::Compacted {
                                 summary: summary.to_string(),
                             });
@@ -523,7 +523,6 @@ impl App {
         self.pending_compact_epoch = self.compact_epoch;
         self.screen.set_throbber(render::Throbber::Compacting);
         self.engine.send(UiCommand::Compact {
-            keep_turns: 1,
             history: self.history.clone(),
             instructions,
         });
@@ -559,7 +558,7 @@ impl App {
         let Some(tokens) = self.screen.context_tokens() else {
             return;
         };
-        if tokens as u64 * 100 >= ctx as u64 * engine::COMPACT_THRESHOLD_PERCENT {
+        if tokens as u64 * 100 >= ctx as u64 * engine::compact_threshold_percent() {
             self.compact_history(None);
         }
     }

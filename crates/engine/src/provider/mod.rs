@@ -8,7 +8,7 @@ mod sse;
 use crate::cancel::CancellationToken;
 use crate::log;
 pub use protocol::TokenUsage;
-use protocol::{Content, Message, ReasoningEffort, Role, ToolCall};
+use protocol::{Content, Message, ReasoningEffort, ToolCall};
 use reqwest::Client;
 use serde::Serialize;
 use std::time::{Duration, Instant};
@@ -790,66 +790,6 @@ impl Provider {
         }
 
         None
-    }
-
-    pub async fn compact(
-        &self,
-        messages: &[Message],
-        model: &str,
-        instructions: Option<&str>,
-        cancel: &CancellationToken,
-    ) -> Result<(String, TokenUsage), ProviderError> {
-        const COMPACT_PROMPT: &str = include_str!("../prompts/compact.txt");
-
-        let conversation = messages
-            .iter()
-            .filter_map(|m| {
-                let role = match m.role {
-                    Role::User => "User",
-                    Role::Assistant => "Assistant",
-                    Role::System => "System",
-                    Role::Agent => "Agent",
-                    Role::Tool => return None,
-                };
-                let text = m.content.as_ref().map(|c| c.as_text()).unwrap_or("");
-                let text = text.trim();
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(format!("{}: {}", role, text))
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        let mut system_text = COMPACT_PROMPT.trim().to_string();
-        if let Some(instructions) = instructions {
-            system_text.push_str(&format!(
-                "\n\nThe user has asked you to pay special attention to the following when summarizing:\n{}",
-                instructions
-            ));
-        }
-
-        // `conversation` is built from history, which is redacted at ingress.
-        let system = Message::system(system_text);
-        let user = Message::user(Content::text(format!(
-            "Conversation to summarize:\n\n{}",
-            conversation
-        )));
-        let resp = self
-            .chat(
-                &[system, user],
-                &[],
-                model,
-                ReasoningEffort::Off,
-                &ChatOptions::new(cancel),
-            )
-            .await?;
-        let summary = resp.content.unwrap_or_default();
-        if summary.trim().is_empty() {
-            return Err(ProviderError::InvalidResponse("empty summary".into()));
-        }
-        Ok((summary, resp.usage))
     }
 
     /// Simple helper: run a system+user message pair through `chat()` and return the text.

@@ -399,7 +399,6 @@ pub enum UiCommand {
 
     /// Compact conversation history.
     Compact {
-        keep_turns: usize,
         history: Vec<Message>,
         instructions: Option<String>,
     },

@@ -1,3 +1,4 @@
+use crate::compact::{self, CompactOptions, CompactPhase, CompactReason, InitialContextInjection};
 use crate::log;
 use crate::permissions::{Decision, Permissions, RuntimeApprovals};
 use crate::provider::{self, ChatOptions, Provider, ProviderError, ToolDefinition};
@@ -14,7 +15,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
-use crate::COMPACT_THRESHOLD_PERCENT;
+use crate::compact_threshold_percent;
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -153,11 +154,24 @@ pub async fn engine_task(
                         // Cache the (possibly fetched) context window for future turns.
                         context_window = turn.context_window;
                     }
-                    UiCommand::Compact { keep_turns, history, instructions } => {
+                    UiCommand::Compact { history, instructions } => {
                         let request = config.aux_or_primary(AuxiliaryTask::Compaction);
                         let provider = build_provider_from_api(&request.api, &client);
                         let cancel = crate::cancel::CancellationToken::new();
-                        match compact_history(&provider, &history, keep_turns, &request.model, instructions.as_deref(), &cancel).await {
+                        match compact::run_compact(
+                            &provider,
+                            &history,
+                            &request.model,
+                            instructions.as_deref(),
+                            &cancel,
+                            CompactOptions {
+                                injection: InitialContextInjection::DoNotInject,
+                                phase: CompactPhase::Manual,
+                                reason: CompactReason::UserRequested,
+                            },
+                        )
+                        .await
+                        {
                             Ok((messages, usage)) => {
                                 emit_usage_background(&event_tx, &request.api, &request.model, usage);
                                 let _ = event_tx.send(EngineEvent::CompactionComplete { messages });
@@ -570,7 +584,8 @@ impl<'a> Turn<'a> {
         let Some(ctx) = self.context_window else {
             return false;
         };
-        if (prompt_tokens as u64) * 100 < (ctx as u64) * COMPACT_THRESHOLD_PERCENT {
+        let threshold = compact_threshold_percent();
+        if (prompt_tokens as u64) * 100 < (ctx as u64) * threshold {
             return false;
         }
         self.compacted_this_turn = true;
@@ -578,23 +593,25 @@ impl<'a> Turn<'a> {
             matches!(self.messages[0].role, Role::System),
             "first message should be the system prompt"
         );
-        let non_system = &self.messages[1..];
         let request = self.config.aux_or_primary(AuxiliaryTask::Compaction);
         let provider = build_provider_from_api(&request.api, self.http_client);
-        match compact_history(
+        let result = compact::run_compact(
             &provider,
-            non_system,
-            1,
+            &self.messages[1..],
             &request.model,
             self.config.instructions.as_deref(),
             &self.cancel,
+            CompactOptions {
+                injection: InitialContextInjection::BeforeLastUserMessage,
+                phase: CompactPhase::MidTurn,
+                reason: CompactReason::ContextLimit,
+            },
         )
-        .await
-        {
+        .await;
+        match result {
             Ok((compacted, usage)) => {
                 emit_usage_background(self.event_tx, &request.api, &request.model, usage);
-                let system = self.messages[0].clone();
-                self.messages = vec![system];
+                self.messages.truncate(1);
                 self.messages.extend(compacted);
                 self.emit_messages_snapshot();
                 log::entry(
@@ -603,6 +620,7 @@ impl<'a> Turn<'a> {
                     &serde_json::json!({
                         "prompt_tokens": prompt_tokens,
                         "context_window": ctx,
+                        "threshold_percent": threshold,
                         "new_message_count": self.messages.len(),
                     }),
                 );
@@ -1553,41 +1571,4 @@ impl PricingContext {
             true,
         );
     }
-}
-
-async fn compact_history(
-    provider: &Provider,
-    messages: &[Message],
-    keep_turns: usize,
-    model: &str,
-    instructions: Option<&str>,
-    cancel: &crate::cancel::CancellationToken,
-) -> Result<(Vec<Message>, protocol::TokenUsage), ProviderError> {
-    let mut user_count = 0;
-    let mut cut = messages.len();
-    for (i, m) in messages.iter().enumerate().rev() {
-        if m.role == Role::User {
-            user_count += 1;
-            if user_count >= keep_turns {
-                cut = i;
-                break;
-            }
-        }
-    }
-    if cut == 0 || cut >= messages.len() {
-        return Err(ProviderError::InvalidResponse(
-            "not enough history to compact".into(),
-        ));
-    }
-
-    let to_summarize = &messages[..cut];
-    let (summary, usage) = provider
-        .compact(to_summarize, model, instructions, cancel)
-        .await?;
-
-    let mut new_messages = vec![Message::user(Content::text(format!(
-        "Summary of prior conversation:\n\n{summary}"
-    )))];
-    new_messages.extend_from_slice(&messages[cut..]);
-    Ok((new_messages, usage))
 }

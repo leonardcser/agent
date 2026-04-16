@@ -116,7 +116,7 @@ All toggleable at runtime via `/settings`.
 | Key                     | Default | Description                                                               |
 | ----------------------- | ------- | ------------------------------------------------------------------------- |
 | `vim_mode`              | `false` | Vi keybindings                                                            |
-| `auto_compact`          | `false` | Auto-summarize at 80% context usage (always on in headless/subagent)      |
+| `auto_compact`          | `false` | Auto-summarize when context usage crosses the threshold (always on in headless/subagent) |
 | `show_tps`              | `true`  | Tokens/sec in status bar                                                  |
 | `show_tokens`           | `true`  | Context token count in status bar                                         |
 | `show_cost`             | `true`  | Session cost in status bar                                                |
@@ -250,15 +250,16 @@ Codex OAuth tokens are stored in the system keyring (service:
 
 ## Environment Variables
 
-| Variable          | Purpose                                                 |
-| ----------------- | ------------------------------------------------------- |
-| `XDG_CONFIG_HOME` | Config directory (default: `~/.config`)                 |
-| `XDG_STATE_HOME`  | State directory (default: `~/.local/state`)             |
-| `XDG_CACHE_HOME`  | Cache directory (default: `~/.cache`)                   |
-| `COLORFGBG`       | Terminal color hint (fallback for dark/light detection) |
-| `TERM`            | Terminal type (`dumb` skips color detection)            |
-| `EDITOR`          | Editor for `Ctrl+X Ctrl+E` and vim `v`                  |
-| `NO_COLOR`        | Disable ANSI colors (respected in headless mode)        |
+| Variable                         | Purpose                                                                                              |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `XDG_CONFIG_HOME`                | Config directory (default: `~/.config`)                                                              |
+| `XDG_STATE_HOME`                 | State directory (default: `~/.local/state`)                                                          |
+| `XDG_CACHE_HOME`                 | Cache directory (default: `~/.cache`)                                                                |
+| `COLORFGBG`                      | Terminal color hint (fallback for dark/light detection)                                              |
+| `TERM`                           | Terminal type (`dumb` skips color detection)                                                         |
+| `EDITOR`                         | Editor for `Ctrl+X Ctrl+E` and vim `v`                                                               |
+| `NO_COLOR`                       | Disable ANSI colors (respected in headless mode)                                                     |
+| `SMELT_COMPACT_THRESHOLD_PERCENT` | Auto-compact trigger as a percentage of the context window. Integer in `[10, 95]`; default `80`.    |
 
 ## Full Example
 
