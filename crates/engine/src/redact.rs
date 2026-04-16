@@ -13,11 +13,12 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// Minimum token length for entropy-based detection.
-const ENTROPY_MIN_LEN: usize = 20;
+/// Minimum token length for entropy-based detection. Kept high to avoid
+/// swallowing ordinary long identifiers; real opaque secrets are longer still.
+const ENTROPY_MIN_LEN: usize = 32;
 
 /// Shannon entropy threshold. Tokens above this are flagged.
-const ENTROPY_THRESHOLD: f64 = 4.0;
+const ENTROPY_THRESHOLD: f64 = 4.5;
 
 /// Format a redaction placeholder with a type label.
 fn placeholder(label: &str) -> String {
@@ -156,12 +157,15 @@ fn patterns() -> &'static Patterns {
             (r"(?i)(?:Server|Data Source)=[^;]+;[^;]*Password=[^;\s]+", "connection_string"),
         ];
 
+        // `token` and `credential` are intentionally omitted: they're too
+        // generic (e.g. `access_token_url`, `auth_token_scope`), and real
+        // provider tokens are caught precisely by the prefix layer above.
         let keyword: Vec<&str> = vec![
             // Quoted values after secret-like keys
-            r#"(?i)(?:password|passwd|pwd|secret|api_?key|auth_?key|private_?key|access_?key|token|credential|api_?secret|client_?secret)\s*[:=]\s*"[^"]{8,}""#,
-            r"(?i)(?:password|passwd|pwd|secret|api_?key|auth_?key|private_?key|access_?key|token|credential|api_?secret|client_?secret)\s*[:=]\s*'[^']{8,}'",
+            r#"(?i)(?:password|passwd|pwd|secret|api_?key|auth_?key|private_?key|access_?key|api_?secret|client_?secret)\s*[:=]\s*"[^"]{8,}""#,
+            r"(?i)(?:password|passwd|pwd|secret|api_?key|auth_?key|private_?key|access_?key|api_?secret|client_?secret)\s*[:=]\s*'[^']{8,}'",
             // Unquoted values (single token, no whitespace)
-            r#"(?i)(?:password|passwd|pwd|secret|api_?key|auth_?key|private_?key|access_?key|token|credential|api_?secret|client_?secret)\s*[:=]\s*[^\s'"]{16,}"#,
+            r#"(?i)(?:password|passwd|pwd|secret|api_?key|auth_?key|private_?key|access_?key|api_?secret|client_?secret)\s*[:=]\s*[^\s'"]{16,}"#,
         ];
 
         let compile_labeled =
@@ -235,6 +239,10 @@ pub fn redact(input: &str) -> String {
                         (actual_start, caps.end())
                     };
                 if final_end > final_start {
+                    let value = &input[final_start..final_end];
+                    if looks_like_url_or_path(value) {
+                        continue;
+                    }
                     // Extract the keyword name for the label.
                     let key_part = matched[..sep_pos].trim();
                     let label = keyword_label(key_part);
@@ -304,13 +312,22 @@ fn keyword_label(key: &str) -> &'static str {
         "private_key"
     } else if lower.ends_with("access_key") || lower.ends_with("accesskey") {
         "access_key"
-    } else if lower.ends_with("token") {
-        "token"
-    } else if lower.ends_with("credential") {
-        "credential"
     } else {
         "secret"
     }
+}
+
+/// Heuristic: does this value look like a URL or file path?
+/// Used to avoid redacting things like `auth_key: "https://.../oauth"` or
+/// `access_key = /etc/creds/my-key.pem`.
+fn looks_like_url_or_path(value: &str) -> bool {
+    value.starts_with("http://")
+        || value.starts_with("https://")
+        || value.starts_with("file://")
+        || value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with("~/")
 }
 
 /// Compute Shannon entropy of a byte slice over its unique byte values.
@@ -331,6 +348,38 @@ fn shannon_entropy(data: &[u8]) -> f64 {
             -p * p.log2()
         })
         .sum()
+}
+
+/// Does a token have at least two distinct character classes
+/// (lowercase / uppercase / digit / symbol)?
+fn has_mixed_char_classes(token: &str) -> bool {
+    let mut classes = 0u8;
+    for b in token.bytes() {
+        let bit = if b.is_ascii_lowercase() {
+            1
+        } else if b.is_ascii_uppercase() {
+            2
+        } else if b.is_ascii_digit() {
+            4
+        } else {
+            8
+        };
+        classes |= bit;
+        if classes.count_ones() >= 2 {
+            return true;
+        }
+    }
+    false
+}
+
+/// UUID shape: 8-4-4-4-12 hex chars with dashes, case-insensitive.
+fn is_uuid_shape(token: &str) -> bool {
+    static UUID_RE: OnceLock<Regex> = OnceLock::new();
+    let re = UUID_RE.get_or_init(|| {
+        Regex::new(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+            .unwrap()
+    });
+    re.is_match(token)
 }
 
 /// Extract high-entropy tokens from text. Returns (byte_start, byte_end, entropy).
@@ -360,8 +409,18 @@ fn entropy_tokens(input: &str) -> Vec<(usize, usize, f64)> {
         if token.starts_with("http://") || token.starts_with("https://") {
             continue;
         }
-        // Skip hex-only strings shorter than 32 chars (likely hashes, commit SHAs).
-        if token.len() < 32 && token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        // Skip hex-only strings: commit SHAs, content hashes, and similar
+        // non-secret identifiers the model often needs to reason about.
+        if token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        // Skip UUIDs: structured identifiers, not secrets.
+        if is_uuid_shape(token) {
+            continue;
+        }
+        // Require at least two character classes so ordinary snake_case or
+        // PascalCase identifiers don't trip the entropy check.
+        if !has_mixed_char_classes(token) {
             continue;
         }
         let entropy = shannon_entropy(token.as_bytes());
@@ -372,26 +431,18 @@ fn entropy_tokens(input: &str) -> Vec<(usize, usize, f64)> {
     results
 }
 
-/// Redact secrets in all messages in place. Mutates content, reasoning, and
-/// tool call arguments.
+/// Redact secrets in all messages in place.
+///
+/// Only mutates `content` — the entry point for newly-arrived text (user
+/// input, tool results, previously-redacted assistant output).
+/// `reasoning_content` and `tool_calls.arguments` are deliberately left
+/// alone: they reflect the model's own prior thought and actions, and
+/// re-redacting them on replay breaks the model's self-consistency
+/// without adding privacy (the provider already saw the original).
 pub fn redact_messages(messages: &mut [protocol::Message]) {
     for msg in messages {
         if let Some(ref mut content) = msg.content {
             redact_content(content);
-        }
-        if let Some(ref mut reasoning) = msg.reasoning_content {
-            let redacted = redact(reasoning);
-            if redacted != *reasoning {
-                *reasoning = redacted;
-            }
-        }
-        if let Some(ref mut calls) = msg.tool_calls {
-            for tc in calls {
-                let redacted = redact(&tc.function.arguments);
-                if redacted != tc.function.arguments {
-                    tc.function.arguments = redacted;
-                }
-            }
         }
     }
 }
@@ -735,11 +786,31 @@ mod tests {
     }
 
     #[test]
-    fn keyword_token() {
+    fn keyword_token_not_redacted_when_no_prefix() {
+        // Generic `token = "..."` is too noisy to redact on its own;
+        // real provider tokens are caught by the prefix layer.
         let input = r#"token = "aLongTokenValue12345678""#;
-        let result = redact(input);
-        assert!(!result.contains("aLongTokenValue12345678"));
-        assert_redacted_with(&result, "token");
+        assert_eq!(redact(input), input);
+    }
+
+    #[test]
+    fn keyword_credential_not_redacted() {
+        let input = r#"credential: "someCredentialValue123""#;
+        assert_eq!(redact(input), input);
+    }
+
+    #[test]
+    fn keyword_value_url_not_redacted() {
+        // An `api_key` whose value is a URL should not be redacted —
+        // it's almost certainly a reference, not a secret.
+        let input = r#"api_key_url = "https://example.com/path/to/key/endpoint""#;
+        assert_eq!(redact(input), input);
+    }
+
+    #[test]
+    fn keyword_value_path_not_redacted() {
+        let input = "private_key = /etc/ssl/private/server.key";
+        assert_eq!(redact(input), input);
     }
 
     // ── Multiple secrets ─────────────────────────────────────────────────
@@ -787,6 +858,33 @@ mod tests {
         assert_eq!(redact(input), input);
     }
 
+    #[test]
+    fn full_git_sha_not_redacted() {
+        // 40-char SHA-1 — previously caught by entropy layer.
+        let input = "commit df2a1bc489ae7b30f1c89e0a5fc2e3d98b77c456";
+        assert_eq!(redact(input), input);
+    }
+
+    #[test]
+    fn sha256_hash_not_redacted() {
+        let input = "sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert_eq!(redact(input), input);
+    }
+
+    #[test]
+    fn uuid_not_redacted() {
+        let input = "session 550e8400-e29b-41d4-a716-446655440000 started";
+        assert_eq!(redact(input), input);
+    }
+
+    #[test]
+    fn long_mixed_identifier_not_redacted() {
+        // CamelCase identifier with digits/underscores — common in code,
+        // not a secret. Would previously trip the entropy check.
+        let input = "call fn CamelCaseIdentifierWith_Mixed_Case_123 here";
+        assert_eq!(redact(input), input);
+    }
+
     // ── Entropy ──────────────────────────────────────────────────────────
 
     #[test]
@@ -812,6 +910,38 @@ mod tests {
         let text = messages[0].content.as_ref().unwrap().text_content();
         assert!(!text.contains("ghp_"));
         assert_redacted_with(&text, "github_pat");
+    }
+
+    #[test]
+    fn redact_messages_leaves_reasoning_alone() {
+        let secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
+        let reasoning = format!("I should probably use {secret} here.");
+        let mut messages = vec![protocol::Message::assistant(
+            Some(protocol::Content::text("ok")),
+            Some(reasoning.clone()),
+            None,
+        )];
+        redact_messages(&mut messages);
+        assert_eq!(
+            messages[0].reasoning_content.as_deref(),
+            Some(reasoning.as_str())
+        );
+    }
+
+    #[test]
+    fn redact_messages_leaves_tool_call_args_alone() {
+        let args = r#"{"path":"/tmp/ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij.log"}"#;
+        let call = protocol::ToolCall::new(
+            "call_1".to_string(),
+            protocol::FunctionCall {
+                name: "read_file".to_string(),
+                arguments: args.to_string(),
+            },
+        );
+        let mut messages = vec![protocol::Message::assistant(None, None, Some(vec![call]))];
+        redact_messages(&mut messages);
+        let tc = &messages[0].tool_calls.as_ref().unwrap()[0];
+        assert_eq!(tc.function.arguments, args);
     }
 
     #[test]
