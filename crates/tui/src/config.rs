@@ -350,7 +350,7 @@ pub fn resolve_aux_model_ref<'a>(
         Ok(model) => Ok(model),
         Err(ResolveModelRefError::NotFound { .. }) => {
             let resolved = resolve_provider_ref(models, reference)?;
-            if resolved.provider_type == "codex" {
+            if resolved.provider_type == "codex" || resolved.provider_type == "copilot" {
                 Ok(resolved)
             } else {
                 Err(ResolveModelRefError::NotFound {
@@ -438,11 +438,14 @@ impl Config {
                 .clone()
                 .unwrap_or_else(|| "openai-compatible".to_string());
 
-            // Codex models are fetched dynamically — emit a placeholder so the
-            // provider is detected even when no models are listed in config.
-            if provider_type == "codex" && provider.models.is_empty() {
+            // Codex and Copilot models are fetched dynamically — emit a
+            // placeholder so the provider is detected even when no models are
+            // listed in config.
+            if (provider_type == "codex" || provider_type == "copilot")
+                && provider.models.is_empty()
+            {
                 out.push(ResolvedModel {
-                    key: format!("{}/codex", provider_name),
+                    key: format!("{}/{}", provider_name, provider_type),
                     provider_name: provider_name.clone(),
                     model_name: String::new(),
                     api_base: api_base.clone(),
@@ -513,6 +516,44 @@ impl Config {
         self.providers
             .iter()
             .any(|p| p.provider_type.as_deref() == Some("codex"))
+    }
+
+    /// Replace copilot placeholders with dynamically fetched model IDs.
+    pub fn inject_copilot_models(&self, resolved: &mut Vec<ResolvedModel>, ids: &[String]) {
+        let Some(copilot_provider) = self
+            .providers
+            .iter()
+            .find(|p| p.provider_type.as_deref() == Some("copilot"))
+        else {
+            return;
+        };
+
+        let provider_name = copilot_provider.name.clone().unwrap_or_default();
+        let api_base = copilot_provider.api_base.clone().unwrap_or_default();
+
+        resolved.retain(|m| m.provider_type != "copilot");
+
+        for id in ids {
+            resolved.push(ResolvedModel {
+                key: format!("{provider_name}/{id}"),
+                provider_name: provider_name.clone(),
+                model_name: id.clone(),
+                api_base: api_base.clone(),
+                api_key_env: String::new(),
+                provider_type: "copilot".to_string(),
+                config: ModelConfig {
+                    name: Some(id.clone()),
+                    ..ModelConfig::default()
+                },
+            });
+        }
+    }
+
+    /// Returns true if the config has a Copilot provider.
+    pub fn has_copilot_provider(&self) -> bool {
+        self.providers
+            .iter()
+            .any(|p| p.provider_type.as_deref() == Some("copilot"))
     }
 
     /// Get the default model key from defaults.model

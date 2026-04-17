@@ -163,6 +163,7 @@ fn catalog_key(provider_type: &str) -> Option<&str> {
     match provider_type {
         "openai" | "codex" => Some("openai"),
         "anthropic" => Some("anthropic"),
+        "copilot" | "github-copilot" => Some("github-copilot"),
         "openai-compatible" => None,
         other => Some(other),
     }

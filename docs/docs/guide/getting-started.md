@@ -67,6 +67,21 @@ SGLang, llama.cpp.
     The Codex provider uses OAuth to connect to your ChatGPT subscription.
     Tokens are stored locally and refreshed automatically.
 
+=== ":simple-github: GitHub Copilot"
+
+    No API key needed — authenticate with your GitHub Copilot subscription
+    via device-code OAuth:
+
+    ```bash
+    smelt auth   # pick "GitHub Copilot", follow the device-code prompt
+    smelt --model claude-sonnet-4.5
+    ```
+
+    On login, smelt enables the policy for every model your account exposes
+    (so Claude, GPT, Grok, etc. work immediately). The list of available
+    models is discovered from the `/models` endpoint and cached locally.
+    Short-lived Copilot tokens refresh automatically in the background.
+
 === ":simple-anthropic: Anthropic"
 
     ```bash

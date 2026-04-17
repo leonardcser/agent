@@ -6,9 +6,9 @@
 
 <p align="center">
   A Rust TUI coding agent. Connects to any OpenAI-compatible API (Ollama, OpenAI,
-  Anthropic, Google Gemini, OpenRouter, etc.) or your ChatGPT subscription via
-  OpenAI Codex, and provides an interactive terminal interface for code
-  generation, analysis, and assistance.
+  Anthropic, Google Gemini, OpenRouter, etc.), your ChatGPT subscription via
+  OpenAI Codex, or your GitHub Copilot subscription, and provides an interactive
+  terminal interface for code generation, analysis, and assistance.
 </p>
 
 <p align="center">
@@ -51,6 +51,13 @@ smelt auth          # log in with your ChatGPT account
 smelt --model gpt-5.4    # use any Codex-supported model
 ```
 
+**With GitHub Copilot:**
+
+```bash
+smelt auth                          # pick "GitHub Copilot", follow device-code prompt
+smelt --model claude-sonnet-4.5     # use any model your Copilot plan exposes
+```
+
 **With Anthropic:**
 
 ```bash
@@ -90,7 +97,7 @@ Config file: `~/.config/smelt/config.yaml` (respects `$XDG_CONFIG_HOME`).
 ```yaml
 providers:
   - name: ollama
-    type: openai-compatible # or: openai, anthropic, codex
+    type: openai-compatible # or: openai, anthropic, codex, copilot
     api_base: http://localhost:11434/v1
     models:
       - qwen3.5:27b
@@ -105,6 +112,10 @@ providers:
   - name: codex
     type: codex # uses ChatGPT subscription — models fetched automatically
     api_base: https://chatgpt.com/backend-api/codex
+
+  - name: copilot
+    type: copilot # uses GitHub Copilot subscription — models fetched automatically
+    api_base: https://api.individual.githubcopilot.com
 
 defaults:
   model: ollama/qwen3.5:27b # provider_name/model_name

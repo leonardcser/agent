@@ -141,5 +141,14 @@ directory.
 !!! warning
 
     **Best-effort safety measure.** Shell commands, symlinks, and indirect
-    access can bypass workspace restriction. Use a container for strong
-    isolation.
+    access can bypass workspace restriction.
+
+## Isolation
+
+Permissions and workspace restriction guard against accidental mistakes, not
+against an agent that actively tries to escape. Any approved bash command runs
+with your user's privileges, so a script like `rm -rf ~` works exactly as it
+would if you typed it yourself.
+
+For untrusted prompts, models, or MCP servers, run smelt inside a container or
+VM. Anything else is defense in depth, not a sandbox.

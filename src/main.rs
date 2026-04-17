@@ -40,7 +40,7 @@ struct Args {
     #[arg(
         long,
         value_name = "TYPE",
-        help = "Provider type: openai-compatible, openai, anthropic, codex"
+        help = "Provider type: openai-compatible, openai, anthropic, codex, copilot"
     )]
     r#type: Option<String>,
     #[arg(short, long)]
@@ -152,7 +152,7 @@ enum ColorMode {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Manage provider authentication (add providers, Codex login/logout)
+    /// Manage provider authentication (add providers, Codex or Copilot login/logout)
     Auth,
 }
 
@@ -217,6 +217,19 @@ async fn main() {
         tokio::spawn(async move {
             let client = reqwest::Client::new();
             let _ = engine::provider::codex::refresh_models_cache(&client).await;
+        });
+    }
+
+    // Same pattern for GitHub Copilot.
+    if cfg.has_copilot_provider() {
+        let cached = engine::provider::copilot::load_cached_models();
+        if !cached.is_empty() {
+            let ids: Vec<String> = cached.into_iter().map(|m| m.id).collect();
+            cfg.inject_copilot_models(&mut available_models, &ids);
+        }
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let _ = engine::provider::copilot::refresh_models_cache(&client).await;
         });
     }
 

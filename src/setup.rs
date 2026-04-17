@@ -46,6 +46,15 @@ const PROVIDERS: &[ProviderTemplate] = &[
         needs_api_base: false,
     },
     ProviderTemplate {
+        name: "copilot",
+        label: "GitHub Copilot (subscription)",
+        provider_type: "copilot",
+        api_base: "https://api.individual.githubcopilot.com",
+        api_key_env: "",
+        default_model: "",
+        needs_api_base: false,
+    },
+    ProviderTemplate {
         name: "custom",
         label: "Other (OpenAI-compatible)",
         provider_type: "openai-compatible",
@@ -78,7 +87,7 @@ fn collect_provider(tmpl: &ProviderTemplate) -> Option<engine::config_file::NewP
         tmpl.api_base.to_string()
     };
 
-    let api_key_env = if tmpl.provider_type == "codex" {
+    let api_key_env = if tmpl.provider_type == "codex" || tmpl.provider_type == "copilot" {
         None
     } else if tmpl.api_key_env.is_empty() {
         Some(
@@ -188,6 +197,65 @@ fn ensure_codex_provider(tmpl: &ProviderTemplate) {
     }
 }
 
+// ── Copilot login/logout ───────────────────────────────────────────────────
+
+async fn copilot_login() {
+    println!("\n  Starting GitHub device-code login…\n");
+
+    let client = reqwest::Client::new();
+    let on_prompt = |url: &str, code: &str| {
+        println!("  Open this URL in a browser:\n");
+        println!("    {url}\n");
+        println!("  Then enter code: {code}\n");
+    };
+    let on_progress = |msg: &str| {
+        println!("  {msg}");
+    };
+
+    let callbacks = engine::provider::copilot::LoginCallbacks {
+        on_prompt: &on_prompt,
+        on_progress: &on_progress,
+    };
+
+    match engine::provider::copilot::device_code_login(&client, &callbacks).await {
+        Ok(tokens) => {
+            println!("\nLogged in to GitHub Copilot.");
+            println!(
+                "API base: {}\nToken expires at: {}",
+                tokens.api_base, tokens.expires_at
+            );
+        }
+        Err(e) => {
+            eprintln!("\nLogin failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn copilot_logout() {
+    engine::provider::copilot::CopilotTokens::delete();
+    println!("\nLogged out of GitHub Copilot.");
+}
+
+fn copilot_new_provider(tmpl: &ProviderTemplate) -> engine::config_file::NewProvider {
+    engine::config_file::NewProvider {
+        name: tmpl.name.to_string(),
+        provider_type: tmpl.provider_type.to_string(),
+        api_base: tmpl.api_base.to_string(),
+        api_key_env: None,
+        models: vec![],
+    }
+}
+
+fn ensure_copilot_provider(tmpl: &ProviderTemplate) {
+    let provider = copilot_new_provider(tmpl);
+    match engine::config_file::ensure_provider(&provider) {
+        Ok(true) => println!("Added copilot provider to config."),
+        Ok(false) => {}
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
 // ── Public entry points ────────────────────────────────────────────────────
 
 /// First-time setup wizard. Returns true if config was written.
@@ -202,6 +270,9 @@ pub async fn run_initial_setup(config_path: &Path) -> bool {
     let provider = if tmpl.provider_type == "codex" {
         codex_login().await;
         codex_new_provider(tmpl)
+    } else if tmpl.provider_type == "copilot" {
+        copilot_login().await;
+        copilot_new_provider(tmpl)
     } else {
         let Some(p) = collect_provider(tmpl) else {
             return false;
@@ -244,6 +315,24 @@ pub async fn run_auth_command() {
                 ensure_codex_provider(tmpl);
             }
             1 => codex_logout(),
+            _ => {}
+        }
+    } else if tmpl.provider_type == "copilot" {
+        let options = &["Log in", "Log out"];
+        let Ok(choice) = Select::new()
+            .with_prompt("GitHub Copilot")
+            .items(options)
+            .default(0)
+            .interact()
+        else {
+            return;
+        };
+        match choice {
+            0 => {
+                copilot_login().await;
+                ensure_copilot_provider(tmpl);
+            }
+            1 => copilot_logout(),
             _ => {}
         }
     } else {

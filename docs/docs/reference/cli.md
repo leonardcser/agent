@@ -10,9 +10,9 @@ arguments and no config file launches the interactive setup wizard.
 
 ## Subcommands
 
-| Subcommand   | Description                                                        |
-| ------------ | ------------------------------------------------------------------ |
-| `smelt auth` | Manage provider authentication (add providers, Codex login/logout) |
+| Subcommand   | Description                                                                          |
+| ------------ | ------------------------------------------------------------------------------------ |
+| `smelt auth` | Manage provider authentication (add providers, Codex or GitHub Copilot login/logout) |
 
 ## Connection
 
@@ -31,6 +31,7 @@ Auto-detection:
 | `api.openai.com`    | `openai`            |
 | `chatgpt.com`       | `codex`             |
 | `api.anthropic.com` | `anthropic`         |
+| `githubcopilot.com` | `copilot`           |
 | anything else       | `openai-compatible` |
 
 ## Behavior

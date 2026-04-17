@@ -1,6 +1,7 @@
 mod anthropic;
 mod chat_completions;
 pub mod codex;
+pub mod copilot;
 mod extract;
 mod openai;
 mod sse;
@@ -270,13 +271,14 @@ pub enum ProviderKind {
     OpenAi,
     Codex,
     Anthropic,
+    Copilot,
     Local,
 }
 
 impl ProviderKind {
     pub fn default_reasoning_cycle(self) -> &'static [ReasoningEffort] {
         match self {
-            Self::OpenAi | Self::Codex | Self::Anthropic => &[
+            Self::OpenAi | Self::Codex | Self::Anthropic | Self::Copilot => &[
                 ReasoningEffort::Off,
                 ReasoningEffort::Low,
                 ReasoningEffort::Medium,
@@ -297,6 +299,7 @@ impl ProviderKind {
             "openai" => Self::OpenAi,
             "codex" => Self::Codex,
             "anthropic" => Self::Anthropic,
+            "copilot" | "github-copilot" => Self::Copilot,
             _ => Self::Local,
         }
     }
@@ -308,6 +311,8 @@ impl ProviderKind {
             Self::Codex
         } else if api_base.contains("api.anthropic.com") {
             Self::Anthropic
+        } else if api_base.contains("githubcopilot.com") {
+            Self::Copilot
         } else {
             Self::Local
         }
@@ -318,6 +323,7 @@ impl ProviderKind {
             Self::OpenAi => "openai",
             Self::Codex => "codex",
             Self::Anthropic => "anthropic",
+            Self::Copilot => "copilot",
             Self::Local => "openai-compatible",
         }
     }
@@ -459,6 +465,7 @@ impl Provider {
     ) -> Result<LLMResponse, ProviderError> {
         let is_anthropic = self.kind == ProviderKind::Anthropic;
         let is_codex = self.kind == ProviderKind::Codex;
+        let is_copilot = self.kind == ProviderKind::Copilot;
 
         // Codex: resolve OAuth access token (refreshing if needed).
         let mut codex_auth = if is_codex {
@@ -472,7 +479,19 @@ impl Provider {
         };
         let mut codex_401_retried = false;
 
-        let (url, mut body) = match self.kind {
+        // Copilot: resolve OAuth access token + dynamic API base (refreshing if needed).
+        let mut copilot_auth = if is_copilot {
+            Some(
+                copilot::ensure_access_token_full(&self.client)
+                    .await
+                    .map_err(ProviderError::Auth)?,
+            )
+        } else {
+            None
+        };
+        let mut copilot_401_retried = false;
+
+        let (mut url, mut body) = match self.kind {
             ProviderKind::OpenAi => {
                 let url = format!("{}/responses", self.api_base);
                 let body = openai::build_body(messages, tools, model, effort, &self.model_config);
@@ -496,6 +515,22 @@ impl Provider {
                     anthropic::build_body(messages, tools, model, effort, &self.model_config);
                 (url, body)
             }
+            ProviderKind::Copilot => {
+                // Base URL comes from the Copilot token's proxy-ep claim.
+                let base = copilot_auth
+                    .as_ref()
+                    .map(|t| t.api_base.as_str())
+                    .unwrap_or(copilot::DEFAULT_COPILOT_API_BASE);
+                let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+                let body = chat_completions::build_body(
+                    messages,
+                    tools,
+                    model,
+                    effort,
+                    &self.model_config,
+                );
+                (url, body)
+            }
             ProviderKind::Local => {
                 let url = format!("{}/chat/completions", self.api_base);
                 let body = chat_completions::build_body(
@@ -508,6 +543,19 @@ impl Provider {
                 (url, body)
             }
         };
+
+        // Copilot dynamic headers: X-Initiator indicates whether the last
+        // message is user- or agent-initiated; Copilot-Vision-Request is set
+        // when any user/tool-result message contains an image.
+        let copilot_initiator: &'static str = if is_copilot {
+            match messages.last().map(|m| m.role) {
+                Some(protocol::Role::User) | None => "user",
+                _ => "agent",
+            }
+        } else {
+            "user"
+        };
+        let copilot_has_images = is_copilot && messages_have_images(messages);
 
         if let Some(fmt) = opts.response_format.as_ref() {
             apply_response_format(&mut body, self.kind, fmt);
@@ -552,6 +600,19 @@ impl Provider {
                     if let Some(ref ts) = *self.turn_state.lock().unwrap() {
                         req = req.header("x-codex-turn-state", ts.as_str());
                     }
+                }
+            } else if is_copilot {
+                if let Some(ref tokens) = copilot_auth {
+                    req = req.bearer_auth(&tokens.access_token);
+                }
+                for (k, v) in copilot::base_headers() {
+                    req = req.header(k, v);
+                }
+                req = req
+                    .header("X-Initiator", copilot_initiator)
+                    .header("Openai-Intent", "conversation-edits");
+                if copilot_has_images {
+                    req = req.header("Copilot-Vision-Request", "true");
                 }
             } else if !self.api_key.is_empty() {
                 if is_anthropic {
@@ -625,6 +686,31 @@ impl Provider {
                     }
                 }
 
+                // Copilot 401 recovery: the short-lived token may have expired
+                // mid-flight. Refresh once using the stored GitHub token.
+                if is_copilot && matches!(err, ProviderError::Auth(_)) && !copilot_401_retried {
+                    copilot_401_retried = true;
+                    if let Some(ref stale) = copilot_auth {
+                        if let Ok(refreshed) =
+                            copilot::refresh_tokens(&self.client, &stale.refresh_token).await
+                        {
+                            log::entry(
+                                log::Level::Info,
+                                "copilot_401_recovery",
+                                &serde_json::json!({ "expires_at": refreshed.expires_at }),
+                            );
+                            // A refreshed token may point at a different proxy
+                            // host; re-derive the URL for the retry.
+                            url = format!(
+                                "{}/chat/completions",
+                                refreshed.api_base.trim_end_matches('/')
+                            );
+                            copilot_auth = Some(refreshed);
+                            continue;
+                        }
+                    }
+                }
+
                 if err.is_retryable() && attempt < max_retries {
                     let backoff = backoff_delay(attempt);
                     let delay = retry_after.map_or(backoff, |ra| ra.max(backoff));
@@ -658,7 +744,7 @@ impl Provider {
                     ProviderKind::Anthropic => {
                         anthropic::read_stream(resp, opts.cancel, on_delta).await
                     }
-                    ProviderKind::Local => {
+                    ProviderKind::Copilot | ProviderKind::Local => {
                         chat_completions::read_stream(resp, opts.cancel, on_delta).await
                     }
                 }?
@@ -684,7 +770,9 @@ impl Provider {
                 match self.kind {
                     ProviderKind::OpenAi | ProviderKind::Codex => openai::parse_response(&data)?,
                     ProviderKind::Anthropic => anthropic::parse_response(&data)?,
-                    ProviderKind::Local => chat_completions::parse_response(&data)?,
+                    ProviderKind::Copilot | ProviderKind::Local => {
+                        chat_completions::parse_response(&data)?
+                    }
                 }
             };
 
@@ -729,6 +817,7 @@ impl Provider {
             ProviderKind::Local => self.fetch_context_window_local(model).await,
             ProviderKind::OpenAi => None,
             ProviderKind::Codex => codex::cached_context_window(model),
+            ProviderKind::Copilot => copilot::cached_context_window(model),
         };
         crate::log::entry(
             crate::log::Level::Info,
@@ -960,7 +1049,7 @@ fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: 
                 }
             });
         }
-        ProviderKind::Local => {
+        ProviderKind::Copilot | ProviderKind::Local => {
             body["response_format"] = serde_json::json!({
                 "type": "json_schema",
                 "json_schema": {
@@ -1010,6 +1099,16 @@ fn extract_json_title_slug(raw: &str) -> Option<(String, String)> {
         parsed.title.trim().to_string(),
         parsed.slug.trim().to_string(),
     ))
+}
+
+/// Returns true if any user or tool-result message contains an image part.
+fn messages_have_images(messages: &[Message]) -> bool {
+    messages.iter().any(|m| match m.role {
+        protocol::Role::User | protocol::Role::Tool => {
+            m.content.as_ref().is_some_and(|c| c.image_count() > 0)
+        }
+        _ => false,
+    })
 }
 
 pub fn slugify(title: &str) -> String {

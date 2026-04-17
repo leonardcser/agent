@@ -9,22 +9,23 @@ the file exists but fails to parse, a warning is printed and defaults are used.
 
 Each entry under `providers` defines a connection to an LLM API.
 
-| Field         | Description                                            |
-| ------------- | ------------------------------------------------------ |
-| `name`        | Unique identifier (used in `defaults.model` as prefix) |
-| `type`        | `openai`, `codex`, `anthropic`, or `openai-compatible` |
-| `api_base`    | API endpoint URL                                       |
-| `api_key_env` | Environment variable holding the API key               |
-| `models`      | List of available models                               |
+| Field         | Description                                                                 |
+| ------------- | --------------------------------------------------------------------------- |
+| `name`        | Unique identifier (used in `defaults.model` as prefix)                      |
+| `type`        | `openai`, `codex`, `anthropic`, `copilot`, or `openai-compatible`           |
+| `api_base`    | API endpoint URL                                                            |
+| `api_key_env` | Environment variable holding the API key (omit for `codex` and `copilot`)   |
+| `models`      | List of available models (optional for `codex`/`copilot` — fetched via API) |
 
 ### Provider Types
 
-| Type                | Endpoint                                | Compatible Services                            |
-| ------------------- | --------------------------------------- | ---------------------------------------------- |
-| `openai`            | `/v1/responses`                         | OpenAI, OpenRouter                             |
-| `codex`             | `chatgpt.com/backend-api/codex` (OAuth) | OpenAI Codex (ChatGPT subscription)            |
-| `anthropic`         | `/v1/messages` + thinking               | Anthropic                                      |
-| `openai-compatible` | `/v1/chat/completions`                  | Ollama, vLLM, SGLang, llama.cpp, Google Gemini |
+| Type                | Endpoint                                           | Compatible Services                            |
+| ------------------- | -------------------------------------------------- | ---------------------------------------------- |
+| `openai`            | `/v1/responses`                                    | OpenAI, OpenRouter                             |
+| `codex`             | `chatgpt.com/backend-api/codex` (OAuth)            | OpenAI Codex (ChatGPT subscription)            |
+| `anthropic`         | `/v1/messages` + thinking                          | Anthropic                                      |
+| `copilot`           | `api.*.githubcopilot.com/chat/completions` (OAuth) | GitHub Copilot subscription                    |
+| `openai-compatible` | `/v1/chat/completions`                             | Ollama, vLLM, SGLang, llama.cpp, Google Gemini |
 
 ### Model Configuration
 
@@ -113,20 +114,20 @@ happens.
 
 All toggleable at runtime via `/settings`.
 
-| Key                     | Default | Description                                                               |
-| ----------------------- | ------- | ------------------------------------------------------------------------- |
-| `vim_mode`              | `false` | Vi keybindings                                                            |
+| Key                     | Default | Description                                                                              |
+| ----------------------- | ------- | ---------------------------------------------------------------------------------------- |
+| `vim_mode`              | `false` | Vi keybindings                                                                           |
 | `auto_compact`          | `false` | Auto-summarize when context usage crosses the threshold (always on in headless/subagent) |
-| `show_tps`              | `true`  | Tokens/sec in status bar                                                  |
-| `show_tokens`           | `true`  | Context token count in status bar                                         |
-| `show_cost`             | `true`  | Session cost in status bar                                                |
-| `input_prediction`      | `true`  | Ghost text suggestions                                                    |
-| `task_slug`             | `true`  | Task label in status bar                                                  |
-| `show_thinking`         | `true`  | Show full thinking/reasoning blocks (false shows a single summary)        |
-| `restrict_to_workspace` | `true`  | Downgrade Allow → Ask outside workspace                                   |
-| `redact_secrets`        | `true`  | Scrub detected secrets from user input and tool results before they reach the LLM |
-| `multi_agent`           | `false` | Enable multi-agent mode                                                   |
-| `context_window`        | auto    | Override context window size (tokens); auto-detected from API             |
+| `show_tps`              | `true`  | Tokens/sec in status bar                                                                 |
+| `show_tokens`           | `true`  | Context token count in status bar                                                        |
+| `show_cost`             | `true`  | Session cost in status bar                                                               |
+| `input_prediction`      | `true`  | Ghost text suggestions                                                                   |
+| `task_slug`             | `true`  | Task label in status bar                                                                 |
+| `show_thinking`         | `true`  | Show full thinking/reasoning blocks (false shows a single summary)                       |
+| `restrict_to_workspace` | `true`  | Downgrade Allow → Ask outside workspace                                                  |
+| `redact_secrets`        | `true`  | Scrub detected secrets from user input and tool results before they reach the LLM        |
+| `multi_agent`           | `false` | Enable multi-agent mode                                                                  |
+| `context_window`        | auto    | Override context window size (tokens); auto-detected from API                            |
 
 ## Theme
 
@@ -248,18 +249,23 @@ Codex OAuth tokens are stored in the system keyring (service:
 `smelt-codex-auth`). If the keyring is unavailable, tokens fall back to
 `$XDG_STATE_HOME/smelt/codex_auth.json` (mode `0600`).
 
+GitHub Copilot OAuth tokens are stored in the system keyring (service:
+`smelt-copilot-auth`). If the keyring is unavailable, they fall back to
+`$XDG_STATE_HOME/smelt/copilot_auth.json` (mode `0600`). The discovered model
+list is cached in `$XDG_CACHE_HOME/smelt/copilot_models.json`.
+
 ## Environment Variables
 
-| Variable                         | Purpose                                                                                              |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `XDG_CONFIG_HOME`                | Config directory (default: `~/.config`)                                                              |
-| `XDG_STATE_HOME`                 | State directory (default: `~/.local/state`)                                                          |
-| `XDG_CACHE_HOME`                 | Cache directory (default: `~/.cache`)                                                                |
-| `COLORFGBG`                      | Terminal color hint (fallback for dark/light detection)                                              |
-| `TERM`                           | Terminal type (`dumb` skips color detection)                                                         |
-| `EDITOR`                         | Editor for `Ctrl+X Ctrl+E` and vim `v`                                                               |
-| `NO_COLOR`                       | Disable ANSI colors (respected in headless mode)                                                     |
-| `SMELT_COMPACT_THRESHOLD_PERCENT` | Auto-compact trigger as a percentage of the context window. Integer in `[10, 95]`; default `80`.    |
+| Variable                          | Purpose                                                                                          |
+| --------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `XDG_CONFIG_HOME`                 | Config directory (default: `~/.config`)                                                          |
+| `XDG_STATE_HOME`                  | State directory (default: `~/.local/state`)                                                      |
+| `XDG_CACHE_HOME`                  | Cache directory (default: `~/.cache`)                                                            |
+| `COLORFGBG`                       | Terminal color hint (fallback for dark/light detection)                                          |
+| `TERM`                            | Terminal type (`dumb` skips color detection)                                                     |
+| `EDITOR`                          | Editor for `Ctrl+X Ctrl+E` and vim `v`                                                           |
+| `NO_COLOR`                        | Disable ANSI colors (respected in headless mode)                                                 |
+| `SMELT_COMPACT_THRESHOLD_PERCENT` | Auto-compact trigger as a percentage of the context window. Integer in `[10, 95]`; default `80`. |
 
 ## Full Example
 
@@ -289,6 +295,10 @@ providers:
   - name: codex
     type: codex # models fetched automatically from the API
     api_base: https://chatgpt.com/backend-api/codex
+
+  - name: copilot
+    type: copilot # models fetched automatically from the API
+    api_base: https://api.individual.githubcopilot.com # overridden at runtime
 
   - name: anthropic
     type: anthropic
