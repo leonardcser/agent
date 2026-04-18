@@ -12,6 +12,7 @@ pub mod fuzzy;
 pub mod input;
 pub mod instructions;
 pub mod keymap;
+pub mod lua;
 pub mod metrics;
 pub mod perf;
 pub mod persist;
