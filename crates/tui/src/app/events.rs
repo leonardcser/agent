@@ -1035,13 +1035,14 @@ impl App {
         })
     }
 
-    /// Rough viewport-height estimate for cursor clamping at event time.
-    /// Prompt height isn't known outside the render pass, so we reserve
-    /// a conservative constant and let the render pass clamp the real
-    /// cursor row.
+    /// Viewport rows available for the content pane. Uses the prompt's
+    /// actual rendered height from the previous frame plus the 1-row
+    /// gap, so multi-line prompts (and completion menus) don't cause
+    /// the scroll math to overshoot.
     fn viewport_rows_estimate(&self) -> u16 {
-        const PROMPT_RESERVE: u16 = 6;
-        self.last_height.saturating_sub(PROMPT_RESERVE).max(1)
+        let prompt_rows = self.screen.prev_prompt_rows().max(1);
+        let gap: u16 = 1;
+        self.last_height.saturating_sub(prompt_rows + gap).max(1)
     }
 
     // ── Mouse event dispatch ─────────────────────────────────────────────
@@ -1111,13 +1112,16 @@ impl App {
         self.move_content_cursor_by_lines(delta);
     }
 
-    /// Move the prompt cursor by `delta` logical lines via synthesized
-    /// vim `j`/`k`, mirroring how the content pane scrolls.
+    /// Move the prompt cursor by `delta` logical lines. Uses `Up`/`Down`
+    /// keys — NOT `j`/`k` — because the prompt may be in vim insert
+    /// mode (or vim disabled), where literal `j`/`k` would be typed
+    /// into the buffer. Arrow keys are interpreted as cursor motion in
+    /// every prompt mode.
     fn scroll_prompt_by_lines(&mut self, delta: isize) {
         let (code, count) = if delta >= 0 {
-            (KeyCode::Char('j'), delta as usize)
+            (KeyCode::Down, delta as usize)
         } else {
-            (KeyCode::Char('k'), (-delta) as usize)
+            (KeyCode::Up, (-delta) as usize)
         };
         let k = KeyEvent {
             code,
