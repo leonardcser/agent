@@ -1038,17 +1038,11 @@ impl App {
         let buf = rows.join("\n");
         let (s, e) = vim.visual_range(&buf, self.content_pane.cpos)?;
         let offset_to_line_col = |off: usize| -> (usize, usize) {
-            let mut off = off.min(buf.len());
-            while off > 0 && !buf.is_char_boundary(off) {
-                off -= 1;
-            }
+            let off = crate::text_utils::snap(&buf, off);
             let prefix = &buf[..off];
             let line = prefix.bytes().filter(|&b| b == b'\n').count();
             let line_start = prefix.rfind('\n').map(|p| p + 1).unwrap_or(0);
-            // Display-cell column so the painter's x-coordinate lines up
-            // with wide glyphs (`⏺`, CJK, …).
-            let col = unicode_width::UnicodeWidthStr::width(&buf[line_start..off]);
-            (line, col)
+            (line, crate::text_utils::byte_to_cell(&buf[line_start..off], off - line_start))
         };
         let (start_line_abs, start_col) = offset_to_line_col(s);
         let (end_line_abs, end_col) = offset_to_line_col(e);
@@ -1329,12 +1323,22 @@ impl App {
     /// Extend the content-pane visual selection to the cell under the
     /// current drag position. Runs while the user holds mouse-1 and
     /// moves — each update moves the cursor inside vim Visual mode so
-    /// the existing visual range widens or shrinks accordingly. If the
-    /// resulting cursor lands on the top/bottom row of the viewport,
-    /// also scroll the transcript by one line so further drag ticks can
-    /// extend the selection past what's visible.
+    /// the existing visual range widens or shrinks accordingly. Auto-
+    /// scroll when the cursor is parked at an edge is handled by
+    /// [`tick_drag_autoscroll`] on the frame tick, so holding the mouse
+    /// still at the edge keeps extending the selection.
     fn extend_content_selection_to(&mut self, row: u16, col: u16) {
         self.position_content_cursor_from_click(row, col);
+    }
+
+    /// Frame-tick hook: if the user is mid-drag with the content cursor
+    /// on the top or bottom row of the viewport, scroll one line so the
+    /// selection widens past the visible area. Called from the main
+    /// loop's frame timer — no-op when there is no active drag.
+    pub(super) fn tick_drag_autoscroll(&mut self) {
+        if !self.mouse_drag_active || self.app_focus != crate::app::AppFocus::Content {
+            return;
+        }
         let viewport = self.viewport_rows_estimate();
         if viewport == 0 {
             return;
@@ -1343,8 +1347,10 @@ impl App {
         // 0 = bottom row, viewport-1 = top row.
         if self.content_pane.cursor_line >= viewport.saturating_sub(1) {
             self.move_content_cursor_by_lines(-1);
+            self.sync_transcript_pin();
         } else if self.content_pane.cursor_line == 0 {
             self.move_content_cursor_by_lines(1);
+            self.sync_transcript_pin();
         }
     }
 
@@ -1418,14 +1424,8 @@ impl App {
             let buf = rows.join("\n");
             if let Some(vim) = self.content_pane.vim.as_ref() {
                 if let Some((s, e)) = vim.visual_range(&buf, self.content_pane.cpos) {
-                    let mut s = s.min(buf.len());
-                    let mut e = e.min(buf.len());
-                    while s > 0 && !buf.is_char_boundary(s) {
-                        s -= 1;
-                    }
-                    while e < buf.len() && !buf.is_char_boundary(e) {
-                        e += 1;
-                    }
+                    let s = crate::text_utils::snap(&buf, s);
+                    let e = crate::text_utils::snap(&buf, e);
                     if s < e {
                         let selection = buf[s..e].to_string();
                         let chars = selection.chars().count();

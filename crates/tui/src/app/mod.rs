@@ -956,6 +956,11 @@ impl App {
                     if self.agents.iter().any(|a| a.status == AgentTrackStatus::Working) {
                         self.screen.mark_dirty();
                     }
+                    // Auto-scroll while the user is mid-drag with the
+                    // cursor parked on the top/bottom row of the
+                    // transcript — extends selection past the viewport
+                    // without requiring further mouse motion.
+                    self.tick_drag_autoscroll();
                     // Render deferred engine events + animations.
                     self.render_frame(agent.is_some(), &mut active_dialog);
                     last_frame = Instant::now();

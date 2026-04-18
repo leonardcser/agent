@@ -1360,13 +1360,13 @@ impl Screen {
         }
         // `range` is viewport-relative: line 0 = top of viewport.
         // `last_viewport_text` indexes top-down.
+        use crate::text_utils::cell_to_byte;
         use unicode_width::UnicodeWidthStr;
         for line_idx in range.start_line..=range.end_line.min(rows.len().saturating_sub(1)) {
             if line_idx >= rows.len() || (line_idx as u16) >= viewport_rows {
                 break;
             }
             let line = &rows[line_idx];
-            let viewport_row = line_idx;
             // Columns are in display cells (set by `content_visual_range`).
             let line_cells = UnicodeWidthStr::width(line.as_str());
             let (sel_start, sel_end) = match range.kind {
@@ -1388,26 +1388,10 @@ impl Screen {
             if sel_end <= sel_start {
                 continue;
             }
-            // Walk chars accumulating display width; grab the byte slice
-            // whose cell range matches `[sel_start, sel_end)`.
-            let (mut byte_start, mut byte_end) = (line.len(), line.len());
-            let mut acc = 0usize;
-            for (b, ch) in line.char_indices() {
-                if acc == sel_start {
-                    byte_start = b;
-                }
-                if acc >= sel_end {
-                    byte_end = b;
-                    break;
-                }
-                acc += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            }
-            if byte_start > byte_end {
-                continue;
-            }
+            let byte_start = cell_to_byte(line, sel_start);
+            let byte_end = cell_to_byte(line, sel_end);
             let sub = &line[byte_start..byte_end];
-            let y = viewport_row as u16;
-            out.move_to(sel_start as u16, y);
+            out.move_to(sel_start as u16, line_idx as u16);
             out.push_style(StyleState {
                 bg: Some(theme::selection_bg()),
                 ..StyleState::default()
@@ -2522,28 +2506,18 @@ impl Screen {
                 // viewport text so `draw_soft_cursor` can re-render it
                 // with inverted fg/bg (matching the prompt's cursor
                 // style, which preserves the underlying glyph).
-                // `col` is a display-cell column; walk chars until their
-                // accumulated width reaches it so wide glyphs render
-                // under the cursor correctly.
-                let under: String = {
-                    let row = self.last_viewport_text.get(cursor_row as usize);
-                    let target = col as usize;
-                    let mut found: Option<char> = None;
-                    if let Some(row) = row {
-                        let mut acc = 0usize;
-                        for ch in row.chars() {
-                            if acc == target {
-                                found = Some(ch);
-                                break;
-                            }
-                            acc += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                            if acc > target {
-                                break;
-                            }
-                        }
-                    }
-                    found.map(|c| c.to_string()).unwrap_or_else(|| " ".to_string())
-                };
+                // Pick the char at the cursor's cell column so wide
+                // glyphs render correctly beneath the cursor.
+                let under: String = self
+                    .last_viewport_text
+                    .get(cursor_row as usize)
+                    .map(|row| {
+                        let byte = crate::text_utils::cell_to_byte(row, col as usize);
+                        row[byte..].chars().next()
+                    })
+                    .and_then(|c| c)
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| " ".to_string());
                 draw_soft_cursor(out, col, cursor_row, &under);
                 (line, col)
             } else {
