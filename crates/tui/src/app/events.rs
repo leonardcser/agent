@@ -465,6 +465,26 @@ impl App {
             return EventOutcome::Noop;
         }
 
+        // Mouse (wheel, click-to-focus, drag-to-select) must keep
+        // working while the agent streams — otherwise the user can't
+        // switch windows, click on the transcript, or drag-select live
+        // content. Mirrors the idle path.
+        if let Event::Mouse(me) = ev {
+            return self.handle_mouse(me);
+        }
+
+        // Ctrl-W pane chord. Same as idle so window-switching works
+        // mid-stream.
+        if let Some(outcome) = self.handle_pane_chord(&ev, t) {
+            return outcome;
+        }
+
+        // When the transcript window has focus, keys drive its vim-style
+        // motions and yank — same routing as the idle path.
+        if self.app_focus == crate::app::AppFocus::Content && !self.input.has_modal() {
+            return self.handle_event_app_history(ev);
+        }
+
         if let Some(outcome) = self.handle_overlay_keys(&ev) {
             return outcome;
         }
