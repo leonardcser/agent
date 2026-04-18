@@ -2261,6 +2261,74 @@ impl Screen {
         }
     }
 
+    /// Flat-line viewport draw path.
+    ///
+    /// Repaints the entire screen every frame: a top region that holds
+    /// the transcript (history + any active streaming content) and the
+    /// prompt stack at the bottom. `scroll_offset` (in rows) shifts the
+    /// transcript slice upward (0 = stuck to bottom).
+    ///
+    /// Returns the clamped scroll offset (so the caller can normalize
+    /// its `history_scroll_offset` back to a valid range).
+    pub fn draw_viewport_frame(
+        &mut self,
+        out: &mut RenderOut,
+        width: usize,
+        prompt: FramePrompt<'_>,
+        scroll_offset: u16,
+    ) -> u16 {
+        let _perf = crate::perf::begin("render:viewport_frame");
+        self.update_spinner();
+
+        let (term_w, term_h) = self.size();
+        out.init_cursor(0, term_w, term_h);
+
+        // Clear full screen.
+        out.row = Some(0);
+        out.move_to(0, 0);
+        let _ = out.queue(terminal::Clear(terminal::ClearType::All));
+
+        // Measure prompt so we know how many rows to reserve at the bottom.
+        let prompt_height =
+            self.measure_prompt_height(prompt.state, width, prompt.queued, prompt.prediction);
+        let viewport_rows = term_h.saturating_sub(prompt_height);
+
+        // Paint transcript slice into the viewport region.
+        let clamped = self.history.paint_viewport(
+            out,
+            width,
+            self.show_thinking,
+            0,
+            viewport_rows,
+            scroll_offset,
+        );
+
+        // Paint prompt stack at the bottom.
+        out.row = Some(viewport_rows);
+        out.move_to(0, viewport_rows);
+        self.draw_prompt_sections(
+            out,
+            prompt.state,
+            prompt.mode,
+            width,
+            prompt.queued,
+            prompt.prediction,
+            prompt_height as usize,
+        );
+
+        // State so other paths don't think they need to repaint.
+        self.prompt.drawn = true;
+        self.prompt.dirty = false;
+        self.prompt.prev_rows = prompt_height;
+        self.prompt.anchor_row = Some(viewport_rows);
+        self.content_start_row = Some(0);
+        self.has_scrollback = false;
+        // Fully flushed — every frame re-renders everything.
+        self.history.flushed = self.history.order.len();
+
+        clamped
+    }
+
     /// Measure prompt height without painting. Used by `draw_frame` to
     /// compute ScrollUp before entering overlay mode.
     fn measure_prompt_height(

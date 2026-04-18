@@ -12,6 +12,7 @@ use super::context::{LayoutContext, PaintContext};
 use super::display::DisplayBlock;
 use super::paint::paint_block;
 use super::RenderOut;
+use crossterm::QueueableCommand;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -632,6 +633,100 @@ impl BlockHistory {
         self.suppress_leading_gap = false;
         self.flushed = self.order.len();
         total
+    }
+
+    /// Flat-line viewport painter. Lays out every block, then paints the
+    /// slice of rendered rows that fits the viewport, shifted upward by
+    /// `scroll_offset` (0 = stuck to bottom).
+    ///
+    /// Overlay-only: each row is placed via `MoveTo`. Callers own clearing
+    /// the viewport region prior to calling (so rows left blank by a short
+    /// transcript stay cleared).
+    ///
+    /// Returns the clamped scroll offset (for the caller to sync state).
+    pub(super) fn paint_viewport(
+        &mut self,
+        out: &mut RenderOut,
+        width: usize,
+        show_thinking: bool,
+        top_row: u16,
+        viewport_rows: u16,
+        scroll_offset: u16,
+    ) -> u16 {
+        let _perf = crate::perf::begin("history:paint_viewport");
+        if viewport_rows == 0 || self.order.is_empty() {
+            return 0;
+        }
+        if width != self.cache_width {
+            self.invalidate_for_width(width);
+            self.cache_width = width;
+        }
+        let key = LayoutKey {
+            width: width as u16,
+            show_thinking,
+        };
+        let mut per_block: Vec<(u16, u16)> = Vec::with_capacity(self.order.len());
+        let mut total: u32 = 0;
+        for i in 0..self.order.len() {
+            let gap = self.block_gap(i);
+            let rows = self.ensure_rows(i, key);
+            total += gap as u32 + rows as u32;
+            per_block.push((gap, rows));
+        }
+        let total = total.min(u16::MAX as u32) as u16;
+
+        // Clamp scroll.
+        let max_scroll = total.saturating_sub(viewport_rows);
+        let scroll = scroll_offset.min(max_scroll);
+        // Lines to skip from the top of the flat transcript.
+        let skip = total.saturating_sub(viewport_rows).saturating_sub(scroll);
+
+        let theme = crate::theme::snapshot();
+        let pctx = super::context::PaintContext {
+            theme: &theme,
+            term_width: width as u16,
+        };
+
+        out.row = Some(top_row);
+        out.move_to(0, top_row);
+
+        let mut remaining_skip = skip as u32;
+        let mut painted: u16 = 0;
+
+        'blocks: for (i, (gap, _rows)) in per_block.iter().enumerate() {
+            // Gap lines (blank rows).
+            for _ in 0..*gap {
+                if remaining_skip > 0 {
+                    remaining_skip -= 1;
+                    continue;
+                }
+                if painted >= viewport_rows {
+                    break 'blocks;
+                }
+                // Blank row: clear to EOL then advance.
+                let _ = out.queue(crossterm::terminal::Clear(
+                    crossterm::terminal::ClearType::CurrentLine,
+                ));
+                out.overlay_newline();
+                painted += 1;
+            }
+            let id = self.order[i];
+            let display = self.artifacts.get(&id).and_then(|a| a.get(key));
+            let Some(display) = display else { continue };
+            for line in &display.lines {
+                if remaining_skip > 0 {
+                    remaining_skip -= 1;
+                    continue;
+                }
+                if painted >= viewport_rows {
+                    break 'blocks;
+                }
+                super::paint::paint_line(out, line, &pctx);
+                painted += 1;
+            }
+        }
+
+        scroll
     }
 }
 

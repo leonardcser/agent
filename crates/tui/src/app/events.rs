@@ -876,15 +876,7 @@ impl App {
     /// Render a full-mode frame (content + prompt) in its own sync frame.
     pub(super) fn tick_prompt(&mut self, agent_running: bool) {
         let _perf = crate::perf::begin("app:tick");
-        // Advance the spinner before the dirty check — otherwise the
-        // status bar spinner stops animating during idle ticks where
-        // nothing else marks the screen dirty.
         self.screen.update_spinner();
-        // Skip the entire frame/flush cycle when nothing changed. Avoids
-        // issuing BeginSync + EndSync + flush on every idle tick.
-        if !self.screen.needs_draw(false) {
-            return;
-        }
         let w = render::term_width();
         let show_queued = agent_running || self.is_compacting();
         self.screen.set_dialog_open(false);
@@ -895,17 +887,20 @@ impl App {
             (&[], self.input_prediction.as_deref())
         };
         let mut frame = render::Frame::begin(self.screen.backend());
-        self.screen.draw_frame(
+        let clamped = self.screen.draw_viewport_frame(
             &mut frame,
             w,
-            Some(FramePrompt {
+            FramePrompt {
                 state: &self.input,
                 mode: self.mode,
                 queued,
                 prediction,
-            }),
-            None,
+            },
+            self.history_scroll_offset,
         );
+        if clamped != self.history_scroll_offset {
+            self.history_scroll_offset = clamped;
+        }
     }
 
     // ── App NORMAL (History focus) key handler ──────────────────────────
