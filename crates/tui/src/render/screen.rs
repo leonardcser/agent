@@ -2342,6 +2342,9 @@ impl Screen {
             };
 
         // Paint prompt stack at the bottom, leaving the gap row blank.
+        // Reset any lingering styling from the transcript paint above so
+        // the prompt starts from a clean default state.
+        out.reset_style();
         let prompt_top = viewport_rows + gap_rows;
         out.row = Some(prompt_top);
         out.move_to(0, prompt_top);
