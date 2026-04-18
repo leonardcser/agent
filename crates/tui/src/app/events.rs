@@ -1248,7 +1248,7 @@ impl App {
                 return EventOutcome::Redraw;
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let dragged = self.mouse_drag_active;
+                let dragged = self.mouse_drag_active && !self.drag_on_scrollbar;
                 match self.app_focus {
                     crate::app::AppFocus::Content => {
                         self.copy_content_selection_and_clear(dragged);
@@ -1259,6 +1259,7 @@ impl App {
                 }
                 self.mouse_drag_active = false;
                 self.drag_autoscroll_since = None;
+                self.drag_on_scrollbar = false;
                 self.sync_transcript_pin();
                 return EventOutcome::Redraw;
             }
@@ -1324,10 +1325,15 @@ impl App {
                 self.app_focus = crate::app::AppFocus::Content;
                 // Click on the scrollbar column jumps the viewport to
                 // that fraction of the transcript; no cursor/selection.
+                // `drag_on_scrollbar` latches the mode so subsequent
+                // drag ticks keep scrolling even if the pointer wanders
+                // off the thumb column.
                 let w = render::term_width() as u16;
                 if me.column + 1 == w && self.jump_scroll_to_row(me.row) {
+                    self.drag_on_scrollbar = true;
                     return EventOutcome::Redraw;
                 }
+                self.drag_on_scrollbar = false;
                 self.position_content_cursor_from_click(me.row, me.column);
                 if double {
                     self.select_and_copy_word_in_content();
@@ -1459,8 +1465,8 @@ impl App {
     /// [`tick_drag_autoscroll`] on the frame tick, so holding the mouse
     /// still at the edge keeps extending the selection.
     fn extend_content_selection_to(&mut self, row: u16, col: u16) {
-        let w = render::term_width() as u16;
-        if col + 1 == w && self.jump_scroll_to_row(row) {
+        if self.drag_on_scrollbar {
+            self.jump_scroll_to_row(row);
             return;
         }
         self.position_content_cursor_from_click(row, col);

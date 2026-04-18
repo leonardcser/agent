@@ -174,6 +174,11 @@ pub struct App {
     /// started. Used by `tick_drag_autoscroll` to ramp the scroll speed
     /// up the longer the cursor stays at the edge.
     pub drag_autoscroll_since: Option<std::time::Instant>,
+    /// When the initial mouse-down landed on the transcript scrollbar
+    /// column, every subsequent drag tick jumps the scroll instead of
+    /// extending a visual selection — even if the pointer wanders off
+    /// the track column.
+    pub drag_on_scrollbar: bool,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -553,6 +558,7 @@ impl App {
             last_click: None,
             mouse_drag_active: false,
             drag_autoscroll_since: None,
+            drag_on_scrollbar: false,
         }
     }
 

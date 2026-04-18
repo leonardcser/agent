@@ -2454,14 +2454,10 @@ impl Screen {
             &ephemeral_lines,
         );
 
-        // Scrollbar on the rightmost column, matching the prompt. Only
-        // drawn when the user has scrolled away from the bottom — a
-        // stationary bar is visual noise when reading the latest output.
-        if clamped > 0 {
-            // For the content pane, `clamped` counts rows scrolled *up*
-            // from the bottom. Invert so the thumb sits at the bottom
-            // when viewing the latest line and at the top when scrolled
-            // to the start.
+        // Scrollbar on the rightmost column, matching the prompt.
+        // Visible whenever content overflows the viewport so the user
+        // has a predictable target to click / drag.
+        if (total_transcript_rows as usize) > viewport_rows as usize {
             let max_scroll =
                 (total_transcript_rows as usize).saturating_sub(viewport_rows as usize);
             let inverted = max_scroll.saturating_sub(clamped as usize);
