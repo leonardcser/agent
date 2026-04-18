@@ -390,10 +390,7 @@ impl App {
                     Some(KeyAction::AcceptGhostText) => {
                         let full = self.input_prediction.take().unwrap();
                         let line = full.lines().next().unwrap_or(&full).to_string();
-                        self.input.apply(crate::pane::Mutation::Replace {
-                            text: line,
-                            cursor: None,
-                        });
+                        crate::api::buf::replace(&mut self.input, line, None);
                         self.screen.mark_dirty();
                         return EventOutcome::Redraw;
                     }
@@ -553,10 +550,7 @@ impl App {
                         combined.push('\n');
                         combined.push_str(&self.input.buf);
                     }
-                    self.input.apply(crate::pane::Mutation::Replace {
-                        text: combined,
-                        cursor: None,
-                    });
+                    crate::api::buf::replace(&mut self.input, combined, None);
                     self.queued_messages.clear();
                     self.screen.mark_dirty();
                 }
@@ -707,10 +701,7 @@ impl App {
         match status {
             Ok(s) if s.success() => match std::fs::read_to_string(tmp.path()) {
                 Ok(new) => {
-                    self.input.apply(crate::pane::Mutation::Replace {
-                        text: new,
-                        cursor: None,
-                    });
+                    crate::api::buf::replace(&mut self.input, new, None);
                 }
                 Err(e) => self.screen.notify_error(format!("read tmp: {e}")),
             },

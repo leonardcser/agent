@@ -15,39 +15,15 @@
 //! doesn't have to be wrapped in a trait object right now.
 
 use crate::buffer::TextBuffer;
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 
-/// A declarative change to a pane's text buffer. Going through
-/// `Pane::apply` instead of writing `buf` / `cpos` directly ensures
-/// side-effects (undo snapshot, completer recompute, selection
-/// clear) run uniformly — no matter which caller produced the edit.
-#[derive(Debug, Clone)]
-pub enum Mutation {
-    /// Replace the entire buffer. Cursor lands at the end by default
-    /// unless `cursor` is supplied.
-    Replace { text: String, cursor: Option<usize> },
-    /// Insert `text` at the current cursor; cursor moves to the end
-    /// of the inserted span. Any active selection is deleted first.
-    InsertText(String),
-    /// Move the cursor without touching the text. Does NOT snapshot
-    /// undo — cursor motion is never an edit.
-    SetCursor(usize),
-    /// Clear the buffer (and cursor, attachments, selection).
-    Clear,
-    /// Append `text` at the end of the buffer; cursor jumps to the
-    /// end. Used for multi-message unqueue paths.
-    Append(String),
-}
-
-/// Common pane interface. Writing to the underlying buffer goes
-/// through `apply()` so undo + completer invariants are uniform; reads
-/// go through `text()`. The richer prompt-specific behaviours
-/// (completer, menu, stash, ghost text) stay on `InputState`.
+/// Common pane interface. Typed buffer mutations live on `crate::api::buf`
+/// — this trait is the minimal shared surface (text access + current
+/// selection range) that the prompt and transcript windows both expose.
 pub trait Pane {
     fn text(&self) -> &TextBuffer;
     fn text_mut(&mut self) -> &mut TextBuffer;
     fn selection(&self) -> Option<(usize, usize)>;
-    fn apply(&mut self, mutation: Mutation);
 }
 
 /// Readonly pane showing the scrollback / transcript. Owns its
@@ -306,6 +282,17 @@ impl ContentPane {
         let Some(vim) = self.vim.as_mut() else {
             return false;
         };
+        // Map arrow keys to j/k/h/l so vertical motion on the readonly
+        // transcript always takes the curswant-preserving path (`j`/`k`
+        // in Normal / Visual), regardless of whether the source was an
+        // arrow key, j/k, the mouse wheel, or Ctrl-U/D/B/F.
+        let key = match key.code {
+            KeyCode::Up => KeyEvent { code: KeyCode::Char('k'), ..key },
+            KeyCode::Down => KeyEvent { code: KeyCode::Char('j'), ..key },
+            KeyCode::Left => KeyEvent { code: KeyCode::Char('h'), ..key },
+            KeyCode::Right => KeyEvent { code: KeyCode::Char('l'), ..key },
+            _ => key,
+        };
         let mut cpos = self.cpos;
         let mut ctx = crate::vim::VimContext {
             buf: &mut self.buffer.buf,
@@ -319,55 +306,37 @@ impl ContentPane {
         !matches!(action, crate::vim::Action::Passthrough)
     }
 
-    /// Move the content cursor by `delta` lines (positive = down).
-    /// Direct scroll — avoids synthesizing vim `j`/`k`, which can
-    /// return Passthrough in some states and prevent motion. We
-    /// compute the new line directly from the current `cpos` line +
-    /// delta, clamp, and reposition.
+    /// Move the content cursor by `delta` lines (positive = down). This
+    /// is the shared code path for vim `j`/`k`, arrow keys, mouse wheel,
+    /// and half/full-page scrolls — each computes a line delta and calls
+    /// here so `curswant` (preferred column) and viewport-follows-cursor
+    /// behave identically regardless of input source.
     pub fn scroll_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
-        if rows.is_empty() {
+        if rows.is_empty() || delta == 0 {
             return;
         }
-        let offsets = Self::line_start_offsets(rows);
-        self.buffer.buf = rows.join("\n");
-
-        // Find current line via cpos (if valid) or derive from viewport state.
-        let total = rows.len();
-        let current_line = if self.cpos > 0 && self.cpos <= self.buffer.buf.len() {
-            match offsets.binary_search(&self.cpos) {
-                Ok(i) => i,
-                Err(i) => i.saturating_sub(1),
+        let offsets = self.mount(rows);
+        let (code, count) = if delta > 0 {
+            (KeyCode::Char('j'), delta as usize)
+        } else {
+            (KeyCode::Char('k'), (-delta) as usize)
+        };
+        let key = KeyEvent {
+            code,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        };
+        for _ in 0..count {
+            self.dispatch_vim_key(key);
+        }
+        // Readonly: a motion that slipped into Insert (via 'a', 'i', …)
+        // must not linger on the content pane.
+        if let Some(vim) = self.vim.as_mut() {
+            if vim.mode() == crate::vim::ViMode::Insert {
+                vim.set_mode(crate::vim::ViMode::Normal);
             }
-        } else {
-            // Stale or zero cpos — use viewport state to locate.
-            let from_bottom = self.cursor_line as usize + self.scroll_offset as usize;
-            (total - 1).saturating_sub(from_bottom).min(total - 1)
-        };
-
-        let target_line = if delta >= 0 {
-            (current_line + delta as usize).min(total - 1)
-        } else {
-            current_line.saturating_sub((-delta) as usize)
-        };
-
-        // Keep horizontal column stable (like vim's curswant).
-        let col = if let Some(line) = rows.get(current_line) {
-            let mut off = self.cpos.saturating_sub(offsets[current_line]).min(line.len());
-            while off > 0 && !line.is_char_boundary(off) {
-                off -= 1;
-            }
-            line[..off].chars().count()
-        } else {
-            0
-        };
-        let target_row = &rows[target_line];
-        let clamped_col = col.min(target_row.chars().count());
-        let byte_off = target_row
-            .char_indices()
-            .nth(clamped_col)
-            .map(|(b, _)| b)
-            .unwrap_or(target_row.len());
-        self.cpos = offsets[target_line] + byte_off;
+        }
         self.sync_from_cpos(rows, &offsets, viewport_rows);
     }
 
@@ -412,20 +381,6 @@ impl Pane for ContentPane {
     }
     fn selection(&self) -> Option<(usize, usize)> {
         ContentPane::selection_range(self)
-    }
-    /// The content pane is readonly: edit-producing mutations are
-    /// ignored. Cursor motion still applies — it's just viewport
-    /// navigation, not an edit.
-    fn apply(&mut self, mutation: Mutation) {
-        match mutation {
-            Mutation::SetCursor(pos) => {
-                self.cpos = pos.min(self.buffer.buf.len());
-            }
-            Mutation::Replace { .. }
-            | Mutation::InsertText(_)
-            | Mutation::Clear
-            | Mutation::Append(_) => {}
-        }
     }
 }
 

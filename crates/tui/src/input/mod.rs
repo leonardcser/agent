@@ -101,9 +101,6 @@ impl crate::pane::Pane for InputState {
     fn selection(&self) -> Option<(usize, usize)> {
         self.selection_range()
     }
-    fn apply(&mut self, mutation: crate::pane::Mutation) {
-        InputState::apply(self, mutation);
-    }
 }
 
 /// What the caller should do after `handle_event`.
@@ -280,56 +277,21 @@ impl InputState {
         // Note: stash and store are intentionally NOT cleared here.
     }
 
-    /// Route a high-level `Mutation` into the prompt's buffer.
-    ///
-    /// Unlike `self.buffer.buf = …` / `self.cpos = …`, this
-    /// path consistently snapshots undo, drops the completer (so it
-    /// re-derives against new text), and clears any shift-selection
-    /// anchor. Every app-level write to the prompt should go through
-    /// here — drive-by assignments were the source of the
-    /// ghost-text / unqueue / resume undo bugs.
-    pub fn apply(&mut self, mutation: crate::pane::Mutation) {
-        use crate::pane::Mutation as M;
-        match mutation {
-            M::Replace { text, cursor } => {
-                self.save_undo();
-                let cpos = cursor.unwrap_or(text.len()).min(text.len());
-                self.buffer.buf = text;
-                self.cpos = cpos;
-                self.buffer.attachment_ids.clear();
-                self.selection_anchor = None;
-                self.from_paste = false;
-                self.completer = None;
-                self.recompute_completer();
-            }
-            M::InsertText(text) => {
-                self.save_undo();
-                if self.selection_range().is_some() {
-                    self.delete_selection();
-                }
-                self.buffer.buf.insert_str(self.cpos, &text);
-                self.cpos += text.len();
-                self.recompute_completer();
-            }
-            M::SetCursor(pos) => {
-                self.cpos = pos.min(self.buffer.buf.len());
-                self.selection_anchor = None;
-            }
-            M::Clear => {
-                self.save_undo();
-                self.clear();
-            }
-            M::Append(text) => {
-                if text.is_empty() {
-                    return;
-                }
-                self.save_undo();
-                self.buffer.buf.push_str(&text);
-                self.cpos = self.buffer.buf.len();
-                self.selection_anchor = None;
-                self.recompute_completer();
-            }
-        }
+    /// Replace the prompt buffer wholesale and re-establish invariants:
+    /// snapshot undo, clear attachments + shift-selection anchor, reset
+    /// paste state, drop the completer so it re-derives. Prefer the
+    /// `crate::api::buf::replace` wrapper at call sites — it reads as
+    /// intent rather than a method on the receiver.
+    pub fn replace_text(&mut self, text: String, cursor: Option<usize>) {
+        self.save_undo();
+        let cpos = cursor.unwrap_or(text.len()).min(text.len());
+        self.buffer.buf = text;
+        self.cpos = cpos;
+        self.buffer.attachment_ids.clear();
+        self.selection_anchor = None;
+        self.from_paste = false;
+        self.completer = None;
+        self.recompute_completer();
     }
 
     /// Toggle stash: if no stash, save current buf and clear; if stashed, restore.

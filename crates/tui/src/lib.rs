@@ -1,4 +1,5 @@
 pub mod alloc;
+pub mod api;
 pub mod app;
 pub mod attachment;
 pub mod buffer;

@@ -296,10 +296,7 @@ impl App {
                     combined.push('\n');
                     combined.push_str(&self.input.buf);
                 }
-                self.input.apply(crate::pane::Mutation::Replace {
-                    text: combined,
-                    cursor: None,
-                });
+                crate::api::buf::replace(&mut self.input, combined, None);
             }
         } else {
             self.screen.set_throbber(render::Throbber::Done);
