@@ -2651,7 +2651,10 @@ impl Screen {
                     Some((s, e))
                 }
             });
-            let line_cursor = if abs_idx == cursor_line && self.focused {
+            let line_cursor = if abs_idx == cursor_line
+                && self.focused
+                && self.last_app_focus == crate::app::AppFocus::Prompt
+            {
                 Some(cursor_char_in_line)
             } else {
                 None

@@ -913,12 +913,14 @@ impl App {
         };
         use crossterm::event::KeyModifiers as M;
         match (k.code, k.modifiers) {
-            // Back to prompt.
+            // Back to prompt — reset scroll so the transcript returns to the bottom.
             (KeyCode::Char('i'), M::NONE)
             | (KeyCode::Char('a'), M::NONE)
             | (KeyCode::Char('o'), M::NONE)
-            | (KeyCode::Esc, _) => {
+            | (KeyCode::Esc, _)
+            | (KeyCode::Char('c'), M::CONTROL) => {
                 self.app_focus = crate::app::AppFocus::Prompt;
+                self.history_scroll_offset = 0;
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
