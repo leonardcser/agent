@@ -1068,12 +1068,17 @@ impl App {
                 ),
                 KeyAction::CopySelection => {
                     if let Some((s, e)) = self.content_pane.selection_range() {
-                        let sel = buf[s..e].to_string();
-                        let n = sel.chars().count();
-                        let _ = crate::app::commands::copy_to_clipboard(&sel);
-                        self.screen.notify(format!("copied {} chars", n));
+                        let s = crate::text_utils::snap(&buf, s);
+                        let e = crate::text_utils::snap(&buf, e);
+                        if s < e {
+                            let sel = buf[s..e].to_string();
+                            let n = sel.chars().count();
+                            let _ = crate::app::commands::copy_to_clipboard(&sel);
+                            self.screen.notify(format!("copied {} chars", n));
+                        }
                     }
-                    None
+                    self.screen.mark_dirty();
+                    return EventOutcome::Redraw;
                 }
                 _ => None,
             };
@@ -1317,6 +1322,12 @@ impl App {
                 // user just clicks without dragging, the subsequent Up
                 // clears visual so nothing gets selected.
                 self.app_focus = crate::app::AppFocus::Content;
+                // Click on the scrollbar column jumps the viewport to
+                // that fraction of the transcript; no cursor/selection.
+                let w = render::term_width() as u16;
+                if me.column + 1 == w && self.jump_scroll_to_row(me.row) {
+                    return EventOutcome::Redraw;
+                }
                 self.position_content_cursor_from_click(me.row, me.column);
                 if double {
                     self.select_and_copy_word_in_content();
@@ -1448,6 +1459,10 @@ impl App {
     /// [`tick_drag_autoscroll`] on the frame tick, so holding the mouse
     /// still at the edge keeps extending the selection.
     fn extend_content_selection_to(&mut self, row: u16, col: u16) {
+        let w = render::term_width() as u16;
+        if col + 1 == w && self.jump_scroll_to_row(row) {
+            return;
+        }
         self.position_content_cursor_from_click(row, col);
     }
 
@@ -1575,6 +1590,32 @@ impl App {
         }
         self.sync_transcript_pin();
         self.screen.mark_dirty();
+    }
+
+    /// Handle a click on the scrollbar column: map `row` (0-based from
+    /// the top of the viewport) to a scroll offset and snap the view
+    /// there. Returns `true` when the click was consumed (scrollbar
+    /// visible + click on a valid row).
+    fn jump_scroll_to_row(&mut self, row: u16) -> bool {
+        let w = render::term_width();
+        let rows = self.screen.full_transcript_text(w);
+        let total = rows.len();
+        let viewport = self.viewport_rows_estimate() as usize;
+        if total <= viewport || row as usize >= viewport {
+            return false;
+        }
+        let max_scroll = total - viewport;
+        // Content pane `scroll_offset` is rows above the bottom of the
+        // viewport. Clicking the top of the track → full scroll_offset,
+        // clicking the bottom → 0.
+        let denom = viewport.saturating_sub(1).max(1);
+        let from_top = (row as usize).saturating_mul(max_scroll) / denom;
+        let scroll = max_scroll.saturating_sub(from_top);
+        self.content_pane.scroll_offset = scroll.min(u16::MAX as usize) as u16;
+        let viewport_u16 = self.viewport_rows_estimate();
+        self.content_pane.resync(&rows, viewport_u16);
+        self.screen.mark_dirty();
+        true
     }
 
     /// Translate a click at screen (row, col) within the content pane

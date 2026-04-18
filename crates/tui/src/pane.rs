@@ -114,10 +114,14 @@ impl ContentPane {
     /// start. Used by double-click.
     pub fn select_word_at(&mut self, cpos: usize) -> Option<(usize, usize)> {
         let (start, end) = self.buffer.word_range_at(cpos)?;
-        self.cpos = end.saturating_sub(1).max(start);
         if let Some(vim) = self.vim.as_mut() {
+            // Vim Visual is char-inclusive at the cursor.
+            self.cpos = end.saturating_sub(1).max(start);
             vim.begin_visual(crate::vim::ViMode::Visual, start);
         } else {
+            // ShiftSelection is half-open [anchor, cpos); place the
+            // cursor past the last char so the whole word is in range.
+            self.cpos = end;
             self.selection.set(Some(start));
         }
         Some((start, end))
@@ -396,6 +400,9 @@ impl ContentPane {
         }
         let line_idx = line_idx.min(rows.len() - 1);
         let offsets = Self::line_start_offsets(rows);
+        // Mount the transcript so downstream word/line motions work
+        // against the same bytes `cpos` indexes into.
+        self.buffer.buf = rows.join("\n");
         // `col` is in display cells (matches click column / cursor_col).
         self.cpos = offsets[line_idx] + cell_to_byte(&rows[line_idx], col);
         self.sync_from_cpos(rows, &offsets, viewport_rows);
