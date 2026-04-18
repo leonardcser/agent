@@ -1048,16 +1048,11 @@ impl App {
     fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         match me.kind {
             MouseEventKind::ScrollUp => {
-                // Scroll wheel moves the content cursor like j/k — the
-                // viewport only scrolls when the cursor is pushed past
-                // an edge. This matches the vim-buffer paradigm.
-                self.app_focus = crate::app::AppFocus::Content;
-                self.move_content_cursor_by_lines(-3);
+                self.scroll_under_mouse(me.row, -3);
                 EventOutcome::Redraw
             }
             MouseEventKind::ScrollDown => {
-                self.app_focus = crate::app::AppFocus::Content;
-                self.move_content_cursor_by_lines(3);
+                self.scroll_under_mouse(me.row, 3);
                 EventOutcome::Redraw
             }
             MouseEventKind::Down(_) => {
@@ -1097,6 +1092,43 @@ impl App {
             }
             _ => EventOutcome::Noop,
         }
+    }
+
+    /// Scroll the pane under the mouse cursor by `delta` lines (positive
+    /// = down). Scrolling over the prompt drives vim j/k on the input
+    /// buffer; scrolling anywhere else drives the content pane. This
+    /// keeps wheel behaviour consistent with the "buffer scroll is
+    /// cursor motion" model used by keyboard navigation.
+    fn scroll_under_mouse(&mut self, row: u16, delta: isize) {
+        if let Some((top, rows, _, _, _)) = self.screen.input_region() {
+            if row >= top && row < top + rows {
+                self.app_focus = crate::app::AppFocus::Prompt;
+                self.scroll_prompt_by_lines(delta);
+                return;
+            }
+        }
+        self.app_focus = crate::app::AppFocus::Content;
+        self.move_content_cursor_by_lines(delta);
+    }
+
+    /// Move the prompt cursor by `delta` logical lines via synthesized
+    /// vim `j`/`k`, mirroring how the content pane scrolls.
+    fn scroll_prompt_by_lines(&mut self, delta: isize) {
+        let (code, count) = if delta >= 0 {
+            (KeyCode::Char('j'), delta as usize)
+        } else {
+            (KeyCode::Char('k'), (-delta) as usize)
+        };
+        let k = KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        };
+        for _ in 0..count {
+            self.input.handle_event(Event::Key(k), None);
+        }
+        self.screen.mark_dirty();
     }
 
     /// Translate a click inside the prompt input region into a char
