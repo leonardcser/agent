@@ -842,24 +842,37 @@ impl App {
                 biased;
 
                 Some(Ok(ev)) = stream_next(&mut term_events) => {
+                    let is_mouse = matches!(ev, event::Event::Mouse(_));
                     if self.dispatch_terminal_event(
                         ev, &mut agent, &mut t, &mut active_dialog,
                     ) {
                         break 'main;
                     }
+                    // For mouse events (scroll, drag) render immediately
+                    // after each one so the user sees continuous feedback
+                    // during bursts instead of a single batched frame.
+                    if is_mouse {
+                        self.render_frame(agent.is_some(), &mut active_dialog);
+                        last_frame = Instant::now();
+                    }
 
                     // Drain buffered terminal events
                     while event::poll(Duration::ZERO).unwrap_or(false) {
                         if let Ok(ev) = event::read() {
+                            let is_mouse = matches!(ev, event::Event::Mouse(_));
                             if self.dispatch_terminal_event(
                                 ev, &mut agent, &mut t, &mut active_dialog,
                             ) {
                                 break 'main;
                             }
+                            if is_mouse {
+                                self.render_frame(agent.is_some(), &mut active_dialog);
+                                last_frame = Instant::now();
+                            }
                         }
                     }
 
-                    // Render immediately after terminal events for responsive typing.
+                    // Final render after non-mouse events for responsive typing.
                     self.render_frame(agent.is_some(), &mut active_dialog);
                     last_frame = Instant::now();
                 }

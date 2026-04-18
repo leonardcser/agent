@@ -138,7 +138,7 @@ impl InputState {
     }
 
     /// Clear any active selection (non-vim). Called on non-shift movement or editing.
-    pub(super) fn clear_selection(&mut self) {
+    pub fn clear_selection(&mut self) {
         self.selection_anchor = None;
     }
 

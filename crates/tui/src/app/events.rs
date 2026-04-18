@@ -1194,8 +1194,24 @@ impl App {
                 EventOutcome::Redraw
             }
             MouseEventKind::Down(_) => {
-                // Clicks focus whichever pane the click lands in, and
-                // position the cursor at the clicked cell.
+                // First, check if the click lands inside the input text
+                // region — that's the only prompt-area hit we position
+                // for. Clicks on queued messages, bars, status line etc.
+                // only change focus.
+                if let Some((top, rows, scroll, gutter, usable)) = self.screen.input_region() {
+                    if me.row >= top && me.row < top + rows {
+                        self.app_focus = crate::app::AppFocus::Prompt;
+                        self.position_prompt_cursor_from_click(
+                            me.row - top,
+                            me.column,
+                            scroll,
+                            gutter,
+                            usable,
+                        );
+                        return EventOutcome::Redraw;
+                    }
+                }
+
                 let (_, height) = self.screen.size();
                 let prompt_rows = self.screen.prev_prompt_rows();
                 let prompt_top = height.saturating_sub(prompt_rows);
@@ -1214,6 +1230,70 @@ impl App {
             }
             _ => EventOutcome::Noop,
         }
+    }
+
+    /// Translate a click inside the prompt input region into a char
+    /// offset in `state.buf` and move `state.cpos` there. `rel_row` is
+    /// rows below the top of the input region; `col` is the screen
+    /// column. Takes current wrap metrics from the last-drawn frame.
+    fn position_prompt_cursor_from_click(
+        &mut self,
+        rel_row: u16,
+        col: u16,
+        scroll: usize,
+        gutter: u16,
+        usable: u16,
+    ) {
+        let target_visual_row = rel_row as usize + scroll;
+        let target_col = col.saturating_sub(gutter) as usize;
+        let usable = usable as usize;
+        let buf = &self.input.buf;
+
+        // Simple char-wrap walk that mirrors `wrap_and_locate_cursor`'s
+        // behaviour for the common case of plain text input.
+        let mut visual_row = 0usize;
+        let mut col_in_line = 0usize;
+        let mut target_byte: Option<usize> = None;
+        let mut last_byte_on_target_row: Option<usize> = None;
+        for (byte_off, ch) in buf.char_indices() {
+            if visual_row == target_visual_row {
+                last_byte_on_target_row = Some(byte_off);
+                if col_in_line == target_col {
+                    target_byte = Some(byte_off);
+                    break;
+                }
+            }
+            if ch == '\n' {
+                if visual_row == target_visual_row && target_byte.is_none() {
+                    target_byte = Some(byte_off);
+                    break;
+                }
+                visual_row += 1;
+                col_in_line = 0;
+                continue;
+            }
+            col_in_line += 1;
+            if col_in_line >= usable {
+                if visual_row == target_visual_row && target_byte.is_none() {
+                    // Past the end of target row without hitting target
+                    // col — clamp to end of line.
+                    target_byte = Some(byte_off + ch.len_utf8());
+                    break;
+                }
+                visual_row += 1;
+                col_in_line = 0;
+            }
+        }
+        let cpos = target_byte
+            .or_else(|| {
+                last_byte_on_target_row
+                    .map(|b| b + buf[b..].chars().next().map_or(0, |c| c.len_utf8()))
+            })
+            .unwrap_or(buf.len());
+        self.input.cpos = cpos.min(buf.len());
+        // Clear any vim pending-op and drop visual selection.
+        self.input.clear_selection();
+        self.screen.mark_dirty();
     }
 
     /// Translate a click at screen (row, col) within the content pane

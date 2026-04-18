@@ -1336,6 +1336,15 @@ impl Screen {
         self.prompt.prev_rows
     }
 
+    /// Screen region `(top_row, rows, scroll_offset, gutter, usable_width)`
+    /// occupied by the input text area in the last frame. Used by mouse
+    /// hit-testing for click-to-position on the prompt.
+    pub fn input_region(&self) -> Option<(u16, u16, usize, u16, u16)> {
+        self.prompt
+            .input_region
+            .map(|r| (r.top_row, r.rows, r.scroll_offset, r.gutter, r.usable_width))
+    }
+
     /// Plain-text rendering of the last-painted viewport rows (top to
     /// bottom). Used by the content pane's vim-style motions and yank.
     pub fn viewport_text_rows(&self) -> &[String] {
@@ -2852,6 +2861,23 @@ impl Screen {
         let scrollbar =
             super::scrollbar::Scrollbar::new(total_content_rows, content_rows, scroll_offset);
 
+        let input_top_row = out.cursor_row;
+        let painted_input_rows = if show_prediction {
+            0
+        } else {
+            visual_lines
+                .iter()
+                .skip(scroll_offset)
+                .take(content_rows)
+                .count() as u16
+        };
+        self.prompt.input_region = Some(super::prompt::InputRegion {
+            top_row: input_top_row,
+            rows: painted_input_rows,
+            scroll_offset,
+            gutter: 1,
+            usable_width: usable as u16,
+        });
         for (li, (line, kinds)) in visual_lines
             .iter()
             .skip(scroll_offset)
