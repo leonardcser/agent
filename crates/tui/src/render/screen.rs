@@ -1634,6 +1634,32 @@ impl Screen {
         self.history.set_status(id, status);
     }
 
+    /// Replace a block's content in place. Preserves its `BlockId` so
+    /// long-lived handles (streaming writers) stay valid across
+    /// mutations; the layout cache auto-invalidates via the updated
+    /// content hash in `LayoutKey`.
+    pub fn rewrite_block(&mut self, id: BlockId, block: Block) {
+        self.history.rewrite(id, block);
+        self.prompt.dirty = true;
+    }
+
+    /// Push `block` into the transcript and mark it as `Streaming`.
+    /// Returns the fresh `BlockId` so the caller can keep it as a
+    /// handle for follow-up `rewrite_block` calls until the stream
+    /// closes and flips to `Status::Done`.
+    pub fn push_streaming(&mut self, block: Block) -> BlockId {
+        let id = self.history.push(block);
+        self.history.set_status(id, Status::Streaming);
+        self.prompt.dirty = true;
+        id
+    }
+
+    /// `BlockId`s of blocks currently in the `Streaming` state, in
+    /// insertion order. Empty when no stream is live.
+    pub fn streaming_block_ids(&self) -> Vec<BlockId> {
+        self.history.streaming_block_ids().collect()
+    }
+
     /// Mutate a committed tool's state and invalidate its layout cache so
     /// the next paint reflects the change. Returns true if `call_id` was
     /// found in history.

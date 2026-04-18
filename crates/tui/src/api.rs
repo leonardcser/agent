@@ -40,7 +40,7 @@ pub mod buf {
 /// `rewrite`, `invoke`, and per-block keymaps arrive in Stage 3.5's
 /// subsequent slices as the `active_*` → live-block collapse progresses.
 pub mod block {
-    use crate::render::{BlockId, Screen, Status, ViewState};
+    use crate::render::{Block, BlockId, Screen, Status, ViewState};
 
     /// Current view state of a block.
     pub fn view_state(screen: &Screen, id: BlockId) -> ViewState {
@@ -61,6 +61,27 @@ pub mod block {
     /// Set a block's lifecycle status.
     pub fn set_status(screen: &mut Screen, id: BlockId, status: Status) {
         screen.set_block_status(id, status);
+    }
+
+    /// Push a new `Streaming` block onto the transcript and return its
+    /// `BlockId`. The id is stable across subsequent `rewrite` calls —
+    /// the canonical handle for live-updating a block as a stream
+    /// arrives.
+    pub fn push_streaming(screen: &mut Screen, block: Block) -> BlockId {
+        screen.push_streaming(block)
+    }
+
+    /// Replace the content of an existing block in place. Preserves
+    /// `BlockId`, `Status`, and `ViewState`; the layout cache
+    /// auto-invalidates via the content-hash component of `LayoutKey`.
+    pub fn rewrite(screen: &mut Screen, id: BlockId, block: Block) {
+        screen.rewrite_block(id, block);
+    }
+
+    /// `BlockId`s of blocks currently in `Status::Streaming`, in
+    /// transcript order.
+    pub fn streaming_ids(screen: &Screen) -> Vec<BlockId> {
+        screen.streaming_block_ids()
     }
 }
 

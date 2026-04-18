@@ -496,6 +496,40 @@ impl BlockHistory {
         self.push(block)
     }
 
+    /// Replace the content of an existing block in place. Preserves
+    /// `BlockId`, `Status`, and `ViewState`; updates the cached content
+    /// hash so the next layout-cache lookup misses stale entries
+    /// automatically via `LayoutKey::content_hash`.
+    ///
+    /// The canonical path for streaming updates: the live streamer
+    /// holds a `BlockId` from `push`, then calls `rewrite` as each
+    /// chunk arrives. No-ops when the block doesn't exist (e.g. it
+    /// was truncated by a rewind while a stream was in flight).
+    pub(super) fn rewrite(&mut self, id: BlockId, block: Block) {
+        if !self.blocks.contains_key(&id) {
+            return;
+        }
+        let hash = block.content_hash();
+        if self.content_hashes.get(&id) == Some(&hash) {
+            // Same content — nothing to do, cache stays warm.
+            self.blocks.insert(id, block);
+            return;
+        }
+        self.blocks.insert(id, block);
+        self.content_hashes.insert(id, hash);
+        self.cache_dirty = true;
+    }
+
+    /// Iterator over `BlockId`s currently in the `Streaming` state, in
+    /// insertion order. Callers use this to find "the live block" for
+    /// an in-flight stream without tracking separate handles.
+    pub(super) fn streaming_block_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
+        self.order
+            .iter()
+            .copied()
+            .filter(|id| matches!(self.status(*id), Status::Streaming))
+    }
+
     /// `BlockId` of the most recent `Block::ToolCall` whose `call_id` matches.
     pub(super) fn tool_block_id(&self, call_id: &str) -> Option<BlockId> {
         self.order.iter().rev().copied().find(|id| {
@@ -1096,6 +1130,65 @@ mod tests {
         assert!(keys.contains(&k100), "expected width=100 cached: {keys:?}");
         assert!(keys.contains(&k80), "expected width=80 cached: {keys:?}");
         assert!(keys.len() <= BlockArtifact::MAX_LAYOUTS);
+    }
+
+    #[test]
+    fn rewrite_preserves_id_and_invalidates_layout_by_hash() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text {
+            content: "hello".into(),
+        });
+
+        let mut sink = RenderOut::buffer();
+        history.render(&mut sink, 80, true);
+        let h0 = history.content_hash(id);
+        assert!(!history.artifacts.get(&id).unwrap().is_empty());
+
+        history.rewrite(
+            id,
+            Block::Text {
+                content: "hello world".into(),
+            },
+        );
+        let h1 = history.content_hash(id);
+        assert_ne!(h0, h1, "content hash must update on rewrite");
+        assert_eq!(
+            history.order.iter().copied().collect::<Vec<_>>(),
+            vec![id],
+            "rewrite must not change order"
+        );
+
+        history.flushed = 0;
+        history.render(&mut sink, 80, true);
+        let keys: Vec<u64> = history
+            .artifacts
+            .get(&id)
+            .unwrap()
+            .layouts
+            .iter()
+            .map(|(k, _)| k.content_hash)
+            .collect();
+        assert!(keys.contains(&h1), "new content hash cached: {keys:?}");
+    }
+
+    #[test]
+    fn streaming_block_ids_filters_on_status() {
+        let mut history = BlockHistory::new();
+        let a = history.push(Block::Text {
+            content: "a".into(),
+        });
+        let b = history.push(Block::Text {
+            content: "b".into(),
+        });
+        history.set_status(b, Status::Streaming);
+        let streaming: Vec<BlockId> = history.streaming_block_ids().collect();
+        assert_eq!(streaming, vec![b]);
+        history.set_status(a, Status::Streaming);
+        let streaming: Vec<BlockId> = history.streaming_block_ids().collect();
+        assert_eq!(streaming, vec![a, b]);
+        history.set_status(b, Status::Done);
+        let streaming: Vec<BlockId> = history.streaming_block_ids().collect();
+        assert_eq!(streaming, vec![a]);
     }
 
     #[test]
