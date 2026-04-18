@@ -2439,10 +2439,16 @@ impl Screen {
         // drawn when the user has scrolled away from the bottom — a
         // stationary bar is visual noise when reading the latest output.
         if clamped > 0 {
+            // `history_scroll_offset` (→ `clamped`) counts rows scrolled
+            // UP from the bottom, but `Scrollbar` expects offset from
+            // the top. Invert so the thumb rises as the user scrolls up.
+            let max_scroll =
+                (total_transcript_rows as usize).saturating_sub(viewport_rows as usize);
+            let scroll_from_top = max_scroll.saturating_sub(clamped as usize);
             let scrollbar = super::scrollbar::Scrollbar::new(
                 total_transcript_rows as usize,
                 viewport_rows as usize,
-                clamped as usize,
+                scroll_from_top,
             );
             super::scrollbar::paint_column(
                 out,
