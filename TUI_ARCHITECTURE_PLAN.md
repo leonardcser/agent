@@ -290,7 +290,7 @@ Do all five `active_*` migrations in **one** coherent patch, not per-variant dua
 - ✅ **B1**: `render/viewport.rs` ships `ViewportGeom` with `max_scroll` / `clamped_scroll` / `skip_from_top` / `leading_blanks` / `row_of_line` / `line_of_row` / `stuck_to_bottom` / `apply_growth`.
 - ✅ **B2**: 13 unit tests — boundary matrix plus a parametric `matrix_row_line_roundtrip` that exhaustively validates `row_of_line ∘ line_of_row = id` across every (total, scroll) combination the plan calls out.
 - ✅ **B3**: `BlockHistory::paint_viewport`, `BlockHistory::viewport_text`, `Screen::draw_viewport_frame` (scrollbar + cursor sites), `Screen::draw_viewport_dialog_frame`, `TranscriptWindow::reanchor_to_visible_row`, `App::content_visual_range`, and `App::position_content_cursor_from_hit` all read from `ViewportGeom`. Remaining bottom-relative cursor_line math is now a pure row-index convention — not viewport geometry — and stays on the window.
-- ⬜ **B4**: the two cursor bugs (j/k locked on resume; click offset inverted on short buffers) have not been reproduced or regression-tested against the new geom; deferred as a follow-up audit task.
+- ⚠️ **B4**: short-buffer click-offset bug fixed — `position_content_cursor_from_hit` now snaps leading-blank clicks to the first content line (regression test in `viewport::leading_blank_click_snaps_to_first_line`). The j/k-locked-on-resume bug is intermittent and hasn't been reproduced against the new geom; deferred as a follow-up audit.
 
 ---
 
@@ -321,7 +321,7 @@ Do all five `active_*` migrations in **one** coherent patch, not per-variant dua
 - ✅ **D4**: `run_command`, `run_keymap`, `has_command`, `command_names` let the Rust dispatcher check for Lua bindings before falling back to built-in handlers.
 - ✅ **D5**: `smelt.defer(ms, fn)` posts to `pending_timers`; `LuaRuntime::tick_timers` fires due handlers on each app tick. Pending-ops queue is the same `pending_notifications` / `lua_errors` channel.
 - ✅ **D6**: every call path is wrapped so Lua errors land in `lua_errors`; the app drains them via `drain_errors` and surfaces the first as a notification. `load_error` captures `init.lua` syntax failures.
-- ⬜ **Wire-up into `App`**: the runtime itself is green (8 `lua::tests::*` unit tests), but the `App` struct does not yet instantiate `LuaRuntime` in its constructor and does not route its dispatchers through `run_command` / `run_keymap`. That bind happens in a follow-up that needs to thread `Arc<LuaRuntime>` through the event loop.
+- ✅ **Wire-up into `App`**: `App::lua` is a directly-owned `LuaRuntime`. `run_command` emits `cmd_pre`, routes through the Lua registry if a name is bound, falls through to the built-in `handle_command`, then emits `cmd_post` and drains notifications/errors. `start_agent` / `finish_turn` emit `stream_start` / `stream_end`. The app loop pumps `tick_timers`, drains newly finished blocks (→ `block_done` autocmd), and surfaces pending notifications + errors every iteration.
 
 ## Phase E — Dogfood
 
