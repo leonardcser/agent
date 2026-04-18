@@ -983,11 +983,150 @@ impl App {
                 EventOutcome::Redraw
             }
             (KeyCode::Char('$'), _) | (KeyCode::End, _) => {
-                self.history_cursor_col = self.last_width.saturating_sub(1);
+                self.history_cursor_col = self.current_line_text_len().saturating_sub(1);
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            // First non-blank of current line.
+            (KeyCode::Char('^'), _) => {
+                let text = self.current_line_text();
+                self.history_cursor_col = text
+                    .char_indices()
+                    .find(|(_, c)| !c.is_whitespace())
+                    .map(|(i, _)| i as u16)
+                    .unwrap_or(0);
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            // Word motions — simplistic: skip non-word then skip word.
+            (KeyCode::Char('w'), M::NONE) => {
+                self.history_cursor_col =
+                    word_forward_start(&self.current_line_text(), self.history_cursor_col as usize)
+                        as u16;
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            (KeyCode::Char('b'), M::NONE) => {
+                self.history_cursor_col = word_backward_start(
+                    &self.current_line_text(),
+                    self.history_cursor_col as usize,
+                ) as u16;
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            (KeyCode::Char('e'), M::NONE) => {
+                self.history_cursor_col =
+                    word_forward_end(&self.current_line_text(), self.history_cursor_col as usize)
+                        as u16;
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            // Visual mode.
+            (KeyCode::Char('v'), M::NONE) => {
+                self.history_visual = match self.history_visual {
+                    Some(v) if v.kind == crate::app::HistoryVisualKind::Char => None,
+                    _ => Some(crate::app::HistoryVisual {
+                        anchor_line: self.history_cursor_line,
+                        anchor_col: self.history_cursor_col,
+                        kind: crate::app::HistoryVisualKind::Char,
+                    }),
+                };
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            (KeyCode::Char('V'), _) => {
+                self.history_visual = match self.history_visual {
+                    Some(v) if v.kind == crate::app::HistoryVisualKind::Line => None,
+                    _ => Some(crate::app::HistoryVisual {
+                        anchor_line: self.history_cursor_line,
+                        anchor_col: 0,
+                        kind: crate::app::HistoryVisualKind::Line,
+                    }),
+                };
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            (KeyCode::Esc, _) => {
+                self.history_visual = None;
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            // Yank current selection (or current line on `yy`).
+            (KeyCode::Char('y'), M::NONE) => {
+                let text = self.collect_yank_text();
+                if !text.is_empty() {
+                    let _ = crate::app::commands::copy_to_clipboard(&text);
+                    self.screen
+                        .notify(format!("yanked {} chars", text.chars().count()));
+                }
+                self.history_visual = None;
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
             _ => EventOutcome::Noop,
+        }
+    }
+
+    fn current_line_text(&self) -> String {
+        let rows = self.screen.viewport_text_rows();
+        if rows.is_empty() {
+            return String::new();
+        }
+        let max_idx = rows.len().saturating_sub(1);
+        let idx = max_idx.saturating_sub(self.history_cursor_line as usize);
+        rows.get(idx).cloned().unwrap_or_default()
+    }
+
+    fn current_line_text_len(&self) -> u16 {
+        self.current_line_text().chars().count() as u16
+    }
+
+    /// Collect plain text for the active visual selection. Returns the
+    /// current line when no selection is active (single-line yank).
+    fn collect_yank_text(&self) -> String {
+        let rows = self.screen.viewport_text_rows();
+        if rows.is_empty() {
+            return String::new();
+        }
+        let max_idx = rows.len().saturating_sub(1);
+        let cur_idx = max_idx.saturating_sub(self.history_cursor_line as usize);
+        match self.history_visual {
+            None => rows.get(cur_idx).cloned().unwrap_or_default(),
+            Some(v) => {
+                let anchor_idx = max_idx.saturating_sub(v.anchor_line as usize);
+                let (lo, hi) = if cur_idx <= anchor_idx {
+                    (cur_idx, anchor_idx)
+                } else {
+                    (anchor_idx, cur_idx)
+                };
+                match v.kind {
+                    crate::app::HistoryVisualKind::Line => rows[lo..=hi].join("\n"),
+                    crate::app::HistoryVisualKind::Char => {
+                        // Character-wise selection on a single line; if
+                        // the range spans lines, include full inner
+                        // lines and clip the endpoints.
+                        if lo == hi {
+                            let line = &rows[lo];
+                            let (a, b) = (v.anchor_col as usize, self.history_cursor_col as usize);
+                            let (s, e) = if a <= b { (a, b) } else { (b, a) };
+                            char_slice_inclusive(line, s, e)
+                        } else {
+                            let mut parts = Vec::with_capacity(hi - lo + 1);
+                            let (start_col, end_col) = if cur_idx <= anchor_idx {
+                                (self.history_cursor_col as usize, v.anchor_col as usize)
+                            } else {
+                                (v.anchor_col as usize, self.history_cursor_col as usize)
+                            };
+                            parts.push(char_slice_from(&rows[lo], start_col));
+                            for r in &rows[lo + 1..hi] {
+                                parts.push(r.clone());
+                            }
+                            parts.push(char_slice_to_inclusive(&rows[hi], end_col));
+                            parts.join("\n")
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1083,3 +1222,77 @@ impl App {
 
 /// Max inter-key gap between `Ctrl-W` and its follow-up key.
 const PANE_CHORD_WINDOW: Duration = Duration::from_millis(750);
+
+/// Return the char index of the first character of the word that
+/// follows the word at `col` (vim `w`). Stops at end of line.
+fn word_forward_start(line: &str, col: usize) -> usize {
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return 0;
+    }
+    let mut i = col.min(n.saturating_sub(1));
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    // Skip current word class.
+    let cur_word = is_word(chars[i]);
+    while i < n && is_word(chars[i]) == cur_word && !chars[i].is_whitespace() {
+        i += 1;
+    }
+    while i < n && chars[i].is_whitespace() {
+        i += 1;
+    }
+    i.min(n.saturating_sub(1))
+}
+
+fn word_backward_start(line: &str, col: usize) -> usize {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.is_empty() {
+        return 0;
+    }
+    let mut i = col.min(chars.len().saturating_sub(1));
+    if i == 0 {
+        return 0;
+    }
+    i -= 1;
+    while i > 0 && chars[i].is_whitespace() {
+        i -= 1;
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let cur_word = is_word(chars[i]);
+    while i > 0 && is_word(chars[i - 1]) == cur_word && !chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    i
+}
+
+fn word_forward_end(line: &str, col: usize) -> usize {
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return 0;
+    }
+    let mut i = col.min(n.saturating_sub(1));
+    if i + 1 < n {
+        i += 1;
+    }
+    while i < n && chars[i].is_whitespace() {
+        i += 1;
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    while i + 1 < n && is_word(chars[i + 1]) == is_word(chars[i]) && !chars[i + 1].is_whitespace() {
+        i += 1;
+    }
+    i.min(n.saturating_sub(1))
+}
+
+fn char_slice_inclusive(s: &str, start: usize, end: usize) -> String {
+    s.chars().skip(start).take(end + 1 - start).collect()
+}
+
+fn char_slice_from(s: &str, start: usize) -> String {
+    s.chars().skip(start).collect()
+}
+
+fn char_slice_to_inclusive(s: &str, end: usize) -> String {
+    s.chars().take(end + 1).collect()
+}

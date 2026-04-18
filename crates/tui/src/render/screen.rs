@@ -95,6 +95,10 @@ pub struct Screen {
     last_scroll_offset: u16,
     last_cursor_line: u16,
     last_cursor_col: u16,
+    /// Plain-text snapshot of each visible row (top to bottom) captured
+    /// during `draw_viewport_frame`. Used by the content pane's motion
+    /// handlers and yank to reason over what the user actually sees.
+    last_viewport_text: Vec<String>,
     /// Ephemeral btw side-question state, rendered above the prompt.
     btw: Option<BtwBlock>,
     /// Ephemeral notification shown above the prompt, dismissed on any key.
@@ -171,6 +175,7 @@ impl Screen {
             last_scroll_offset: 0,
             last_cursor_line: 0,
             last_cursor_col: 0,
+            last_viewport_text: Vec::new(),
             btw: None,
             notification: None,
             task_label: None,
@@ -1313,6 +1318,12 @@ impl Screen {
         self.prompt.prev_rows
     }
 
+    /// Plain-text rendering of the last-painted viewport rows (top to
+    /// bottom). Used by the content pane's vim-style motions and yank.
+    pub fn viewport_text_rows(&self) -> &[String] {
+        &self.last_viewport_text
+    }
+
     pub fn working_throbber(&self) -> Option<Throbber> {
         self.working.throbber
     }
@@ -2303,6 +2314,14 @@ impl Screen {
             0,
             viewport_rows,
             scroll_offset,
+            &ephemeral_lines,
+        );
+        // Record plain text for the content pane's motion handlers.
+        self.last_viewport_text = self.history.viewport_text(
+            width,
+            self.show_thinking,
+            viewport_rows,
+            clamped,
             &ephemeral_lines,
         );
 

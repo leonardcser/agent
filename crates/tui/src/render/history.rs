@@ -610,6 +610,88 @@ impl BlockHistory {
     /// transcript stay cleared).
     ///
     /// Returns the clamped scroll offset (for the caller to sync state).
+    /// Mirror of `paint_viewport`'s slicing that returns the plain-text
+    /// of each visible row. Used by the content pane to reason over
+    /// what the user sees (motions, yank).
+    pub(super) fn viewport_text(
+        &mut self,
+        width: usize,
+        show_thinking: bool,
+        viewport_rows: u16,
+        scroll_offset: u16,
+        extra_lines: &[super::display::DisplayLine],
+    ) -> Vec<String> {
+        if viewport_rows == 0 {
+            return Vec::new();
+        }
+        let key = LayoutKey {
+            width: width as u16,
+            show_thinking,
+        };
+        let mut per_block: Vec<(u16, u16)> = Vec::with_capacity(self.order.len());
+        let mut total: u32 = 0;
+        for i in 0..self.order.len() {
+            let gap = self.block_gap(i);
+            let rows = self.ensure_rows(i, key);
+            total += gap as u32 + rows as u32;
+            per_block.push((gap, rows));
+        }
+        total += extra_lines.len() as u32;
+        let total = total.min(u16::MAX as u32) as u16;
+
+        let max_scroll = total.saturating_sub(viewport_rows);
+        let scroll = scroll_offset.min(max_scroll);
+        let skip = total.saturating_sub(viewport_rows).saturating_sub(scroll);
+
+        let mut out: Vec<String> = Vec::with_capacity(viewport_rows as usize);
+        let mut remaining_skip = skip as u32;
+
+        let collect_display = |line: &super::display::DisplayLine| -> String {
+            let mut s = String::new();
+            for span in &line.spans {
+                s.push_str(&span.text);
+            }
+            s
+        };
+
+        'blocks: for (i, (gap, _rows)) in per_block.iter().enumerate() {
+            for _ in 0..*gap {
+                if remaining_skip > 0 {
+                    remaining_skip -= 1;
+                    continue;
+                }
+                if out.len() as u16 >= viewport_rows {
+                    break 'blocks;
+                }
+                out.push(String::new());
+            }
+            let id = self.order[i];
+            let display = self.artifacts.get(&id).and_then(|a| a.get(key));
+            let Some(display) = display else { continue };
+            for line in &display.lines {
+                if remaining_skip > 0 {
+                    remaining_skip -= 1;
+                    continue;
+                }
+                if out.len() as u16 >= viewport_rows {
+                    break 'blocks;
+                }
+                out.push(collect_display(line));
+            }
+        }
+        for line in extra_lines {
+            if remaining_skip > 0 {
+                remaining_skip -= 1;
+                continue;
+            }
+            if out.len() as u16 >= viewport_rows {
+                break;
+            }
+            out.push(collect_display(line));
+        }
+        out
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn paint_viewport(
         &mut self,

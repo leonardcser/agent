@@ -167,6 +167,23 @@ pub struct App {
     pub history_cursor_line: u16,
     /// Cursor column within the history viewport (0-indexed).
     pub history_cursor_col: u16,
+    /// Active visual selection in the content pane.
+    pub history_visual: Option<HistoryVisual>,
+}
+
+/// Visual selection state in the content pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryVisual {
+    /// Anchor (line_from_bottom, col) captured when visual mode started.
+    pub anchor_line: u16,
+    pub anchor_col: u16,
+    pub kind: HistoryVisualKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryVisualKind {
+    Char,
+    Line,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -540,6 +557,7 @@ impl App {
             history_scroll_offset: 0,
             history_cursor_line: 0,
             history_cursor_col: 0,
+            history_visual: None,
         }
     }
 

@@ -704,10 +704,13 @@ impl io::Write for RenderOut {
     }
 }
 
-/// Colors for the software block cursor. Consistent across panes and
-/// themes: black foreground on a white background.
+/// Colors for the software block cursor, adapted to light/dark theme.
 pub(super) fn cursor_colors() -> (Color, Color) {
-    (Color::Black, Color::White)
+    if theme::is_light() {
+        (Color::White, Color::Black)
+    } else {
+        (Color::Black, Color::White)
+    }
 }
 
 /// Draw a software cursor (block) at the given position.
