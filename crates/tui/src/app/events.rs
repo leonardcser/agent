@@ -958,41 +958,28 @@ impl App {
     }
 
     /// Move the content-pane cursor by `delta` lines (positive = down,
-    /// negative = up), clamping to the transcript range and letting the
-    /// scroll offset follow the cursor at the edges of the viewport.
+    /// negative = up) by synthesizing vim `j`/`k` keys and feeding them
+    /// through `handle_content_vim_key`. This reuses vim's own vertical
+    /// motion — including `curswant` (desired column) tracking — so
+    /// mouse-wheel scroll, Ctrl-U/Ctrl-D, arrow keys, and j/k all take
+    /// the same code path.
     fn move_content_cursor_by_lines(&mut self, delta: isize) {
-        let w = render::term_width();
-        let rows = self.screen.full_transcript_text(w);
-        if rows.is_empty() {
-            return;
-        }
-        let total = rows.len();
-        let (cur_line, cur_col) = self.current_content_line_col(&rows);
-        let new_line = (cur_line as isize + delta).max(0).min(total as isize - 1) as usize;
-        self.set_content_cursor_to_line_col(&rows, new_line, cur_col);
-    }
-
-    /// Resolve the current `content_cpos` into `(line_idx, col)`
-    /// coordinates against the transcript row list.
-    fn current_content_line_col(&self, rows: &[String]) -> (usize, usize) {
-        if rows.is_empty() {
-            return (0, 0);
-        }
-        let mut acc = 0usize;
-        let mut offsets = Vec::with_capacity(rows.len());
-        for r in rows {
-            offsets.push(acc);
-            acc += r.len() + 1;
-        }
-        let buf_len = acc.saturating_sub(1);
-        let cpos = self.content_cpos.min(buf_len);
-        let line_idx = match offsets.binary_search(&cpos) {
-            Ok(i) => i,
-            Err(i) => i.saturating_sub(1),
+        let (code, count) = if delta >= 0 {
+            (KeyCode::Char('j'), delta as usize)
+        } else {
+            (KeyCode::Char('k'), (-delta) as usize)
         };
-        let line_start = offsets[line_idx];
-        let col = rows[line_idx][..cpos - line_start].chars().count();
-        (line_idx, col)
+        let k = KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        };
+        for _ in 0..count {
+            if !self.handle_content_vim_key(k) {
+                break;
+            }
+        }
     }
 
     /// Place the content cursor at `(line_idx, col)` (col measured in
