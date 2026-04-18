@@ -976,6 +976,8 @@ pub(super) struct ActiveText {
     pub(super) table_rows: Vec<String>,
     /// Cached count of non-separator data rows (avoids recomputing per frame).
     pub(super) table_data_rows: usize,
+    /// Streaming block id for the in-flight paragraph (if any).
+    pub(super) streaming_id: Option<BlockId>,
 }
 
 #[cfg(test)]

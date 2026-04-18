@@ -966,6 +966,7 @@ impl Screen {
             in_code_block: None,
             table_rows: Vec::new(),
             table_data_rows: 0,
+            streaming_id: None,
         });
 
         for ch in delta.chars() {
@@ -979,7 +980,36 @@ impl Screen {
                 at.current_line.push(ch);
             }
         }
+        // Reflect the in-flight paragraph (including the current line)
+        // as a streaming `Block::Text` so it flows through
+        // `paint_viewport` like any other block.
+        Self::sync_streaming_text(&mut self.history, at);
         self.prompt.dirty = true;
+    }
+
+    fn sync_streaming_text(history: &mut BlockHistory, at: &mut ActiveText) {
+        // Tables and code blocks have their own committed blocks; only
+        // the plain-paragraph buffer needs a streaming reflection.
+        if at.in_code_block.is_some() || !at.table_rows.is_empty() {
+            return;
+        }
+        let preview = match (at.paragraph.is_empty(), at.current_line.is_empty()) {
+            (true, true) => None,
+            (true, false) => Some(at.current_line.clone()),
+            (false, true) => Some(at.paragraph.clone()),
+            (false, false) => Some(format!("{}\n{}", at.paragraph, at.current_line)),
+        };
+        let Some(content) = preview.filter(|t| !t.trim().is_empty()) else {
+            return;
+        };
+        let block = Block::Text { content };
+        if let Some(id) = at.streaming_id {
+            history.rewrite(id, block);
+        } else {
+            let id = history.push(block);
+            history.set_status(id, Status::Streaming);
+            at.streaming_id = Some(id);
+        }
     }
 
     fn process_text_line(history: &mut BlockHistory, at: &mut ActiveText, line: &str) {
@@ -1043,11 +1073,21 @@ impl Screen {
 
     fn commit_paragraph(history: &mut BlockHistory, at: &mut ActiveText) {
         let para = std::mem::take(&mut at.paragraph);
-        let trimmed = para.trim();
-        if !trimmed.is_empty() {
-            history.push(Block::Text {
-                content: trimmed.to_string(),
-            });
+        let trimmed = para.trim().to_string();
+        if let Some(id) = at.streaming_id.take() {
+            if trimmed.is_empty() {
+                history.rewrite(
+                    id,
+                    Block::Text {
+                        content: String::new(),
+                    },
+                );
+            } else {
+                history.rewrite(id, Block::Text { content: trimmed });
+            }
+            history.set_status(id, Status::Done);
+        } else if !trimmed.is_empty() {
+            history.push(Block::Text { content: trimmed });
         }
     }
 
@@ -2007,14 +2047,16 @@ impl Screen {
             }
         }
 
-        // ── Active text (paragraph, code line, or partial table) ───
+        // ── Active text (partial table or in-code-block line only) ─
+        // The plain-paragraph stream lives as a streaming `Block::Text`
+        // in history via `sync_streaming_text`; only in-flight tables
+        // and code lines still render through the overlay until the
+        // block pushes them whole.
         if let Some(ref at) = self.active_text {
             let in_table =
                 !at.table_rows.is_empty() || at.current_line.trim_start().starts_with('|');
 
             let block_opt: Option<Block> = if in_table {
-                // Partial markdown table rendered live. Paint cropping
-                // handles overflow; commits normally when complete.
                 let mut total = at.table_rows.iter().map(|r| r.len() + 1).sum::<usize>();
                 let cur_trim = at.current_line.trim_start();
                 let append_cur = cur_trim.starts_with('|');
@@ -2044,17 +2086,6 @@ impl Screen {
                     content: at.current_line.clone(),
                     lang: at.in_code_block.clone().unwrap_or_default(),
                 })
-            } else if !at.paragraph.is_empty() || !at.current_line.trim().is_empty() {
-                let mut content =
-                    String::with_capacity(at.paragraph.len() + at.current_line.len() + 1);
-                content.push_str(&at.paragraph);
-                if !at.current_line.is_empty() {
-                    if !content.is_empty() {
-                        content.push('\n');
-                    }
-                    content.push_str(&at.current_line);
-                }
-                (!content.trim().is_empty()).then_some(Block::Text { content })
             } else {
                 None
             };

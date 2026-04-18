@@ -224,13 +224,12 @@ Five phases. Each is shippable. Each phase lists what it **deletes** alongside w
 
 The scrollback-commit rendering model is dead. Alt-buffer repaints every frame; there is no terminal-side scrollback that can drift. Every abstraction that defended the old invariants is dead weight and has to go before anything else. This phase deletes, it doesn't add.
 
-**Session-one status (shipped)**
-- ✅ **A2** (PurgeRedraw): `Action::PurgeRedraw`, `KeyAction::PurgeRedraw`, `purge_redraw_debounced`, `last_purge_redraw`, `PURGE_REDRAW_DEBOUNCE` all deleted. Ctrl+L folds into `KeyAction::Redraw` → `Action::Redraw` → `screen.redraw()`/`mark_dirty()`. `Screen::redraw` no longer queues `Clear::All`.
-- ✅ **A4** (obsolete tests): `scrollback_integrity.rs` (1851 lines) and `overlay_edge_cases.rs` (398 lines) deleted in full. Two tests in `dialog_lifecycle.rs` (`fullscreen_dialog_scrollback_integrity`, `fullscreen_dialog_focus_event_no_duplicate`, `tool_after_streaming_does_not_move_prompt_up`) removed. `dialog_with_streaming_text_and_tool` removed from `dialog_overlay_interaction.rs`. `assert_scrollback_integrity`, `assert_visible_matches_fresh_render`, `compare_and_panic`, `build_diff`, `fresh_render*`, `stream_and_flush`, `stream_lines_with_ticks` deleted from `harness/mod.rs`.
-- ⚠️ **A3 partial**: `scroll_newline` / `overlay_newline` wrappers merged into a single `newline` method across ~60 call sites (dialogs + history + screen). Remaining A3 work (below) still pending.
-- ⬜ **A1**: Deferred. The `active_*` → streaming-block cutover requires rewriting the incremental-markdown parser in `append_streaming_text` / `append_streaming_thinking` so each chunk rewrites a streaming block instead of committing completed paragraphs to history. `render_ephemeral_into` (190 lines) can only be deleted once streaming state flows through `push_streaming` + `rewrite` + `set_status(Done)` for text / thinking / tool / exec / agent paths. Recommend a dedicated session.
-- ⬜ **A3 remainder**: Deferred. `BlockHistory::render()` (the scroll-mode commit path) is still the only block renderer used by `draw_frame`'s dialog path (`app/events.rs:873`). Deleting `flushed` / `last_block_rows` / `suppress_leading_gap` / `pending_head_skip` / `has_unflushed` requires first rerouting `draw_frame` to `paint_viewport` (which overlaps with A5).
-- ⬜ **A5**: Deferred. `draw_frame` is still the live dialog-rendering path; `cfg(test)`-only gating depends on folding dialog layout into `draw_viewport_frame` first.
+**Status**
+- ✅ **A2** (PurgeRedraw): fully shipped.
+- ✅ **A3** (commit/flush/scroll-mode vocabulary): `BlockHistory::render`, `flushed`-counter gating, `last_block_rows`, `suppress_leading_gap`, `pending_head_skip`, `scroll_up`, scroll-mode `newline` branch — all deleted. `paint_viewport` is the only block painter.
+- ✅ **A4** (obsolete tests): shipped.
+- ✅ **A5**: `draw_frame` fully deleted. `tick_dialog` → `draw_viewport_dialog_frame` (alt-buffer, reserves `dialog_height + 1 gap + 1 status` at the bottom of the viewport). `draw_prompt` + the one unit-test caller route through `draw_viewport_frame`.
+- ⚠️ **A1 partial**: `active_exec` and `active_thinking` now flow through streaming `Block::Exec` / `Block::Thinking` via `push` + `rewrite` + `set_status(Done)`. `Element::ActiveExec`, `render_active_exec`, and the `ActiveExec` struct are deleted. `active_text`, `active_tools`, `active_agents` still live in `render_ephemeral_into`; `has_ephemeral` + `extra_lines` stay until those three migrate. The animated thinking-summary widget (shown when `show_thinking == false`) deliberately remains as an ephemeral overlay — it's a summary, not a stream.
 
 ### A1 — Atomic `active_*` → `Streaming` blocks cutover
 
