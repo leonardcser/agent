@@ -1366,15 +1366,14 @@ impl Screen {
         if rows.is_empty() || viewport_rows == 0 {
             return;
         }
-        let top_line = rows.len().saturating_sub(viewport_rows as usize);
-        for (viewport_row, line_idx) in (top_line..rows.len()).enumerate() {
-            if viewport_row as u16 >= viewport_rows {
+        // `range` is viewport-relative: line 0 = top of viewport.
+        // `last_viewport_text` indexes top-down.
+        for line_idx in range.start_line..=range.end_line.min(rows.len().saturating_sub(1)) {
+            if line_idx >= rows.len() || (line_idx as u16) >= viewport_rows {
                 break;
             }
-            if line_idx < range.start_line || line_idx > range.end_line {
-                continue;
-            }
             let line = &rows[line_idx];
+            let viewport_row = line_idx;
             let line_len = line.chars().count();
             let (sel_start, sel_end) = match range.kind {
                 ContentVisualKind::Char => {

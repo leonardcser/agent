@@ -1024,12 +1024,19 @@ impl App {
             let col = buf[line_start..off].chars().count();
             (line, col)
         };
-        let (start_line, start_col) = offset_to_line_col(s);
-        let (end_line, end_col) = offset_to_line_col(e);
+        let (start_line_abs, start_col) = offset_to_line_col(s);
+        let (end_line_abs, end_col) = offset_to_line_col(e);
+        // Transcript-absolute line indices → viewport-relative so the
+        // painter can walk `last_viewport_text` directly.
+        let viewport = self.viewport_rows_estimate() as usize;
+        let total = rows.len();
+        let scroll = self.content_pane.scroll_offset as usize;
+        let view_top = total.saturating_sub(viewport).saturating_sub(scroll);
+        let to_view = |abs: usize| abs.saturating_sub(view_top);
         Some(render::ContentVisualRange {
-            start_line,
+            start_line: to_view(start_line_abs),
             start_col,
-            end_line,
+            end_line: to_view(end_line_abs),
             end_col,
             kind,
         })
