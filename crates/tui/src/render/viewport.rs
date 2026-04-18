@@ -232,6 +232,21 @@ mod tests {
     }
 
     #[test]
+    fn leading_blank_click_snaps_to_first_line() {
+        // Regression: clicking a leading-blank row on a short buffer used
+        // to fall back to `total-1` (last line) via `unwrap_or`. The fix
+        // in `position_content_cursor_from_hit` snaps to the first line
+        // instead — exercise the geom invariant that backs it.
+        let g = ViewportGeom::new(3, 10, 0);
+        // Rows 0..=6 are leading blanks.
+        for row in 0..7 {
+            assert_eq!(g.line_of_row(row), None, "row {row} should be blank");
+        }
+        // Content lines 0..=2 are on rows 7..=9.
+        assert_eq!(g.line_of_row(7), Some(0));
+    }
+
+    #[test]
     fn zero_viewport_never_panics() {
         let g = ViewportGeom::new(10, 0, 5);
         // With no visible rows, the concept of "which row is line N"

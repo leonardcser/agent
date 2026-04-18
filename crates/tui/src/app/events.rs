@@ -1834,9 +1834,10 @@ impl App {
         let total = rows.len().min(u16::MAX as usize) as u16;
         let geom =
             render::ViewportGeom::new(total, viewport_rows, self.transcript_window.scroll_offset);
-        let line_idx = geom
-            .line_of_row(rel_row)
-            .unwrap_or(geom.total.saturating_sub(1)) as usize;
+        // Clicks in the leading-blank band (short buffer, bottom-anchored)
+        // snap to the first content line — clicking above content should
+        // place the cursor at the *top* of it, not the last line.
+        let line_idx = geom.line_of_row(rel_row).unwrap_or(0) as usize;
         let line_idx = line_idx.min(rows.len() - 1);
         self.transcript_window
             .jump_to_line_col(&rows, line_idx, col as usize, viewport_rows);
