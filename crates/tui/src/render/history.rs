@@ -755,9 +755,9 @@ impl BlockHistory {
         total += extra_lines.len() as u32;
         let total = total.min(u16::MAX as u32) as u16;
 
-        let max_scroll = total.saturating_sub(viewport_rows);
-        let scroll = scroll_offset.min(max_scroll);
-        let skip = total.saturating_sub(viewport_rows).saturating_sub(scroll);
+        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_offset);
+        let skip = geom.skip_from_top();
+        let leading_blanks = geom.leading_blanks();
 
         let mut out: Vec<String> = Vec::with_capacity(viewport_rows as usize);
         let mut remaining_skip = skip as u32;
@@ -774,7 +774,6 @@ impl BlockHistory {
         // get leading blank rows so the last content line sits at the
         // viewport bottom. Mouse hit-testing and vim motions index
         // into this vector directly, so the row layout must match.
-        let leading_blanks = viewport_rows.saturating_sub(total);
         for _ in 0..leading_blanks {
             if out.len() as u16 >= viewport_rows {
                 break;
@@ -857,11 +856,9 @@ impl BlockHistory {
         total += extra_lines.len() as u32;
         let total = total.min(u16::MAX as u32) as u16;
 
-        // Clamp scroll.
-        let max_scroll = total.saturating_sub(viewport_rows);
-        let scroll = scroll_offset.min(max_scroll);
-        // Lines to skip from the top of the flat transcript.
-        let skip = total.saturating_sub(viewport_rows).saturating_sub(scroll);
+        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_offset);
+        let scroll = geom.clamped_scroll();
+        let skip = geom.skip_from_top();
 
         let theme = crate::theme::snapshot();
         let pctx = super::context::PaintContext {
@@ -881,7 +878,7 @@ impl BlockHistory {
         // means "stuck to bottom" throughout the UI; cursor math and
         // click/hit-testing both assume bottom-anchoring, so top-padding
         // short transcripts keeps everything in lockstep.
-        let leading_blanks = viewport_rows.saturating_sub(total);
+        let leading_blanks = geom.leading_blanks();
         for _ in 0..leading_blanks {
             if painted >= viewport_rows {
                 break;
