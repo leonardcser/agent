@@ -1329,23 +1329,23 @@ impl App {
     /// Extend the content-pane visual selection to the cell under the
     /// current drag position. Runs while the user holds mouse-1 and
     /// moves — each update moves the cursor inside vim Visual mode so
-    /// the existing visual range widens or shrinks accordingly. When
-    /// the drag reaches the top or bottom row of the content viewport
-    /// the transcript scrolls one line per event so the user can extend
-    /// the selection past what's visible.
+    /// the existing visual range widens or shrinks accordingly. If the
+    /// resulting cursor lands on the top/bottom row of the viewport,
+    /// also scroll the transcript by one line so further drag ticks can
+    /// extend the selection past what's visible.
     fn extend_content_selection_to(&mut self, row: u16, col: u16) {
-        let viewport = self.viewport_rows_estimate();
-        if viewport > 0 {
-            if row == 0 {
-                self.move_content_cursor_by_lines(-1);
-                return;
-            }
-            if row >= viewport.saturating_sub(1) {
-                self.move_content_cursor_by_lines(1);
-                return;
-            }
-        }
         self.position_content_cursor_from_click(row, col);
+        let viewport = self.viewport_rows_estimate();
+        if viewport == 0 {
+            return;
+        }
+        // `cursor_line` is measured from the bottom of the viewport:
+        // 0 = bottom row, viewport-1 = top row.
+        if self.content_pane.cursor_line >= viewport.saturating_sub(1) {
+            self.move_content_cursor_by_lines(-1);
+        } else if self.content_pane.cursor_line == 0 {
+            self.move_content_cursor_by_lines(1);
+        }
     }
 
     /// Extend the prompt's shift-selection anchor to the click position.
