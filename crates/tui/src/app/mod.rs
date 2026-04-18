@@ -939,15 +939,21 @@ impl App {
                 }
 
                 _ = tokio::time::sleep({
-                    // When the screen is dirty (deferred engine events), fire
-                    // at the next frame deadline (~60 fps).  When idle, use a
-                    // longer interval for spinner / timer animations.
+                    // When drag-autoscroll is running, fire fast so we
+                    // advance one line per tick and the motion stays
+                    // smooth; the interval itself ramps down the longer
+                    // the cursor is parked at the edge.
                     let since = last_frame.elapsed();
-                    if self.screen.is_dirty() {
-                        MIN_FRAME_INTERVAL.saturating_sub(since)
+                    let want = if let Some(started) = self.drag_autoscroll_since {
+                        let held = started.elapsed().as_millis() as u64;
+                        let ms = 45u64.saturating_sub(held / 120).max(10);
+                        Duration::from_millis(ms)
+                    } else if self.screen.is_dirty() {
+                        MIN_FRAME_INTERVAL
                     } else {
-                        Duration::from_millis(80).saturating_sub(since)
-                    }
+                        Duration::from_millis(80)
+                    };
+                    want.saturating_sub(since)
                 }) => {
                     // Mark time-based animations dirty.
                     if let Some(d) = active_dialog.as_mut() {

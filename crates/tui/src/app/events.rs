@@ -1333,10 +1333,11 @@ impl App {
     }
 
     /// Frame-tick hook: if the user is mid-drag with the content cursor
-    /// on the top or bottom row of the viewport, scroll so the
-    /// selection widens past the visible area. Speed ramps with how
-    /// long the cursor has been parked at the edge: starts at 2
-    /// lines/tick and climbs +1 every 250 ms, capped at 10.
+    /// on the top or bottom row of the viewport, scroll a single line
+    /// so the selection widens past the visible area. One-line-per-tick
+    /// avoids the choppy feel of multi-line jumps; the main loop ramps
+    /// its sleep interval down the longer the cursor stays at the edge,
+    /// which is how acceleration happens.
     pub(super) fn tick_drag_autoscroll(&mut self) {
         if !self.mouse_drag_active || self.app_focus != crate::app::AppFocus::Content {
             self.drag_autoscroll_since = None;
@@ -1357,12 +1358,9 @@ impl App {
             self.drag_autoscroll_since = None;
             return;
         };
-        let started = *self
-            .drag_autoscroll_since
+        self.drag_autoscroll_since
             .get_or_insert_with(std::time::Instant::now);
-        let held_ms = started.elapsed().as_millis() as usize;
-        let lines = (2 + held_ms / 250).min(10) as isize;
-        self.move_content_cursor_by_lines(delta * lines);
+        self.move_content_cursor_by_lines(delta);
         self.sync_transcript_pin();
     }
 
