@@ -182,4 +182,62 @@ mod tests {
             assert_eq!(g.line_of_row(row), None);
         }
     }
+
+    #[test]
+    fn matrix_row_line_roundtrip() {
+        let viewport = 10u16;
+        for &total in &[0u16, 1, viewport - 1, viewport, viewport + 1, 2 * viewport] {
+            let max = total.saturating_sub(viewport);
+            for &scroll in &[0u16, 1, max.saturating_sub(1), max, max + 1] {
+                let g = ViewportGeom::new(total, viewport, scroll);
+                // row_of_line ∘ line_of_row = id for every onscreen row.
+                for row in 0..viewport {
+                    if let Some(line) = g.line_of_row(row) {
+                        assert_eq!(
+                            g.row_of_line(line),
+                            Some(row),
+                            "roundtrip failed total={total} scroll={scroll} row={row} line={line}"
+                        );
+                    }
+                }
+                // Lines before skip and past total map to None.
+                let skip = g.skip_from_top();
+                if skip > 0 {
+                    assert_eq!(g.row_of_line(skip - 1), None);
+                }
+                if total > 0 {
+                    assert_eq!(g.row_of_line(total), None);
+                }
+                // The clamp never produces scroll > max_scroll.
+                assert!(g.clamped_scroll() <= g.max_scroll());
+            }
+        }
+    }
+
+    #[test]
+    fn single_line_viewport_one() {
+        let g = ViewportGeom::new(1, 1, 0);
+        assert_eq!(g.leading_blanks(), 0);
+        assert_eq!(g.row_of_line(0), Some(0));
+        assert_eq!(g.line_of_row(0), Some(0));
+    }
+
+    #[test]
+    fn apply_growth_clamps_to_new_max() {
+        let mut g = ViewportGeom::new(10, 10, 0);
+        // Viewport exactly filled — scroll==0 is stuck-to-bottom.
+        g.apply_growth(100);
+        assert_eq!(g.total, 110);
+        assert!(g.stuck_to_bottom());
+    }
+
+    #[test]
+    fn zero_viewport_never_panics() {
+        let g = ViewportGeom::new(10, 0, 5);
+        // With no visible rows, the concept of "which row is line N"
+        // is degenerate; just exercise the code paths don't panic.
+        assert_eq!(g.leading_blanks(), 0);
+        let _ = g.line_of_row(0);
+        let _ = g.row_of_line(0);
+    }
 }

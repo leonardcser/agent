@@ -1227,10 +1227,11 @@ impl App {
         let (end_line_abs, end_col) = offset_to_line_col(e);
         // Transcript-absolute line indices → viewport-relative so the
         // painter can walk `last_viewport_text` directly.
-        let viewport = self.viewport_rows_estimate() as usize;
-        let total = rows.len();
-        let scroll = self.transcript_window.scroll_offset as usize;
-        let view_top = total.saturating_sub(viewport).saturating_sub(scroll);
+        let viewport = self.viewport_rows_estimate();
+        let total = rows.len().min(u16::MAX as usize) as u16;
+        let scroll = self.transcript_window.scroll_offset;
+        let geom = render::ViewportGeom::new(total, viewport, scroll);
+        let view_top = geom.skip_from_top() as usize;
         let to_view = |abs: usize| abs.saturating_sub(view_top);
         Some(render::ContentVisualRange {
             start_line: to_view(start_line_abs),
@@ -1830,13 +1831,13 @@ impl App {
             return;
         };
         let viewport_rows = region.rows;
-        let total = rows.len();
-        let max_scroll = total.saturating_sub(viewport_rows as usize);
-        let scroll = (self.transcript_window.scroll_offset as usize).min(max_scroll);
-        let skip = total
-            .saturating_sub(viewport_rows as usize)
-            .saturating_sub(scroll);
-        let line_idx = (skip + rel_row as usize).min(total - 1);
+        let total = rows.len().min(u16::MAX as usize) as u16;
+        let geom =
+            render::ViewportGeom::new(total, viewport_rows, self.transcript_window.scroll_offset);
+        let line_idx = geom
+            .line_of_row(rel_row)
+            .unwrap_or(geom.total.saturating_sub(1)) as usize;
+        let line_idx = line_idx.min(rows.len() - 1);
         self.transcript_window
             .jump_to_line_col(&rows, line_idx, col as usize, viewport_rows);
         self.screen.mark_dirty();

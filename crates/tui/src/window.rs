@@ -194,8 +194,8 @@ impl TranscriptWindow {
         let offsets = Self::line_start_offsets(rows);
         self.buffer.buf = rows.join("\n");
         let total = rows.len() as u16;
-        let max_scroll = total.saturating_sub(viewport_rows);
-        let scroll = self.scroll_offset.min(max_scroll);
+        let geom = crate::render::ViewportGeom::new(total, viewport_rows, self.scroll_offset);
+        let scroll = geom.clamped_scroll();
         self.scroll_offset = scroll;
         let cursor_line = self.cursor_line.min(viewport_rows.saturating_sub(1));
         let line_from_bottom = scroll.saturating_add(cursor_line);
@@ -234,6 +234,9 @@ impl TranscriptWindow {
         let Some(last) = self.pinned_last_total else {
             return;
         };
+        // Pin semantics are "preserve visible rows while content grows
+        // below" — always carry the delta even when the pin is engaged
+        // at the bottom (e.g. selection while stuck).
         let delta = total_rows.saturating_sub(last);
         if delta > 0 {
             self.scroll_offset = self.scroll_offset.saturating_add(delta);
