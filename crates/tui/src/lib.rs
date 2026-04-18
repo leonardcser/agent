@@ -16,6 +16,7 @@ pub mod pane;
 pub mod perf;
 pub mod persist;
 pub mod render;
+pub mod selection;
 pub mod session;
 pub mod sleep_inhibit;
 pub mod state;

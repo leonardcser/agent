@@ -31,6 +31,30 @@ pub fn byte_to_cell(line: &str, byte: usize) -> usize {
     UnicodeWidthStr::width(&line[..snap(line, byte)])
 }
 
+/// Byte offset of the char boundary before `pos`. Returns 0 at start.
+pub fn prev_char_boundary(s: &str, pos: usize) -> usize {
+    if pos == 0 {
+        return 0;
+    }
+    let mut p = pos - 1;
+    while p > 0 && !s.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
+}
+
+/// Byte offset of the char boundary after `pos`. Returns `s.len()` at end.
+pub fn next_char_boundary(s: &str, pos: usize) -> usize {
+    if pos >= s.len() {
+        return s.len();
+    }
+    let mut p = pos + 1;
+    while p < s.len() && !s.is_char_boundary(p) {
+        p += 1;
+    }
+    p
+}
+
 /// Inverse of [`byte_to_cell`]: find the byte offset whose preceding
 /// text occupies `cell` terminal columns. Wide glyphs that cross the
 /// target land on their starting byte (never mid-glyph).

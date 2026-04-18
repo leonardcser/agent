@@ -57,9 +57,10 @@ pub struct InputState {
     pub cpos: usize,
     /// Per-window vim state (mode, visual_anchor, curswant).
     pub vim: Option<Vim>,
-    /// Non-vim selection anchor (shift+arrow). Vim visual mode takes
-    /// priority.
-    pub selection_anchor: Option<usize>,
+    /// Non-vim shift+arrow selection anchor (shared type across the
+    /// prompt and transcript windows). Vim Visual mode takes priority
+    /// when active.
+    pub selection: crate::selection::ShiftSelection,
     /// Kill ring for yank/paste.
     pub kill_ring: KillRing,
     pub store: AttachmentStore,
@@ -131,7 +132,7 @@ impl InputState {
             buffer: crate::buffer::TextBuffer::new(),
             cpos: 0,
             vim: None,
-            selection_anchor: None,
+            selection: crate::selection::ShiftSelection::new(),
             kill_ring: KillRing::new(),
             store: AttachmentStore::new(),
             completer: None,
@@ -153,18 +154,7 @@ impl InputState {
                 return Some(range);
             }
         }
-        // Non-vim shift+key selection.
-        let anchor = self.selection_anchor?;
-        let (a, b) = if anchor <= self.cpos {
-            (anchor, self.cpos)
-        } else {
-            (self.cpos, anchor)
-        };
-        if a == b {
-            None
-        } else {
-            Some((a, b))
-        }
+        self.selection.range(self.cpos)
     }
 
     fn has_selection(&self) -> bool {
@@ -173,7 +163,7 @@ impl InputState {
 
     /// Clear any active selection (non-vim). Called on non-shift movement or editing.
     pub fn clear_selection(&mut self) {
-        self.selection_anchor = None;
+        self.selection.clear();
     }
 
     /// Select the word at `cpos`. Used by mouse double-click.
@@ -183,16 +173,14 @@ impl InputState {
         if let Some(vim) = self.vim.as_mut() {
             vim.begin_visual(crate::vim::ViMode::Visual, start);
         } else {
-            self.selection_anchor = Some(start);
+            self.selection.set(Some(start));
         }
         Some((start, end))
     }
 
     /// Start or extend selection at current cursor position (non-vim shift+key).
     fn extend_selection(&mut self) {
-        if self.selection_anchor.is_none() {
-            self.selection_anchor = Some(self.cpos);
-        }
+        self.selection.extend(self.cpos);
     }
 
     /// Delete the currently selected text, returning it. Handles attachment cleanup.
@@ -202,7 +190,7 @@ impl InputState {
         self.remove_attachments_in_range(start, end);
         self.buffer.buf.drain(start..end);
         self.cpos = start;
-        self.selection_anchor = None;
+        self.selection.clear();
         Some(deleted)
     }
 
@@ -273,7 +261,7 @@ impl InputState {
         self.menu = None;
         self.history_saved_buf = None;
         self.from_paste = false;
-        self.selection_anchor = None;
+        self.selection.clear();
         // Note: stash and store are intentionally NOT cleared here.
     }
 
@@ -288,7 +276,7 @@ impl InputState {
         self.buffer.buf = text;
         self.cpos = cpos;
         self.buffer.attachment_ids.clear();
-        self.selection_anchor = None;
+        self.selection.clear();
         self.from_paste = false;
         self.completer = None;
         self.recompute_completer();
@@ -1299,7 +1287,7 @@ mod tests {
 
         // Reset cursor to simulate the scenario: user types '!', then pastes at line start
         // This is the key scenario that was broken before the fix
-        input.buf.clear();
+        input.buffer.buf.clear();
         input.cpos = 0;
         input.insert_paste("echo hello".to_string());
         assert!(
@@ -1313,7 +1301,7 @@ mod tests {
     fn paste_in_middle_of_line_does_not_set_from_paste() {
         let mut input = InputState::new();
 
-        input.buf = "hello ".to_string();
+        input.buffer.buf = "hello ".to_string();
         input.cpos = 6; // After "hello "
         input.insert_paste("!world".to_string());
         assert!(
@@ -1327,7 +1315,7 @@ mod tests {
     fn paste_at_end_of_line_does_not_set_from_paste() {
         let mut input = InputState::new();
 
-        input.buf = "hello".to_string();
+        input.buffer.buf = "hello".to_string();
         input.cpos = 5; // At end
         input.insert_paste(" world".to_string());
         assert!(
@@ -1341,7 +1329,7 @@ mod tests {
     fn paste_at_start_of_multiline_buffer() {
         let mut input = InputState::new();
 
-        input.buf = "line1\nline2".to_string();
+        input.buffer.buf = "line1\nline2".to_string();
         input.cpos = 0; // At very start
         input.insert_paste("!command".to_string());
         assert!(
@@ -1355,7 +1343,7 @@ mod tests {
     fn paste_at_start_of_second_line_sets_from_paste() {
         let mut input = InputState::new();
 
-        input.buf = "line1\n".to_string();
+        input.buffer.buf = "line1\n".to_string();
         input.cpos = 6; // Start of second line
         input.insert_paste("!command".to_string());
         assert!(
@@ -1369,7 +1357,7 @@ mod tests {
     fn paste_middle_of_second_line_does_not_set_from_paste() {
         let mut input = InputState::new();
 
-        input.buf = "line1\nhello".to_string();
+        input.buffer.buf = "line1\nhello".to_string();
         input.cpos = 8; // Insert at byte position 8 (before first 'l' of "hello")
         input.insert_paste(" world".to_string());
         assert!(
@@ -1582,7 +1570,7 @@ mod tests {
         // This is the main bug scenario: type '!', then paste command
         let mut input = InputState::new();
 
-        input.buf = String::new();
+        input.buffer.buf = String::new();
         input.cpos = 0;
         input.insert_paste("!ls -la".to_string());
 
@@ -1602,10 +1590,10 @@ mod tests {
     #[test]
     fn shift_select_right_creates_selection() {
         let mut input = InputState::new();
-        input.buf = "hello".to_string();
+        input.buffer.buf = "hello".to_string();
         input.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
-        assert_eq!(input.selection_anchor, Some(0));
+        assert_eq!(input.selection.anchor(), Some(0));
         assert_eq!(input.cpos, 1);
         assert_eq!(input.selection_range(), Some((0, 1)));
     }
@@ -1613,12 +1601,12 @@ mod tests {
     #[test]
     fn shift_select_extends_selection() {
         let mut input = InputState::new();
-        input.buf = "hello".to_string();
+        input.buffer.buf = "hello".to_string();
         input.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
         input.execute_key_action(KeyAction::SelectRight, None);
         input.execute_key_action(KeyAction::SelectRight, None);
-        assert_eq!(input.selection_anchor, Some(0));
+        assert_eq!(input.selection.anchor(), Some(0));
         assert_eq!(input.cpos, 3);
         assert_eq!(input.selection_range(), Some((0, 3)));
     }
@@ -1626,7 +1614,7 @@ mod tests {
     #[test]
     fn movement_clears_selection() {
         let mut input = InputState::new();
-        input.buf = "hello".to_string();
+        input.buffer.buf = "hello".to_string();
         input.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
         input.execute_key_action(KeyAction::SelectRight, None);
@@ -1638,7 +1626,7 @@ mod tests {
     #[test]
     fn backspace_deletes_selection() {
         let mut input = InputState::new();
-        input.buf = "hello world".to_string();
+        input.buffer.buf = "hello world".to_string();
         input.cpos = 0;
         // Select "hello"
         for _ in 0..5 {
@@ -1653,7 +1641,7 @@ mod tests {
     #[test]
     fn delete_forward_deletes_selection() {
         let mut input = InputState::new();
-        input.buf = "hello world".to_string();
+        input.buffer.buf = "hello world".to_string();
         input.cpos = 0;
         for _ in 0..5 {
             input.execute_key_action(KeyAction::SelectRight, None);
@@ -1665,7 +1653,7 @@ mod tests {
     #[test]
     fn typing_replaces_selection() {
         let mut input = InputState::new();
-        input.buf = "hello world".to_string();
+        input.buffer.buf = "hello world".to_string();
         input.cpos = 0;
         for _ in 0..5 {
             input.execute_key_action(KeyAction::SelectRight, None);
@@ -1678,11 +1666,11 @@ mod tests {
     #[test]
     fn select_left_from_end() {
         let mut input = InputState::new();
-        input.buf = "hello".to_string();
+        input.buffer.buf = "hello".to_string();
         input.cpos = 5;
         input.execute_key_action(KeyAction::SelectLeft, None);
         input.execute_key_action(KeyAction::SelectLeft, None);
-        assert_eq!(input.selection_anchor, Some(5));
+        assert_eq!(input.selection.anchor(), Some(5));
         assert_eq!(input.cpos, 3);
         assert_eq!(input.selection_range(), Some((3, 5)));
     }
@@ -1690,10 +1678,10 @@ mod tests {
     #[test]
     fn select_word_forward() {
         let mut input = InputState::new();
-        input.buf = "hello world foo".to_string();
+        input.buffer.buf = "hello world foo".to_string();
         input.cpos = 0;
         input.execute_key_action(KeyAction::SelectWordForward, None);
-        assert_eq!(input.selection_anchor, Some(0));
+        assert_eq!(input.selection.anchor(), Some(0));
         // word_forward_pos from 0 should be 6 (start of "world").
         assert_eq!(input.cpos, 6);
         input.execute_key_action(KeyAction::Backspace, None);
@@ -1703,7 +1691,7 @@ mod tests {
     #[test]
     fn select_word_backward() {
         let mut input = InputState::new();
-        input.buf = "hello world".to_string();
+        input.buffer.buf = "hello world".to_string();
         input.cpos = 11;
         input.execute_key_action(KeyAction::SelectWordBackward, None);
         assert_eq!(input.selection_range(), Some((6, 11)));
@@ -1714,7 +1702,7 @@ mod tests {
     #[test]
     fn select_to_line_start() {
         let mut input = InputState::new();
-        input.buf = "hello world".to_string();
+        input.buffer.buf = "hello world".to_string();
         input.cpos = 5;
         input.execute_key_action(KeyAction::SelectStartOfLine, None);
         assert_eq!(input.selection_range(), Some((0, 5)));
@@ -1723,7 +1711,7 @@ mod tests {
     #[test]
     fn select_to_line_end() {
         let mut input = InputState::new();
-        input.buf = "hello world".to_string();
+        input.buffer.buf = "hello world".to_string();
         input.cpos = 5;
         input.execute_key_action(KeyAction::SelectEndOfLine, None);
         assert_eq!(input.selection_range(), Some((5, 11)));
@@ -1732,7 +1720,7 @@ mod tests {
     #[test]
     fn newline_replaces_selection() {
         let mut input = InputState::new();
-        input.buf = "hello world".to_string();
+        input.buffer.buf = "hello world".to_string();
         input.cpos = 0;
         for _ in 0..5 {
             input.execute_key_action(KeyAction::SelectRight, None);
@@ -1745,7 +1733,7 @@ mod tests {
     #[test]
     fn kill_to_eol_with_selection() {
         let mut input = InputState::new();
-        input.buf = "hello world".to_string();
+        input.buffer.buf = "hello world".to_string();
         input.cpos = 0;
         for _ in 0..5 {
             input.execute_key_action(KeyAction::SelectRight, None);
@@ -1759,7 +1747,7 @@ mod tests {
     #[test]
     fn selection_at_buffer_boundary() {
         let mut input = InputState::new();
-        input.buf = "ab".to_string();
+        input.buffer.buf = "ab".to_string();
         input.cpos = 0;
         // Select all.
         input.execute_key_action(KeyAction::SelectRight, None);
@@ -1773,16 +1761,16 @@ mod tests {
     #[test]
     fn selection_range_empty_when_anchor_equals_cursor() {
         let mut input = InputState::new();
-        input.buf = "hello".to_string();
+        input.buffer.buf = "hello".to_string();
         input.cpos = 3;
-        input.selection_anchor = Some(3);
+        input.selection.set(Some(3));
         assert_eq!(input.selection_range(), None);
     }
 
     #[test]
     fn clear_resets_selection() {
         let mut input = InputState::new();
-        input.buf = "hello".to_string();
+        input.buffer.buf = "hello".to_string();
         input.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
         assert!(input.selection_range().is_some());
@@ -1793,7 +1781,7 @@ mod tests {
     #[test]
     fn delete_word_backward_with_selection() {
         let mut input = InputState::new();
-        input.buf = "hello world".to_string();
+        input.buffer.buf = "hello world".to_string();
         input.cpos = 6;
         // Select "wor"
         for _ in 0..3 {
@@ -1806,7 +1794,7 @@ mod tests {
     #[test]
     fn delete_word_forward_with_selection() {
         let mut input = InputState::new();
-        input.buf = "hello world".to_string();
+        input.buffer.buf = "hello world".to_string();
         input.cpos = 0;
         for _ in 0..3 {
             input.execute_key_action(KeyAction::SelectRight, None);
@@ -1818,7 +1806,7 @@ mod tests {
     #[test]
     fn delete_to_start_of_line_with_selection() {
         let mut input = InputState::new();
-        input.buf = "hello world".to_string();
+        input.buffer.buf = "hello world".to_string();
         input.cpos = 3;
         for _ in 0..4 {
             input.execute_key_action(KeyAction::SelectRight, None);
@@ -1830,17 +1818,17 @@ mod tests {
     #[test]
     fn select_left_at_start_stays() {
         let mut input = InputState::new();
-        input.buf = "hello".to_string();
+        input.buffer.buf = "hello".to_string();
         input.cpos = 0;
         input.execute_key_action(KeyAction::SelectLeft, None);
         assert_eq!(input.cpos, 0);
-        assert_eq!(input.selection_anchor, Some(0));
+        assert_eq!(input.selection.anchor(), Some(0));
     }
 
     #[test]
     fn select_right_at_end_stays() {
         let mut input = InputState::new();
-        input.buf = "hello".to_string();
+        input.buffer.buf = "hello".to_string();
         input.cpos = 5;
         input.execute_key_action(KeyAction::SelectRight, None);
         assert_eq!(input.cpos, 5);
@@ -1849,7 +1837,7 @@ mod tests {
     #[test]
     fn select_empty_buffer() {
         let mut input = InputState::new();
-        input.buf = String::new();
+        input.buffer.buf = String::new();
         input.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
         assert_eq!(input.cpos, 0);
@@ -1859,7 +1847,7 @@ mod tests {
     #[test]
     fn utf8_selection() {
         let mut input = InputState::new();
-        input.buf = "héllo".to_string();
+        input.buffer.buf = "héllo".to_string();
         input.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
         input.execute_key_action(KeyAction::SelectRight, None);
@@ -1873,7 +1861,7 @@ mod tests {
     #[test]
     fn selection_preserved_across_multiple_select_directions() {
         let mut input = InputState::new();
-        input.buf = "abcdef".to_string();
+        input.buffer.buf = "abcdef".to_string();
         input.cpos = 3; // on 'd'
                         // Select right 2 chars.
         input.execute_key_action(KeyAction::SelectRight, None);
@@ -1896,7 +1884,7 @@ mod tests {
 
         let mut input = InputState::new();
         input.set_vim_enabled(true);
-        input.buf = "hello world".to_string();
+        input.buffer.buf = "hello world".to_string();
         input.cpos = 0;
         // Create a shift selection.
         input.execute_key_action(KeyAction::SelectRight, None);
@@ -1925,12 +1913,12 @@ mod tests {
     fn delete_selection_removes_attachments() {
         let mut input = InputState::new();
         // Insert text with an attachment marker in the middle: "ab[paste]cd"
-        input.buf = format!("ab{}cd", ATTACHMENT_MARKER);
+        input.buffer.buf = format!("ab{}cd", ATTACHMENT_MARKER);
         input.cpos = 0;
         let id = input.store.insert_paste("pasted".to_string());
         input.attachment_ids.push(id);
         // Select "b[paste]c" (bytes 1..5 — marker is 3 bytes)
-        input.selection_anchor = Some(1);
+        input.selection.set(Some(1));
         input.cpos = 1 + 1 + ATTACHMENT_MARKER.len_utf8() + 1; // b + marker + c
         assert!(input.selection_range().is_some());
         let deleted = input.delete_selection();
@@ -1946,7 +1934,7 @@ mod tests {
 
     /// Place two markers in the buffer that both point at `id`.
     fn buf_with_two_markers(input: &mut InputState, id: AttachmentId) {
-        input.buf = format!("pre{m}mid{m}post", m = ATTACHMENT_MARKER);
+        input.buffer.buf = format!("pre{m}mid{m}post", m = ATTACHMENT_MARKER);
         input.cpos = input.buf.len();
         input.attachment_ids = vec![id, id];
     }
@@ -1972,7 +1960,7 @@ mod tests {
         let mut input = InputState::new();
         let id1 = input.store.insert_paste("alpha body long enough".into());
         let id2 = input.store.insert_paste("beta body different".into());
-        input.buf = format!("{m}and{m}", m = ATTACHMENT_MARKER);
+        input.buffer.buf = format!("{m}and{m}", m = ATTACHMENT_MARKER);
         input.cpos = input.buf.len();
         input.attachment_ids = vec![id1, id2];
         let text = input.expanded_text();
@@ -1986,7 +1974,7 @@ mod tests {
         let mut input = InputState::new();
         let body = "repeated content".to_string();
         let id = input.store.insert_paste(body.clone());
-        input.buf = format!("{m}a{m}b{m}", m = ATTACHMENT_MARKER);
+        input.buffer.buf = format!("{m}a{m}b{m}", m = ATTACHMENT_MARKER);
         input.cpos = input.buf.len();
         input.attachment_ids = vec![id, id, id];
         let text = input.expanded_text();
@@ -2018,7 +2006,7 @@ mod tests {
         let id2 = input
             .store
             .insert_image("b.png".into(), "data:image/png;base64,BBB".into());
-        input.buf = format!("{m}{m}", m = ATTACHMENT_MARKER);
+        input.buffer.buf = format!("{m}{m}", m = ATTACHMENT_MARKER);
         input.cpos = input.buf.len();
         input.attachment_ids = vec![id1, id2];
         let content = input.build_content();
@@ -2035,7 +2023,7 @@ mod tests {
         let id_b = input
             .store
             .insert_image("b.png".into(), "data:image/png;base64,BBB".into());
-        input.buf = format!("{m}x{m}y{m}", m = ATTACHMENT_MARKER);
+        input.buffer.buf = format!("{m}x{m}y{m}", m = ATTACHMENT_MARKER);
         input.cpos = input.buf.len();
         input.attachment_ids = vec![id_a, id_b, id_a];
         let content = input.build_content();

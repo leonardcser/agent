@@ -971,10 +971,116 @@ impl App {
             }
         }
 
-        // Route the key through vim. If it's consumed, sync
-        // scroll/cursor state from the new cpos and return.
-        if self.handle_content_vim_key(k) {
-            return EventOutcome::Redraw;
+        if self.content_pane.vim_enabled() {
+            if self.handle_content_vim_key(k) {
+                return EventOutcome::Redraw;
+            }
+            match (k.code, k.modifiers) {
+                (KeyCode::Char('q'), M::NONE) => EventOutcome::Quit,
+                _ => EventOutcome::Noop,
+            }
+        } else {
+            self.handle_content_novim_key(k)
+        }
+    }
+
+    /// Content-pane key handler when vim is disabled. Drives the same
+    /// selection mechanism as the prompt: shift+movement extends via
+    /// `ShiftSelection`; plain movement clears it; Ctrl-C / ⌘C copies.
+    fn handle_content_novim_key(&mut self, k: KeyEvent) -> EventOutcome {
+        use crate::keymap::{lookup, KeyAction, KeyContext};
+        use crossterm::event::KeyModifiers as M;
+        let ctx = KeyContext {
+            buf_empty: self.content_pane.buffer.buf.is_empty(),
+            vim_non_insert: false,
+            vim_enabled: false,
+            agent_running: false,
+            ghost_text_visible: false,
+        };
+        if let Some(action) = lookup(k.code, k.modifiers, &ctx) {
+            let extending = matches!(
+                action,
+                KeyAction::SelectLeft
+                    | KeyAction::SelectRight
+                    | KeyAction::SelectWordForward
+                    | KeyAction::SelectWordBackward
+                    | KeyAction::SelectStartOfLine
+                    | KeyAction::SelectEndOfLine
+            );
+            match action {
+                KeyAction::MoveLeft
+                | KeyAction::MoveRight
+                | KeyAction::MoveUp
+                | KeyAction::MoveDown
+                | KeyAction::MoveStartOfLine
+                | KeyAction::MoveEndOfLine
+                | KeyAction::MoveWordForward
+                | KeyAction::MoveWordBackward => {
+                    self.content_pane.selection.clear();
+                }
+                _ if extending => {
+                    self.content_pane.selection.extend(self.content_pane.cpos);
+                }
+                _ => {}
+            }
+            let delta: Option<isize> = match action {
+                KeyAction::MoveUp => Some(-1),
+                KeyAction::MoveDown => Some(1),
+                _ => None,
+            };
+            if let Some(d) = delta {
+                self.move_content_cursor_by_lines(d);
+                return EventOutcome::Redraw;
+            }
+            let buf = self.content_pane.buffer.buf.clone();
+            let mv: Option<usize> = match action {
+                KeyAction::MoveLeft | KeyAction::SelectLeft => {
+                    Some(crate::text_utils::prev_char_boundary(&buf, self.content_pane.cpos))
+                }
+                KeyAction::MoveRight | KeyAction::SelectRight => {
+                    Some(crate::text_utils::next_char_boundary(&buf, self.content_pane.cpos))
+                }
+                KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => {
+                    Some(crate::text_utils::line_start(&buf, self.content_pane.cpos))
+                }
+                KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
+                    Some(crate::text_utils::line_end(&buf, self.content_pane.cpos))
+                }
+                KeyAction::MoveWordForward | KeyAction::SelectWordForward => Some(
+                    crate::text_utils::word_forward_pos(
+                        &buf,
+                        self.content_pane.cpos,
+                        crate::text_utils::CharClass::Word,
+                    ),
+                ),
+                KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => Some(
+                    crate::text_utils::word_backward_pos(
+                        &buf,
+                        self.content_pane.cpos,
+                        crate::text_utils::CharClass::Word,
+                    ),
+                ),
+                KeyAction::CopySelection => {
+                    if let Some((s, e)) = self.content_pane.selection_range() {
+                        let sel = buf[s..e].to_string();
+                        let n = sel.chars().count();
+                        let _ = crate::app::commands::copy_to_clipboard(&sel);
+                        self.screen.notify(format!("copied {} chars", n));
+                    }
+                    None
+                }
+                _ => None,
+            };
+            if let Some(new_cpos) = mv {
+                self.content_pane.cpos = new_cpos;
+                let w = render::term_width();
+                let rows = self.screen.full_transcript_text(w);
+                let viewport = self.viewport_rows_estimate();
+                self.content_pane.refocus(&rows, viewport);
+                self.sync_transcript_pin();
+                self.screen.mark_dirty();
+                return EventOutcome::Redraw;
+            }
         }
         match (k.code, k.modifiers) {
             (KeyCode::Char('q'), M::NONE) => EventOutcome::Quit,
@@ -1369,9 +1475,7 @@ impl App {
     /// position (where the drag started); subsequent drags only move
     /// the cursor so the selection widens or shrinks.
     fn extend_prompt_selection_to(&mut self, row: u16, col: u16) {
-        if self.input.selection_anchor.is_none() {
-            self.input.selection_anchor = Some(self.input.cpos);
-        }
+        self.input.selection.extend(self.input.cpos);
         if let Some((top, rows, scroll, gutter, usable)) = self.screen.input_region() {
             if row >= top && row < top + rows {
                 self.position_prompt_cursor_from_click(row - top, col, scroll, gutter, usable);
@@ -1391,7 +1495,7 @@ impl App {
             let _ = crate::app::commands::copy_to_clipboard(&text);
             self.screen.notify(format!("copied {} chars", chars));
         }
-        self.input.selection_anchor = None;
+        self.input.selection.clear();
         self.screen.mark_dirty();
     }
 

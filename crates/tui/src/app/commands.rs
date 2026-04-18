@@ -416,6 +416,7 @@ impl App {
         let prev_show_thinking = self.settings.show_thinking;
         f(&mut self.settings);
         self.input.set_vim_enabled(self.settings.vim);
+        self.content_pane.set_vim_enabled(self.settings.vim);
         self.screen.apply_settings(&self.settings);
         state::save_settings(&self.settings);
         if self.settings.show_thinking != prev_show_thinking {

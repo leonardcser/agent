@@ -40,9 +40,9 @@ pub struct ContentPane {
     pub cpos: usize,
     /// Per-window vim state (mode, visual_anchor, curswant).
     pub vim: Option<crate::vim::Vim>,
-    /// Non-vim selection anchor (unused on content pane right now;
-    /// vim visual mode is the selection mechanism).
-    pub selection_anchor: Option<usize>,
+    /// Non-vim shift+arrow selection (shared type with the prompt
+    /// window). Vim Visual mode takes priority when active.
+    pub selection: crate::selection::ShiftSelection,
     /// Per-window kill ring — yanking from the transcript copies
     /// here; `handle_key` lifts it to the system clipboard.
     pub kill_ring: crate::input::KillRing,
@@ -71,14 +71,32 @@ impl ContentPane {
         Self {
             buffer: TextBuffer::readonly(),
             cpos: 0,
-            vim: Some(crate::vim::Vim::new()),
-            selection_anchor: None,
+            vim: None,
+            selection: crate::selection::ShiftSelection::new(),
             kill_ring: crate::input::KillRing::new(),
             scroll_offset: 0,
             cursor_line: 0,
             cursor_col: 0,
             pinned_last_total: None,
         }
+    }
+
+    /// Toggle whether this pane routes motions / selection through a
+    /// vim state machine. Mirrors `InputState::set_vim_enabled` so the
+    /// whole app flips together.
+    pub fn set_vim_enabled(&mut self, enabled: bool) {
+        if enabled {
+            if self.vim.is_none() {
+                self.vim = Some(crate::vim::Vim::new());
+            }
+        } else {
+            self.vim = None;
+            self.selection.clear();
+        }
+    }
+
+    pub fn vim_enabled(&self) -> bool {
+        self.vim.is_some()
     }
 
     /// Current selection range (vim visual takes priority over
@@ -89,13 +107,7 @@ impl ContentPane {
                 return Some(range);
             }
         }
-        let anchor = self.selection_anchor?;
-        let (a, b) = if anchor <= self.cpos {
-            (anchor, self.cpos)
-        } else {
-            (self.cpos, anchor)
-        };
-        (a != b).then_some((a, b))
+        self.selection.range(self.cpos)
     }
 
     /// Select the word at `cpos` and enter vim Visual anchored at its
@@ -106,7 +118,7 @@ impl ContentPane {
         if let Some(vim) = self.vim.as_mut() {
             vim.begin_visual(crate::vim::ViMode::Visual, start);
         } else {
-            self.selection_anchor = Some(start);
+            self.selection.set(Some(start));
         }
         Some((start, end))
     }

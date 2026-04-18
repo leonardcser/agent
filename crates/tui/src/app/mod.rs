@@ -444,7 +444,8 @@ impl App {
         let saved = state::State::load();
         let mode = saved.mode();
         let mut input = InputState::new();
-        if settings.vim {
+        let vim_enabled = settings.vim;
+        if vim_enabled {
             input.set_vim_enabled(true);
         }
         let theme_names: Vec<String> = crate::theme::PRESETS
@@ -544,7 +545,11 @@ impl App {
             cli_api_key_env_override,
             startup_auth_error,
             app_focus: AppFocus::Prompt,
-            content_pane: crate::pane::ContentPane::new(),
+            content_pane: {
+                let mut p = crate::pane::ContentPane::new();
+                p.set_vim_enabled(vim_enabled);
+                p
+            },
             last_click: None,
             mouse_drag_active: false,
             drag_autoscroll_since: None,
@@ -946,7 +951,8 @@ impl App {
                     let since = last_frame.elapsed();
                     let want = if let Some(started) = self.drag_autoscroll_since {
                         let held = started.elapsed().as_millis() as u64;
-                        let ms = 45u64.saturating_sub(held / 120).max(10);
+                        // Start at ~33 lines/sec (30 ms), ramp to ~200 lines/sec (5 ms).
+                        let ms = 30u64.saturating_sub(held / 120).max(5);
                         Duration::from_millis(ms)
                     } else if self.screen.is_dirty() {
                         MIN_FRAME_INTERVAL
