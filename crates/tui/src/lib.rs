@@ -6,16 +6,15 @@ pub mod buffer;
 pub mod builtin_commands;
 pub mod completer;
 pub mod config;
+pub mod cursor;
 pub mod custom_commands;
 pub mod fuzzy;
 pub mod input;
 pub mod instructions;
 pub mod keymap;
 pub mod metrics;
-pub mod window;
 pub mod perf;
 pub mod persist;
-pub mod cursor;
 pub mod render;
 pub mod session;
 pub mod sleep_inhibit;
@@ -25,6 +24,7 @@ pub mod theme;
 pub mod undo;
 pub mod utils;
 pub mod vim;
+pub mod window;
 pub mod workspace_permissions;
 
 /// Expand `@path` and `"@path with spaces"` references in user input:

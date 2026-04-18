@@ -62,8 +62,8 @@ impl ScrollbarGeom {
             return 0;
         }
         let thumb_top = thumb_top.min(max_thumb);
-        let from_top = (thumb_top as u32 * max_scroll as u32 + max_thumb as u32 / 2)
-            / max_thumb as u32;
+        let from_top =
+            (thumb_top as u32 * max_scroll as u32 + max_thumb as u32 / 2) / max_thumb as u32;
         from_top.min(u16::MAX as u32) as u16
     }
 
@@ -71,7 +71,6 @@ impl ScrollbarGeom {
     pub fn contains(&self, row: u16, col: u16) -> bool {
         col == self.col && row >= self.top_row && row < self.top_row + self.rows
     }
-
 }
 
 /// Screen region occupied by the transcript viewport in the last frame.
@@ -152,7 +151,10 @@ mod tests {
     fn click_top_jumps_to_start_click_bottom_jumps_to_end() {
         let b = bar(10, 40);
         assert_eq!(b.scroll_from_top_for_thumb(0), 0);
-        assert_eq!(b.scroll_from_top_for_thumb(b.max_thumb_top()), b.max_scroll());
+        assert_eq!(
+            b.scroll_from_top_for_thumb(b.max_thumb_top()),
+            b.max_scroll()
+        );
     }
 
     #[test]

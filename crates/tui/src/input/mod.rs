@@ -511,10 +511,7 @@ impl InputState {
         // next vertical motion picks up wherever the user is now.
         if !matches!(
             action,
-            KeyAction::MoveUp
-                | KeyAction::MoveDown
-                | KeyAction::SelectUp
-                | KeyAction::SelectDown
+            KeyAction::MoveUp | KeyAction::MoveDown | KeyAction::SelectUp | KeyAction::SelectDown
         ) {
             self.cursor.clear_curswant();
         }

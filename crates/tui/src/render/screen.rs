@@ -45,7 +45,9 @@ use super::selection::{
     build_char_kinds, build_display_spans, compute_visual_line_offsets, map_cursor,
     render_styled_chars, spans_to_string, wrap_and_locate_cursor, wrap_line, SpanKind,
 };
-use super::status::{draw_bar, render_status_spans, vim_mode_label, BarSpan, StatusSpan};
+use super::status::{
+    draw_bar, render_status_spans, vim_mode_label, BarSpan, StatusPosition, StatusSpan,
+};
 use super::working::WorkingState;
 use super::{
     cursor_colors, draw_soft_cursor, emit_newlines, format_tokens, is_table_separator,
@@ -109,11 +111,11 @@ pub struct Screen {
     last_mode: protocol::Mode,
     /// App-level focus (Prompt / History). Driven by App::app_focus.
     last_app_focus: crate::app::AppFocus,
-    /// Last scroll offset / cursor position reported by the viewport draw.
-    /// Used by the status bar to render contextual info for the Content pane.
-    last_scroll_offset: u16,
-    last_cursor_line: u16,
-    last_cursor_col: u16,
+    /// Buffer-agnostic cursor/scroll snapshot for the focused window
+    /// (prompt or transcript). Pushed by `App::tick_prompt` each frame
+    /// so the status line reads a single, already-computed record
+    /// instead of recomputing from stale view fields.
+    last_status_position: Option<StatusPosition>,
     /// Plain-text snapshot of each visible row (top to bottom) captured
     /// during `draw_viewport_frame`. Used by the content pane's motion
     /// handlers and yank to reason over what the user actually sees.
@@ -195,9 +197,7 @@ impl Screen {
             last_vim_mode: None,
             last_mode: protocol::Mode::Normal,
             last_app_focus: crate::app::AppFocus::Prompt,
-            last_scroll_offset: 0,
-            last_cursor_line: 0,
-            last_cursor_col: 0,
+            last_status_position: None,
             last_viewport_text: Vec::new(),
             last_transcript_region: None,
             btw: None,
@@ -544,8 +544,7 @@ impl Screen {
                 text: format!(" {sp} "),
                 style: pill_style.clone(),
                 priority: 0,
-                group: false,
-                truncatable: false,
+                ..StatusSpan::default()
             });
             let label = if is_compacting {
                 "compacting ".into()
@@ -561,8 +560,8 @@ impl Screen {
                 text: label,
                 style: pill_style,
                 priority: 5,
-                group: false,
                 truncatable: true,
+                ..StatusSpan::default()
             });
         } else if self.show_slug {
             if let Some(ref label) = self.task_label {
@@ -570,39 +569,10 @@ impl Screen {
                     text: format!(" {label} "),
                     style: pill_style,
                     priority: 5,
-                    group: false,
                     truncatable: true,
+                    ..StatusSpan::default()
                 });
             }
-        }
-
-        // Contextual pane info — cursor position / scroll when content focused.
-        if self.last_app_focus == crate::app::AppFocus::Content {
-            let text = if self.last_scroll_offset > 0 {
-                format!(
-                    " L{}:C{} scroll:{} ",
-                    self.last_cursor_line + 1,
-                    self.last_cursor_col + 1,
-                    self.last_scroll_offset,
-                )
-            } else {
-                format!(
-                    " L{}:C{} ",
-                    self.last_cursor_line + 1,
-                    self.last_cursor_col + 1,
-                )
-            };
-            spans.push(StatusSpan {
-                text,
-                style: StyleState {
-                    fg: Some(theme::muted()),
-                    bg: Some(Color::AnsiValue(234)),
-                    ..StyleState::default()
-                },
-                priority: 3,
-                group: false,
-                truncatable: true,
-            });
         }
 
         if self.last_vim_enabled {
@@ -622,8 +592,7 @@ impl Screen {
                     ..StyleState::default()
                 },
                 priority: 3,
-                group: false,
-                truncatable: false,
+                ..StatusSpan::default()
             });
         }
 
@@ -642,8 +611,7 @@ impl Screen {
                 ..StyleState::default()
             },
             priority: 1,
-            group: false,
-            truncatable: false,
+            ..StatusSpan::default()
         });
 
         // Throbber status (timer, tok/s, retry, done, interrupted).
@@ -675,8 +643,7 @@ impl Screen {
                     ..StyleState::default()
                 },
                 priority,
-                group: false,
-                truncatable: false,
+                ..StatusSpan::default()
             });
         }
 
@@ -692,7 +659,7 @@ impl Screen {
                 },
                 priority: 2,
                 group: true,
-                truncatable: false,
+                ..StatusSpan::default()
             });
         }
 
@@ -712,7 +679,7 @@ impl Screen {
                 },
                 priority: 2,
                 group: true,
-                truncatable: false,
+                ..StatusSpan::default()
             });
         }
 
@@ -732,7 +699,26 @@ impl Screen {
                 },
                 priority: 2,
                 group: true,
-                truncatable: false,
+                ..StatusSpan::default()
+            });
+        }
+
+        // Right-aligned cursor / scroll position — buffer-agnostic.
+        // The app pushes a `StatusPosition` each tick derived from the
+        // focused window; missing = no focused buffer yet (dialogs,
+        // early frames) so we simply omit the span.
+        if let Some(p) = self.last_status_position {
+            spans.push(StatusSpan {
+                text: p.render(),
+                style: StyleState {
+                    fg: Some(theme::muted()),
+                    bg: Some(status_bg),
+                    ..StyleState::default()
+                },
+                priority: 3,
+                truncatable: true,
+                align_right: true,
+                ..StatusSpan::default()
             });
         }
 
@@ -1535,6 +1521,18 @@ impl Screen {
     /// focused, transcript mode when the transcript window is
     /// focused. Without this, the cached value from the last prompt
     /// render is stale relative to the focused window.
+    /// Push the focused window's cursor position + scroll into the
+    /// status bar. One setter for every buffer — the app computes a
+    /// buffer-agnostic `StatusPosition` from the focused window and
+    /// the status line renders it right-aligned, so the format is
+    /// identical regardless of which window has focus.
+    pub fn set_status_position(&mut self, p: Option<StatusPosition>) {
+        if self.last_status_position != p {
+            self.last_status_position = p;
+            self.prompt.dirty = true;
+        }
+    }
+
     pub fn set_status_vim(&mut self, enabled: bool, mode: Option<crate::vim::ViMode>) {
         if self.last_vim_enabled != enabled || self.last_vim_mode != mode {
             self.last_vim_enabled = enabled;
@@ -2638,11 +2636,6 @@ impl Screen {
         self.has_scrollback = false;
         // Fully flushed — every frame re-renders everything.
         self.history.flushed = self.history.order.len();
-
-        // Record cursor/scroll state for the status bar.
-        self.last_scroll_offset = clamped;
-        self.last_cursor_line = clamped_cursor_line;
-        self.last_cursor_col = clamped_cursor_col;
 
         (clamped, clamped_cursor_line, clamped_cursor_col)
     }

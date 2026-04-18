@@ -152,7 +152,6 @@ impl When {
         self
     }
 
-
     const fn idle(mut self) -> Self {
         self.agent_running = Cond::No;
         self

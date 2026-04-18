@@ -202,10 +202,7 @@ impl TranscriptWindow {
         let target_line = (total.saturating_sub(1).saturating_sub(line_from_bottom)) as usize;
         let target_line = target_line.min(rows.len() - 1);
         let line = &rows[target_line];
-        let want = self
-            .cursor
-            .curswant()
-            .unwrap_or(self.cursor_col as usize);
+        let want = self.cursor.curswant().unwrap_or(self.cursor_col as usize);
         let col_bytes = cell_to_byte(line, want);
         self.cpos = offsets[target_line] + col_bytes;
         self.cursor_col = byte_to_cell(line, col_bytes) as u16;
@@ -364,10 +361,22 @@ impl TranscriptWindow {
         // Map arrow keys to j/k/h/l so vertical motion on the readonly
         // transcript always takes the curswant-preserving path.
         let key = match key.code {
-            KeyCode::Up => KeyEvent { code: KeyCode::Char('k'), ..key },
-            KeyCode::Down => KeyEvent { code: KeyCode::Char('j'), ..key },
-            KeyCode::Left => KeyEvent { code: KeyCode::Char('h'), ..key },
-            KeyCode::Right => KeyEvent { code: KeyCode::Char('l'), ..key },
+            KeyCode::Up => KeyEvent {
+                code: KeyCode::Char('k'),
+                ..key
+            },
+            KeyCode::Down => KeyEvent {
+                code: KeyCode::Char('j'),
+                ..key
+            },
+            KeyCode::Left => KeyEvent {
+                code: KeyCode::Char('h'),
+                ..key
+            },
+            KeyCode::Right => KeyEvent {
+                code: KeyCode::Char('l'),
+                ..key
+            },
             _ => key,
         };
         // Seed vim's curswant from the window cursor so a prior
@@ -405,7 +414,9 @@ impl TranscriptWindow {
         // active — gets the same column preservation because the next
         // dispatch syncs `cursor.curswant` → `vim.curswant` via
         // `dispatch_vim_key`.
-        let new_cpos = self.cursor.move_vertical(&self.buffer.buf, self.cpos, delta);
+        let new_cpos = self
+            .cursor
+            .move_vertical(&self.buffer.buf, self.cpos, delta);
         self.cpos = new_cpos;
         // A readonly transcript should never land in Insert.
         if let Some(vim) = self.vim.as_mut() {
@@ -417,7 +428,9 @@ impl TranscriptWindow {
     }
 
     /// Jump the cursor to the transcript `(line_idx, col)` position and
-    /// pull the viewport to keep it onscreen.
+    /// pull the viewport to keep it onscreen. Seeds `curswant` from the
+    /// clicked column so subsequent vertical motion (mouse wheel, j/k)
+    /// preserves the clicked visual column.
     pub fn jump_to_line_col(
         &mut self,
         rows: &[String],
@@ -430,11 +443,12 @@ impl TranscriptWindow {
         }
         let line_idx = line_idx.min(rows.len() - 1);
         let offsets = Self::line_start_offsets(rows);
-        // Mount the transcript so downstream word/line motions work
-        // against the same bytes `cpos` indexes into.
         self.buffer.buf = rows.join("\n");
-        // `col` is in display cells (matches click column / cursor_col).
-        self.cpos = offsets[line_idx] + cell_to_byte(&rows[line_idx], col);
+        let line = &rows[line_idx];
+        let col_bytes = cell_to_byte(line, col);
+        self.cpos = offsets[line_idx] + col_bytes;
+        let landed_col = byte_to_cell(line, col_bytes);
+        self.cursor.set_curswant(Some(landed_col));
         self.sync_from_cpos(rows, &offsets, viewport_rows);
     }
 }

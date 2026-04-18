@@ -16,8 +16,8 @@ mod selection;
 mod status;
 mod working;
 
-pub use screen::{BtwBlock, ContentVisualKind, ContentVisualRange, Notification, Screen};
 pub(crate) use region::{ScrollbarGeom, TranscriptHit};
+pub use screen::{BtwBlock, ContentVisualKind, ContentVisualRange, Notification, Screen};
 
 pub use history::{
     ActiveAgent, ActiveExec, ActiveTool, AgentBlockStatus, ApprovalScope, Block, BlockArtifact,
@@ -27,6 +27,7 @@ pub use history::{
 
 pub(crate) use selection::{scan_at_token, truncate_str, try_at_ref, wrap_line};
 
+pub use status::StatusPosition;
 pub(crate) use status::{draw_bar, BarSpan};
 
 pub use dialogs::{

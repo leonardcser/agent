@@ -873,6 +873,50 @@ impl App {
         self.screen.draw_frame(out, w, None, Some(dialog_height))
     }
 
+    /// Build the status-bar position record for the focused window.
+    /// Buffer-agnostic: reads the current buffer + byte offset from
+    /// whichever window has focus, so every window shares one
+    /// `<line>:<col> <pct>%` formatter and the numbers stay in sync
+    /// with the actual cursor position regardless of which code path
+    /// moved it (key, motion, mouse click, scroll).
+    fn compute_status_position(&mut self, width: usize) -> Option<render::StatusPosition> {
+        use crate::text_utils::byte_to_cell;
+        let (buf_ref, cpos) = match self.app_focus {
+            crate::app::AppFocus::Prompt => (
+                std::borrow::Cow::Borrowed(&self.input.buf[..]),
+                self.input.cpos,
+            ),
+            crate::app::AppFocus::Content => {
+                let rows = self.screen.full_transcript_text(width);
+                if rows.is_empty() {
+                    return None;
+                }
+                (
+                    std::borrow::Cow::Owned(rows.join("\n")),
+                    self.transcript_window.cpos,
+                )
+            }
+        };
+        let buf: &str = buf_ref.as_ref();
+        let cpos = cpos.min(buf.len());
+        // Line: 1-indexed count of '\n' before cpos.
+        let line_idx = buf[..cpos].bytes().filter(|&b| b == b'\n').count();
+        // Column: display width of the current line up to cpos.
+        let line_start = buf[..cpos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let col_cells = byte_to_cell(&buf[line_start..], cpos - line_start);
+        let total_lines = buf.bytes().filter(|&b| b == b'\n').count() + 1;
+        let pct = if total_lines <= 1 {
+            100
+        } else {
+            ((line_idx as u64 * 100) / (total_lines.saturating_sub(1) as u64)) as u8
+        };
+        Some(render::StatusPosition {
+            line: (line_idx as u32) + 1,
+            col: col_cells as u32 + 1,
+            scroll_pct: pct.min(100),
+        })
+    }
+
     /// Render a full-mode frame (content + prompt) in its own sync frame.
     pub(super) fn tick_prompt(&mut self, agent_running: bool) {
         let _perf = crate::perf::begin("app:tick");
@@ -906,6 +950,8 @@ impl App {
         };
         self.screen
             .set_status_vim(status_vim_enabled, status_vim_mode);
+        let status_position = self.compute_status_position(w);
+        self.screen.set_status_position(status_position);
         let (queued, prediction): (&[String], Option<&str>) = if show_queued {
             (&self.queued_messages, None)
         } else {
@@ -1044,7 +1090,9 @@ impl App {
                     self.transcript_window.cursor.clear_anchor();
                 }
                 _ if extending => {
-                    self.transcript_window.cursor.extend(self.transcript_window.cpos);
+                    self.transcript_window
+                        .cursor
+                        .extend(self.transcript_window.cpos);
                 }
                 _ => {}
             }
@@ -1060,32 +1108,32 @@ impl App {
             }
             let buf = self.transcript_window.buffer.buf.clone();
             let mv: Option<usize> = match action {
-                KeyAction::MoveLeft | KeyAction::SelectLeft => {
-                    Some(crate::text_utils::prev_char_boundary(&buf, self.transcript_window.cpos))
-                }
-                KeyAction::MoveRight | KeyAction::SelectRight => {
-                    Some(crate::text_utils::next_char_boundary(&buf, self.transcript_window.cpos))
-                }
-                KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => {
-                    Some(crate::text_utils::line_start(&buf, self.transcript_window.cpos))
-                }
-                KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
-                    Some(crate::text_utils::line_end(&buf, self.transcript_window.cpos))
-                }
-                KeyAction::MoveWordForward | KeyAction::SelectWordForward => Some(
-                    crate::text_utils::word_forward_pos(
+                KeyAction::MoveLeft | KeyAction::SelectLeft => Some(
+                    crate::text_utils::prev_char_boundary(&buf, self.transcript_window.cpos),
+                ),
+                KeyAction::MoveRight | KeyAction::SelectRight => Some(
+                    crate::text_utils::next_char_boundary(&buf, self.transcript_window.cpos),
+                ),
+                KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => Some(
+                    crate::text_utils::line_start(&buf, self.transcript_window.cpos),
+                ),
+                KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => Some(
+                    crate::text_utils::line_end(&buf, self.transcript_window.cpos),
+                ),
+                KeyAction::MoveWordForward | KeyAction::SelectWordForward => {
+                    Some(crate::text_utils::word_forward_pos(
                         &buf,
                         self.transcript_window.cpos,
                         crate::text_utils::CharClass::Word,
-                    ),
-                ),
-                KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => Some(
-                    crate::text_utils::word_backward_pos(
+                    ))
+                }
+                KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => {
+                    Some(crate::text_utils::word_backward_pos(
                         &buf,
                         self.transcript_window.cpos,
                         crate::text_utils::CharClass::Word,
-                    ),
-                ),
+                    ))
+                }
                 KeyAction::CopySelection => {
                     if let Some((s, e)) = self.transcript_window.selection_range() {
                         let s = crate::text_utils::snap(&buf, s);
@@ -1127,7 +1175,8 @@ impl App {
         let w = render::term_width();
         let rows = self.screen.full_transcript_text(w);
         let viewport = self.viewport_rows_estimate();
-        self.transcript_window.scroll_by_lines(delta, &rows, viewport);
+        self.transcript_window
+            .scroll_by_lines(delta, &rows, viewport);
         self.screen.mark_dirty();
     }
 
@@ -1176,7 +1225,10 @@ impl App {
             let (s, e) = vim.visual_range(&buf, self.transcript_window.cpos)?;
             (s, e, kind)
         } else {
-            let (s, e) = self.transcript_window.cursor.range(self.transcript_window.cpos)?;
+            let (s, e) = self
+                .transcript_window
+                .cursor
+                .range(self.transcript_window.cpos)?;
             (s, e, render::ContentVisualKind::Char)
         };
         let offset_to_line_col = |off: usize| -> (usize, usize) {
@@ -1184,7 +1236,10 @@ impl App {
             let prefix = &buf[..off];
             let line = prefix.bytes().filter(|&b| b == b'\n').count();
             let line_start = prefix.rfind('\n').map(|p| p + 1).unwrap_or(0);
-            (line, crate::text_utils::byte_to_cell(&buf[line_start..off], off - line_start))
+            (
+                line,
+                crate::text_utils::byte_to_cell(&buf[line_start..off], off - line_start),
+            )
         };
         let (start_line_abs, start_col) = offset_to_line_col(s);
         let (end_line_abs, end_col) = offset_to_line_col(e);
@@ -1253,6 +1308,14 @@ impl App {
     // ── Mouse event dispatch ─────────────────────────────────────────────
     fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         use crossterm::event::MouseButton;
+        // The status bar is a self-contained UI strip on the last row
+        // of the terminal. Clicks / scrolls on it must not bleed into
+        // the prompt below — otherwise clicking anywhere on the status
+        // line focuses the prompt and jumps its cursor.
+        let (_, h) = self.screen.size();
+        if h > 0 && me.row == h - 1 {
+            return EventOutcome::Noop;
+        }
         // Drag + release drive tmux-style click-drag-copy. Works in
         // both the prompt and the content pane — each extends its own
         // buffer's selection anchor.
@@ -1506,6 +1569,8 @@ impl App {
             })
             .unwrap_or(buf.len());
         self.input.cpos = cpos.min(buf.len());
+        let want = col.saturating_sub(gutter) as usize;
+        self.input.cursor.set_curswant(Some(want));
         self.screen.mark_dirty();
     }
 
@@ -1643,7 +1708,9 @@ impl App {
             let range = if let Some(vim) = self.transcript_window.vim.as_ref() {
                 vim.visual_range(&buf, self.transcript_window.cpos)
             } else {
-                self.transcript_window.cursor.range(self.transcript_window.cpos)
+                self.transcript_window
+                    .cursor
+                    .range(self.transcript_window.cpos)
             };
             if let Some((s, e)) = range {
                 let s = crate::text_utils::snap(&buf, s);
@@ -1743,16 +1810,12 @@ impl App {
     }
 
     /// Lookup the currently-painted scrollbar geometry for a pane.
-    fn scrollbar_for(
-        &self,
-        target: crate::app::AppFocus,
-    ) -> Option<render::ScrollbarGeom> {
+    fn scrollbar_for(&self, target: crate::app::AppFocus) -> Option<render::ScrollbarGeom> {
         match target {
             crate::app::AppFocus::Content => self.screen.transcript_region()?.scrollbar,
             crate::app::AppFocus::Prompt => self.screen.input_scrollbar(),
         }
     }
-
 
     /// Translate a click inside the transcript viewport into a
     /// (line, col) in the full transcript and jump the content cursor
