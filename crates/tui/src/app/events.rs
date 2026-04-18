@@ -922,6 +922,13 @@ impl App {
         };
         use crossterm::event::KeyModifiers as M;
 
+        // Ctrl-C from a non-prompt pane returns focus to the prompt.
+        if k.modifiers.contains(M::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
+            self.app_focus = crate::app::AppFocus::Prompt;
+            self.screen.mark_dirty();
+            return EventOutcome::Redraw;
+        }
+
         // Readonly-buffer scrolling keybinds: Ctrl-U / Ctrl-D (half-page),
         // Ctrl-B / Ctrl-F (full-page), Ctrl-Y / Ctrl-E (one line). These
         // mirror Vim's scroll commands. Since Vim in the prompt reuses
