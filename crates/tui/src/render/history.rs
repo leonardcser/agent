@@ -610,6 +610,38 @@ impl BlockHistory {
     /// transcript stay cleared).
     ///
     /// Returns the clamped scroll offset (for the caller to sync state).
+    /// Plain-text rendering of the full transcript at the given width.
+    /// One string per rendered row, gaps between blocks included as
+    /// empty entries. Used by the content pane as the `vim` buffer.
+    pub(super) fn full_text(&mut self, width: usize, show_thinking: bool) -> Vec<String> {
+        let key = LayoutKey {
+            width: width as u16,
+            show_thinking,
+        };
+        let collect_display = |line: &super::display::DisplayLine| -> String {
+            let mut s = String::new();
+            for span in &line.spans {
+                s.push_str(&span.text);
+            }
+            s
+        };
+        let mut out: Vec<String> = Vec::new();
+        for i in 0..self.order.len() {
+            let gap = self.block_gap(i);
+            for _ in 0..gap {
+                out.push(String::new());
+            }
+            let _ = self.ensure_rows(i, key);
+            let id = self.order[i];
+            if let Some(display) = self.artifacts.get(&id).and_then(|a| a.get(key)) {
+                for line in &display.lines {
+                    out.push(collect_display(line));
+                }
+            }
+        }
+        out
+    }
+
     /// Mirror of `paint_viewport`'s slicing that returns the plain-text
     /// of each visible row. Used by the content pane to reason over
     /// what the user sees (motions, yank).

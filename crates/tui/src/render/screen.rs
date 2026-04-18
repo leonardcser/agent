@@ -1324,6 +1324,26 @@ impl Screen {
         &self.last_viewport_text
     }
 
+    /// Plain-text rendering of the full transcript (including any
+    /// ephemeral streaming content). Used by the content pane as the
+    /// vim buffer so motions span the entire conversation, not just the
+    /// current viewport slice.
+    pub fn full_transcript_text(&mut self, width: usize) -> Vec<String> {
+        let mut rows = self.history.full_text(width, self.show_thinking);
+        if self.has_ephemeral() {
+            let mut col = SpanCollector::new(width as u16);
+            self.render_ephemeral_into(&mut col, width);
+            for line in col.finish().lines {
+                let mut s = String::new();
+                for span in &line.spans {
+                    s.push_str(&span.text);
+                }
+                rows.push(s);
+            }
+        }
+        rows
+    }
+
     pub fn working_throbber(&self) -> Option<Throbber> {
         self.working.throbber
     }

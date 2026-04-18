@@ -911,223 +911,105 @@ impl App {
         self.history_cursor_col = clamped_col;
     }
 
-    // ── App NORMAL (History focus) key handler ──────────────────────────
+    // ── Content pane key handler — drives `Vim` over a readonly
+    // transcript buffer so Normal / Visual / VisualLine motions and
+    // yank behave exactly like they do in the prompt.
     fn handle_event_app_history(&mut self, ev: Event) -> EventOutcome {
         let Event::Key(k) = ev else {
             return EventOutcome::Noop;
         };
+        // Route the key through vim first. If it's consumed, sync
+        // scroll/cursor state from the new cpos and return.
+        if self.handle_content_vim_key(k) {
+            return EventOutcome::Redraw;
+        }
         use crossterm::event::KeyModifiers as M;
         match (k.code, k.modifiers) {
-            // Quit.
             (KeyCode::Char('q'), M::NONE) => EventOutcome::Quit,
-            // Vim-like cursor motions. The cursor moves through the
-            // viewport until it hits an edge, then scrolling takes over
-            // (tmux copy-mode style).
-            (KeyCode::Char('j'), M::NONE) | (KeyCode::Down, _) => {
-                if self.history_cursor_line > 0 {
-                    self.history_cursor_line -= 1;
-                } else {
-                    self.history_scroll_offset = self.history_scroll_offset.saturating_sub(1);
-                }
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            (KeyCode::Char('k'), M::NONE) | (KeyCode::Up, _) => {
-                let viewport = self.viewport_rows_estimate();
-                if self.history_cursor_line + 1 < viewport {
-                    self.history_cursor_line += 1;
-                } else {
-                    self.history_scroll_offset = self.history_scroll_offset.saturating_add(1);
-                }
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            (KeyCode::Char('d'), M::CONTROL) => {
-                let half = (self.last_height / 2).max(1);
-                self.history_scroll_offset = self.history_scroll_offset.saturating_sub(half);
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            (KeyCode::Char('u'), M::CONTROL) => {
-                let half = (self.last_height / 2).max(1);
-                self.history_scroll_offset = self.history_scroll_offset.saturating_add(half);
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            (KeyCode::Char('G'), _) => {
-                self.history_scroll_offset = 0;
-                self.history_cursor_line = 0;
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            (KeyCode::Char('g'), M::NONE) => {
-                self.history_scroll_offset = u16::MAX;
-                self.history_cursor_line = self.viewport_rows_estimate().saturating_sub(1);
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            // Horizontal motion.
-            (KeyCode::Char('h'), M::NONE) | (KeyCode::Left, _) => {
-                self.history_cursor_col = self.history_cursor_col.saturating_sub(1);
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            (KeyCode::Char('l'), M::NONE) | (KeyCode::Right, _) => {
-                self.history_cursor_col = self.history_cursor_col.saturating_add(1);
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            (KeyCode::Char('0'), M::NONE) | (KeyCode::Home, _) => {
-                self.history_cursor_col = 0;
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            (KeyCode::Char('$'), _) | (KeyCode::End, _) => {
-                self.history_cursor_col = self.current_line_text_len().saturating_sub(1);
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            // First non-blank of current line.
-            (KeyCode::Char('^'), _) => {
-                let text = self.current_line_text();
-                self.history_cursor_col = text
-                    .char_indices()
-                    .find(|(_, c)| !c.is_whitespace())
-                    .map(|(i, _)| i as u16)
-                    .unwrap_or(0);
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            // Word motions — simplistic: skip non-word then skip word.
-            (KeyCode::Char('w'), M::NONE) => {
-                self.history_cursor_col =
-                    word_forward_start(&self.current_line_text(), self.history_cursor_col as usize)
-                        as u16;
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            (KeyCode::Char('b'), M::NONE) => {
-                self.history_cursor_col = word_backward_start(
-                    &self.current_line_text(),
-                    self.history_cursor_col as usize,
-                ) as u16;
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            (KeyCode::Char('e'), M::NONE) => {
-                self.history_cursor_col =
-                    word_forward_end(&self.current_line_text(), self.history_cursor_col as usize)
-                        as u16;
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            // Visual mode.
-            (KeyCode::Char('v'), M::NONE) => {
-                self.history_visual = match self.history_visual {
-                    Some(v) if v.kind == crate::app::HistoryVisualKind::Char => None,
-                    _ => Some(crate::app::HistoryVisual {
-                        anchor_line: self.history_cursor_line,
-                        anchor_col: self.history_cursor_col,
-                        kind: crate::app::HistoryVisualKind::Char,
-                    }),
-                };
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            (KeyCode::Char('V'), _) => {
-                self.history_visual = match self.history_visual {
-                    Some(v) if v.kind == crate::app::HistoryVisualKind::Line => None,
-                    _ => Some(crate::app::HistoryVisual {
-                        anchor_line: self.history_cursor_line,
-                        anchor_col: 0,
-                        kind: crate::app::HistoryVisualKind::Line,
-                    }),
-                };
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            (KeyCode::Esc, _) => {
-                self.history_visual = None;
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            // Yank current selection (or current line on `yy`).
-            (KeyCode::Char('y'), M::NONE) => {
-                let text = self.collect_yank_text();
-                if !text.is_empty() {
-                    let _ = crate::app::commands::copy_to_clipboard(&text);
-                    self.screen
-                        .notify(format!("yanked {} chars", text.chars().count()));
-                }
-                self.history_visual = None;
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
             _ => EventOutcome::Noop,
         }
     }
 
-    fn current_line_text(&self) -> String {
-        let rows = self.screen.viewport_text_rows();
+    /// Build the transcript buffer, run `key` through the content-pane
+    /// `Vim` instance, and mirror the resulting cursor / visual / yank
+    /// state back onto our scroll + cursor. Returns `true` when vim
+    /// consumed the key (caller should return `Redraw`).
+    fn handle_content_vim_key(&mut self, k: KeyEvent) -> bool {
+        let w = render::term_width();
+        let rows = self.screen.full_transcript_text(w);
         if rows.is_empty() {
-            return String::new();
+            return false;
         }
-        let max_idx = rows.len().saturating_sub(1);
-        let idx = max_idx.saturating_sub(self.history_cursor_line as usize);
-        rows.get(idx).cloned().unwrap_or_default()
-    }
+        let mut buf = rows.join("\n");
+        let total_lines = rows.len();
 
-    fn current_line_text_len(&self) -> u16 {
-        self.current_line_text().chars().count() as u16
-    }
-
-    /// Collect plain text for the active visual selection. Returns the
-    /// current line when no selection is active (single-line yank).
-    fn collect_yank_text(&self) -> String {
-        let rows = self.screen.viewport_text_rows();
-        if rows.is_empty() {
-            return String::new();
-        }
-        let max_idx = rows.len().saturating_sub(1);
-        let cur_idx = max_idx.saturating_sub(self.history_cursor_line as usize);
-        match self.history_visual {
-            None => rows.get(cur_idx).cloned().unwrap_or_default(),
-            Some(v) => {
-                let anchor_idx = max_idx.saturating_sub(v.anchor_line as usize);
-                let (lo, hi) = if cur_idx <= anchor_idx {
-                    (cur_idx, anchor_idx)
-                } else {
-                    (anchor_idx, cur_idx)
-                };
-                match v.kind {
-                    crate::app::HistoryVisualKind::Line => rows[lo..=hi].join("\n"),
-                    crate::app::HistoryVisualKind::Char => {
-                        // Character-wise selection on a single line; if
-                        // the range spans lines, include full inner
-                        // lines and clip the endpoints.
-                        if lo == hi {
-                            let line = &rows[lo];
-                            let (a, b) = (v.anchor_col as usize, self.history_cursor_col as usize);
-                            let (s, e) = if a <= b { (a, b) } else { (b, a) };
-                            char_slice_inclusive(line, s, e)
-                        } else {
-                            let mut parts = Vec::with_capacity(hi - lo + 1);
-                            let (start_col, end_col) = if cur_idx <= anchor_idx {
-                                (self.history_cursor_col as usize, v.anchor_col as usize)
-                            } else {
-                                (v.anchor_col as usize, self.history_cursor_col as usize)
-                            };
-                            parts.push(char_slice_from(&rows[lo], start_col));
-                            for r in &rows[lo + 1..hi] {
-                                parts.push(r.clone());
-                            }
-                            parts.push(char_slice_to_inclusive(&rows[hi], end_col));
-                            parts.join("\n")
-                        }
-                    }
-                }
+        // Start-of-bottom-line offset (what cpos maps to when scroll=0).
+        let line_start_offsets: Vec<usize> = {
+            let mut v = Vec::with_capacity(total_lines);
+            let mut acc = 0usize;
+            for r in &rows {
+                v.push(acc);
+                acc += r.len() + 1; // include '\n'
             }
+            v
+        };
+
+        // Clamp cpos into the current buffer.
+        if self.content_cpos > buf.len() {
+            self.content_cpos = buf.len();
         }
+        let mut cpos = self.content_cpos;
+        let mut attachments: Vec<crate::attachment::AttachmentId> = Vec::new();
+        let mut ctx = crate::vim::VimContext {
+            buf: &mut buf,
+            cpos: &mut cpos,
+            attachments: &mut attachments,
+            kill_ring: &mut self.content_kill,
+            history: &mut self.content_undo,
+        };
+        let action = self.content_vim.handle_key(k, &mut ctx);
+        // Insert mode in the content pane would expose editing — snap
+        // back to Normal so the pane stays readonly.
+        if self.content_vim.mode() == crate::vim::ViMode::Insert {
+            self.content_vim.set_mode(crate::vim::ViMode::Normal);
+        }
+        if matches!(action, crate::vim::Action::Passthrough) {
+            return false;
+        }
+
+        // On yank (kill_ring updated), push to the system clipboard.
+        let yanked = self.content_kill.current().to_string();
+        if !yanked.is_empty() {
+            let _ = crate::app::commands::copy_to_clipboard(&yanked);
+            self.screen
+                .notify(format!("yanked {} chars", yanked.chars().count()));
+            self.content_kill.set_with_linewise(String::new(), false);
+        }
+
+        // Map cpos back to (line_idx, col) and sync scroll/cursor.
+        self.content_cpos = cpos.min(
+            line_start_offsets.last().copied().unwrap_or(0) + rows.last().map_or(0, |r| r.len()),
+        );
+        let line_idx = match line_start_offsets.binary_search(&self.content_cpos) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        };
+        let col = self.content_cpos - line_start_offsets[line_idx];
+        let line_from_bottom = (total_lines - 1).saturating_sub(line_idx) as u16;
+        self.history_cursor_line = line_from_bottom;
+        self.history_cursor_col = col as u16;
+
+        // Scroll so the cursor line is visible. Viewport height is
+        // estimated — the render pass clamps the final values.
+        let viewport = self.viewport_rows_estimate();
+        if line_from_bottom >= viewport {
+            self.history_scroll_offset = line_from_bottom - (viewport - 1);
+        } else if line_from_bottom < self.history_scroll_offset.saturating_sub(viewport - 1) {
+            self.history_scroll_offset = line_from_bottom;
+        }
+
+        self.screen.mark_dirty();
+        true
     }
 
     /// Rough viewport-height estimate for cursor clamping at event time.
@@ -1222,77 +1104,3 @@ impl App {
 
 /// Max inter-key gap between `Ctrl-W` and its follow-up key.
 const PANE_CHORD_WINDOW: Duration = Duration::from_millis(750);
-
-/// Return the char index of the first character of the word that
-/// follows the word at `col` (vim `w`). Stops at end of line.
-fn word_forward_start(line: &str, col: usize) -> usize {
-    let chars: Vec<char> = line.chars().collect();
-    let n = chars.len();
-    if n == 0 {
-        return 0;
-    }
-    let mut i = col.min(n.saturating_sub(1));
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    // Skip current word class.
-    let cur_word = is_word(chars[i]);
-    while i < n && is_word(chars[i]) == cur_word && !chars[i].is_whitespace() {
-        i += 1;
-    }
-    while i < n && chars[i].is_whitespace() {
-        i += 1;
-    }
-    i.min(n.saturating_sub(1))
-}
-
-fn word_backward_start(line: &str, col: usize) -> usize {
-    let chars: Vec<char> = line.chars().collect();
-    if chars.is_empty() {
-        return 0;
-    }
-    let mut i = col.min(chars.len().saturating_sub(1));
-    if i == 0 {
-        return 0;
-    }
-    i -= 1;
-    while i > 0 && chars[i].is_whitespace() {
-        i -= 1;
-    }
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    let cur_word = is_word(chars[i]);
-    while i > 0 && is_word(chars[i - 1]) == cur_word && !chars[i - 1].is_whitespace() {
-        i -= 1;
-    }
-    i
-}
-
-fn word_forward_end(line: &str, col: usize) -> usize {
-    let chars: Vec<char> = line.chars().collect();
-    let n = chars.len();
-    if n == 0 {
-        return 0;
-    }
-    let mut i = col.min(n.saturating_sub(1));
-    if i + 1 < n {
-        i += 1;
-    }
-    while i < n && chars[i].is_whitespace() {
-        i += 1;
-    }
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    while i + 1 < n && is_word(chars[i + 1]) == is_word(chars[i]) && !chars[i + 1].is_whitespace() {
-        i += 1;
-    }
-    i.min(n.saturating_sub(1))
-}
-
-fn char_slice_inclusive(s: &str, start: usize, end: usize) -> String {
-    s.chars().skip(start).take(end + 1 - start).collect()
-}
-
-fn char_slice_from(s: &str, start: usize) -> String {
-    s.chars().skip(start).collect()
-}
-
-fn char_slice_to_inclusive(s: &str, end: usize) -> String {
-    s.chars().take(end + 1).collect()
-}

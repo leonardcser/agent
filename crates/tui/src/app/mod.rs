@@ -167,23 +167,18 @@ pub struct App {
     pub history_cursor_line: u16,
     /// Cursor column within the history viewport (0-indexed).
     pub history_cursor_col: u16,
-    /// Active visual selection in the content pane.
-    pub history_visual: Option<HistoryVisual>,
-}
-
-/// Visual selection state in the content pane.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HistoryVisual {
-    /// Anchor (line_from_bottom, col) captured when visual mode started.
-    pub anchor_line: u16,
-    pub anchor_col: u16,
-    pub kind: HistoryVisualKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HistoryVisualKind {
-    Char,
-    Line,
+    /// Vim state driving the content pane (Normal / Visual / VisualLine).
+    /// The content pane treats the transcript as a readonly buffer and
+    /// reuses vim for motions, visual selection and yank.
+    pub content_vim: crate::vim::Vim,
+    /// Flat char-offset of the cursor into the transcript buffer.
+    pub content_cpos: usize,
+    /// Scratch kill ring used by content-pane yank; copied to the system
+    /// clipboard after each yank action.
+    pub content_kill: crate::input::KillRing,
+    /// Scratch undo stack — required by `VimContext` but discarded each
+    /// turn since the content buffer is readonly.
+    pub content_undo: crate::undo::UndoHistory,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -557,7 +552,10 @@ impl App {
             history_scroll_offset: 0,
             history_cursor_line: 0,
             history_cursor_col: 0,
-            history_visual: None,
+            content_vim: crate::vim::Vim::new(),
+            content_cpos: 0,
+            content_kill: crate::input::KillRing::new(),
+            content_undo: crate::undo::UndoHistory::new(None),
         }
     }
 
