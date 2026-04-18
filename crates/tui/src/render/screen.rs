@@ -2232,7 +2232,8 @@ impl Screen {
         width: usize,
         prompt: FramePrompt<'_>,
         scroll_offset: u16,
-    ) -> u16 {
+        history_cursor_line: u16,
+    ) -> (u16, u16) {
         let _perf = crate::perf::begin("render:viewport_frame");
         self.update_spinner();
 
@@ -2272,18 +2273,24 @@ impl Screen {
         );
 
         // Draw the history cursor (tmux-style) when in History focus.
-        if self.last_app_focus == crate::app::AppFocus::History && viewport_rows > 0 {
-            let cursor_row = viewport_rows.saturating_sub(1);
-            out.move_to(0, cursor_row);
-            out.push_style(StyleState {
-                fg: Some(Color::Black),
-                bg: Some(theme::accent()),
-                bold: true,
-                ..StyleState::default()
-            });
-            out.print("\u{258B}"); // ▋
-            out.pop_style();
-        }
+        let clamped_cursor =
+            if self.last_app_focus == crate::app::AppFocus::History && viewport_rows > 0 {
+                let max_cur = viewport_rows.saturating_sub(1);
+                let cur = history_cursor_line.min(max_cur);
+                let cursor_row = viewport_rows.saturating_sub(1 + cur);
+                out.move_to(0, cursor_row);
+                out.push_style(StyleState {
+                    fg: Some(Color::Black),
+                    bg: Some(theme::accent()),
+                    bold: true,
+                    ..StyleState::default()
+                });
+                out.print("\u{258B}"); // ▋
+                out.pop_style();
+                cur
+            } else {
+                history_cursor_line
+            };
 
         // Paint prompt stack at the bottom, leaving the gap row blank.
         let prompt_top = viewport_rows + gap_rows;
@@ -2311,7 +2318,7 @@ impl Screen {
         // Fully flushed — every frame re-renders everything.
         self.history.flushed = self.history.order.len();
 
-        clamped
+        (clamped, clamped_cursor)
     }
 
     /// Measure prompt height without painting. Used by `draw_frame` to

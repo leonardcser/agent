@@ -477,40 +477,6 @@ impl BlockHistory {
         rows
     }
 
-    /// Earliest block index such that `[start_idx..len()]` fits in
-    /// `max_lines` rows. Walks backwards and stops early — O(tail),
-    /// not O(history).
-    ///
-    /// Returns `(start_idx, head_skip)`. When a single block at the
-    /// tail is taller than the entire budget, that block is still
-    /// included and `head_skip` is the number of rows to drop from
-    /// its top so the painted slice fits the budget. This keeps very
-    /// long messages visible (tail-cropped, tmux-style) instead of
-    /// disappearing entirely.
-    pub(super) fn redraw_start(&mut self, max_lines: u16, key: LayoutKey) -> (usize, u16) {
-        let _perf = crate::perf::begin("history:redraw_start");
-        let mut budget = max_lines;
-        let mut start = self.order.len();
-        for i in (0..self.order.len()).rev() {
-            let rows = self.ensure_rows(i, key);
-            let total = self.block_gap(i) + rows;
-            if total > budget {
-                if start == self.order.len() {
-                    // Even the last block is bigger than the budget —
-                    // include it and crop its head to fit. The gap is
-                    // dropped by `render` when `head_skip > 0`, so the
-                    // budget here is purely block rows, not gap+rows.
-                    let head_skip = rows.saturating_sub(budget);
-                    return (i, head_skip);
-                }
-                break;
-            }
-            budget -= total;
-            start = i;
-        }
-        (start, 0)
-    }
-
     pub(super) fn truncate(&mut self, idx: usize) {
         if idx >= self.order.len() {
             return;
@@ -644,6 +610,7 @@ impl BlockHistory {
     /// transcript stay cleared).
     ///
     /// Returns the clamped scroll offset (for the caller to sync state).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn paint_viewport(
         &mut self,
         out: &mut RenderOut,

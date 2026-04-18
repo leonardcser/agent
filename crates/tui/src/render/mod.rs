@@ -61,9 +61,6 @@ pub use cache::{
     RenderCache, ToolOutputRenderCache, LAYOUT_CACHE_VERSION, RENDER_CACHE_VERSION,
 };
 
-/// Cap on rows painted by a single redraw, regardless of history length.
-pub(super) const MAX_REDRAW_LINES: u16 = 2000;
-
 /// Parameters for rendering the prompt section in `draw_frame`.
 /// When `None` is passed instead, only content (blocks + active tool) is drawn.
 pub struct FramePrompt<'a> {

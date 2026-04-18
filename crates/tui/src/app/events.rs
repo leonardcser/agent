@@ -890,7 +890,7 @@ impl App {
             (&[], self.input_prediction.as_deref())
         };
         let mut frame = render::Frame::begin(self.screen.backend());
-        let clamped = self.screen.draw_viewport_frame(
+        let (clamped_scroll, clamped_cursor) = self.screen.draw_viewport_frame(
             &mut frame,
             w,
             FramePrompt {
@@ -900,10 +900,10 @@ impl App {
                 prediction,
             },
             self.history_scroll_offset,
+            self.history_cursor_line,
         );
-        if clamped != self.history_scroll_offset {
-            self.history_scroll_offset = clamped;
-        }
+        self.history_scroll_offset = clamped_scroll;
+        self.history_cursor_line = clamped_cursor;
     }
 
     // ── App NORMAL (History focus) key handler ──────────────────────────
@@ -921,26 +921,44 @@ impl App {
             | (KeyCode::Char('c'), M::CONTROL) => {
                 self.app_focus = crate::app::AppFocus::Prompt;
                 self.history_scroll_offset = 0;
+                self.history_cursor_line = 0;
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
             // Quit.
             (KeyCode::Char('q'), M::NONE) => EventOutcome::Quit,
-            // Scroll motions: stubbed as offset changes. Actual viewport
-            // rendering honors these once the flat-line model lands.
+            // Vim-like cursor motions. The cursor moves through the
+            // viewport until it hits an edge, then scrolling takes over
+            // (tmux copy-mode style).
             (KeyCode::Char('j'), M::NONE) | (KeyCode::Down, _) => {
-                self.history_scroll_offset = self.history_scroll_offset.saturating_sub(1);
+                if self.history_cursor_line > 0 {
+                    self.history_cursor_line -= 1;
+                } else {
+                    self.history_scroll_offset = self.history_scroll_offset.saturating_sub(1);
+                    if self.history_scroll_offset == 0 {
+                        self.app_focus = crate::app::AppFocus::Prompt;
+                    }
+                }
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
             (KeyCode::Char('k'), M::NONE) | (KeyCode::Up, _) => {
-                self.history_scroll_offset = self.history_scroll_offset.saturating_add(1);
+                let viewport = self.viewport_rows_estimate();
+                if self.history_cursor_line + 1 < viewport {
+                    self.history_cursor_line += 1;
+                } else {
+                    self.history_scroll_offset = self.history_scroll_offset.saturating_add(1);
+                }
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
             (KeyCode::Char('d'), M::CONTROL) => {
                 let half = (self.last_height / 2).max(1);
                 self.history_scroll_offset = self.history_scroll_offset.saturating_sub(half);
+                if self.history_scroll_offset == 0 {
+                    self.history_cursor_line = 0;
+                    self.app_focus = crate::app::AppFocus::Prompt;
+                }
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
@@ -952,16 +970,28 @@ impl App {
             }
             (KeyCode::Char('G'), _) => {
                 self.history_scroll_offset = 0;
+                self.history_cursor_line = 0;
+                self.app_focus = crate::app::AppFocus::Prompt;
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
             (KeyCode::Char('g'), M::NONE) => {
                 self.history_scroll_offset = u16::MAX;
+                self.history_cursor_line = self.viewport_rows_estimate().saturating_sub(1);
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
             _ => EventOutcome::Noop,
         }
+    }
+
+    /// Rough viewport-height estimate for cursor clamping at event time.
+    /// Prompt height isn't known outside the render pass, so we reserve
+    /// a conservative constant and let the render pass clamp the real
+    /// cursor row.
+    fn viewport_rows_estimate(&self) -> u16 {
+        const PROMPT_RESERVE: u16 = 6;
+        self.last_height.saturating_sub(PROMPT_RESERVE).max(1)
     }
 
     // ── Mouse event dispatch (wheel → history scroll) ───────────────────

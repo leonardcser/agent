@@ -161,6 +161,10 @@ pub struct App {
     /// Scroll offset in rows for the history viewport (0 = stuck to bottom).
     /// Increases as the user scrolls up (via wheel or j/k in History focus).
     pub history_scroll_offset: u16,
+    /// Cursor position within the history viewport, measured as lines
+    /// *from the bottom*. 0 = bottom-most visible row; when this would
+    /// exceed the viewport, the caller scrolls instead.
+    pub history_cursor_line: u16,
 }
 
 /// Two-level focus on top of the existing vim modes.
@@ -527,6 +531,7 @@ impl App {
             startup_auth_error,
             app_focus: AppFocus::Prompt,
             history_scroll_offset: 0,
+            history_cursor_line: 0,
         }
     }
 
