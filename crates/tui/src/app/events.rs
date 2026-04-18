@@ -305,9 +305,16 @@ impl App {
             return EventOutcome::Noop;
         }
 
-        // ── Mouse events (wheel scrolls history) ─────────────────────────
+        // ── Mouse events (wheel + click → pane focus) ─────────────────────
         if let Event::Mouse(me) = ev {
             return self.handle_mouse(me);
+        }
+
+        // ── Ctrl-W pane chord ─────────────────────────────────────────────
+        // First press primes the chord; the next keypress within
+        // `PANE_CHORD_WINDOW` is consumed as the navigation command.
+        if let Some(outcome) = self.handle_pane_chord(&ev, t) {
+            return outcome;
         }
 
         // ── App NORMAL (History focus): intercept keys before anything else.
@@ -339,7 +346,7 @@ impl App {
                     t.last_esc = None;
                     let restore_mode = t.esc_vim_mode.take();
 
-                    // Cancel in-flight compaction instead of switching focus.
+                    // Cancel in-flight compaction on double-Esc.
                     if self.screen.working_throbber() == Some(render::Throbber::Compacting) {
                         self.compact_epoch += 1;
                         self.screen.set_throbber(render::Throbber::Interrupted);
@@ -349,11 +356,7 @@ impl App {
                         }
                         return EventOutcome::Noop;
                     }
-
-                    // Double-Esc from prompt NORMAL → app NORMAL (history focus).
-                    self.app_focus = crate::app::AppFocus::Content;
-                    self.screen.mark_dirty();
-                    return EventOutcome::Redraw;
+                    return EventOutcome::Noop;
                 }
                 // Single Esc in normal mode — start timer.
                 t.last_esc = Some(Instant::now());
@@ -915,18 +918,6 @@ impl App {
         };
         use crossterm::event::KeyModifiers as M;
         match (k.code, k.modifiers) {
-            // Back to prompt — reset scroll so the transcript returns to the bottom.
-            (KeyCode::Char('i'), M::NONE)
-            | (KeyCode::Char('a'), M::NONE)
-            | (KeyCode::Char('o'), M::NONE)
-            | (KeyCode::Esc, _)
-            | (KeyCode::Char('c'), M::CONTROL) => {
-                self.app_focus = crate::app::AppFocus::Prompt;
-                self.history_scroll_offset = 0;
-                self.history_cursor_line = 0;
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
             // Quit.
             (KeyCode::Char('q'), M::NONE) => EventOutcome::Quit,
             // Vim-like cursor motions. The cursor moves through the
@@ -937,9 +928,6 @@ impl App {
                     self.history_cursor_line -= 1;
                 } else {
                     self.history_scroll_offset = self.history_scroll_offset.saturating_sub(1);
-                    if self.history_scroll_offset == 0 {
-                        self.app_focus = crate::app::AppFocus::Prompt;
-                    }
                 }
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
@@ -957,10 +945,6 @@ impl App {
             (KeyCode::Char('d'), M::CONTROL) => {
                 let half = (self.last_height / 2).max(1);
                 self.history_scroll_offset = self.history_scroll_offset.saturating_sub(half);
-                if self.history_scroll_offset == 0 {
-                    self.history_cursor_line = 0;
-                    self.app_focus = crate::app::AppFocus::Prompt;
-                }
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
@@ -973,7 +957,6 @@ impl App {
             (KeyCode::Char('G'), _) => {
                 self.history_scroll_offset = 0;
                 self.history_cursor_line = 0;
-                self.app_focus = crate::app::AppFocus::Prompt;
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
@@ -1017,30 +1000,86 @@ impl App {
         self.last_height.saturating_sub(PROMPT_RESERVE).max(1)
     }
 
-    // ── Mouse event dispatch (wheel → history scroll) ───────────────────
+    // ── Mouse event dispatch ─────────────────────────────────────────────
     fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         match me.kind {
             MouseEventKind::ScrollUp => {
-                // Scrolling up enters history focus so motions stay consistent.
-                if self.app_focus == crate::app::AppFocus::Prompt {
-                    self.app_focus = crate::app::AppFocus::Content;
-                }
+                // Scrolling up focuses the content pane (but does not reset
+                // the prompt state — pane state is kept independent).
+                self.app_focus = crate::app::AppFocus::Content;
                 self.history_scroll_offset = self.history_scroll_offset.saturating_add(3);
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
             MouseEventKind::ScrollDown => {
                 self.history_scroll_offset = self.history_scroll_offset.saturating_sub(3);
-                // When the user scrolls back to the bottom, return focus to the prompt.
-                if self.history_scroll_offset == 0
-                    && self.app_focus == crate::app::AppFocus::Content
-                {
-                    self.app_focus = crate::app::AppFocus::Prompt;
-                }
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
+            }
+            MouseEventKind::Down(_) => {
+                // Clicks focus whichever pane the click lands in. The
+                // prompt occupies the bottom `prev_rows` rows + a gap;
+                // everything above is the content pane.
+                let (_, height) = self.screen.size();
+                let prompt_rows = self.screen.prev_prompt_rows();
+                let prompt_top = height.saturating_sub(prompt_rows);
+                let new_focus = if me.row >= prompt_top {
+                    crate::app::AppFocus::Prompt
+                } else {
+                    crate::app::AppFocus::Content
+                };
+                if new_focus != self.app_focus {
+                    self.app_focus = new_focus;
+                    self.screen.mark_dirty();
+                    return EventOutcome::Redraw;
+                }
+                EventOutcome::Noop
             }
             _ => EventOutcome::Noop,
         }
     }
+
+    /// Ctrl-W pane chord. Returns `Some` when the event was consumed by
+    /// the chord state machine (either priming or dispatching).
+    fn handle_pane_chord(&mut self, ev: &Event, t: &mut Timers) -> Option<EventOutcome> {
+        use crossterm::event::KeyModifiers as M;
+        let Event::Key(k) = ev else { return None };
+
+        // In-flight chord: consume the follow-up key.
+        if let Some(started) = t.pending_pane_chord {
+            if started.elapsed() < PANE_CHORD_WINDOW {
+                let navigated = matches!(
+                    (k.code, k.modifiers),
+                    (KeyCode::Char('w'), _) | (KeyCode::Char('j' | 'k' | 'h' | 'l' | 'p'), M::NONE)
+                );
+                t.pending_pane_chord = None;
+                if navigated {
+                    self.toggle_pane_focus();
+                    self.screen.mark_dirty();
+                    return Some(EventOutcome::Redraw);
+                }
+                // Non-navigation follow-up — fall through so the key is
+                // processed normally.
+                return None;
+            }
+            t.pending_pane_chord = None;
+        }
+
+        // Prime the chord.
+        if k.code == KeyCode::Char('w') && k.modifiers.contains(M::CONTROL) {
+            t.pending_pane_chord = Some(Instant::now());
+            return Some(EventOutcome::Noop);
+        }
+        None
+    }
+
+    fn toggle_pane_focus(&mut self) {
+        self.app_focus = match self.app_focus {
+            crate::app::AppFocus::Prompt => crate::app::AppFocus::Content,
+            crate::app::AppFocus::Content => crate::app::AppFocus::Prompt,
+        };
+    }
 }
+
+/// Max inter-key gap between `Ctrl-W` and its follow-up key.
+const PANE_CHORD_WINDOW: Duration = Duration::from_millis(750);

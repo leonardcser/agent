@@ -1318,6 +1318,12 @@ impl Screen {
         }
     }
 
+    /// Number of rows the prompt pane occupied in the last draw. Used by
+    /// mouse hit-testing to route clicks to the right pane.
+    pub fn prev_prompt_rows(&self) -> u16 {
+        self.prompt.prev_rows
+    }
+
     pub fn working_throbber(&self) -> Option<Throbber> {
         self.working.throbber
     }
@@ -2311,8 +2317,9 @@ impl Screen {
             &ephemeral_lines,
         );
 
-        // When in History focus, paint a block cursor at (col, row) within
-        // the viewport. Clamped so the caller can sync state.
+        // When the content pane has focus, paint a block cursor at
+        // (col, row) within the viewport using the same colors as the
+        // prompt's soft cursor.
         let (clamped_cursor_line, clamped_cursor_col) =
             if self.last_app_focus == crate::app::AppFocus::Content && viewport_rows > 0 {
                 let max_line = viewport_rows.saturating_sub(1);
@@ -2320,13 +2327,7 @@ impl Screen {
                 let max_col = (width as u16).saturating_sub(1);
                 let col = history_cursor_col.min(max_col);
                 let cursor_row = viewport_rows.saturating_sub(1 + line);
-                out.move_to(col, cursor_row);
-                out.push_style(StyleState {
-                    fg: Some(theme::accent()),
-                    ..StyleState::default()
-                });
-                out.print("\u{2588}"); // █
-                out.pop_style();
+                draw_soft_cursor(out, col, cursor_row);
                 (line, col)
             } else {
                 (history_cursor_line, history_cursor_col)

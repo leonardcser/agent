@@ -339,6 +339,9 @@ struct Timers {
     esc_vim_mode: Option<vim::ViMode>,
     last_ctrlc: Option<Instant>,
     last_keypress: Option<Instant>,
+    /// Pending `Ctrl-W` pane chord. When set, the next key consumes the
+    /// chord to navigate panes instead of flowing to input handling.
+    pending_pane_chord: Option<Instant>,
 }
 
 /// How long after the last keypress before we show a deferred permission dialog.
@@ -621,6 +624,7 @@ impl App {
             esc_vim_mode: None,
             last_ctrlc: None,
             last_keypress: None,
+            pending_pane_chord: None,
         };
         let mut pending_dialogs: VecDeque<DeferredDialog> = VecDeque::new();
         let mut last_frame = Instant::now();
