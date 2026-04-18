@@ -11,6 +11,17 @@ pub enum CharClass {
     WORD,
 }
 
+/// Clamp `pos` to `buf.len()` and snap backward to the nearest char
+/// boundary. Prevents byte-slicing panics when callers hand us an
+/// offset that was computed on a different snapshot of the string.
+fn snap(buf: &str, pos: usize) -> usize {
+    let mut p = pos.min(buf.len());
+    while p > 0 && !buf.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
+}
+
 pub fn char_class(c: char, mode: CharClass) -> u8 {
     match mode {
         CharClass::Word => {
@@ -33,6 +44,7 @@ pub fn char_class(c: char, mode: CharClass) -> u8 {
 }
 
 pub fn word_forward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
+    let cpos = snap(buf, cpos);
     let chars: Vec<(usize, char)> = buf[cpos..].char_indices().collect();
     if chars.is_empty() {
         return cpos;
@@ -55,6 +67,7 @@ pub fn word_forward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
 }
 
 pub fn word_backward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
+    let cpos = snap(buf, cpos);
     if cpos == 0 {
         return 0;
     }
@@ -76,9 +89,11 @@ pub fn word_backward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
 }
 
 pub fn line_start(buf: &str, cpos: usize) -> usize {
+    let cpos = snap(buf, cpos);
     buf[..cpos].rfind('\n').map(|i| i + 1).unwrap_or(0)
 }
 
 pub fn line_end(buf: &str, cpos: usize) -> usize {
+    let cpos = snap(buf, cpos);
     cpos + buf[cpos..].find('\n').unwrap_or(buf.len() - cpos)
 }
