@@ -964,63 +964,15 @@ impl App {
         }
     }
 
-    /// Move the content-pane cursor by `delta` lines (positive = down,
-    /// negative = up) by routing synthetic `j`/`k` keys through the
-    /// same vim path as real keypresses. This reuses vim's vertical
-    /// motion — including `curswant` — so mouse wheel, Ctrl-U/D, arrow
-    /// keys and j/k all share one code path.
+    /// Move the content-pane cursor by `delta` lines. Delegates to
+    /// `ContentPane::scroll_by_lines`, which reuses vim `j`/`k` so
+    /// vertical motion shares one code path (with `curswant`) across
+    /// mouse wheel, Ctrl-U/D, arrows and j/k.
     fn move_content_cursor_by_lines(&mut self, delta: isize) {
-        let (code, count) = if delta >= 0 {
-            (KeyCode::Char('j'), delta as usize)
-        } else {
-            (KeyCode::Char('k'), (-delta) as usize)
-        };
-        let k = KeyEvent {
-            code,
-            modifiers: KeyModifiers::NONE,
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::empty(),
-        };
-        for _ in 0..count {
-            if !self.handle_content_vim_key(k) {
-                break;
-            }
-        }
-    }
-
-    /// Place the content cursor at `(line_idx, col)` (col measured in
-    /// visual columns, clamped to the line) and adjust the viewport
-    /// scroll so the cursor stays onscreen.
-    fn set_content_cursor_to_line_col(&mut self, rows: &[String], line_idx: usize, col: usize) {
-        if rows.is_empty() {
-            return;
-        }
-        let line_idx = line_idx.min(rows.len() - 1);
-        let mut acc = 0usize;
-        for r in rows.iter().take(line_idx) {
-            acc += r.len() + 1;
-        }
-        let line = &rows[line_idx];
-        let max_cols = line.chars().count();
-        let col = col.min(max_cols);
-        let byte_off = line
-            .char_indices()
-            .nth(col)
-            .map(|(b, _)| b)
-            .unwrap_or(line.len());
-        self.content_pane.buffer.cpos = acc + byte_off;
-
-        let total = rows.len();
-        let line_from_bottom = (total - 1).saturating_sub(line_idx) as u16;
-        self.content_pane.cursor_line = line_from_bottom;
-        self.content_pane.cursor_col = col as u16;
-
+        let w = render::term_width();
+        let rows = self.screen.full_transcript_text(w);
         let viewport = self.viewport_rows_estimate();
-        if line_from_bottom >= self.content_pane.scroll_offset + viewport {
-            self.content_pane.scroll_offset = line_from_bottom + 1 - viewport;
-        } else if line_from_bottom < self.content_pane.scroll_offset {
-            self.content_pane.scroll_offset = line_from_bottom;
-        }
+        self.content_pane.scroll_by_lines(delta, &rows, viewport);
         self.screen.mark_dirty();
     }
 
@@ -1031,86 +983,19 @@ impl App {
     fn handle_content_vim_key(&mut self, k: KeyEvent) -> bool {
         let w = render::term_width();
         let rows = self.screen.full_transcript_text(w);
-        if rows.is_empty() {
-            return false;
-        }
-        let total_lines = rows.len();
-
-        // Per-line byte offsets into the joined buffer.
-        let mut line_start_offsets: Vec<usize> = Vec::with_capacity(total_lines);
-        let mut acc = 0usize;
-        for r in &rows {
-            line_start_offsets.push(acc);
-            acc += r.len() + 1;
-        }
-
-        // Sync the buffer's text and cursor from the visible cursor
-        // position before handing off. Without this, a fresh resume
-        // (buffer cpos=0 at top, but cursor shown at bottom of viewport)
-        // would snap to the wrong line on the first motion.
-        self.content_pane.buffer.buf = rows.join("\n");
-        let transcript_from_bottom =
-            (self.content_pane.cursor_line as usize) + (self.content_pane.scroll_offset as usize);
-        let visible_line_idx = (total_lines - 1)
-            .saturating_sub(transcript_from_bottom)
-            .min(total_lines - 1);
-        let visible_line_start = line_start_offsets[visible_line_idx];
-        let visible_line_len = rows[visible_line_idx].len();
-        let col_byte = rows[visible_line_idx]
-            .char_indices()
-            .nth(self.content_pane.cursor_col as usize)
-            .map(|(b, _)| b)
-            .unwrap_or(visible_line_len);
-        self.content_pane.buffer.cpos =
-            (visible_line_start + col_byte).min(self.content_pane.buffer.buf.len());
-
-        if !self.content_pane.buffer.handle_vim_key(k) {
-            return false;
-        }
-
-        // On yank (kill_ring updated), push to the system clipboard.
-        let yanked = self.content_pane.buffer.kill_ring.current().to_string();
-        if !yanked.is_empty() {
-            let _ = crate::app::commands::copy_to_clipboard(&yanked);
-            self.screen
-                .notify(format!("yanked {} chars", yanked.chars().count()));
-            self.content_pane
-                .buffer
-                .kill_ring
-                .set_with_linewise(String::new(), false);
-        }
-
-        // Map cpos back to (line_idx, col). `line_from_bottom` is the
-        // absolute transcript position measured from the bottom.
-        self.content_pane.buffer.cpos = self.content_pane.buffer.cpos.min(
-            line_start_offsets.last().copied().unwrap_or(0) + rows.last().map_or(0, |r| r.len()),
-        );
-        let line_idx = match line_start_offsets.binary_search(&self.content_pane.buffer.cpos) {
-            Ok(i) => i,
-            Err(i) => i.saturating_sub(1),
-        };
-        let col = self.content_pane.buffer.cpos - line_start_offsets[line_idx];
-        let line_from_bottom = ((total_lines - 1).saturating_sub(line_idx)) as u16;
-        self.content_pane.cursor_col = col as u16;
-
-        // Adjust scroll so the cursor row stays inside the viewport.
         let viewport = self.viewport_rows_estimate();
-        let top_lfb = self
-            .content_pane
-            .scroll_offset
-            .saturating_add(viewport.saturating_sub(1));
-        let bottom_lfb = self.content_pane.scroll_offset;
-        if line_from_bottom > top_lfb {
-            self.content_pane.scroll_offset =
-                line_from_bottom.saturating_sub(viewport.saturating_sub(1));
-        } else if line_from_bottom < bottom_lfb {
-            self.content_pane.scroll_offset = line_from_bottom;
+        match self.content_pane.handle_key(k, &rows, viewport) {
+            None => false,
+            Some(yanked) => {
+                if let Some(text) = yanked {
+                    let _ = crate::app::commands::copy_to_clipboard(&text);
+                    self.screen
+                        .notify(format!("yanked {} chars", text.chars().count()));
+                }
+                self.screen.mark_dirty();
+                true
+            }
         }
-        self.content_pane.cursor_line =
-            line_from_bottom.saturating_sub(self.content_pane.scroll_offset);
-
-        self.screen.mark_dirty();
-        true
     }
 
     /// Compute the content pane's visual selection range (if any) in
@@ -1304,7 +1189,9 @@ impl App {
             .saturating_sub(viewport_rows as usize)
             .saturating_sub(scroll);
         let line_idx = (skip + row as usize).min(total - 1);
-        self.set_content_cursor_to_line_col(&rows, line_idx, col as usize);
+        self.content_pane
+            .jump_to_line_col(&rows, line_idx, col as usize, viewport_rows);
+        self.screen.mark_dirty();
     }
 
     /// Ctrl-W pane chord. Returns `Some` when the event was consumed by
