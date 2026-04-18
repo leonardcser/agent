@@ -2435,15 +2435,23 @@ impl Screen {
             &ephemeral_lines,
         );
 
-        // Draw a scrollbar on column 0 of the viewport, identical in
-        // style to the prompt's scrollbar. It only renders when the
-        // transcript exceeds the viewport.
-        let scrollbar = super::scrollbar::Scrollbar::new(
-            total_transcript_rows as usize,
-            viewport_rows as usize,
-            clamped as usize,
-        );
-        super::scrollbar::paint_column(out, 0, 0, viewport_rows, &scrollbar);
+        // Scrollbar on the rightmost column, matching the prompt. Only
+        // drawn when the user has scrolled away from the bottom — a
+        // stationary bar is visual noise when reading the latest output.
+        if clamped > 0 {
+            let scrollbar = super::scrollbar::Scrollbar::new(
+                total_transcript_rows as usize,
+                viewport_rows as usize,
+                clamped as usize,
+            );
+            super::scrollbar::paint_column(
+                out,
+                (width as u16).saturating_sub(1),
+                0,
+                viewport_rows,
+                &scrollbar,
+            );
+        }
         // Record plain text for the content pane's motion handlers.
         self.last_viewport_text = self.history.viewport_text(
             width,
