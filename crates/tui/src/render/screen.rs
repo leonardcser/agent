@@ -19,6 +19,24 @@ use super::history::{
     ActiveAgent, ActiveExec, ActiveText, ActiveThinking, ActiveTool, AgentBlockStatus, Block,
     BlockHistory, BlockId, Throbber, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
 };
+
+/// Visual selection in the content pane, captured from vim state.
+/// Line indices are 0-based from the top of the full transcript; cols
+/// count chars on that line.
+#[derive(Clone, Copy, Debug)]
+pub struct ContentVisualRange {
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+    pub kind: ContentVisualKind,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ContentVisualKind {
+    Char,
+    Line,
+}
 use super::layout_out::{LayoutSink, SpanCollector};
 use super::paint::paint_line;
 use super::prompt::PromptState;
@@ -1324,6 +1342,75 @@ impl Screen {
         &self.last_viewport_text
     }
 
+    /// Overlay a reverse-video highlight for the given visual selection
+    /// on top of the already-painted transcript. Ranges are expressed
+    /// in absolute buffer (line_from_top, col) coordinates; the viewport
+    /// draws lines top-to-bottom so the mapping is direct.
+    fn paint_visual_range(
+        &self,
+        out: &mut RenderOut,
+        viewport_rows: u16,
+        width: u16,
+        range: &ContentVisualRange,
+    ) {
+        let rows = &self.last_viewport_text;
+        if rows.is_empty() || viewport_rows == 0 {
+            return;
+        }
+        let top_line = rows.len().saturating_sub(viewport_rows as usize);
+        for (viewport_row, line_idx) in (top_line..rows.len()).enumerate() {
+            if viewport_row as u16 >= viewport_rows {
+                break;
+            }
+            if line_idx < range.start_line || line_idx > range.end_line {
+                continue;
+            }
+            let line = &rows[line_idx];
+            let line_len = line.chars().count();
+            let (sel_start, sel_end) = match range.kind {
+                ContentVisualKind::Char => {
+                    let start = if line_idx == range.start_line {
+                        range.start_col
+                    } else {
+                        0
+                    };
+                    let end = if line_idx == range.end_line {
+                        range.end_col.min(line_len)
+                    } else {
+                        line_len
+                    };
+                    (start, end)
+                }
+                ContentVisualKind::Line => (0, line_len),
+            };
+            if sel_end <= sel_start {
+                continue;
+            }
+            let y = viewport_row as u16;
+            out.move_to(sel_start as u16, y);
+            out.push_style(StyleState {
+                bg: Some(theme::selection_bg()),
+                ..StyleState::default()
+            });
+            // Emit the original substring so underlying chars remain visible.
+            let sub: String = line
+                .chars()
+                .skip(sel_start)
+                .take(sel_end - sel_start)
+                .collect();
+            out.print(&sub);
+            // Pad to end of line for Line-wise visuals so the full row is highlighted.
+            if matches!(range.kind, ContentVisualKind::Line) {
+                let used = (sel_end - sel_start) as u16;
+                let remaining = width.saturating_sub(sel_start as u16 + used);
+                for _ in 0..remaining {
+                    out.print(" ");
+                }
+            }
+            out.pop_style();
+        }
+    }
+
     /// Plain-text rendering of the full transcript (including any
     /// ephemeral streaming content). Used by the content pane as the
     /// vim buffer so motions span the entire conversation, not just the
@@ -2298,6 +2385,7 @@ impl Screen {
         scroll_offset: u16,
         history_cursor_line: u16,
         history_cursor_col: u16,
+        visual_range: Option<ContentVisualRange>,
     ) -> (u16, u16, u16) {
         let _perf = crate::perf::begin("render:viewport_frame");
         self.update_spinner();
@@ -2344,6 +2432,11 @@ impl Screen {
             clamped,
             &ephemeral_lines,
         );
+
+        // Overlay visual selection highlighting before drawing the cursor.
+        if let Some(range) = visual_range {
+            self.paint_visual_range(out, viewport_rows, width as u16, &range);
+        }
 
         // When the content pane has focus, paint a block cursor at
         // (col, row) within the viewport using the same colors as the

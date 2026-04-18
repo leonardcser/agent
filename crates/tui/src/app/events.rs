@@ -887,6 +887,7 @@ impl App {
         let show_queued = agent_running || self.is_compacting();
         self.screen.set_dialog_open(false);
 
+        let visual = self.content_visual_range(w);
         let (queued, prediction): (&[String], Option<&str>) = if show_queued {
             (&self.queued_messages, None)
         } else {
@@ -905,6 +906,7 @@ impl App {
             self.history_scroll_offset,
             self.history_cursor_line,
             self.history_cursor_col,
+            visual,
         );
         self.history_scroll_offset = clamped_scroll;
         self.history_cursor_line = clamped_line;
@@ -1010,6 +1012,43 @@ impl App {
 
         self.screen.mark_dirty();
         true
+    }
+
+    /// Compute the content pane's visual selection range (if any) in
+    /// absolute transcript coordinates for the renderer to highlight.
+    fn content_visual_range(&mut self, width: usize) -> Option<render::ContentVisualRange> {
+        if self.app_focus != crate::app::AppFocus::Content {
+            return None;
+        }
+        let mode = self.content_vim.mode();
+        let kind = match mode {
+            crate::vim::ViMode::Visual => render::ContentVisualKind::Char,
+            crate::vim::ViMode::VisualLine => render::ContentVisualKind::Line,
+            _ => return None,
+        };
+        let rows = self.screen.full_transcript_text(width);
+        if rows.is_empty() {
+            return None;
+        }
+        let buf = rows.join("\n");
+        let (s, e) = self.content_vim.visual_range(&buf, self.content_cpos)?;
+        let offset_to_line_col = |off: usize| -> (usize, usize) {
+            let off = off.min(buf.len());
+            let prefix = &buf[..off];
+            let line = prefix.bytes().filter(|&b| b == b'\n').count();
+            let line_start = prefix.rfind('\n').map(|p| p + 1).unwrap_or(0);
+            let col = buf[line_start..off].chars().count();
+            (line, col)
+        };
+        let (start_line, start_col) = offset_to_line_col(s);
+        let (end_line, end_col) = offset_to_line_col(e);
+        Some(render::ContentVisualRange {
+            start_line,
+            start_col,
+            end_line,
+            end_col,
+            kind,
+        })
     }
 
     /// Rough viewport-height estimate for cursor clamping at event time.

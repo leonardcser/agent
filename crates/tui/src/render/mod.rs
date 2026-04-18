@@ -14,7 +14,7 @@ mod selection;
 mod status;
 mod working;
 
-pub use screen::{BtwBlock, Notification, Screen};
+pub use screen::{BtwBlock, ContentVisualKind, ContentVisualRange, Notification, Screen};
 
 pub use history::{
     ActiveAgent, ActiveExec, ActiveTool, AgentBlockStatus, ApprovalScope, Block, BlockArtifact,
