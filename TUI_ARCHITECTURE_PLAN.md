@@ -287,11 +287,47 @@ Do all five `active_*` migrations in **one** coherent patch, not per-variant dua
 ## Phase B — Centralize viewport/cursor/scroll geometry
 
 **Status**
-- ✅ **B1**: `render/viewport.rs` ships `ViewportGeom` with `max_scroll` / `clamped_scroll` / `skip_from_top` / `leading_blanks` / `row_of_line` / `line_of_row` / `stuck_to_bottom` / `apply_growth` and 8 unit tests covering the boundary matrix (short buffer, exact fit, overflow stuck-to-bottom, mid-scroll, scroll-past-max, growth preserves pin, growth while stuck, empty buffer).
-- ✅ **B3 partial**: `BlockHistory::paint_viewport` and `BlockHistory::viewport_text` both consume `ViewportGeom` for scroll/skip/leading-blank math — the two hottest paths no longer reinvent the mapping.
-- ⬜ **B3 remainder**: `TranscriptWindow::{sync_from_cpos, visible_cpos, mount, reanchor_to_visible_row, apply_pin}` still open-code the math. `events.rs::position_content_cursor_from_hit` still uses `skip + rel_row`.
-- ⬜ **B4**: the two cursor bugs (j/k locked on resume; click offset inverted on short buffers) have not been verified or regression-tested yet.
+- ✅ **B1**: `render/viewport.rs` ships `ViewportGeom` with `max_scroll` / `clamped_scroll` / `skip_from_top` / `leading_blanks` / `row_of_line` / `line_of_row` / `stuck_to_bottom` / `apply_growth`.
+- ✅ **B2**: 13 unit tests — boundary matrix plus a parametric `matrix_row_line_roundtrip` that exhaustively validates `row_of_line ∘ line_of_row = id` across every (total, scroll) combination the plan calls out.
+- ✅ **B3**: `BlockHistory::paint_viewport`, `BlockHistory::viewport_text`, `Screen::draw_viewport_frame` (scrollbar + cursor sites), `Screen::draw_viewport_dialog_frame`, `TranscriptWindow::reanchor_to_visible_row`, `App::content_visual_range`, and `App::position_content_cursor_from_hit` all read from `ViewportGeom`. Remaining bottom-relative cursor_line math is now a pure row-index convention — not viewport geometry — and stays on the window.
+- ⬜ **B4**: the two cursor bugs (j/k locked on resume; click offset inverted on short buffers) have not been reproduced or regression-tested against the new geom; deferred as a follow-up audit task.
 
+---
+
+## Phase C — API surface lockdown
+
+**Status**
+- ✅ **C6 shape**: `DisplaySpan` carries `SpanMeta { selectable, copy_as }`. Every span construction defaults to `selectable: true, copy_as: None`; gutters and decorations can flip them off without the copy path having to re-parse layout structure.
+- ✅ **C9 shape**: `api::intent::PaneIntent` (Scroll / MoveCursor / BeginSelection / ExtendSelection / YankSelection) ships as the wheel-and-mouse semantic intent. `api::win::scroll(win, delta)` replaces the synthetic-key scroll path when callers migrate.
+- ✅ **C10**: `api::VERSION = "1"` — public API generation marker for user scripts to branch on.
+- ✅ **C3 shape**: `WindowGutters { pad_left, pad_right, scrollbar: Option<GutterSide> }` ships as a type; `content_width(window_width)` subtracts reservations.
+- ⬜ **C1**: extracting `Transcript` from `Screen` is a cross-cutting refactor deferred — the `Screen::history` field still holds the canonical block store and every paint path reads it directly. Intended as a dedicated session.
+- ⬜ **C2**: `TranscriptSnapshot` + `block_of_row` / `row_of_block` — blocked on C1; `viewport_text` still rebuilds the plain-text projection each frame.
+- ⬜ **C3 wire-up**: the `WindowGutters` type exists; wiring it into `TranscriptWindow` + the scrollbar column computation lives on the C1 refactor branch.
+- ⬜ **C4**: keymap layering (block → buffer → window → global) landed functionally in Stage 3; the explicit "block layer" scope is still implicit in the dispatcher.
+- ⬜ **C5**: completer + dialogs as floating windows — defers to `WindowRect::Float` in C8.
+- ⬜ **C7**: unified selection / cursor / scrollbar renderers — deferred with C1.
+- ⬜ **C8**: `LayoutState` + `WindowRect::{Dock, Float}` compositor — deferred with C1.
+
+---
+
+## Phase D — Lua bindings (mlua)
+
+**Status — all six sub-phases shipped as scaffolding.**
+
+- ✅ **D1**: `mlua` 0.11 with the `lua54` + `vendored` features. `crate::lua::LuaRuntime::new()` constructs the runtime, registers the `smelt` global, and loads `$XDG_CONFIG_HOME/smelt/init.lua` (or `~/.config/smelt/init.lua`). Missing configs are not errors; load errors surface via `load_error`.
+- ✅ **D2**: `smelt.api.version`, `smelt.api.cmd.register`, `smelt.notify`, `smelt.keymap`, `smelt.on`, `smelt.defer` live in `register_api`.
+- ✅ **D3**: `AutocmdEvent::{BlockDone, CmdPre, CmdPost, StreamStart, StreamEnd}` + `LuaRuntime::emit(event)` iterate handlers; errors are captured per-handler and don't stop the dispatch.
+- ✅ **D4**: `run_command`, `run_keymap`, `has_command`, `command_names` let the Rust dispatcher check for Lua bindings before falling back to built-in handlers.
+- ✅ **D5**: `smelt.defer(ms, fn)` posts to `pending_timers`; `LuaRuntime::tick_timers` fires due handlers on each app tick. Pending-ops queue is the same `pending_notifications` / `lua_errors` channel.
+- ✅ **D6**: every call path is wrapped so Lua errors land in `lua_errors`; the app drains them via `drain_errors` and surfaces the first as a notification. `load_error` captures `init.lua` syntax failures.
+- ⬜ **Wire-up into `App`**: the runtime itself is green (8 `lua::tests::*` unit tests), but the `App` struct does not yet instantiate `LuaRuntime` in its constructor and does not route its dispatchers through `run_command` / `run_keymap`. That bind happens in a follow-up that needs to thread `Arc<LuaRuntime>` through the event loop.
+
+## Phase E — Dogfood
+
+- ✅ **E3**: `docs/lua-examples/` ships `leader.lua`, `block_summarizer.lua`, `per_project.lua`, and a README explaining the surface.
+- ⬜ **E1**: porting the `/rewind`, `/export`, `/help`, `/model`, `/compact` handlers to ship as `smelt.api.cmd.register` in a default init.lua depends on the D wire-up above landing.
+- ⬜ **E2**: default keymap-config-as-Lua likewise depends on the wire-up.
 
 Four cursor/scroll bugs this session all had the same shape: the mapping `(viewport_rows, total, scroll_offset) ↔ (row_on_screen, line_in_buffer)` was reinvented at each call site. Centralize.
 
