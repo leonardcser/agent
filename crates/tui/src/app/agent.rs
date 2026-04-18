@@ -66,6 +66,9 @@ impl App {
         self.screen.set_throbber(render::Throbber::Working);
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
 
+        // Notify Lua autocmd subscribers that a new stream is starting.
+        self.lua.emit(crate::lua::AutocmdEvent::StreamStart);
+
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
@@ -271,6 +274,8 @@ impl App {
             self.engine.send(UiCommand::Cancel);
             self.kill_blocking_agents();
         }
+        // Fire the `stream_end` autocmd for any Lua subscribers.
+        self.lua.emit(crate::lua::AutocmdEvent::StreamEnd);
         // Flush any in-flight streaming content before committing tools.
         self.screen.flush_streaming_thinking();
         self.screen.flush_streaming_text();
