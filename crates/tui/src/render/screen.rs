@@ -591,16 +591,8 @@ impl Screen {
             });
         }
 
-        // Vim mode — shown for both panes when vim is enabled. The
-        // content pane currently only has NORMAL; Visual support is
-        // planned.
         if self.last_vim_enabled {
-            let effective_mode = if self.last_app_focus == crate::app::AppFocus::Content {
-                None
-            } else {
-                self.last_vim_mode
-            };
-            let vim_label = vim_mode_label(effective_mode).unwrap_or("NORMAL");
+            let vim_label = vim_mode_label(self.last_vim_mode).unwrap_or("NORMAL");
             let vim_fg = match self.last_vim_mode {
                 Some(crate::vim::ViMode::Insert) => Color::AnsiValue(78),
                 Some(crate::vim::ViMode::Visual) | Some(crate::vim::ViMode::VisualLine) => {

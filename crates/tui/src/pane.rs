@@ -352,7 +352,10 @@ impl ContentPane {
 
         // Keep horizontal column stable (like vim's curswant).
         let col = if let Some(line) = rows.get(current_line) {
-            let off = self.cpos.saturating_sub(offsets[current_line]).min(line.len());
+            let mut off = self.cpos.saturating_sub(offsets[current_line]).min(line.len());
+            while off > 0 && !line.is_char_boundary(off) {
+                off -= 1;
+            }
             line[..off].chars().count()
         } else {
             0

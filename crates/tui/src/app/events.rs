@@ -1047,7 +1047,10 @@ impl App {
         let buf = rows.join("\n");
         let (s, e) = vim.visual_range(&buf, self.content_pane.cpos)?;
         let offset_to_line_col = |off: usize| -> (usize, usize) {
-            let off = off.min(buf.len());
+            let mut off = off.min(buf.len());
+            while off > 0 && !buf.is_char_boundary(off) {
+                off -= 1;
+            }
             let prefix = &buf[..off];
             let line = prefix.bytes().filter(|&b| b == b'\n').count();
             let line_start = prefix.rfind('\n').map(|p| p + 1).unwrap_or(0);
