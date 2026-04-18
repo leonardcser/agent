@@ -190,22 +190,24 @@ pub enum Block {
 }
 
 impl Block {
-    /// Stable content hash of this block. Two blocks with the same id
-    /// produce identical `DisplayBlock`s for the same `LayoutKey` and
-    /// `ToolState`. For `ToolCall`, `ToolState` (status / output / elapsed)
-    /// is deliberately *not* hashed — mutable tool state lives separately
-    /// and is invalidated via `BlockHistory::invalidate_block_layout`.
+    /// Stable content hash of this block. Two blocks with the same
+    /// content hash produce identical `DisplayBlock`s for the same
+    /// `LayoutKey` and `ToolState`. For `ToolCall`, `ToolState` (status
+    /// / output / elapsed) is deliberately *not* hashed — mutable tool
+    /// state lives separately and is invalidated via
+    /// `BlockHistory::invalidate_block_layout`.
     ///
-    /// Implementation: serialize through `serde_json::Value` first (whose
-    /// `Map` is a `BTreeMap` without the `preserve_order` feature) so the
-    /// `HashMap<String, Value>` arg fields are emitted in sorted-key
-    /// order, then hash the resulting bytes. Without the intermediate
-    /// `to_value` step, two blocks with identical content but different
-    /// HashMap insertion orders would produce different ids.
-    pub fn id(&self) -> BlockId {
+    /// Implementation: serialize through `serde_json::Value` first
+    /// (whose `Map` is a `BTreeMap` without the `preserve_order`
+    /// feature) so the `HashMap<String, Value>` arg fields are emitted
+    /// in sorted-key order, then hash the resulting bytes. Without the
+    /// intermediate `to_value` step, two blocks with identical content
+    /// but different HashMap insertion orders would produce different
+    /// hashes.
+    pub fn content_hash(&self) -> u64 {
         let value = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
         let bytes = serde_json::to_vec(&value).unwrap_or_default();
-        BlockId(seahash::hash(&bytes))
+        seahash::hash(&bytes)
     }
 }
 
@@ -241,9 +243,10 @@ pub enum Throbber {
     Interrupted,
 }
 
-/// Stable content hash of a `Block`. Computed once at construction; two
-/// blocks with the same id are guaranteed to lay out identically given the
-/// same `LayoutKey` and (for tool blocks) `ToolState`.
+/// Stable, monotonic per-session handle to a block. Independent of
+/// block content: mutating a block in place keeps the same `BlockId`.
+/// Layout cache invalidation on content change is handled via
+/// [`LayoutKey::content_hash`], not by identity.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -292,6 +295,11 @@ pub struct LayoutKey {
     pub width: u16,
     pub show_thinking: bool,
     pub view_state: ViewState,
+    /// Content hash of the block this layout was produced for. When a
+    /// block mutates (streaming append / rewrite), its content hash
+    /// changes and the new `LayoutKey` misses the old cached layout
+    /// — automatic invalidation by keying, not by eviction.
+    pub content_hash: u64,
 }
 
 /// Per-block cached artifacts. Keeps a bounded LRU of the most recent
@@ -334,15 +342,21 @@ impl BlockArtifact {
 }
 
 pub(super) struct BlockHistory {
-    /// Append-only sequence of `BlockId`s. The "ith block" is
-    /// `blocks[&order[i]]`. Duplicate ids are allowed: two identical blocks
-    /// at different positions resolve to the same entry in `blocks` /
-    /// `artifacts`.
+    /// Append-only sequence of `BlockId`s. Each entry is a unique
+    /// monotonic handle; positions are 1:1 with block instances.
     pub(super) order: Vec<BlockId>,
-    /// Content-addressed block store.
+    /// Per-instance block store.
     pub(super) blocks: HashMap<BlockId, Block>,
-    /// Content-addressed per-block layout cache.
+    /// Cached content hash per `BlockId`. Populated on push / mutation
+    /// so layout-key construction and persisted-cache re-keying can
+    /// skip re-hashing the block bytes.
+    pub(super) content_hashes: HashMap<BlockId, u64>,
+    /// Per-block layout cache, keyed by the monotonic `BlockId`. Cache
+    /// invalidation on content change is handled via
+    /// `LayoutKey::content_hash` + the bounded LRU in `BlockArtifact`.
     pub(super) artifacts: HashMap<BlockId, BlockArtifact>,
+    /// Monotonic counter driving fresh `BlockId`s on push.
+    pub(super) next_id: u64,
     /// Mutable sidecar state for `Block::ToolCall` entries, keyed by `call_id`.
     pub(super) tool_states: HashMap<String, ToolState>,
     /// Per-block view state (collapsed / trimmed / expanded). Absent
@@ -375,7 +389,9 @@ impl BlockHistory {
         Self {
             order: Vec::new(),
             blocks: HashMap::new(),
+            content_hashes: HashMap::new(),
             artifacts: HashMap::new(),
+            next_id: 0,
             tool_states: HashMap::new(),
             view_states: HashMap::new(),
             statuses: HashMap::new(),
@@ -386,6 +402,15 @@ impl BlockHistory {
             suppress_leading_gap: false,
             pending_head_skip: 0,
         }
+    }
+
+    /// Cached content hash for `id`. Falls back to re-hashing if the
+    /// cache entry is missing (shouldn't happen in steady state).
+    pub(super) fn content_hash(&self, id: BlockId) -> u64 {
+        if let Some(h) = self.content_hashes.get(&id) {
+            return *h;
+        }
+        self.blocks.get(&id).map(|b| b.content_hash()).unwrap_or(0)
     }
 
     pub(super) fn len(&self) -> usize {
@@ -443,13 +468,18 @@ impl BlockHistory {
         }
     }
 
-    /// Append `block` and return its `BlockId`. Duplicate content merges
-    /// into the existing entry in `blocks`/`artifacts`, so two identical
-    /// blocks share their cached layouts.
+    /// Append `block` and return a fresh monotonic `BlockId`. Each
+    /// push produces a unique id; identical content at two positions
+    /// gets distinct ids and distinct cache slots. Cross-session cache
+    /// sharing of identical blocks is preserved at the persistence
+    /// boundary (see [`Self::export_layouts_by_hash`]).
     pub(super) fn push(&mut self, block: Block) -> BlockId {
-        let id = block.id();
+        let hash = block.content_hash();
+        let id = BlockId(self.next_id);
+        self.next_id += 1;
         self.order.push(id);
-        self.blocks.entry(id).or_insert(block);
+        self.blocks.insert(id, block);
+        self.content_hashes.insert(id, hash);
         self.artifacts.entry(id).or_default();
         self.cache_dirty = true;
         id
@@ -493,8 +523,12 @@ impl BlockHistory {
     pub(super) fn clear(&mut self) {
         self.order.clear();
         self.blocks.clear();
+        self.content_hashes.clear();
         self.artifacts.clear();
+        self.next_id = 0;
         self.tool_states.clear();
+        self.view_states.clear();
+        self.statuses.clear();
         self.flushed = 0;
         self.last_block_rows = 0;
         self.cache_dirty = true;
@@ -543,6 +577,7 @@ impl BlockHistory {
     pub(super) fn resolve_key(&self, id: BlockId, base: LayoutKey) -> LayoutKey {
         LayoutKey {
             view_state: self.view_state(id),
+            content_hash: self.content_hash(id),
             ..base
         }
     }
@@ -582,12 +617,12 @@ impl BlockHistory {
             return;
         }
         let removed: Vec<BlockId> = self.order.drain(idx..).collect();
-        let live: HashSet<BlockId> = self.order.iter().copied().collect();
         for id in removed {
-            if !live.contains(&id) {
-                self.blocks.remove(&id);
-                self.artifacts.remove(&id);
-            }
+            self.blocks.remove(&id);
+            self.content_hashes.remove(&id);
+            self.artifacts.remove(&id);
+            self.view_states.remove(&id);
+            self.statuses.remove(&id);
         }
         self.flushed = self.flushed.min(self.order.len());
         self.cache_dirty = true;
@@ -633,6 +668,7 @@ impl BlockHistory {
             view_state: super::history::ViewState::Expanded,
             width: width as u16,
             show_thinking,
+            content_hash: 0,
         };
 
         let mut total = 0u16;
@@ -725,6 +761,7 @@ impl BlockHistory {
             view_state: super::history::ViewState::Expanded,
             width: width as u16,
             show_thinking,
+            content_hash: 0,
         };
         let mut total: u32 = 0;
         for i in 0..self.order.len() {
@@ -739,6 +776,7 @@ impl BlockHistory {
             view_state: super::history::ViewState::Expanded,
             width: width as u16,
             show_thinking,
+            content_hash: 0,
         };
         let collect_display = |line: &super::display::DisplayLine| -> String {
             let mut s = String::new();
@@ -783,6 +821,7 @@ impl BlockHistory {
             view_state: super::history::ViewState::Expanded,
             width: width as u16,
             show_thinking,
+            content_hash: 0,
         };
         let mut per_block: Vec<(u16, u16)> = Vec::with_capacity(self.order.len());
         let mut total: u32 = 0;
@@ -872,6 +911,7 @@ impl BlockHistory {
             view_state: super::history::ViewState::Expanded,
             width: width as u16,
             show_thinking,
+            content_hash: 0,
         };
         let mut per_block: Vec<(u16, u16)> = Vec::with_capacity(self.order.len());
         let mut total: u32 = 0;
@@ -1032,6 +1072,7 @@ mod tests {
         history.flushed = 0;
         history.render(&mut sink, 80, true);
 
+        let content_hash = history.content_hash(id);
         let keys: Vec<LayoutKey> = history
             .artifacts
             .get(&id)
@@ -1044,11 +1085,13 @@ mod tests {
             width: 100,
             show_thinking: true,
             view_state: ViewState::Expanded,
+            content_hash,
         };
         let k80 = LayoutKey {
             width: 80,
             show_thinking: true,
             view_state: ViewState::Expanded,
+            content_hash,
         };
         assert!(keys.contains(&k100), "expected width=100 cached: {keys:?}");
         assert!(keys.contains(&k80), "expected width=80 cached: {keys:?}");
@@ -1056,9 +1099,9 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_block_ids_share_artifact() {
-        // Two identical blocks at different positions should resolve to the
-        // same `BlockId` and share a single entry in `blocks` / `artifacts`.
+    fn identical_blocks_get_distinct_ids() {
+        // Each push mints a fresh monotonic `BlockId`. Identical content
+        // at two positions no longer shares a slot in `blocks`.
         let mut history = BlockHistory::new();
         let a = history.push(Block::Text {
             content: "same".into(),
@@ -1066,9 +1109,9 @@ mod tests {
         let b = history.push(Block::Text {
             content: "same".into(),
         });
-        assert_eq!(a, b);
+        assert_ne!(a, b);
         assert_eq!(history.order.len(), 2);
-        assert_eq!(history.blocks.len(), 1);
-        assert_eq!(history.artifacts.len(), 1);
+        assert_eq!(history.blocks.len(), 2);
+        assert_eq!(history.content_hash(a), history.content_hash(b));
     }
 }

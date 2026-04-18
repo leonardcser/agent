@@ -15,7 +15,7 @@
 //! freshly each frame). The IR cache survives layout invalidation
 //! (resize prunes layouts but not the underlying diff IR).
 use super::highlight::{build_inline_diff_cache_ext, CachedInlineDiff};
-use super::{BlockArtifact, BlockId};
+use super::BlockArtifact;
 use engine::tools::NotebookRenderData;
 use protocol::{Message, TurnMeta};
 use serde::{Deserialize, Serialize};
@@ -23,11 +23,12 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 pub const RENDER_CACHE_VERSION: u32 = 1;
-pub const LAYOUT_CACHE_VERSION: u32 = 5;
+pub const LAYOUT_CACHE_VERSION: u32 = 6;
 
-/// Content-addressed on-disk snapshot of `BlockHistory::artifacts` for one
-/// session. Keyed by `BlockId`, so forked sessions with identical blocks
-/// can share cached layouts. Per-layout width validity is enforced lazily
+/// Content-addressed on-disk snapshot of `BlockHistory::artifacts` for
+/// one session. Keyed by block content hash (not `BlockId`, which is
+/// monotonic per-session), so forked sessions with identical blocks
+/// share cached layouts. Per-layout width validity is enforced lazily
 /// by `DisplayBlock::is_valid_at` during the next paint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedLayoutCache {
@@ -39,7 +40,7 @@ pub struct PersistedLayoutCache {
     /// stale syntax-highlight colors, so we drop the cache on mismatch.
     #[serde(default)]
     pub is_light: bool,
-    pub blocks: HashMap<BlockId, BlockArtifact>,
+    pub blocks: HashMap<u64, BlockArtifact>,
 }
 
 impl PersistedLayoutCache {

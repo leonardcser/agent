@@ -60,7 +60,7 @@ use crossterm::{
     style::{Color, Print, ResetColor},
     terminal, QueueableCommand,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -1370,7 +1370,6 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
-
     /// Plain-text rendering of the last-painted viewport rows (top to
     /// bottom). Used by the content pane's vim-style motions and yank.
     pub fn viewport_text_rows(&self) -> &[String] {
@@ -1776,13 +1775,10 @@ impl Screen {
             return None;
         }
         let mut cache = PersistedLayoutCache::new(crate::theme::is_light());
-        // Walk `order` so we only export artifacts for blocks currently in
-        // history (and so we can inspect the `ToolState` of each tool block
-        // exactly once — duplicates in `order` resolve to the same entry).
+        // Walk `order`, re-keying artifacts by content hash so another
+        // session (with different monotonic `BlockId`s) can install the
+        // same cache.
         for id in &self.history.order {
-            if cache.blocks.contains_key(id) {
-                continue;
-            }
             let Some(block) = self.history.blocks.get(id) else {
                 continue;
             };
@@ -1798,9 +1794,13 @@ impl Screen {
             if !persist {
                 continue;
             }
+            let hash = self.history.content_hash(*id);
+            if cache.blocks.contains_key(&hash) {
+                continue;
+            }
             if let Some(artifact) = self.history.artifacts.get(id) {
                 if !artifact.is_empty() {
-                    cache.blocks.insert(*id, artifact.clone());
+                    cache.blocks.insert(hash, artifact.clone());
                 }
             }
         }
@@ -1823,11 +1823,19 @@ impl Screen {
             return;
         }
         let nw = self.size().0;
-        let live: HashSet<BlockId> = self.history.order.iter().copied().collect();
-        for (id, mut artifact) in cache.blocks {
-            if !live.contains(&id) {
+        // Map cached content hashes onto the first live `BlockId` with
+        // matching content. Each hash installs once — duplicates in the
+        // current history all reuse the same cached artifact via the
+        // shared `content_hash` field in `LayoutKey`.
+        let mut by_hash: HashMap<u64, BlockId> = HashMap::new();
+        for id in &self.history.order {
+            let hash = self.history.content_hash(*id);
+            by_hash.entry(hash).or_insert(*id);
+        }
+        for (hash, mut artifact) in cache.blocks {
+            let Some(id) = by_hash.get(&hash).copied() else {
                 continue;
-            }
+            };
             let Some(block) = self.history.blocks.get(&id) else {
                 continue;
             };
@@ -1843,8 +1851,6 @@ impl Screen {
             if !allow {
                 continue;
             }
-            // Drop any layouts that would not paint correctly at the
-            // current terminal width.
             artifact
                 .layouts
                 .retain(|(k, b)| k.width == nw || b.is_valid_at(nw));
