@@ -42,29 +42,39 @@ pub struct InputSnapshot {
 /// Unified input buffer with attachment markers and file completer.
 /// Used by both the prompt loop and the agent-mode type-ahead.
 pub struct InputState {
-    pub buf: String,
-    pub cpos: usize,
-    pub attachment_ids: Vec<AttachmentId>,
+    /// The underlying editable buffer. Owns `buf`, `cpos`, `vim`,
+    /// `kill_ring`, `history`, `attachment_ids`, and `selection_anchor`.
+    /// Accessible directly (e.g. `input.buf`, `input.cpos`) via
+    /// `Deref<Target = Buffer>` so existing call sites don't need to
+    /// know the prompt uses the same `Buffer` type as the content pane.
+    pub buffer: crate::buffer::Buffer,
     pub store: AttachmentStore,
     pub completer: Option<Completer>,
     pub menu: Option<MenuState>,
-    pub(super) vim: Option<Vim>,
     /// Saved buffer before history search, restored on cancel.
     pub(super) history_saved_buf: Option<(String, usize)>,
     pub stash: Option<InputSnapshot>,
     /// Tracks whether the current buffer content originated from a paste.
     /// Cleared on any manual character input.
     pub(super) from_paste: bool,
-    pub(super) kill_ring: KillRing,
-    pub(super) history: crate::undo::UndoHistory,
     /// Chord state: true after Ctrl+X, waiting for second key.
     pending_ctrl_x: bool,
     /// Completable arguments for commands like `/model`, `/theme`, `/color`.
     /// Each entry is `("/cmd", vec!["arg1", "arg2", ...])`.
     pub command_arg_sources: Vec<(String, Vec<String>)>,
-    /// Byte position of the selection anchor for shift+key selection (non-vim).
-    /// When `Some`, selection spans from anchor to `cpos`.
-    selection_anchor: Option<usize>,
+}
+
+impl std::ops::Deref for InputState {
+    type Target = crate::buffer::Buffer;
+    fn deref(&self) -> &crate::buffer::Buffer {
+        &self.buffer
+    }
+}
+
+impl std::ops::DerefMut for InputState {
+    fn deref_mut(&mut self) -> &mut crate::buffer::Buffer {
+        &mut self.buffer
+    }
 }
 
 /// What the caller should do after `handle_event`.
@@ -92,21 +102,15 @@ impl Default for InputState {
 impl InputState {
     pub fn new() -> Self {
         Self {
-            buf: String::new(),
-            cpos: 0,
-            attachment_ids: Vec::new(),
+            buffer: crate::buffer::Buffer::writable(),
             store: AttachmentStore::new(),
             completer: None,
             menu: None,
-            vim: None,
             history_saved_buf: None,
             stash: None,
             from_paste: false,
-            kill_ring: KillRing::new(),
-            history: crate::undo::UndoHistory::new(Some(100)),
             pending_ctrl_x: false,
             command_arg_sources: Vec::new(),
-            selection_anchor: None,
         }
     }
 
@@ -114,17 +118,17 @@ impl InputState {
     /// Works for both vim visual modes and shift+key selection.
     pub fn selection_range(&self) -> Option<(usize, usize)> {
         // Vim visual mode takes priority.
-        if let Some(ref vim) = self.vim {
-            if let Some(range) = vim.visual_range(&self.buf, self.cpos) {
+        if let Some(ref vim) = self.buffer.vim {
+            if let Some(range) = vim.visual_range(&self.buffer.buf, self.buffer.cpos) {
                 return Some(range);
             }
         }
         // Non-vim shift+key selection.
-        let anchor = self.selection_anchor?;
-        let (a, b) = if anchor <= self.cpos {
-            (anchor, self.cpos)
+        let anchor = self.buffer.selection_anchor?;
+        let (a, b) = if anchor <= self.buffer.cpos {
+            (anchor, self.buffer.cpos)
         } else {
-            (self.cpos, anchor)
+            (self.buffer.cpos, anchor)
         };
         if a == b {
             None
@@ -139,38 +143,38 @@ impl InputState {
 
     /// Clear any active selection (non-vim). Called on non-shift movement or editing.
     pub fn clear_selection(&mut self) {
-        self.selection_anchor = None;
+        self.buffer.selection_anchor = None;
     }
 
     /// Start or extend selection at current cursor position (non-vim shift+key).
     fn extend_selection(&mut self) {
-        if self.selection_anchor.is_none() {
-            self.selection_anchor = Some(self.cpos);
+        if self.buffer.selection_anchor.is_none() {
+            self.buffer.selection_anchor = Some(self.buffer.cpos);
         }
     }
 
     /// Delete the currently selected text, returning it. Handles attachment cleanup.
     fn delete_selection(&mut self) -> Option<String> {
         let (start, end) = self.selection_range()?;
-        let deleted = self.buf[start..end].to_string();
+        let deleted = self.buffer.buf[start..end].to_string();
         self.remove_attachments_in_range(start, end);
-        self.buf.drain(start..end);
-        self.cpos = start;
-        self.selection_anchor = None;
+        self.buffer.buf.drain(start..end);
+        self.buffer.cpos = start;
+        self.buffer.selection_anchor = None;
         Some(deleted)
     }
 
     pub fn vim_enabled(&self) -> bool {
-        self.vim.is_some()
+        self.buffer.vim.is_some()
     }
 
     pub fn vim_mode(&self) -> Option<ViMode> {
-        self.vim.as_ref().map(|v| v.mode())
+        self.buffer.vim.as_ref().map(|v| v.mode())
     }
 
     /// Returns true if vim is enabled and currently in insert mode.
     pub fn vim_in_insert_mode(&self) -> bool {
-        self.vim
+        self.buffer.vim
             .as_ref()
             .is_some_and(|v| v.mode() == ViMode::Insert)
     }
@@ -183,51 +187,51 @@ impl InputState {
 
     pub fn set_vim_enabled(&mut self, enabled: bool) {
         if enabled {
-            if self.vim.is_none() {
-                self.vim = Some(Vim::new());
+            if self.buffer.vim.is_none() {
+                self.buffer.vim = Some(Vim::new());
             }
         } else {
-            self.vim = None;
+            self.buffer.vim = None;
         }
     }
 
     /// Restore vim to a specific mode (used after double-Esc cancel).
     pub fn set_vim_mode(&mut self, mode: ViMode) {
-        if let Some(ref mut vim) = self.vim {
+        if let Some(ref mut vim) = self.buffer.vim {
             vim.set_mode(mode);
         }
     }
 
     pub fn take_buffer(&mut self) -> (String, usize) {
-        let buf = std::mem::take(&mut self.buf);
-        let cpos = std::mem::replace(&mut self.cpos, 0);
+        let buf = std::mem::take(&mut self.buffer.buf);
+        let cpos = std::mem::replace(&mut self.buffer.cpos, 0);
         (buf, cpos)
     }
 
     pub fn set_buffer(&mut self, buf: String, cpos: usize) {
-        self.buf = buf;
-        self.cpos = cpos.min(self.buf.len());
+        self.buffer.buf = buf;
+        self.buffer.cpos = cpos.min(self.buffer.buf.len());
     }
 
     /// Take the kill ring contents (moves ownership, leaves empty).
     pub fn take_kill_ring(&mut self) -> String {
-        self.kill_ring.take()
+        self.buffer.kill_ring.take()
     }
 
     /// Set the kill ring contents (used to sync back from dialogs).
     pub fn set_kill_ring(&mut self, contents: String) {
-        self.kill_ring.set(contents);
+        self.buffer.kill_ring.set(contents);
     }
 
     pub fn clear(&mut self) {
-        self.buf.clear();
-        self.cpos = 0;
-        self.attachment_ids.clear();
+        self.buffer.buf.clear();
+        self.buffer.cpos = 0;
+        self.buffer.attachment_ids.clear();
         self.completer = None;
         self.menu = None;
         self.history_saved_buf = None;
         self.from_paste = false;
-        self.selection_anchor = None;
+        self.buffer.selection_anchor = None;
         // Note: stash and store are intentionally NOT cleared here.
     }
 
@@ -235,23 +239,23 @@ impl InputState {
     /// Attachments are cloned out of the store so the stash survives store clears.
     pub fn toggle_stash(&mut self) {
         if let Some(snap) = self.stash.take() {
-            self.buf = snap.buf;
-            self.cpos = snap.cpos;
-            self.attachment_ids = snap
+            self.buffer.buf = snap.buf;
+            self.buffer.cpos = snap.cpos;
+            self.buffer.attachment_ids = snap
                 .attachments
                 .into_iter()
                 .map(|a| self.store.insert(a))
                 .collect();
             self.from_paste = snap.from_paste;
             self.completer = None;
-        } else if !self.buf.is_empty() || !self.attachment_ids.is_empty() {
-            let attachments = std::mem::take(&mut self.attachment_ids)
+        } else if !self.buffer.buf.is_empty() || !self.buffer.attachment_ids.is_empty() {
+            let attachments = std::mem::take(&mut self.buffer.attachment_ids)
                 .into_iter()
                 .filter_map(|id| self.store.get(id).cloned())
                 .collect();
             self.stash = Some(InputSnapshot {
-                buf: std::mem::take(&mut self.buf),
-                cpos: std::mem::replace(&mut self.cpos, 0),
+                buf: std::mem::take(&mut self.buffer.buf),
+                cpos: std::mem::replace(&mut self.buffer.cpos, 0),
                 attachments,
                 from_paste: self.from_paste,
             });
@@ -263,9 +267,9 @@ impl InputState {
     /// Restore stash into the buffer (called after submit/command completes).
     pub fn restore_stash(&mut self) {
         if let Some(snap) = self.stash.take() {
-            self.buf = snap.buf;
-            self.cpos = snap.cpos;
-            self.attachment_ids = snap
+            self.buffer.buf = snap.buf;
+            self.buffer.cpos = snap.cpos;
+            self.buffer.attachment_ids = snap
                 .attachments
                 .into_iter()
                 .map(|a| self.store.insert(a))
@@ -287,9 +291,9 @@ impl InputState {
                 ids.push(id);
             }
         }
-        self.buf = text;
-        self.cpos = self.buf.len();
-        self.attachment_ids = ids;
+        self.buffer.buf = text;
+        self.buffer.cpos = self.buffer.buf.len();
+        self.buffer.attachment_ids = ids;
     }
 
     pub fn has_modal(&self) -> bool {
@@ -318,7 +322,7 @@ impl InputState {
     }
 
     pub fn cursor_char(&self) -> usize {
-        char_pos(&self.buf, self.cpos)
+        char_pos(&self.buffer.buf, self.buffer.cpos)
     }
 
     /// Expand attachment markers and return the final text for submission.
@@ -334,9 +338,9 @@ impl InputState {
         let mut result = String::new();
         let mut att_idx = 0;
         let mut seen: std::collections::HashSet<AttachmentId> = std::collections::HashSet::new();
-        for c in self.buf.chars() {
+        for c in self.buffer.buf.chars() {
             if c == ATTACHMENT_MARKER {
-                if let Some(&id) = self.attachment_ids.get(att_idx) {
+                if let Some(&id) = self.buffer.attachment_ids.get(att_idx) {
                     if seen.insert(id) {
                         result.push_str(self.store.expanded_text(id));
                     } else if matches!(self.store.get(id), Some(Attachment::Paste { .. })) {
@@ -355,9 +359,9 @@ impl InputState {
     pub fn message_display_text(&self) -> String {
         let mut result = String::new();
         let mut att_idx = 0;
-        for c in self.buf.chars() {
+        for c in self.buffer.buf.chars() {
             if c == ATTACHMENT_MARKER {
-                if let Some(&id) = self.attachment_ids.get(att_idx) {
+                if let Some(&id) = self.buffer.attachment_ids.get(att_idx) {
                     if let Some(att) = self.store.get(id) {
                         match att {
                             Attachment::Paste { content } => result.push_str(content),
@@ -376,7 +380,7 @@ impl InputState {
     }
 
     pub fn image_count(&self) -> usize {
-        self.attachment_ids
+        self.buffer.attachment_ids
             .iter()
             .filter(|&&id| matches!(self.store.get(id), Some(Attachment::Image { .. })))
             .count()
@@ -413,14 +417,14 @@ impl InputState {
     /// Build a `KeyContext` snapshot for keymap lookups.
     pub fn key_context(&self, agent_running: bool, ghost_text_visible: bool) -> KeyContext {
         KeyContext {
-            buf_empty: self.buf.is_empty() && self.attachment_ids.is_empty(),
-            vim_non_insert: self.vim.as_ref().is_some_and(|v| {
+            buf_empty: self.buffer.buf.is_empty() && self.buffer.attachment_ids.is_empty(),
+            vim_non_insert: self.buffer.vim.as_ref().is_some_and(|v| {
                 matches!(
                     v.mode(),
                     ViMode::Normal | ViMode::Visual | ViMode::VisualLine
                 )
             }),
-            vim_enabled: self.vim.is_some(),
+            vim_enabled: self.buffer.vim.is_some(),
             agent_running,
             ghost_text_visible,
         }
@@ -435,7 +439,7 @@ impl InputState {
         history: Option<&mut History>,
     ) -> Action {
         if !matches!(action, KeyAction::Yank | KeyAction::YankPop) {
-            self.kill_ring.clear_yank();
+            self.buffer.kill_ring.clear_yank();
         }
         // Selection actions extend; editing actions consume; everything else clears.
         let is_select = matches!(
@@ -487,7 +491,7 @@ impl InputState {
 
             // ── Submit / newline ─────────────────────────────────────────
             KeyAction::Submit => {
-                if self.buf.is_empty() && self.attachment_ids.is_empty() {
+                if self.buffer.buf.is_empty() && self.buffer.attachment_ids.is_empty() {
                     Action::SubmitEmpty
                 } else {
                     let display = self.message_display_text();
@@ -501,17 +505,17 @@ impl InputState {
                     self.save_undo();
                     self.delete_selection();
                 }
-                self.buf.insert(self.cpos, '\n');
-                self.cpos += 1;
+                self.buffer.buf.insert(self.buffer.cpos, '\n');
+                self.buffer.cpos += 1;
                 self.completer = None;
                 Action::Redraw
             }
 
             // ── Navigation ──────────────────────────────────────────────
             KeyAction::MoveLeft => {
-                if self.cpos > 0 {
-                    let cp = char_pos(&self.buf, self.cpos);
-                    self.cpos = byte_of_char(&self.buf, cp - 1);
+                if self.buffer.cpos > 0 {
+                    let cp = char_pos(&self.buffer.buf, self.buffer.cpos);
+                    self.buffer.cpos = byte_of_char(&self.buffer.buf, cp - 1);
                     self.recompute_completer();
                     Action::Redraw
                 } else {
@@ -519,9 +523,9 @@ impl InputState {
                 }
             }
             KeyAction::MoveRight => {
-                if self.cpos < self.buf.len() {
-                    let cp = char_pos(&self.buf, self.cpos);
-                    self.cpos = byte_of_char(&self.buf, cp + 1);
+                if self.buffer.cpos < self.buffer.buf.len() {
+                    let cp = char_pos(&self.buffer.buf, self.buffer.cpos);
+                    self.buffer.cpos = byte_of_char(&self.buffer.buf, cp + 1);
                     self.recompute_completer();
                     Action::Redraw
                 } else {
@@ -543,14 +547,14 @@ impl InputState {
                 }
             }
             KeyAction::MoveUp => {
-                let new_pos = crate::vim::move_up(&self.buf, self.cpos);
-                if new_pos != self.cpos {
-                    self.cpos = new_pos;
+                let new_pos = crate::vim::move_up(&self.buffer.buf, self.buffer.cpos);
+                if new_pos != self.buffer.cpos {
+                    self.buffer.cpos = new_pos;
                     self.recompute_completer();
                     Action::Redraw
-                } else if let Some(entry) = history.and_then(|h| h.up(&self.buf)) {
-                    self.buf = entry.to_string();
-                    self.cpos = 0;
+                } else if let Some(entry) = history.and_then(|h| h.up(&self.buffer.buf)) {
+                    self.buffer.buf = entry.to_string();
+                    self.buffer.cpos = 0;
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -558,14 +562,14 @@ impl InputState {
                 }
             }
             KeyAction::MoveDown => {
-                let new_pos = crate::vim::move_down(&self.buf, self.cpos);
-                if new_pos != self.cpos {
-                    self.cpos = new_pos;
+                let new_pos = crate::vim::move_down(&self.buffer.buf, self.buffer.cpos);
+                if new_pos != self.buffer.cpos {
+                    self.buffer.cpos = new_pos;
                     self.recompute_completer();
                     Action::Redraw
                 } else if let Some(entry) = history.and_then(|h| h.down()) {
-                    self.buf = entry.to_string();
-                    self.cpos = self.buf.len();
+                    self.buffer.buf = entry.to_string();
+                    self.buffer.cpos = self.buffer.buf.len();
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -573,29 +577,29 @@ impl InputState {
                 }
             }
             KeyAction::MoveStartOfLine => {
-                self.cpos = crate::text_utils::line_start(&self.buf, self.cpos);
+                self.buffer.cpos = crate::text_utils::line_start(&self.buffer.buf, self.buffer.cpos);
                 self.recompute_completer();
                 Action::Redraw
             }
             KeyAction::MoveEndOfLine => {
-                self.cpos = crate::text_utils::line_end(&self.buf, self.cpos);
+                self.buffer.cpos = crate::text_utils::line_end(&self.buffer.buf, self.buffer.cpos);
                 self.recompute_completer();
                 Action::Redraw
             }
             KeyAction::MoveStartOfBuffer => {
-                self.cpos = 0;
+                self.buffer.cpos = 0;
                 self.recompute_completer();
                 Action::Redraw
             }
             KeyAction::MoveEndOfBuffer => {
-                self.cpos = self.buf.len();
+                self.buffer.cpos = self.buffer.buf.len();
                 self.recompute_completer();
                 Action::Redraw
             }
             KeyAction::HistoryPrev => {
-                if let Some(entry) = history.and_then(|h| h.up(&self.buf)) {
-                    self.buf = entry.to_string();
-                    self.cpos = 0;
+                if let Some(entry) = history.and_then(|h| h.up(&self.buffer.buf)) {
+                    self.buffer.buf = entry.to_string();
+                    self.buffer.cpos = 0;
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -604,8 +608,8 @@ impl InputState {
             }
             KeyAction::HistoryNext => {
                 if let Some(entry) = history.and_then(|h| h.down()) {
-                    self.buf = entry.to_string();
-                    self.cpos = self.buf.len();
+                    self.buffer.buf = entry.to_string();
+                    self.buffer.cpos = self.buffer.buf.len();
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -683,15 +687,15 @@ impl InputState {
                 if self.has_selection() {
                     self.delete_selection();
                 }
-                if let Some(new_cpos) = self.kill_ring.yank(&mut self.buf, self.cpos) {
-                    self.cpos = new_cpos;
+                if let Some(new_cpos) = self.buffer.kill_ring.yank(&mut self.buffer.buf, self.buffer.cpos) {
+                    self.buffer.cpos = new_cpos;
                     self.recompute_completer();
                 }
                 Action::Redraw
             }
             KeyAction::YankPop => {
-                if let Some(new_cpos) = self.kill_ring.yank_pop(&mut self.buf) {
-                    self.cpos = new_cpos;
+                if let Some(new_cpos) = self.buffer.kill_ring.yank_pop(&mut self.buffer.buf) {
+                    self.buffer.cpos = new_cpos;
                     self.recompute_completer();
                 }
                 Action::Redraw
@@ -719,15 +723,15 @@ impl InputState {
             // ── Vim half-page scroll ────────────────────────────────────
             KeyAction::VimHalfPageUp => {
                 let half = render::term_height() / 2;
-                let line = current_line(&self.buf, self.cpos);
+                let line = current_line(&self.buffer.buf, self.buffer.cpos);
                 let target = line.saturating_sub(half);
                 self.move_to_line(target);
                 Action::Redraw
             }
             KeyAction::VimHalfPageDown => {
                 let half = render::term_height() / 2;
-                let line = current_line(&self.buf, self.cpos);
-                let total = self.buf.chars().filter(|&c| c == '\n').count() + 1;
+                let line = current_line(&self.buffer.buf, self.buffer.cpos);
+                let total = self.buffer.buf.chars().filter(|&c| c == '\n').count() + 1;
                 let target = (line + half).min(total - 1);
                 self.move_to_line(target);
                 Action::Redraw
@@ -736,9 +740,9 @@ impl InputState {
             // ── Clipboard ───────────────────────────────────────────────
             KeyAction::CopySelection => {
                 if let Some((start, end)) = self.selection_range() {
-                    let text = self.buf[start..end].to_string();
+                    let text = self.buffer.buf[start..end].to_string();
                     let _ = crate::app::copy_to_clipboard(&text);
-                    self.kill_ring.set(text);
+                    self.buffer.kill_ring.set(text);
                 }
                 Action::Noop
             }
@@ -747,7 +751,7 @@ impl InputState {
                     self.save_undo();
                     if let Some(text) = self.delete_selection() {
                         let _ = crate::app::copy_to_clipboard(&text);
-                        self.kill_ring.set(text);
+                        self.buffer.kill_ring.set(text);
                     }
                     self.recompute_completer();
                     Action::Redraw
@@ -768,46 +772,46 @@ impl InputState {
             // ── Selection (shift+movement) ─────────────────────────────
             KeyAction::SelectLeft => {
                 self.extend_selection();
-                if self.cpos > 0 {
-                    let cp = char_pos(&self.buf, self.cpos);
-                    self.cpos = byte_of_char(&self.buf, cp - 1);
+                if self.buffer.cpos > 0 {
+                    let cp = char_pos(&self.buffer.buf, self.buffer.cpos);
+                    self.buffer.cpos = byte_of_char(&self.buffer.buf, cp - 1);
                 }
                 Action::Redraw
             }
             KeyAction::SelectRight => {
                 self.extend_selection();
-                if self.cpos < self.buf.len() {
-                    let cp = char_pos(&self.buf, self.cpos);
-                    self.cpos = byte_of_char(&self.buf, cp + 1);
+                if self.buffer.cpos < self.buffer.buf.len() {
+                    let cp = char_pos(&self.buffer.buf, self.buffer.cpos);
+                    self.buffer.cpos = byte_of_char(&self.buffer.buf, cp + 1);
                 }
                 Action::Redraw
             }
             KeyAction::SelectWordForward => {
                 self.extend_selection();
-                self.cpos = crate::text_utils::word_forward_pos(
-                    &self.buf,
-                    self.cpos,
+                self.buffer.cpos = crate::text_utils::word_forward_pos(
+                    &self.buffer.buf,
+                    self.buffer.cpos,
                     crate::text_utils::CharClass::Word,
                 );
                 Action::Redraw
             }
             KeyAction::SelectWordBackward => {
                 self.extend_selection();
-                self.cpos = crate::text_utils::word_backward_pos(
-                    &self.buf,
-                    self.cpos,
+                self.buffer.cpos = crate::text_utils::word_backward_pos(
+                    &self.buffer.buf,
+                    self.buffer.cpos,
                     crate::text_utils::CharClass::Word,
                 );
                 Action::Redraw
             }
             KeyAction::SelectStartOfLine => {
                 self.extend_selection();
-                self.cpos = crate::text_utils::line_start(&self.buf, self.cpos);
+                self.buffer.cpos = crate::text_utils::line_start(&self.buffer.buf, self.buffer.cpos);
                 Action::Redraw
             }
             KeyAction::SelectEndOfLine => {
                 self.extend_selection();
-                self.cpos = crate::text_utils::line_end(&self.buf, self.cpos);
+                self.buffer.cpos = crate::text_utils::line_end(&self.buffer.buf, self.buffer.cpos);
                 Action::Redraw
             }
         }
@@ -901,14 +905,14 @@ impl InputState {
             // (agent_running, ghost_text) are set to defaults here — the app
             // event loop overrides them by calling lookup directly when needed.
             let ctx = KeyContext {
-                buf_empty: self.buf.is_empty() && self.attachment_ids.is_empty(),
-                vim_non_insert: self.vim.as_ref().is_some_and(|v| {
+                buf_empty: self.buffer.buf.is_empty() && self.buffer.attachment_ids.is_empty(),
+                vim_non_insert: self.buffer.vim.as_ref().is_some_and(|v| {
                     matches!(
                         v.mode(),
                         ViMode::Normal | ViMode::Visual | ViMode::VisualLine
                     )
                 }),
-                vim_enabled: self.vim.is_some(),
+                vim_enabled: self.buffer.vim.is_some(),
                 agent_running: false,
                 ghost_text_visible: false,
             };

@@ -19,8 +19,8 @@ impl InputState {
     /// apply side effects, and return the appropriate action.
     pub(super) fn accept_picker(&mut self, comp: Completer) -> Action {
         self.history_saved_buf = None;
-        self.buf.clear();
-        self.cpos = 0;
+        self.buffer.buf.clear();
+        self.buffer.cpos = 0;
         match comp.kind {
             CompleterKind::Model => match comp.accept_extra().map(|s| s.to_string()) {
                 Some(k) => Action::MenuResult(MenuResult::ModelSelect(k)),
@@ -103,8 +103,8 @@ impl InputState {
                 match comp.kind {
                     CompleterKind::History => {
                         if let Some(label) = comp.accept() {
-                            self.buf = label.to_string();
-                            self.cpos = self.buf.len();
+                            self.buffer.buf = label.to_string();
+                            self.buffer.cpos = self.buffer.buf.len();
                         }
                         self.history_saved_buf = None;
                         Some(Action::Redraw)
@@ -160,8 +160,8 @@ impl InputState {
                 // Restore saved buffer for all picker types.
                 if is_picker {
                     if let Some((buf, cpos)) = self.history_saved_buf.take() {
-                        self.buf = buf;
-                        self.cpos = cpos;
+                        self.buffer.buf = buf;
+                        self.buffer.cpos = cpos;
                     }
                 }
                 Some(Action::Redraw)
@@ -216,8 +216,8 @@ impl InputState {
                 match comp.kind {
                     CompleterKind::History => {
                         if let Some(label) = comp.accept() {
-                            self.buf = label.to_string();
-                            self.cpos = self.buf.len();
+                            self.buffer.buf = label.to_string();
+                            self.buffer.cpos = self.buffer.buf.len();
                         }
                         self.history_saved_buf = None;
                     }
@@ -253,14 +253,14 @@ impl InputState {
 
     fn accept_completion(&mut self, comp: &Completer) {
         if let Some(label) = comp.accept() {
-            let end = self.cpos;
+            let end = self.buffer.cpos;
             let start = comp.anchor;
             if comp.kind == CompleterKind::CommandArg {
                 // Replace just the argument portion after the command prefix.
-                self.buf.replace_range(start..end, label);
-                self.cpos = start + label.len();
+                self.buffer.buf.replace_range(start..end, label);
+                self.buffer.cpos = start + label.len();
             } else {
-                let trigger = &self.buf[start..start + 1];
+                let trigger = &self.buffer.buf[start..start + 1];
                 let replacement = if trigger == "/" {
                     format!("/{} ", label)
                 } else if label.contains(' ') {
@@ -268,8 +268,8 @@ impl InputState {
                 } else {
                     format!("@{} ", label)
                 };
-                self.buf.replace_range(start..end, &replacement);
-                self.cpos = start + replacement.len();
+                self.buffer.buf.replace_range(start..end, &replacement);
+                self.buffer.cpos = start + replacement.len();
             }
         }
     }
@@ -284,8 +284,8 @@ impl InputState {
                 || Completer::command_args(arg_anchor, &items),
                 query,
             );
-        } else if find_slash_anchor(&self.buf, self.cpos).is_some() {
-            let query = self.buf[1..self.cpos].to_string();
+        } else if find_slash_anchor(&self.buffer.buf, self.buffer.cpos).is_some() {
+            let query = self.buffer.buf[1..self.buffer.cpos].to_string();
             self.set_or_update_completer(CompleterKind::Command, || Completer::commands(0), query);
         } else {
             self.completer = None;
@@ -327,14 +327,14 @@ impl InputState {
                     | CompleterKind::Settings
             )
         }) {
-            let query = self.buf.clone();
+            let query = self.buffer.buf.clone();
             self.completer.as_mut().unwrap().update_query(query);
             self.live_preview_picker();
             return;
         }
-        if let Some(at_pos) = cursor_in_at_zone(&self.buf, self.cpos) {
-            let query = if self.cpos > at_pos + 1 {
-                self.buf[at_pos + 1..self.cpos].to_string()
+        if let Some(at_pos) = cursor_in_at_zone(&self.buffer.buf, self.buffer.cpos) {
+            let query = if self.buffer.cpos > at_pos + 1 {
+                self.buffer.buf[at_pos + 1..self.buffer.cpos].to_string()
             } else {
                 String::new()
             };
@@ -357,11 +357,11 @@ impl InputState {
                 || Completer::command_args(arg_anchor, &items),
                 query,
             );
-        } else if find_slash_anchor(&self.buf, self.cpos).is_some()
-            || (self.cpos == 0 && self.buf.starts_with('/'))
+        } else if find_slash_anchor(&self.buffer.buf, self.buffer.cpos).is_some()
+            || (self.buffer.cpos == 0 && self.buffer.buf.starts_with('/'))
         {
-            let end = self.cpos.max(1);
-            let query = self.buf[1..end].to_string();
+            let end = self.buffer.cpos.max(1);
+            let query = self.buffer.buf[1..end].to_string();
             self.set_or_update_completer(CompleterKind::Command, || Completer::commands(0), query);
         } else {
             self.completer = None;
@@ -386,8 +386,8 @@ impl InputState {
     }
 
     fn arg_query(&self, anchor: usize) -> String {
-        if self.cpos > anchor {
-            self.buf[anchor..self.cpos].to_string()
+        if self.buffer.cpos > anchor {
+            self.buffer.buf[anchor..self.buffer.cpos].to_string()
         } else {
             String::new()
         }
@@ -399,10 +399,10 @@ impl InputState {
     fn find_command_arg_zone(&self) -> Option<(usize, usize)> {
         for (i, (cmd, _)) in self.command_arg_sources.iter().enumerate() {
             let anchor = cmd.len() + 1; // "/cmd" + space
-            if self.buf.len() >= anchor
-                && self.buf.starts_with(cmd.as_str())
-                && self.buf.as_bytes()[cmd.len()] == b' '
-                && self.cpos >= anchor
+            if self.buffer.buf.len() >= anchor
+                && self.buffer.buf.starts_with(cmd.as_str())
+                && self.buffer.buf.as_bytes()[cmd.len()] == b' '
+                && self.buffer.cpos >= anchor
             {
                 return Some((i, anchor));
             }

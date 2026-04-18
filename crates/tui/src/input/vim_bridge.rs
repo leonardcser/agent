@@ -26,7 +26,7 @@ impl InputState {
         ev: &Event,
         history: &mut Option<&mut History>,
     ) -> VimBridgeResult {
-        if self.vim.is_none() {
+        if self.buffer.vim.is_none() {
             return VimBridgeResult::NotAKey;
         }
         let Event::Key(key_ev) = ev else {
@@ -34,14 +34,14 @@ impl InputState {
         };
         let key_ev: KeyEvent = *key_ev;
 
-        let vim = self.vim.as_mut().unwrap();
+        let vim = self.buffer.vim.as_mut().unwrap();
         let result = {
             let mut ctx = VimContext {
-                buf: &mut self.buf,
-                cpos: &mut self.cpos,
-                attachments: &mut self.attachment_ids,
-                kill_ring: &mut self.kill_ring,
-                history: &mut self.history,
+                buf: &mut self.buffer.buf,
+                cpos: &mut self.buffer.cpos,
+                attachments: &mut self.buffer.attachment_ids,
+                kill_ring: &mut self.buffer.kill_ring,
+                history: &mut self.buffer.history,
             };
             vim.handle_key(key_ev, &mut ctx)
         };
@@ -55,7 +55,7 @@ impl InputState {
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::Submit => {
-                if self.buf.is_empty() && self.attachment_ids.is_empty() {
+                if self.buffer.buf.is_empty() && self.buffer.attachment_ids.is_empty() {
                     VimBridgeResult::Handled(Action::SubmitEmpty)
                 } else {
                     let display = self.message_display_text();
@@ -65,17 +65,17 @@ impl InputState {
                 }
             }
             vim::Action::HistoryPrev => {
-                if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(&self.buf)) {
-                    self.buf = entry.to_string();
-                    self.cpos = 0;
+                if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(&self.buffer.buf)) {
+                    self.buffer.buf = entry.to_string();
+                    self.buffer.cpos = 0;
                     self.sync_completer();
                 }
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::HistoryNext => {
                 if let Some(entry) = history.as_deref_mut().and_then(|h| h.down()) {
-                    self.buf = entry.to_string();
-                    self.cpos = self.buf.len();
+                    self.buffer.buf = entry.to_string();
+                    self.buffer.cpos = self.buffer.buf.len();
                     self.sync_completer();
                 }
                 VimBridgeResult::Handled(Action::Redraw)

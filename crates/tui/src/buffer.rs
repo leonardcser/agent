@@ -37,10 +37,11 @@ pub struct Buffer {
     /// Per-buffer kill ring for yank/paste.
     pub kill_ring: KillRing,
     /// Attachment markers inside `buf`. Readonly buffers keep this
-    /// empty.
-    pub attachments: Vec<AttachmentId>,
+    /// empty. Named to match `InputState.attachment_ids` so the field
+    /// path is identical whether the buffer is writable or readonly.
+    pub attachment_ids: Vec<AttachmentId>,
     /// Undo/redo stack.
-    pub undo: UndoHistory,
+    pub history: UndoHistory,
     /// Rows scrolled away from the bottom edge of the viewport (0 =
     /// stuck to bottom). Only used by panes whose content is larger
     /// than the visible area.
@@ -62,8 +63,8 @@ impl Buffer {
             vim: None,
             selection_anchor: None,
             kill_ring: KillRing::new(),
-            attachments: Vec::new(),
-            undo: UndoHistory::new(Some(100)),
+            attachment_ids: Vec::new(),
+            history: UndoHistory::new(Some(100)),
             scroll_offset: 0,
             cursor_line: 0,
             cursor_col: 0,
@@ -80,8 +81,8 @@ impl Buffer {
             vim: Some(Vim::new()),
             selection_anchor: None,
             kill_ring: KillRing::new(),
-            attachments: Vec::new(),
-            undo: UndoHistory::new(None),
+            attachment_ids: Vec::new(),
+            history: UndoHistory::new(None),
             scroll_offset: 0,
             cursor_line: 0,
             cursor_col: 0,
@@ -116,9 +117,9 @@ impl Buffer {
         let mut ctx = VimContext {
             buf: &mut self.buf,
             cpos: &mut cpos,
-            attachments: &mut self.attachments,
+            attachments: &mut self.attachment_ids,
             kill_ring: &mut self.kill_ring,
-            history: &mut self.undo,
+            history: &mut self.history,
         };
         let action = vim.handle_key(key, &mut ctx);
         if self.readonly && vim.mode() == vim::ViMode::Insert {
