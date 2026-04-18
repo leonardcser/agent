@@ -920,16 +920,115 @@ impl App {
         let Event::Key(k) = ev else {
             return EventOutcome::Noop;
         };
-        // Route the key through vim first. If it's consumed, sync
+        use crossterm::event::KeyModifiers as M;
+
+        // Readonly-buffer scrolling keybinds: Ctrl-U / Ctrl-D (half-page),
+        // Ctrl-B / Ctrl-F (full-page), Ctrl-Y / Ctrl-E (one line). These
+        // mirror Vim's scroll commands. Since Vim in the prompt reuses
+        // InputState for these, we implement them here by driving the
+        // content cursor directly — which in turn pulls the viewport via
+        // the normal scroll-follows-cursor logic.
+        if k.modifiers.contains(M::CONTROL) {
+            let half = (self.viewport_rows_estimate() / 2).max(1) as isize;
+            let full = (self.viewport_rows_estimate() as isize).max(1);
+            let delta: Option<isize> = match k.code {
+                KeyCode::Char('u') => Some(-half),
+                KeyCode::Char('d') => Some(half),
+                KeyCode::Char('b') => Some(-full),
+                KeyCode::Char('f') => Some(full),
+                KeyCode::Char('y') => Some(-1),
+                KeyCode::Char('e') => Some(1),
+                _ => None,
+            };
+            if let Some(dn) = delta {
+                self.move_content_cursor_by_lines(dn);
+                return EventOutcome::Redraw;
+            }
+        }
+
+        // Route the key through vim. If it's consumed, sync
         // scroll/cursor state from the new cpos and return.
         if self.handle_content_vim_key(k) {
             return EventOutcome::Redraw;
         }
-        use crossterm::event::KeyModifiers as M;
         match (k.code, k.modifiers) {
             (KeyCode::Char('q'), M::NONE) => EventOutcome::Quit,
             _ => EventOutcome::Noop,
         }
+    }
+
+    /// Move the content-pane cursor by `delta` lines (positive = down,
+    /// negative = up), clamping to the transcript range and letting the
+    /// scroll offset follow the cursor at the edges of the viewport.
+    fn move_content_cursor_by_lines(&mut self, delta: isize) {
+        let w = render::term_width();
+        let rows = self.screen.full_transcript_text(w);
+        if rows.is_empty() {
+            return;
+        }
+        let total = rows.len();
+        let (cur_line, cur_col) = self.current_content_line_col(&rows);
+        let new_line = (cur_line as isize + delta).max(0).min(total as isize - 1) as usize;
+        self.set_content_cursor_to_line_col(&rows, new_line, cur_col);
+    }
+
+    /// Resolve the current `content_cpos` into `(line_idx, col)`
+    /// coordinates against the transcript row list.
+    fn current_content_line_col(&self, rows: &[String]) -> (usize, usize) {
+        if rows.is_empty() {
+            return (0, 0);
+        }
+        let mut acc = 0usize;
+        let mut offsets = Vec::with_capacity(rows.len());
+        for r in rows {
+            offsets.push(acc);
+            acc += r.len() + 1;
+        }
+        let buf_len = acc.saturating_sub(1);
+        let cpos = self.content_cpos.min(buf_len);
+        let line_idx = match offsets.binary_search(&cpos) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        };
+        let line_start = offsets[line_idx];
+        let col = rows[line_idx][..cpos - line_start].chars().count();
+        (line_idx, col)
+    }
+
+    /// Place the content cursor at `(line_idx, col)` (col measured in
+    /// visual columns, clamped to the line) and adjust the viewport
+    /// scroll so the cursor stays onscreen.
+    fn set_content_cursor_to_line_col(&mut self, rows: &[String], line_idx: usize, col: usize) {
+        if rows.is_empty() {
+            return;
+        }
+        let line_idx = line_idx.min(rows.len() - 1);
+        let mut acc = 0usize;
+        for r in rows.iter().take(line_idx) {
+            acc += r.len() + 1;
+        }
+        let line = &rows[line_idx];
+        let max_cols = line.chars().count();
+        let col = col.min(max_cols);
+        let byte_off = line
+            .char_indices()
+            .nth(col)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len());
+        self.content_cpos = acc + byte_off;
+
+        let total = rows.len();
+        let line_from_bottom = (total - 1).saturating_sub(line_idx) as u16;
+        self.history_cursor_line = line_from_bottom;
+        self.history_cursor_col = col as u16;
+
+        let viewport = self.viewport_rows_estimate();
+        if line_from_bottom >= self.history_scroll_offset + viewport {
+            self.history_scroll_offset = line_from_bottom + 1 - viewport;
+        } else if line_from_bottom < self.history_scroll_offset {
+            self.history_scroll_offset = line_from_bottom;
+        }
+        self.screen.mark_dirty();
     }
 
     /// Build the transcript buffer, run `key` through the content-pane
@@ -1064,39 +1163,68 @@ impl App {
     fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         match me.kind {
             MouseEventKind::ScrollUp => {
-                // Scrolling up focuses the content pane (but does not reset
-                // the prompt state — pane state is kept independent).
+                // Scroll wheel moves the content cursor like j/k — the
+                // viewport only scrolls when the cursor is pushed past
+                // an edge. This matches the vim-buffer paradigm.
                 self.app_focus = crate::app::AppFocus::Content;
-                self.history_scroll_offset = self.history_scroll_offset.saturating_add(3);
-                self.screen.mark_dirty();
+                self.move_content_cursor_by_lines(-3);
                 EventOutcome::Redraw
             }
             MouseEventKind::ScrollDown => {
-                self.history_scroll_offset = self.history_scroll_offset.saturating_sub(3);
-                self.screen.mark_dirty();
+                self.app_focus = crate::app::AppFocus::Content;
+                self.move_content_cursor_by_lines(3);
                 EventOutcome::Redraw
             }
             MouseEventKind::Down(_) => {
-                // Clicks focus whichever pane the click lands in. The
-                // prompt occupies the bottom `prev_rows` rows + a gap;
-                // everything above is the content pane.
+                // Clicks focus whichever pane the click lands in, and
+                // position the cursor at the clicked cell.
                 let (_, height) = self.screen.size();
                 let prompt_rows = self.screen.prev_prompt_rows();
                 let prompt_top = height.saturating_sub(prompt_rows);
-                let new_focus = if me.row >= prompt_top {
-                    crate::app::AppFocus::Prompt
-                } else {
-                    crate::app::AppFocus::Content
-                };
-                if new_focus != self.app_focus {
-                    self.app_focus = new_focus;
-                    self.screen.mark_dirty();
-                    return EventOutcome::Redraw;
+                if me.row >= prompt_top {
+                    if self.app_focus != crate::app::AppFocus::Prompt {
+                        self.app_focus = crate::app::AppFocus::Prompt;
+                        self.screen.mark_dirty();
+                        return EventOutcome::Redraw;
+                    }
+                    return EventOutcome::Noop;
                 }
-                EventOutcome::Noop
+                // Content pane click: focus + move cursor.
+                self.app_focus = crate::app::AppFocus::Content;
+                self.position_content_cursor_from_click(me.row, me.column);
+                EventOutcome::Redraw
             }
             _ => EventOutcome::Noop,
         }
+    }
+
+    /// Translate a click at screen (row, col) within the content pane
+    /// into a transcript (line, col) and jump the content cursor there.
+    fn position_content_cursor_from_click(&mut self, row: u16, col: u16) {
+        let w = render::term_width();
+        let rows = self.screen.full_transcript_text(w);
+        if rows.is_empty() {
+            self.screen.mark_dirty();
+            return;
+        }
+        let (_, height) = self.screen.size();
+        let prompt_rows = self.screen.prev_prompt_rows();
+        let prompt_top = height.saturating_sub(prompt_rows);
+        let gap_rows: u16 = 1;
+        let viewport_rows = prompt_top.saturating_sub(gap_rows);
+        if row >= viewport_rows {
+            // Click on the gap row — ignore.
+            self.screen.mark_dirty();
+            return;
+        }
+        let total = rows.len();
+        let max_scroll = total.saturating_sub(viewport_rows as usize);
+        let scroll = (self.history_scroll_offset as usize).min(max_scroll);
+        let skip = total
+            .saturating_sub(viewport_rows as usize)
+            .saturating_sub(scroll);
+        let line_idx = (skip + row as usize).min(total - 1);
+        self.set_content_cursor_to_line_col(&rows, line_idx, col as usize);
     }
 
     /// Ctrl-W pane chord. Returns `Some` when the event was consumed by

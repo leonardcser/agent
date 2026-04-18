@@ -613,6 +613,22 @@ impl BlockHistory {
     /// Plain-text rendering of the full transcript at the given width.
     /// One string per rendered row, gaps between blocks included as
     /// empty entries. Used by the content pane as the `vim` buffer.
+    /// Total number of rows the full transcript would occupy at
+    /// `width`. Mirrors the gap + layout-rows math in `paint_viewport`
+    /// without painting anything. Used for scrollbar geometry.
+    pub(super) fn total_rows(&mut self, width: usize, show_thinking: bool) -> u16 {
+        let key = LayoutKey {
+            width: width as u16,
+            show_thinking,
+        };
+        let mut total: u32 = 0;
+        for i in 0..self.order.len() {
+            total += self.block_gap(i) as u32;
+            total += self.ensure_rows(i, key) as u32;
+        }
+        total.min(u16::MAX as u32) as u16
+    }
+
     pub(super) fn full_text(&mut self, width: usize, show_thinking: bool) -> Vec<String> {
         let key = LayoutKey {
             width: width as u16,
@@ -819,6 +835,18 @@ impl BlockHistory {
                 break;
             }
             super::paint::paint_line(out, line, &pctx);
+            painted += 1;
+        }
+
+        // Blank-fill any remaining viewport rows so leftover content from
+        // previous frames is cleanly overwritten without a full-screen
+        // Clear::All (which causes visible flicker on terminals that
+        // don't support synchronized update).
+        while painted < viewport_rows {
+            let _ = out.queue(crossterm::terminal::Clear(
+                crossterm::terminal::ClearType::CurrentLine,
+            ));
+            out.overlay_newline();
             painted += 1;
         }
 

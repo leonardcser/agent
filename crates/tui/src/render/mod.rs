@@ -10,6 +10,7 @@ mod layout_out;
 mod paint;
 mod prompt;
 mod screen;
+mod scrollbar;
 mod selection;
 mod status;
 mod working;

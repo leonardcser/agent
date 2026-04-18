@@ -2393,10 +2393,13 @@ impl Screen {
         let (term_w, term_h) = self.size();
         out.init_cursor(0, term_w, term_h);
 
-        // Clear full screen.
+        // Position at top. We deliberately do NOT Clear::All here — the
+        // whole screen is repainted row-by-row (each `newline` clears to
+        // end of line) and any unused rows are blanked explicitly. Clearing
+        // the whole screen every frame causes hard flicker on terminals
+        // without DEC synchronized-update support.
         out.row = Some(0);
         out.move_to(0, 0);
-        let _ = out.queue(terminal::Clear(terminal::ClearType::All));
 
         // Measure prompt so we know how many rows to reserve at the bottom.
         let prompt_height =
@@ -2414,6 +2417,13 @@ impl Screen {
             Vec::new()
         };
 
+        // Compute total transcript rows so we can render the shared
+        // scrollbar at column 0 over the viewport.
+        let total_transcript_rows = self
+            .history
+            .total_rows(width, self.show_thinking)
+            .saturating_add(ephemeral_lines.len() as u16);
+
         // Paint transcript slice (history + ephemeral tail) into the viewport.
         let clamped = self.history.paint_viewport(
             out,
@@ -2424,6 +2434,16 @@ impl Screen {
             scroll_offset,
             &ephemeral_lines,
         );
+
+        // Draw a scrollbar on column 0 of the viewport, identical in
+        // style to the prompt's scrollbar. It only renders when the
+        // transcript exceeds the viewport.
+        let scrollbar = super::scrollbar::Scrollbar::new(
+            total_transcript_rows as usize,
+            viewport_rows as usize,
+            clamped as usize,
+        );
+        super::scrollbar::paint_column(out, 0, 0, viewport_rows, &scrollbar);
         // Record plain text for the content pane's motion handlers.
         self.last_viewport_text = self.history.viewport_text(
             width,
@@ -2458,6 +2478,12 @@ impl Screen {
         // Reset any lingering styling from the transcript paint above so
         // the prompt starts from a clean default state.
         out.reset_style();
+        // Explicitly blank the gap row so stale residue from previous
+        // frames doesn't leak through.
+        if gap_rows > 0 {
+            out.move_to(0, viewport_rows);
+            let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+        }
         let prompt_top = viewport_rows + gap_rows;
         out.row = Some(prompt_top);
         out.move_to(0, prompt_top);
@@ -2808,18 +2834,8 @@ impl Screen {
         // display buffer contributes 1 additional char between logical lines.
         let line_char_offsets = compute_visual_line_offsets(&display_buf, &visual_lines);
 
-        let has_scrollbar = total_content_rows > content_rows && content_rows > 0;
-        let (thumb_start, thumb_end) = if has_scrollbar {
-            let thumb_size = (content_rows * content_rows / total_content_rows).max(1);
-            let max_scroll = total_content_rows - content_rows;
-            let thumb_pos = scroll_offset
-                .checked_mul(content_rows.saturating_sub(thumb_size))
-                .and_then(|v| v.checked_div(max_scroll))
-                .unwrap_or(0);
-            (thumb_pos, thumb_pos + thumb_size)
-        } else {
-            (0, 0)
-        };
+        let scrollbar =
+            super::scrollbar::Scrollbar::new(total_content_rows, content_rows, scroll_offset);
 
         for (li, (line, kinds)) in visual_lines
             .iter()
@@ -2927,8 +2943,8 @@ impl Screen {
             if line_cursor.is_some() {
                 self.prompt.soft_cursor = Some((1 + cursor_char_in_line as u16, out.cursor_row));
             }
-            if has_scrollbar {
-                let bg = if li >= thumb_start && li < thumb_end {
+            if scrollbar.visible {
+                let bg = if scrollbar.is_thumb(li) {
                     theme::scrollbar_thumb()
                 } else {
                     theme::scrollbar_track()
