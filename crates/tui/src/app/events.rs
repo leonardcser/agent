@@ -1140,12 +1140,14 @@ impl App {
                 | KeyAction::MoveEndOfLine
                 | KeyAction::MoveWordForward
                 | KeyAction::MoveWordBackward => {
-                    self.transcript_window.cursor.clear_anchor();
+                    self.transcript_window.selection_anchor = None;
                 }
-                _ if extending => {
-                    self.transcript_window
-                        .cursor
-                        .extend(self.transcript_window.cpos);
+                _ if extending
+                    && self.transcript_window.selection_anchor.is_none() =>
+                {
+                    let row = self.transcript_window.cursor_abs_row(0);
+                    let col = self.transcript_window.cursor_col as usize;
+                    self.transcript_window.selection_anchor = Some((row, col));
                 }
                 _ => {}
             }
@@ -1188,7 +1190,7 @@ impl App {
                     ))
                 }
                 KeyAction::CopySelection => {
-                    if let Some((s, e)) = self.transcript_window.selection_range() {
+                    if let Some((s, e)) = self.transcript_window.selection_range(&rows) {
                         let s = crate::text_utils::snap(&buf, s);
                         let e = crate::text_utils::snap(&buf, e);
                         if s < e {
@@ -1277,7 +1279,7 @@ impl App {
             let (s, e) = vim.visual_range(&buf, cpos)?;
             (s, e, kind)
         } else {
-            let (s, e) = self.transcript_window.cursor.range(cpos)?;
+            let (s, e) = self.transcript_window.selection_range(&rows)?;
             (s, e, render::ContentVisualKind::Char)
         };
         // Byte offsets in nav text → (line, nav_col).
@@ -1332,7 +1334,7 @@ impl App {
     /// rows the user is looking at. When the pin releases, scroll
     /// resumes its normal stuck-to-bottom behavior.
     fn sync_transcript_pin(&mut self) {
-        let has_selection = self.transcript_window.selection_range().is_some();
+        let has_selection = self.transcript_window.selection_anchor.is_some();
         let in_vim_visual = matches!(
             self.transcript_window.vim.as_ref().map(|v| v.mode()),
             Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
@@ -1530,7 +1532,9 @@ impl App {
                 if let Some(vim) = self.transcript_window.vim.as_mut() {
                     vim.begin_visual(crate::vim::ViMode::Visual, anchor);
                 } else {
-                    self.transcript_window.cursor.set_anchor(Some(anchor));
+                    let row = self.transcript_window.cursor_abs_row(0);
+                    let col = self.transcript_window.cursor_col as usize;
+                    self.transcript_window.selection_anchor = Some((row, col));
                 }
                 EventOutcome::Redraw
             }
@@ -1736,8 +1740,9 @@ impl App {
     /// Double-click on the content pane: enter vim Visual over the
     /// word under the cursor and copy it.
     fn select_and_copy_word_in_content(&mut self) {
-        let cpos = self.transcript_window.cpos;
-        if let Some((s, e)) = self.transcript_window.select_word_at(cpos) {
+        let rows = self.screen.full_transcript_nav_text();
+        let cpos = self.transcript_window.compute_cpos(&rows);
+        if let Some((s, e)) = self.transcript_window.select_word_at(&rows, cpos) {
             let text = self.transcript_window.buffer.buf[s..e].to_string();
             let _ = crate::app::commands::copy_to_clipboard(&text);
         }
@@ -1752,11 +1757,11 @@ impl App {
         if dragged {
             let rows = self.screen.full_transcript_nav_text();
             let buf = rows.join("\n");
-            let cpos = self.transcript_window.compute_cpos(&rows);
             let range = if let Some(vim) = self.transcript_window.vim.as_ref() {
+                let cpos = self.transcript_window.compute_cpos(&rows);
                 vim.visual_range(&buf, cpos)
             } else {
-                self.transcript_window.cursor.range(cpos)
+                self.transcript_window.selection_range(&rows)
             };
             if let Some((s, e)) = range {
                 let s = crate::text_utils::snap(&buf, s);
@@ -1770,7 +1775,7 @@ impl App {
         if let Some(vim) = self.transcript_window.vim.as_mut() {
             vim.set_mode(crate::vim::ViMode::Normal);
         } else {
-            self.transcript_window.cursor.clear_anchor();
+            self.transcript_window.selection_anchor = None;
         }
         self.sync_transcript_pin();
         self.screen.mark_dirty();

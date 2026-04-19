@@ -107,6 +107,10 @@ pub struct TranscriptWindow {
     /// constant while new content grows below. Each frame, the delta
     /// in total rows is tracked so we know when content shrinks too.
     pub pinned_last_total: Option<u16>,
+    /// Selection anchor in (row, col) space. Survives transcript
+    /// mutations during streaming because it's in row/col coordinates
+    /// rather than byte offsets.
+    pub selection_anchor: Option<(usize, usize)>,
 }
 
 impl TranscriptWindow {
@@ -121,6 +125,7 @@ impl TranscriptWindow {
             cursor_line: 0,
             cursor_col: 0,
             pinned_last_total: None,
+            selection_anchor: None,
         }
     }
 
@@ -134,7 +139,7 @@ impl TranscriptWindow {
             }
         } else {
             self.vim = None;
-            self.cursor.clear_anchor();
+            self.selection_anchor = None;
         }
     }
 
@@ -148,29 +153,44 @@ impl TranscriptWindow {
     }
 
     /// Current selection range (vim visual takes priority over
-    /// shift-selection anchor). Returns byte offsets in `buffer.buf`.
-    pub fn selection_range(&self) -> Option<(usize, usize)> {
+    /// shift-selection anchor). Returns byte offsets in the nav buffer.
+    pub fn selection_range(&self, rows: &[String]) -> Option<(usize, usize)> {
+        let cpos = self.compute_cpos(rows);
         if let Some(ref vim) = self.vim {
-            if let Some(range) = vim.visual_range(&self.buffer.buf, self.cpos) {
+            if let Some(range) = vim.visual_range(&rows.join("\n"), cpos) {
                 return Some(range);
             }
         }
-        self.cursor.range(self.cpos)
+        let (ar, ac) = self.selection_anchor?;
+        let offsets = Self::line_start_offsets(rows);
+        let anchor_row = ar.min(rows.len().saturating_sub(1));
+        let anchor_byte = offsets.get(anchor_row).copied().unwrap_or(0)
+            + cell_to_byte(rows.get(anchor_row).map(|s| s.as_str()).unwrap_or(""), ac);
+        let (lo, hi) = if anchor_byte <= cpos {
+            (anchor_byte, cpos)
+        } else {
+            (cpos, anchor_byte)
+        };
+        (lo != hi).then_some((lo, hi))
     }
 
     /// Select the word at `cpos` and enter vim Visual anchored at its
     /// start. Used by double-click.
-    pub fn select_word_at(&mut self, cpos: usize) -> Option<(usize, usize)> {
+    pub fn select_word_at(&mut self, rows: &[String], cpos: usize) -> Option<(usize, usize)> {
         let (start, end) = self.buffer.word_range_at(cpos)?;
         if let Some(vim) = self.vim.as_mut() {
-            // Vim Visual is char-inclusive at the cursor.
             self.cpos = end.saturating_sub(1).max(start);
             vim.begin_visual(crate::vim::ViMode::Visual, start);
         } else {
-            // ShiftSelection is half-open [anchor, cpos); place the
-            // cursor past the last char so the whole word is in range.
             self.cpos = end;
-            self.cursor.set_anchor(Some(start));
+            let offsets = Self::line_start_offsets(rows);
+            let anchor_line = match offsets.binary_search(&start) {
+                Ok(i) => i,
+                Err(i) => i.saturating_sub(1),
+            };
+            let byte_col = start.saturating_sub(offsets[anchor_line]);
+            let col = byte_to_cell(&rows[anchor_line], byte_col);
+            self.selection_anchor = Some((anchor_line, col));
         }
         Some((start, end))
     }
@@ -504,10 +524,13 @@ impl Window for TranscriptWindow {
         self.cpos = pos.min(self.buffer.buf.len());
     }
     fn selection(&self) -> Option<(usize, usize)> {
-        TranscriptWindow::selection_range(self)
+        if let Some(ref vim) = self.vim {
+            return vim.visual_range(&self.buffer.buf, self.cpos);
+        }
+        None
     }
     fn clear_selection(&mut self) {
-        self.cursor.clear_anchor();
+        self.selection_anchor = None;
         if let Some(vim) = self.vim.as_mut() {
             if matches!(
                 vim.mode(),

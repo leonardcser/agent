@@ -439,7 +439,7 @@ Both `process_input` and `try_command_while_running` now call `run_command` so L
 
 **T4b. Derive cpos from (row, col)** ✅ — Status bar uses `cursor_abs_row`/`cursor_col` directly (no byte offset). Visual range, copy, and block focus all use `compute_cpos()` from fresh rows instead of persisted `cpos`. Eliminates stale-offset and mid-codepoint hazards.
 
-**T4c. Selection anchor in (row, col) space** ⬜ (deferred) — Switch `WindowCursor.anchor` from byte offset to `(row, col)` so selection survives transcript mutations during streaming. Low priority — the existing selection flicker during streaming is a known bug.
+**T4c. Selection anchor in (row, col) space** ✅ — `TranscriptWindow.selection_anchor: Option<(usize, usize)>` stores the anchor in row/col coordinates instead of byte offset. `selection_range(&rows)` derives byte offsets on demand from the current nav rows. `WindowCursor.anchor` is no longer used for transcript selection. Selection survives transcript mutations during streaming.
 
 **Files:** `kill_ring.rs`, `vim/mod.rs`, `window.rs`, `cursor.rs`, `events.rs`, `screen.rs`.
 
