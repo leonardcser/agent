@@ -1229,11 +1229,20 @@ impl App {
         match self.transcript_window.handle_key(k, &rows, viewport) {
             None => false,
             Some(yanked) => {
-                if let Some(text) = yanked {
-                    let _ = crate::app::commands::copy_to_clipboard(&text);
+                if let Some(raw) = yanked {
+                    let buf = rows.join("\n");
+                    let copy = if let Some(start) = buf.find(&raw) {
+                        let tw = self.screen.transcript_width() as u16;
+                        let snap = self
+                            .screen
+                            .transcript
+                            .snapshot(tw, self.screen.show_thinking());
+                        snap.copy_byte_range(start, start + raw.len())
+                    } else {
+                        raw
+                    };
+                    let _ = crate::app::commands::copy_to_clipboard(&copy);
                 }
-                // Live-streaming updates can't shift the transcript
-                // under the user while a visual selection is active.
                 self.sync_transcript_pin();
                 self.screen.mark_dirty();
                 true
