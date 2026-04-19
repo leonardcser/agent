@@ -83,6 +83,9 @@ pub trait Window {
 /// transcript on every key dispatch (the transcript is rebuilt
 /// each frame).
 pub struct TranscriptWindow {
+    /// Window-level gutter reservations (padding + scrollbar column).
+    /// Scrollbar paint and content-width math derive from this.
+    pub gutters: WindowGutters,
     /// Underlying content-only buffer.
     pub buffer: Buffer,
     /// Cursor byte offset into `buffer.buf` — window-level.
@@ -119,6 +122,11 @@ pub struct TranscriptWindow {
 impl TranscriptWindow {
     pub fn new() -> Self {
         Self {
+            gutters: WindowGutters {
+                pad_left: 0,
+                pad_right: 1,
+                scrollbar: Some(GutterSide::Right),
+            },
             buffer: Buffer::readonly(),
             cpos: 0,
             vim: None,

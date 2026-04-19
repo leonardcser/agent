@@ -116,6 +116,10 @@ pub struct Screen {
     /// during `draw_viewport_frame`. Used by the content pane's motion
     /// handlers and yank to reason over what the user actually sees.
     last_viewport_text: Vec<String>,
+    /// Gutter reservations for the transcript window (padding +
+    /// scrollbar column). Pushed from `App` so the paint path picks up
+    /// the authoritative source without a reverse dependency.
+    transcript_gutters: crate::window::WindowGutters,
     /// Transcript viewport region recorded during the last paint. Used
     /// by mouse hit-testing and scroll math. `None` before the first
     /// viewport frame.
@@ -195,6 +199,11 @@ impl Screen {
             last_app_focus: crate::app::AppFocus::Prompt,
             last_status_position: None,
             last_viewport_text: Vec::new(),
+            transcript_gutters: crate::window::WindowGutters {
+                pad_left: 0,
+                pad_right: 1,
+                scrollbar: Some(crate::window::GutterSide::Right),
+            },
             last_transcript_region: None,
             btw: None,
             notification: None,
@@ -1840,6 +1849,17 @@ impl Screen {
         self.history.drain_finished_blocks()
     }
 
+    /// Push the transcript window's gutter reservation into the paint
+    /// path. Called by `App` whenever the transcript window mutates its
+    /// gutters so the scrollbar column and content-width math stay
+    /// consistent.
+    pub fn set_transcript_gutters(&mut self, gutters: crate::window::WindowGutters) {
+        if self.transcript_gutters != gutters {
+            self.transcript_gutters = gutters;
+            self.prompt.dirty = true;
+        }
+    }
+
     /// Replace a block's content in place. Preserves its `BlockId` so
     /// long-lived handles (streaming writers) stay valid across
     /// mutations; the layout cache auto-invalidates via the updated
@@ -2244,11 +2264,13 @@ impl Screen {
         let gap_rows: u16 = 1;
         let viewport_rows = term_h.saturating_sub(prompt_height + gap_rows);
 
-        // Reserve the rightmost column for the scrollbar track so the
-        // bar never overpaints transcript content. Layout width must
-        // match across total_rows / paint / viewport_text or mouse
-        // hit-testing drifts relative to what's actually drawn.
-        let tw = (width.saturating_sub(1)).max(1);
+        // Reserve gutter columns (padding + scrollbar track) so the bar
+        // never overpaints transcript content. Layout width must match
+        // across total_rows / paint / viewport_text or mouse hit-testing
+        // drifts relative to what's actually drawn. The transcript
+        // window's `gutters` carry the authoritative reservation.
+        let gutters = self.transcript_gutters;
+        let tw = (gutters.content_width(width as u16) as usize).max(1);
 
         // Build ephemeral tail (streaming overlays) as a flat DisplayBlock.
         let ephemeral_lines: Vec<crate::render::display::DisplayLine> = if self.has_ephemeral() {
@@ -2285,7 +2307,10 @@ impl Screen {
         // has a predictable target to click / drag.
         let geom =
             super::viewport::ViewportGeom::new(total_transcript_rows, viewport_rows, clamped);
-        let scrollbar_col = (width as u16).saturating_sub(1);
+        let scrollbar_col = match self.transcript_gutters.scrollbar {
+            Some(crate::window::GutterSide::Left) => 0,
+            _ => (width as u16).saturating_sub(1),
+        };
         let scrollbar_geom: Option<super::region::ScrollbarGeom> = if geom.max_scroll() > 0 {
             let max_scroll = geom.max_scroll() as usize;
             let inverted = max_scroll.saturating_sub(clamped as usize);
@@ -2480,7 +2505,10 @@ impl Screen {
         );
 
         // Scrollbar on the rightmost column over the transcript region.
-        let scrollbar_col = (width as u16).saturating_sub(1);
+        let scrollbar_col = match self.transcript_gutters.scrollbar {
+            Some(crate::window::GutterSide::Left) => 0,
+            _ => (width as u16).saturating_sub(1),
+        };
         let dialog_geom =
             super::viewport::ViewportGeom::new(total_transcript_rows, viewport_rows, clamped);
         let scrollbar_geom: Option<super::region::ScrollbarGeom> = if dialog_geom.max_scroll() > 0 {
