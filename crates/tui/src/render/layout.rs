@@ -1,5 +1,3 @@
-use super::region::ScrollbarGeom;
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Rect {
     pub top: u16,
@@ -27,33 +25,12 @@ impl Rect {
     }
 
     pub fn contains(&self, row: u16, col: u16) -> bool {
-        row >= self.top
-            && row < self.bottom()
-            && col >= self.left
-            && col < self.right()
+        row >= self.top && row < self.bottom() && col >= self.left && col < self.right()
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DockSlot {
-    Transcript,
-    Prompt,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FloatAnchor {
-    Bottom,
-    Center,
-}
-
 #[derive(Clone, Debug)]
-pub struct FloatSpec {
-    pub height: u16,
-    pub anchor: FloatAnchor,
-    pub modal: bool,
-}
-
-#[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct LayoutState {
     pub term_width: u16,
     pub term_height: u16,
@@ -61,7 +38,6 @@ pub struct LayoutState {
     pub gap: u16,
     pub prompt: Rect,
     pub dialog: Option<DialogLayout>,
-    pub transcript_scrollbar: Option<ScrollbarGeom>,
 }
 
 #[derive(Clone, Debug)]
@@ -112,7 +88,6 @@ impl LayoutState {
             gap,
             prompt,
             dialog: None,
-            transcript_scrollbar: None,
         }
     }
 
@@ -154,7 +129,6 @@ impl LayoutState {
             gap: 0,
             prompt: Rect::default(),
             dialog: dialog_layout,
-            transcript_scrollbar: None,
         }
     }
 
@@ -162,6 +136,7 @@ impl LayoutState {
         self.transcript.height
     }
 
+    #[allow(dead_code)]
     pub fn prompt_top(&self) -> u16 {
         self.prompt.top
     }

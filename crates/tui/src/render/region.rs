@@ -1,38 +1,26 @@
-//! Screen regions recorded during paint and consumed by event handlers
-//! for mouse hit-testing and scroll math.
+//! Buffer viewport — the bridge between a scrollable buffer and its
+//! on-screen window.
 //!
-//! Each region is a small record of *what the last paint pass drew and
-//! where*. Mouse handlers look the event up in a region instead of
-//! recomputing layout (viewport rows, total rows, scrollbar column) on
-//! every tick. This keeps paint and hit-test in lockstep — the classic
-//! source of "click is off by one column" / "click scrolls to the wrong
-//! place" drift bugs.
+//! A `Viewport` records *what the last paint pass drew and where*:
+//! screen rect, content dimensions, scroll state, and optional
+//! scrollbar geometry.  Mouse handlers hit-test against viewports
+//! instead of recomputing layout on every tick, keeping paint and
+//! input in lockstep.
 
 /// Geometry of a single-column scrollbar painted during the last frame.
-/// Stored with enough information to map a click row back into a scroll
-/// offset without re-measuring the transcript.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ScrollbarGeom {
-    /// Screen column the track lives on.
     pub col: u16,
-    /// First screen row of the track.
     pub top_row: u16,
-    /// Number of rows the track spans (viewport height).
     pub rows: u16,
-    /// Total content rows at the time of paint.
     pub total_rows: u16,
 }
 
 impl ScrollbarGeom {
-    /// Maximum scroll amount (in content rows) — how far above the
-    /// bottom (or below the top, depending on the caller's convention)
-    /// the buffer can be scrolled.
     pub fn max_scroll(&self) -> u16 {
         self.total_rows.saturating_sub(self.rows)
     }
 
-    /// Thumb height in screen rows. Matches `scrollbar::Scrollbar::new`
-    /// so hit-testing and painting agree on the geometry.
     pub fn thumb_size(&self) -> u16 {
         let rows = self.rows as usize;
         let total = self.total_rows as usize;
@@ -42,19 +30,10 @@ impl ScrollbarGeom {
         ((rows * rows) / total).max(1) as u16
     }
 
-    /// Highest row the top of the thumb can occupy. When the content
-    /// overflows by exactly one row this collapses to zero; callers
-    /// should treat that as "no interactive scrollbar".
     pub fn max_thumb_top(&self) -> u16 {
         self.rows.saturating_sub(self.thumb_size())
     }
 
-    /// Translate a thumb-top screen offset (0..=max_thumb_top) into a
-    /// top-relative scroll offset (0..=max_scroll). This is the inverse
-    /// of the forward mapping in `scrollbar::Scrollbar::new`: the thumb
-    /// scale and the buffer scale are different (the thumb moves over
-    /// `max_thumb_top` rows while the buffer moves over `max_scroll`),
-    /// and this method handles the proportional mapping in one place.
     pub fn scroll_from_top_for_thumb(&self, thumb_top: u16) -> u16 {
         let max_thumb = self.max_thumb_top();
         let max_scroll = self.max_scroll();
@@ -67,67 +46,48 @@ impl ScrollbarGeom {
         from_top.min(u16::MAX as u32) as u16
     }
 
-    /// Is `(row, col)` inside the scrollbar track?
     pub fn contains(&self, row: u16, col: u16) -> bool {
         col == self.col && row >= self.top_row && row < self.top_row + self.rows
     }
 }
 
-/// Screen region occupied by the transcript viewport in the last frame.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
-pub(crate) struct TranscriptRegion {
-    /// First screen row of the viewport.
+pub(crate) struct Viewport {
     pub top_row: u16,
-    /// Number of viewport rows.
     pub rows: u16,
-    /// Width available for transcript content (excludes scrollbar column).
     pub content_width: u16,
-    /// Scrollbar geometry when the content overflows; `None` otherwise.
-    pub scrollbar: Option<ScrollbarGeom>,
-    /// Total transcript rows at the time of paint.
     pub total_rows: u16,
-    /// Clamped scroll offset (rows above the bottom of the viewport).
     pub scroll_offset: u16,
+    pub scrollbar: Option<ScrollbarGeom>,
 }
 
-/// Result of hit-testing a mouse event against a `TranscriptRegion`.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
-pub(crate) enum TranscriptHit {
-    /// Event lands on the scrollbar column — caller should jump/drag
-    /// the viewport using `scroll_offset_for_row`. `row` is the screen
-    /// row relative to `ScrollbarGeom::top_row`.
+pub(crate) enum ViewportHit {
     Scrollbar { row: u16 },
-    /// Event lands on the content area; `row` and `col` are 0-based
-    /// within the viewport and `content_width`. Reserved for the
-    /// upcoming `position_content_cursor_from_click` migration.
     Content { row: u16, col: u16 },
 }
 
-impl TranscriptRegion {
-    /// Is `(row, col)` inside this region (either content or scrollbar)?
-    pub fn contains(&self, row: u16, col: u16) -> bool {
-        let _ = col;
+impl Viewport {
+    pub fn contains(&self, row: u16, _col: u16) -> bool {
         row >= self.top_row && row < self.top_row + self.rows
     }
 
-    /// Classify a mouse event against this region. Returns `None` if the
-    /// event is outside the viewport entirely.
-    pub fn hit(&self, row: u16, col: u16) -> Option<TranscriptHit> {
+    pub fn hit(&self, row: u16, col: u16) -> Option<ViewportHit> {
         if !self.contains(row, col) {
             return None;
         }
         if let Some(bar) = self.scrollbar {
             if col == bar.col {
-                return Some(TranscriptHit::Scrollbar {
+                return Some(ViewportHit::Scrollbar {
                     row: row.saturating_sub(bar.top_row),
                 });
             }
         }
         let rel_row = row - self.top_row;
         let max_col = self.content_width.saturating_sub(1);
-        Some(TranscriptHit::Content {
+        Some(ViewportHit::Content {
             row: rel_row,
             col: col.min(max_col),
         })
@@ -179,5 +139,31 @@ mod tests {
         let b = bar(10, 10);
         assert_eq!(b.max_scroll(), 0);
         assert_eq!(b.scroll_from_top_for_thumb(5), 0);
+    }
+
+    #[test]
+    fn viewport_hit_test() {
+        let vp = Viewport {
+            top_row: 5,
+            rows: 10,
+            content_width: 78,
+            total_rows: 50,
+            scroll_offset: 0,
+            scrollbar: Some(ScrollbarGeom {
+                col: 79,
+                top_row: 5,
+                rows: 10,
+                total_rows: 50,
+            }),
+        };
+        assert!(vp.hit(3, 0).is_none());
+        assert!(matches!(
+            vp.hit(5, 0),
+            Some(ViewportHit::Content { row: 0, .. })
+        ));
+        assert!(matches!(
+            vp.hit(5, 79),
+            Some(ViewportHit::Scrollbar { row: 0 })
+        ));
     }
 }

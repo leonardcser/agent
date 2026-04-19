@@ -90,6 +90,15 @@ impl App {
             return false;
         }
 
+        // Cmdline mode: when the `:` command line is active, route
+        // all key events to it. Esc cancels, Enter executes.
+        if self.screen.cmdline.is_some() {
+            if let Event::Key(k) = ev {
+                return self.handle_cmdline_key(k, agent, active_dialog);
+            }
+            return false;
+        }
+
         // Ctrl+C while exec is running → kill it.
         if self.exec_kill.is_some()
             && matches!(
@@ -283,10 +292,19 @@ impl App {
     /// scrollbar), `Ctrl-W` pane chord, transcript-window key
     /// routing when `Content` has focus, and dialog/overlay keys.
     ///
-    /// Returns `Some(outcome)` when the event was fully handled and
-    /// the caller should return immediately; `None` when the caller
-    /// should continue with its path-specific logic (esc handling,
-    /// keymap lookups, delegation to `InputState`).
+    /// Shared key/event preamble for both idle and running paths.
+    ///
+    /// Returns `Some(outcome)` when the event was fully handled;
+    /// `None` when the caller should continue with path-specific
+    /// logic (esc handling, keymap lookups, `InputState`).
+    ///
+    /// Dispatch priority (first match wins):
+    ///  1. Resize / mouse — structural events, always handled
+    ///  2. Lua keymaps    — user-registered chords (`vim.keymap.set`)
+    ///  3. Pane chords    — Ctrl-W window management
+    ///  4. Cmdline `:`    — opens nvim-style command line (normal mode only)
+    ///  5. Content focus  — transcript navigation when content pane is focused
+    ///  6. Overlay keys   — notifications, btw block dismiss
     fn dispatch_common(&mut self, ev: &Event, t: &mut Timers) -> Option<EventOutcome> {
         if matches!(ev, Event::Paste(_)) {
             self.input_prediction = None;
@@ -316,6 +334,24 @@ impl App {
         }
         if let Some(outcome) = self.handle_pane_chord(ev, t) {
             return Some(outcome);
+        }
+        // `:` opens the cmdline from any window, unless in insert mode.
+        if let Event::Key(KeyEvent {
+            code: KeyCode::Char(':'),
+            modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+            ..
+        }) = ev
+        {
+            let in_insert = match self.app_focus {
+                crate::app::AppFocus::Prompt => {
+                    !self.input.vim_enabled() || self.input.vim_in_insert_mode()
+                }
+                crate::app::AppFocus::Content => false,
+            };
+            if !in_insert && !self.input.has_modal() {
+                self.open_cmdline();
+                return Some(EventOutcome::Noop);
+            }
         }
         if self.app_focus == crate::app::AppFocus::Content && !self.input.has_modal() {
             return Some(self.handle_event_app_history(ev));
@@ -1316,7 +1352,7 @@ impl App {
         let total = self.screen.full_transcript_text(w).len() as u16;
         let viewport = self
             .screen
-            .transcript_region()
+            .transcript_viewport()
             .map(|r| r.rows)
             .unwrap_or_else(|| self.viewport_rows_estimate());
         (total, viewport)
@@ -1334,14 +1370,7 @@ impl App {
         match me.kind {
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.mouse_drag_active = true;
-                match self.app_focus {
-                    crate::app::AppFocus::Content => {
-                        self.extend_content_selection_to(me.row, me.column);
-                    }
-                    crate::app::AppFocus::Prompt => {
-                        self.extend_prompt_selection_to(me.row, me.column);
-                    }
-                }
+                self.extend_selection_to(me.row, me.column);
                 self.sync_transcript_pin();
                 return EventOutcome::Redraw;
             }
@@ -1388,12 +1417,9 @@ impl App {
                 // region — that's the only prompt-area hit we position
                 // for. Clicks on queued messages, bars, status line etc.
                 // only change focus.
-                if let Some((top, rows, scroll, gutter, usable)) = self.screen.input_region() {
-                    if me.row >= top && me.row < top + rows {
+                if let Some(vp) = self.screen.input_viewport() {
+                    if vp.contains(me.row, me.column) {
                         self.app_focus = crate::app::AppFocus::Prompt;
-                        // Prompt scrollbar click intercepts the hit —
-                        // same model as the transcript side, using the
-                        // shared `ScrollbarGeom` recorded at paint time.
                         if self.begin_scrollbar_drag_if_hit(
                             me.row,
                             me.column,
@@ -1402,13 +1428,16 @@ impl App {
                             return EventOutcome::Redraw;
                         }
                         self.drag_on_scrollbar = None;
-                        self.position_prompt_cursor_from_click(
-                            me.row - top,
-                            me.column,
-                            scroll,
-                            gutter,
-                            usable,
-                        );
+                        if let Some(render::ViewportHit::Content { row, col }) =
+                            vp.hit(me.row, me.column)
+                        {
+                            self.position_prompt_cursor_from_click(
+                                row,
+                                col,
+                                vp.scroll_offset as usize,
+                                vp.content_width,
+                            );
+                        }
                         if double {
                             self.select_and_copy_word_in_prompt();
                         }
@@ -1432,7 +1461,7 @@ impl App {
                 // user just clicks without dragging, the subsequent Up
                 // clears visual so nothing gets selected.
                 self.app_focus = crate::app::AppFocus::Content;
-                // Route the event through the `TranscriptRegion`
+                // Route the event through the `Viewport`
                 // recorded by the last paint: scrollbar clicks latch a
                 // `ScrollbarDrag` so subsequent drag ticks keep
                 // scrolling with the same thumb-relative offset;
@@ -1448,14 +1477,14 @@ impl App {
                 self.drag_on_scrollbar = None;
                 match self
                     .screen
-                    .transcript_region()
+                    .transcript_viewport()
                     .and_then(|r| r.hit(me.row, me.column))
                 {
-                    Some(render::TranscriptHit::Scrollbar { .. }) => {
+                    Some(render::ViewportHit::Scrollbar { .. }) => {
                         // Unreachable: begin_scrollbar_drag_if_hit above
                         // handles Scrollbar hits. Kept for exhaustiveness.
                     }
-                    Some(render::TranscriptHit::Content { row, col }) => {
+                    Some(render::ViewportHit::Content { row, col }) => {
                         self.position_content_cursor_from_hit(row, col);
                     }
                     None => {
@@ -1532,11 +1561,10 @@ impl App {
         rel_row: u16,
         col: u16,
         scroll: usize,
-        gutter: u16,
         usable: u16,
     ) {
         let target_visual_row = rel_row as usize + scroll;
-        let target_col = col.saturating_sub(gutter) as usize;
+        let target_col = col as usize;
         let usable = usable as usize;
         let buf = &self.input.buf;
 
@@ -1582,7 +1610,7 @@ impl App {
             })
             .unwrap_or(buf.len());
         self.input.cpos = cpos.min(buf.len());
-        let want = col.saturating_sub(gutter) as usize;
+        let want = col as usize;
         self.input.cursor.set_curswant(Some(want));
         self.screen.mark_dirty();
     }
@@ -1594,22 +1622,39 @@ impl App {
     /// scroll when the cursor is parked at an edge is handled by
     /// [`tick_drag_autoscroll`] on the frame tick, so holding the mouse
     /// still at the edge keeps extending the selection.
-    fn extend_content_selection_to(&mut self, row: u16, col: u16) {
+    fn extend_selection_to(&mut self, row: u16, col: u16) {
         if self.drag_on_scrollbar.is_some() {
             self.apply_scrollbar_drag(row);
             return;
         }
-        // Clamp against the transcript region so drags off the
-        // scrollbar column or outside the viewport still land on a
-        // valid content cell.
-        if let Some(region) = self.screen.transcript_region() {
-            let rel_row = row
-                .saturating_sub(region.top_row)
-                .min(region.rows.saturating_sub(1));
-            let col = col.min(region.content_width.saturating_sub(1));
-            self.position_content_cursor_from_hit(rel_row, col);
-        } else {
-            self.position_content_cursor_from_hit(row, col);
+        match self.app_focus {
+            crate::app::AppFocus::Content => {
+                if let Some(region) = self.screen.transcript_viewport() {
+                    let rel_row = row
+                        .saturating_sub(region.top_row)
+                        .min(region.rows.saturating_sub(1));
+                    let col = col.min(region.content_width.saturating_sub(1));
+                    self.position_content_cursor_from_hit(rel_row, col);
+                } else {
+                    self.position_content_cursor_from_hit(row, col);
+                }
+            }
+            crate::app::AppFocus::Prompt => {
+                self.input.cursor.extend(self.input.cpos);
+                if let Some(vp) = self.screen.input_viewport() {
+                    if let Some(render::ViewportHit::Content { row: r, col: c }) = vp.hit(row, col)
+                    {
+                        self.position_prompt_cursor_from_click(
+                            r,
+                            c,
+                            vp.scroll_offset as usize,
+                            vp.content_width,
+                        );
+                        return;
+                    }
+                }
+                self.screen.mark_dirty();
+            }
         }
     }
 
@@ -1646,25 +1691,6 @@ impl App {
             .get_or_insert_with(std::time::Instant::now);
         self.move_content_cursor_by_lines(delta);
         self.sync_transcript_pin();
-    }
-
-    /// Extend the prompt's shift-selection anchor to the click position.
-    /// On the first drag tick the anchor is set at the current cursor
-    /// position (where the drag started); subsequent drags only move
-    /// the cursor so the selection widens or shrinks.
-    fn extend_prompt_selection_to(&mut self, row: u16, col: u16) {
-        if self.drag_on_scrollbar.is_some() {
-            self.apply_scrollbar_drag(row);
-            return;
-        }
-        self.input.cursor.extend(self.input.cpos);
-        if let Some((top, rows, scroll, gutter, usable)) = self.screen.input_region() {
-            if row >= top && row < top + rows {
-                self.position_prompt_cursor_from_click(row - top, col, scroll, gutter, usable);
-                return;
-            }
-        }
-        self.screen.mark_dirty();
     }
 
     /// Finalise a prompt drag-select: copy any non-empty selection to
@@ -1749,7 +1775,7 @@ impl App {
     }
 
     /// Snap the viewport so the scrollbar thumb lands at screen row
-    /// `screen_row`. Uses the `TranscriptRegion` recorded by the last
+    /// `screen_row`. Uses the `Viewport` recorded by the last
     /// paint — no re-measuring of the transcript on drag. Returns
     /// `true` when the region has a visible scrollbar and the jump was
     /// applied.
@@ -1809,7 +1835,7 @@ impl App {
                 let rows = self.screen.full_transcript_text(w);
                 let viewport = self
                     .screen
-                    .transcript_region()
+                    .transcript_viewport()
                     .map(|r| r.rows)
                     .unwrap_or_else(|| self.viewport_rows_estimate());
                 self.transcript_window
@@ -1825,14 +1851,14 @@ impl App {
     /// Lookup the currently-painted scrollbar geometry for a pane.
     fn scrollbar_for(&self, target: crate::app::AppFocus) -> Option<render::ScrollbarGeom> {
         match target {
-            crate::app::AppFocus::Content => self.screen.transcript_region()?.scrollbar,
-            crate::app::AppFocus::Prompt => self.screen.input_scrollbar(),
+            crate::app::AppFocus::Content => self.screen.transcript_viewport()?.scrollbar,
+            crate::app::AppFocus::Prompt => self.screen.input_viewport()?.scrollbar,
         }
     }
 
     /// Translate a click inside the transcript viewport into a
     /// (line, col) in the full transcript and jump the content cursor
-    /// there. Reads geometry from the `TranscriptRegion` recorded at
+    /// there. Reads geometry from the `Viewport` recorded at
     /// paint time so viewport rows, content width and scroll offset
     /// all match what the user is actually looking at. `rel_row` and
     /// `col` are already clamped against the region by the caller.
@@ -1843,7 +1869,7 @@ impl App {
             self.screen.mark_dirty();
             return;
         }
-        let Some(region) = self.screen.transcript_region() else {
+        let Some(region) = self.screen.transcript_viewport() else {
             return;
         };
         // Content rect starts after the window's left gutter. Clicks
@@ -1974,6 +2000,99 @@ impl App {
             }
             _ => None,
         }
+    }
+    // ── Cmdline (:) ───────────────────────────────────────────────────
+
+    pub fn open_cmdline(&mut self) {
+        self.screen.cmdline = Some(render::CmdlineState::new());
+        self.screen.mark_dirty();
+    }
+
+    fn handle_cmdline_key(
+        &mut self,
+        k: KeyEvent,
+        agent: &mut Option<super::TurnState>,
+        active_dialog: &mut Option<Box<dyn render::Dialog>>,
+    ) -> bool {
+        use crossterm::event::KeyModifiers as M;
+        let cl = match self.screen.cmdline.as_mut() {
+            Some(cl) => cl,
+            None => return false,
+        };
+        match (k.code, k.modifiers) {
+            (KeyCode::Esc, _) | (KeyCode::Char('c'), M::CONTROL) => {
+                self.screen.cmdline = None;
+                self.screen.mark_dirty();
+            }
+            (KeyCode::Enter, _) => {
+                let line = cl.buf.clone();
+                self.screen.cmdline = None;
+                self.screen.mark_dirty();
+                if !line.is_empty() {
+                    let action = super::commands::run_command(self, &format!(":{line}"));
+                    match action {
+                        CommandAction::Quit => return true,
+                        CommandAction::CancelAndClear => {
+                            self.reset_session();
+                            *agent = None;
+                        }
+                        CommandAction::Compact { instructions } => {
+                            if self.history.is_empty() {
+                                self.screen.notify_error("nothing to compact".into());
+                            } else {
+                                self.compact_history(instructions);
+                            }
+                        }
+                        CommandAction::OpenDialog(dlg) => {
+                            self.open_dialog(dlg, active_dialog);
+                        }
+                        CommandAction::Exec(rx, kill) => {
+                            self.exec_rx = Some(rx);
+                            self.exec_kill = Some(kill);
+                        }
+                        CommandAction::Continue => {}
+                    }
+                }
+            }
+            (KeyCode::Backspace, _) => {
+                cl.backspace();
+                if cl.buf.is_empty() {
+                    self.screen.cmdline = None;
+                }
+                self.screen.mark_dirty();
+            }
+            (KeyCode::Delete, _) => {
+                cl.delete();
+                self.screen.mark_dirty();
+            }
+            (KeyCode::Left, _) => {
+                cl.move_left();
+                self.screen.mark_dirty();
+            }
+            (KeyCode::Right, _) => {
+                cl.move_right();
+                self.screen.mark_dirty();
+            }
+            (KeyCode::Home, _) | (KeyCode::Char('a'), M::CONTROL) => {
+                cl.move_start();
+                self.screen.mark_dirty();
+            }
+            (KeyCode::End, _) | (KeyCode::Char('e'), M::CONTROL) => {
+                cl.move_end();
+                self.screen.mark_dirty();
+            }
+            (KeyCode::Char('u'), M::CONTROL) => {
+                cl.buf.clear();
+                cl.cursor = 0;
+                self.screen.mark_dirty();
+            }
+            (KeyCode::Char(ch), M::NONE | M::SHIFT) => {
+                cl.insert_char(ch);
+                self.screen.mark_dirty();
+            }
+            _ => {}
+        }
+        false
     }
 }
 

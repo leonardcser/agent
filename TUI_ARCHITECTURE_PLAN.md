@@ -191,7 +191,7 @@ What's done so far, cross-referenced with the phases below.
 - **Nvim-style renames** (Phase A prerequisite, done): `TextBuffer → Buffer`, `Pane → Window`, `ContentPane → TranscriptWindow`, `PaneId → WinId`, `pane` module → `window`, `content_pane` field → `transcript_window`.
 - **`Window` trait filled out**: `cursor() / set_cursor()`, `scroll_top() / set_scroll_top()`, `selection() / clear_selection()`, shared by `TranscriptWindow` + `InputState`. `DerefMut for InputState` dropped.
 - **`smelt::api` surface**: `buf::{get_text, replace}`, `win::{cursor, set_cursor, selection, clear_selection, scroll_top, set_scroll_top}`, `cmd::run`, `block::{view_state, set_view_state, status, set_status, push_streaming, rewrite, streaming_ids}`.
-- **Mouse region unification** (Stage 6.5 shipped): `TranscriptRegion` + `ScrollbarGeom` + `TranscriptHit` recorded at paint time; `Screen::transcript_region()` exposes them; `InputRegion` carries its own `Option<ScrollbarGeom>`; both scrollbars share one `ScrollbarGeom::scroll_offset_for_row` hit-test; `transcript_dims` uses fresh total to drive pin math.
+- **Unified `Viewport` type** (C8 shipped): `Viewport` in `render/region.rs` replaces `TranscriptRegion` and `InputRegion`. Every scrollable buffer records a single `Viewport { top_row, rows, content_width, total_rows, scroll_offset, scrollbar }` after paint. `ScrollbarGeom` lives inside `Viewport.scrollbar`. `Screen::transcript_viewport()` and `Screen::input_viewport()` expose them. Mouse hit-testing uses `Viewport::hit() → ViewportHit::{Content, Scrollbar}`. Adding a new scrollable region (dialog body, file preview) = record one more `Viewport`.
 - **WindowCursor** (one type for prompt + transcript) carries `anchor` + `curswant`; `move_vertical(buf, cpos, delta)` is the single vertical-motion entry point.
 - **Block primitives for mutable blocks (Stage 3.5 pre-req + core)**:
   - `BlockId` decoupled from content — monotonic per-session handle (cross-session cache sharing via `content_hash` field on `LayoutKey`).
@@ -202,8 +202,10 @@ What's done so far, cross-referenced with the phases below.
 - **Auto-pin when scrolled up**: transcript viewport pins on `scroll_offset > 0`, not just on selection/drag. Streaming rows grow below off-screen; visible content stays stable. Pin delta uses fresh `full_transcript_text.len()` each tick (no more stale `region.total_rows`).
 - **Bottom-anchor transcript**: `paint_viewport` + `viewport_text` prepend leading blank rows when `total < viewport_rows` so the last content row sits at the viewport bottom — matches the cursor math and the `scroll_offset == 0 = stuck to bottom` convention.
 - **Status bar consolidation**: buffer-agnostic `StatusPosition { line, col, scroll_pct }` pushed by `App::compute_status_position`; right-aligned via `align_right: bool` on `StatusSpan` + `cursor::MoveToColumn`; status bar carved out from click region (row `h-1` swallows mouse events).
-- **Streaming-safe input routing**: `handle_event_idle` + `handle_event_running` share one `dispatch_common` preamble (mouse, pane chord, content-focus routing, overlay keys). Focus switch, click, drag-select all work mid-stream.
-- **Prompt prediction cursor gated on focus** — no more double-cursor when focus is on the transcript.
+- **Streaming-safe input routing**: `handle_event_idle` + `handle_event_running` share one `dispatch_common` preamble (mouse, pane chord, cmdline, content-focus routing, overlay keys). Dispatch priority documented inline. Focus switch, click, drag-select all work mid-stream.
+- **Nvim-style cmdline**: `:` opens a command line in the status bar from any window (normal mode only). `CmdlineState` in `render/cmdline.rs` owns editing + rendering. Enter executes via `run_command` (`:` → `/` normalization). Cmdline module is self-contained: state, key handling, and rendering in one file.
+- **`CursorOwner` consolidation**: single enum set per frame determines which component draws the soft cursor. Replaces scattered `cmdline.is_none()` / `focused && last_app_focus == X` guards at each draw site.
+- **Prompt prediction cursor gated on focus** — no more double-cursor when focus is on the transcript or cmdline.
 - **Curswant seeded on click** (both prompt and transcript), and on `refocus`.
 - **Stage 3 command bus scaffold**: `api::cmd::run` is the single entry point; `Outcome = CommandAction` is the stable result shape. Registry lookup still matches legacy `App::handle_command` — migration is mechanical.
 
@@ -305,9 +307,9 @@ Do all five `active_*` migrations in **one** coherent patch, not per-variant dua
 - ✅ **C2** (core): `TranscriptSnapshot` with `rows`, `block_of_row`, `row_of_block` cached on `Transcript` via generation counter. `full_transcript_text` and viewport text both read from the snapshot. `BlockHistory::full_text` and `viewport_text` deleted. `total_rows` in draw paths replaced with `snapshot.rows.len()`. Remaining: wire `block_of_row` into mouse dispatch, add `copy_range` / `snap_to_selectable` / `cell_to_logical` for full C2 completion.
 - ✅ **C3 wire-up**: `WindowGutters` wired into `TranscriptWindow` + `Screen`. `paint_viewport` takes `pad_left` and applies it per-block via `paint_line(…, pad_left)` — `Block::User` gets `pad_left=0` (edge-to-edge bg with inner padding), all other blocks get the window's `pad_left`. Scrollbar column derived from `gutters.scrollbar` side. Content width uses `gutters.content_width(width)`. Block renderers stripped of legacy 1-space indent (moved to window gutter).
 - ✅ **C4** (core): `dispatch_block_key` wired before vim/novim dispatch in `handle_event_app_history`. `focused_block_id` derives block from cursor position via snapshot's `block_of_row`. ToolCall blocks bind `e` to toggle expand/collapse. Remaining: add more block-scoped bindings (re-run, yank output), generalize to non-ToolCall blocks.
-- ⬜ **C5**: completer + dialogs as floating windows — defers to `WindowRect::Float` in C8.
-- ⬜ **C7**: unified selection / cursor / scrollbar renderers — deferred with C1.
-- ✅ **C8** (core): `LayoutState` with `Rect`, `LayoutInput`, `HitRegion` in `render/layout.rs`. `compute()` produces docked transcript + prompt rects and optional `DialogLayout`. Computed per frame in both `draw_viewport_frame` and `draw_viewport_dialog_frame`, stored on `Screen.layout`. Mouse dispatch (status bar swallow, scroll routing, prompt-area click) uses `layout.hit_test()`. `viewport_rows_estimate` reads from layout instead of recomputing from stale `prev_prompt_rows`. Remaining: `Float` variant for completer/cmdline, z-ordered float hit-testing, full `input_region`/`transcript_region` migration.
+- ✅ **C5** (cmdline): nvim-style `:` command line renders inside the status bar row. `CmdlineState` in `render/cmdline.rs` owns buffer + cursor + editing + rendering. `:` opens from any window in normal mode (gated on not in insert mode). Enter executes through `run_command` (`:` normalizes to `/`). Esc/Ctrl-C dismisses. Remaining: tab completion, command history, completer + dialogs as floating windows (defers to `WindowRect::Float` in C8).
+- ✅ **C7** (cursor ownership): `CursorOwner` enum (`Prompt | Transcript | Cmdline | Dialog | None`) set once per frame via `refresh_cursor_owner`. All cursor draw sites check `cursor_owner` instead of independently testing focus + mode flags. Scrollbar now unified via `Viewport` (C8). Remaining: unified selection renderer.
+- ✅ **C8** (core): `LayoutState` with `Rect`, `LayoutInput`, `HitRegion` in `render/layout.rs`. `compute()` produces docked transcript + prompt rects and optional `DialogLayout`. Computed per frame, stored on `Screen.layout`. Mouse dispatch uses `layout.hit_test()`. `Viewport` replaces `TranscriptRegion` + `InputRegion` — both transcript and prompt record a `Viewport` after paint; mouse click/drag/scrollbar all route through `Viewport::hit()`. `LayoutState` is lean (just rects); scrollbar state lives on the buffer's `Viewport`. Remaining: `Float` variant for completer/cmdline, z-ordered float hit-testing.
 
 ---
 
@@ -470,13 +472,14 @@ struct TranscriptSnapshot {
 
 **Deletes**: duplicated selection priority; per-window scrollbar paint; separate `draw_soft_cursor` call sites.
 
-### C8 — Layout primitive (`LayoutState` + `WindowRect`)
+### C8 — Layout primitive (`LayoutState` + `Viewport` + `WindowRect`)
 
-- `WindowRect::{Dock(Region), Float { rect, z, anchor }}`.
+- `LayoutState` owns rects only — no scrollbar state. `Viewport` in `region.rs` is the buffer-level primitive: each scrollable buffer records `Viewport { top_row, rows, content_width, total_rows, scroll_offset, scrollbar }` after paint. `Viewport::hit()` classifies mouse events into `ViewportHit::{Content, Scrollbar}`. Any future scrollable region (dialog body, file preview) adds one more `Viewport` — no layout changes needed.
+- `WindowRect::{Dock(Region), Float { rect, z, anchor }}` for floating windows (remaining).
 - Compositor produces `LayoutState` per frame from rects + dock priorities.
 - Mouse handlers read `LayoutState` (z-ordered hit-test walks floats first).
 
-**Deletes**: `Screen::input_region` as a method; `prev_prompt_rows`; `viewport_rows_estimate`; bespoke dialog rect math.
+**Deletes**: `TranscriptRegion`, `InputRegion`, `TranscriptHit` (replaced by `Viewport` + `ViewportHit`); `Screen::input_region()` tuple method; `Screen::input_scrollbar()` method.
 
 ### C9 — Semantic intents for mouse/wheel
 

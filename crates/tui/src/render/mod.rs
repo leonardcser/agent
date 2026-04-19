@@ -1,5 +1,6 @@
 mod blocks;
 mod cache;
+pub(crate) mod cmdline;
 mod completions;
 mod context;
 mod dialogs;
@@ -19,8 +20,9 @@ pub(crate) mod transcript;
 mod viewport;
 mod working;
 
-pub(crate) use layout::{DialogLayout, HitRegion, LayoutInput, LayoutState, Rect};
-pub(crate) use region::{ScrollbarGeom, TranscriptHit};
+pub use cmdline::CmdlineState;
+pub(crate) use layout::HitRegion;
+pub(crate) use region::{ScrollbarGeom, ViewportHit};
 pub use screen::{BtwBlock, ContentVisualKind, ContentVisualRange, Notification, Screen};
 pub use transcript::TranscriptSnapshot;
 pub use viewport::ViewportGeom;

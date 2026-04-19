@@ -36,6 +36,18 @@ pub enum ContentVisualKind {
     Char,
     Line,
 }
+
+/// Who owns the soft cursor this frame. Set once at the start of each
+/// paint so individual draw sites just check `cursor_owner` instead of
+/// testing mode flags independently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CursorOwner {
+    Prompt,
+    Transcript,
+    Cmdline,
+    Dialog,
+    None,
+}
 use super::layout_out::{LayoutSink, SpanCollector};
 use super::prompt::PromptState;
 use super::selection::{
@@ -113,10 +125,7 @@ pub struct Screen {
     /// scrollbar column). Pushed from `App` so the paint path picks up
     /// the authoritative source without a reverse dependency.
     transcript_gutters: crate::window::WindowGutters,
-    /// Transcript viewport region recorded during the last paint. Used
-    /// by mouse hit-testing and scroll math. `None` before the first
-    /// viewport frame.
-    last_transcript_region: Option<super::region::TranscriptRegion>,
+    last_transcript_viewport: Option<super::region::Viewport>,
     /// Centralized layout state computed at the start of each frame.
     pub(crate) layout: super::layout::LayoutState,
     /// Ephemeral btw side-question state, rendered above the prompt.
@@ -126,6 +135,11 @@ pub struct Screen {
     /// Short task label (slug) shown on the status bar after the throbber.
     task_label: Option<String>,
 
+    /// Nvim-style command line rendered inside the status bar row.
+    pub(crate) cmdline: Option<super::cmdline::CmdlineState>,
+    /// Who owns the soft cursor this frame. Recomputed at the start of
+    /// each paint via `refresh_cursor_owner`.
+    cursor_owner: CursorOwner,
     /// Terminal I/O backend (real terminal or test buffer).
     backend: Box<dyn TerminalBackend>,
     focused: bool,
@@ -194,7 +208,7 @@ impl Screen {
                 pad_right: 1,
                 scrollbar: Some(crate::window::GutterSide::Right),
             },
-            last_transcript_region: None,
+            last_transcript_viewport: None,
             layout: super::layout::LayoutState::compute(&super::layout::LayoutInput {
                 term_width: 80,
                 term_height: 24,
@@ -205,6 +219,8 @@ impl Screen {
             btw: None,
             notification: None,
             task_label: None,
+            cmdline: None,
+            cursor_owner: CursorOwner::Prompt,
             backend,
             focused: true,
         }
@@ -444,6 +460,11 @@ impl Screen {
     /// Render the status line content at the current cursor position.
     /// Responsively drops/truncates elements when the terminal is too narrow.
     fn render_status_line(&self, out: &mut RenderOut) {
+        if let Some(ref cl) = self.cmdline {
+            let (w, h) = self.size();
+            cl.render(out, w, h - 1);
+            return;
+        }
         let (w, _) = self.size();
         let width = w as usize;
         let status_bg = Color::AnsiValue(233);
@@ -891,6 +912,21 @@ impl Screen {
         }
     }
 
+    fn refresh_cursor_owner(&mut self) {
+        self.cursor_owner = if self.cmdline.is_some() {
+            CursorOwner::Cmdline
+        } else if self.dialog_open {
+            CursorOwner::Dialog
+        } else if !self.focused {
+            CursorOwner::None
+        } else {
+            match self.last_app_focus {
+                crate::app::AppFocus::Content => CursorOwner::Transcript,
+                crate::app::AppFocus::Prompt => CursorOwner::Prompt,
+            }
+        };
+    }
+
     /// Number of rows the prompt pane occupied in the last draw. Used by
     /// mouse hit-testing to route clicks to the right pane.
     pub fn prev_prompt_rows(&self) -> u16 {
@@ -898,24 +934,12 @@ impl Screen {
     }
 
     /// Screen region `(top_row, rows, scroll_offset, gutter, usable_width)`
-    /// occupied by the input text area in the last frame. Used by mouse
-    /// hit-testing for click-to-position on the prompt.
-    /// Transcript viewport region recorded during the last paint. Used
-    /// by mouse hit-testing and scroll math.
-    pub(crate) fn transcript_region(&self) -> Option<super::region::TranscriptRegion> {
-        self.last_transcript_region
+    pub(crate) fn transcript_viewport(&self) -> Option<super::region::Viewport> {
+        self.last_transcript_viewport
     }
 
-    pub fn input_region(&self) -> Option<(u16, u16, usize, u16, u16)> {
-        self.prompt
-            .input_region
-            .map(|r| (r.top_row, r.rows, r.scroll_offset, r.gutter, r.usable_width))
-    }
-
-    /// Scrollbar geometry for the prompt input area recorded during the
-    /// last paint. `None` when the input fits in its viewport.
-    pub(crate) fn input_scrollbar(&self) -> Option<super::region::ScrollbarGeom> {
-        self.prompt.input_region.and_then(|r| r.scrollbar)
+    pub(crate) fn input_viewport(&self) -> Option<super::region::Viewport> {
+        self.prompt.viewport
     }
 
     /// Overwrite the prompt's top-relative input scroll offset. Used by
@@ -1525,6 +1549,7 @@ impl Screen {
         visual_range: Option<ContentVisualRange>,
     ) -> (u16, u16, u16) {
         let _perf = crate::perf::begin("render:viewport_frame");
+        self.refresh_cursor_owner();
         self.update_spinner();
 
         let (term_w, term_h) = self.size();
@@ -1615,13 +1640,13 @@ impl Screen {
         } else {
             None
         };
-        self.last_transcript_region = Some(super::region::TranscriptRegion {
+        self.last_transcript_viewport = Some(super::region::Viewport {
             top_row: 0,
             rows: viewport_rows,
             content_width: tw as u16,
-            scrollbar: scrollbar_geom,
             total_rows: total_transcript_rows,
             scroll_offset: clamped,
+            scrollbar: scrollbar_geom,
         });
         // Record plain text for the content pane's motion handlers.
         {
@@ -1654,7 +1679,7 @@ impl Screen {
         // bottom-relative row (0 = bottom row of the viewport); the
         // painter writes in top-down coords.
         let (clamped_cursor_line, clamped_cursor_col) =
-            if self.last_app_focus == crate::app::AppFocus::Content && viewport_rows > 0 {
+            if self.cursor_owner == CursorOwner::Transcript && viewport_rows > 0 {
                 let max_line = viewport_rows.saturating_sub(1);
                 let line = history_cursor_line.min(max_line);
                 let max_col = (tw as u16).saturating_sub(1);
@@ -1729,6 +1754,7 @@ impl Screen {
         dialog_height: u16,
     ) -> (bool, Option<DialogPlacement>) {
         let _perf = crate::perf::begin("render:viewport_dialog_frame");
+        self.refresh_cursor_owner();
         self.update_spinner();
 
         let raw_dialog_height = dialog_height;
@@ -1823,13 +1849,13 @@ impl Screen {
         } else {
             None
         };
-        self.last_transcript_region = Some(super::region::TranscriptRegion {
+        self.last_transcript_viewport = Some(super::region::Viewport {
             top_row: 0,
             rows: viewport_rows,
             content_width: tw as u16,
-            scrollbar: scrollbar_geom,
             total_rows: total_transcript_rows,
             scroll_offset: clamped,
+            scrollbar: scrollbar_geom,
         });
         {
             let snap = self.transcript.snapshot(tw as u16, self.show_thinking);
@@ -2172,15 +2198,14 @@ impl Screen {
             let pred = prediction.unwrap();
             let first_line = pred.lines().next().unwrap_or(pred);
             let cursor_row = out.row.unwrap_or(0);
-            let prompt_focused =
-                self.focused && self.last_app_focus == crate::app::AppFocus::Prompt;
+            let has_cursor = self.cursor_owner == CursorOwner::Prompt;
             // Match the one-space gutter used for normal input lines so the
             // prediction aligns with where real characters would be typed.
             out.print(" ");
             let max_chars = usable.saturating_sub(1);
             let mut chars = first_line.chars().take(max_chars);
             if let Some(first) = chars.next() {
-                if prompt_focused {
+                if has_cursor {
                     // Only the focused window draws a block cursor —
                     // otherwise the transcript window's cursor + this
                     // one render as two simultaneous cursors.
@@ -2198,7 +2223,7 @@ impl Screen {
                 let rest: String = chars.collect();
                 out.print(&rest);
                 out.pop_style();
-            } else if prompt_focused {
+            } else if self.cursor_owner == CursorOwner::Prompt {
                 draw_soft_cursor(out, 1, cursor_row, " ");
             }
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
@@ -2241,12 +2266,12 @@ impl Screen {
         } else {
             None
         };
-        self.prompt.input_region = Some(super::prompt::InputRegion {
+        self.prompt.viewport = Some(super::region::Viewport {
             top_row: input_top_row,
             rows: painted_input_rows,
-            scroll_offset,
-            gutter: 1,
-            usable_width: usable as u16,
+            content_width: usable as u16,
+            total_rows: total_content_rows as u16,
+            scroll_offset: scroll_offset as u16,
             scrollbar: input_scrollbar,
         });
         for (li, (line, kinds)) in visual_lines
@@ -2272,9 +2297,7 @@ impl Screen {
                     Some((s, e))
                 }
             });
-            let line_cursor = if abs_idx == cursor_line
-                && self.focused
-                && self.last_app_focus == crate::app::AppFocus::Prompt
+            let line_cursor = if abs_idx == cursor_line && self.cursor_owner == CursorOwner::Prompt
             {
                 Some(cursor_char_in_line)
             } else {
@@ -2355,19 +2378,10 @@ impl Screen {
             if line_cursor.is_some() {
                 self.prompt.soft_cursor = Some((1 + cursor_char_in_line as u16, out.cursor_row));
             }
-            if scrollbar.visible {
-                let bg = if scrollbar.is_thumb(li) {
-                    theme::scrollbar_thumb()
-                } else {
-                    theme::scrollbar_track()
-                };
-                let _ = out.queue(cursor::MoveToColumn((width as u16).saturating_sub(1)));
-                out.push_bg(bg);
-                out.print(" ");
-                out.pop_style();
-            }
             out.newline();
         }
+
+        super::scrollbar::paint_column(out, bar_col, input_top_row, painted_input_rows, &scrollbar);
 
         draw_bar(out, width, None, None, bar_color);
 
