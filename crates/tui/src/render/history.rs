@@ -840,6 +840,7 @@ impl BlockHistory {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn paint_viewport(
         &mut self,
         out: &mut RenderOut,
@@ -849,6 +850,7 @@ impl BlockHistory {
         viewport_rows: u16,
         scroll_offset: u16,
         extra_lines: &[super::display::DisplayLine],
+        pad_left: u16,
     ) -> u16 {
         let _perf = crate::perf::begin("history:paint_viewport");
         if viewport_rows == 0 || (self.order.is_empty() && extra_lines.is_empty()) {
@@ -886,7 +888,17 @@ impl BlockHistory {
         };
 
         out.row = Some(top_row);
-        out.move_to(0, top_row);
+        out.move_to(pad_left, top_row);
+
+        // Emit the window-level left gutter by prepending pad_left
+        // blank cells at the start of every content row. Paints once
+        // for the current row; `seed_row` re-pads after each newline.
+        let pad_str = " ".repeat(pad_left as usize);
+        let seed_row = |out: &mut RenderOut| {
+            if pad_left > 0 {
+                out.print(&pad_str);
+            }
+        };
 
         let mut remaining_skip = skip as u32;
         let mut painted: u16 = 0;
@@ -908,6 +920,9 @@ impl BlockHistory {
             out.newline();
             painted += 1;
         }
+        if painted < viewport_rows {
+            seed_row(out);
+        }
 
         'blocks: for (i, (gap, _rows)) in per_block.iter().enumerate() {
             // Gap lines (blank rows).
@@ -925,6 +940,9 @@ impl BlockHistory {
                 ));
                 out.newline();
                 painted += 1;
+                if painted < viewport_rows {
+                    seed_row(out);
+                }
             }
             let id = self.order[i];
             let bkey = self.resolve_key(id, key);
@@ -940,6 +958,9 @@ impl BlockHistory {
                 }
                 super::paint::paint_line(out, line, &pctx);
                 painted += 1;
+                if painted < viewport_rows {
+                    seed_row(out);
+                }
             }
         }
 
@@ -954,6 +975,9 @@ impl BlockHistory {
             }
             super::paint::paint_line(out, line, &pctx);
             painted += 1;
+            if painted < viewport_rows {
+                seed_row(out);
+            }
         }
 
         // Blank-fill any remaining viewport rows so leftover content from
@@ -1017,7 +1041,7 @@ mod tests {
         });
 
         let mut out = RenderOut::buffer();
-        history.paint_viewport(&mut out, 80, false, 0, 50, 0, &[]);
+        history.paint_viewport(&mut out, 80, false, 0, 50, 0, &[], 0);
         let rendered = String::from_utf8(out.into_bytes()).unwrap();
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("thinking (2 lines)"));
@@ -1033,13 +1057,13 @@ mod tests {
         });
 
         let mut sink = RenderOut::buffer();
-        history.paint_viewport(&mut sink, 100, true, 0, 50, 0, &[]);
+        history.paint_viewport(&mut sink, 100, true, 0, 50, 0, &[], 0);
         history.flushed = 0;
-        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[]);
+        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0);
         history.flushed = 0;
-        history.paint_viewport(&mut sink, 100, true, 0, 50, 0, &[]);
+        history.paint_viewport(&mut sink, 100, true, 0, 50, 0, &[], 0);
         history.flushed = 0;
-        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[]);
+        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0);
 
         let content_hash = history.content_hash(id);
         let keys: Vec<LayoutKey> = history
@@ -1075,7 +1099,7 @@ mod tests {
         });
 
         let mut sink = RenderOut::buffer();
-        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[]);
+        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0);
         let h0 = history.content_hash(id);
         assert!(!history.artifacts.get(&id).unwrap().is_empty());
 
@@ -1094,7 +1118,7 @@ mod tests {
         );
 
         history.flushed = 0;
-        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[]);
+        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0);
         let keys: Vec<u64> = history
             .artifacts
             .get(&id)

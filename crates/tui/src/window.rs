@@ -123,7 +123,7 @@ impl TranscriptWindow {
     pub fn new() -> Self {
         Self {
             gutters: WindowGutters {
-                pad_left: 0,
+                pad_left: 1,
                 pad_right: 1,
                 scrollbar: Some(GutterSide::Right),
             },

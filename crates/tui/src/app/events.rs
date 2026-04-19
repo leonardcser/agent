@@ -1846,6 +1846,10 @@ impl App {
         let Some(region) = self.screen.transcript_region() else {
             return;
         };
+        // Content rect starts after the window's left gutter. Clicks
+        // inside the gutter snap to content col 0.
+        let pad_left = self.transcript_window.gutters.pad_left;
+        let col = col.saturating_sub(pad_left);
         let viewport_rows = region.rows;
         let total = rows.len().min(u16::MAX as usize) as u16;
         let geom =

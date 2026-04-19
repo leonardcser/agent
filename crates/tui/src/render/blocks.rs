@@ -280,7 +280,10 @@ pub(super) fn render_block<S: LayoutSink>(
             // Each rendered row is: " " (1-char prefix) + content + trailing padding.
             // `text_w` is the max content chars per row so the total never reaches
             // the terminal width (which would cause an implicit wrap).
-            let text_w = width.saturating_sub(2).max(1);
+            // Window-level `pad_left` now paints the leading gutter cell;
+            // the User block only needs to reserve a trailing cell inside
+            // the content rect for its styled background bar.
+            let text_w = width.saturating_sub(1).max(1);
             let all_lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
             // Strip leading/trailing blank lines but preserve internal structure.
             let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
@@ -314,7 +317,7 @@ pub(super) fn render_block<S: LayoutSink>(
             let mut rows = 0u16;
             for logical_line in &logical_lines {
                 if logical_line.is_empty() {
-                    let fill = if block_w > 0 { block_w + 1 } else { 2 };
+                    let fill = if block_w > 0 { block_w } else { 1 };
                     out.set_bg(user_bg);
                     out.print_string(" ".repeat(fill));
                     out.reset_style();
@@ -335,7 +338,6 @@ pub(super) fn render_block<S: LayoutSink>(
                     };
                     out.set_bg(user_bg);
                     out.set_bold();
-                    out.print(" ");
                     print_user_highlights(out, chunk, image_labels, is_command);
                     out.print_string(" ".repeat(trailing));
                     out.reset_style();
@@ -350,7 +352,7 @@ pub(super) fn render_block<S: LayoutSink>(
                 let (label, line_count) = thinking_summary(content);
                 return render_thinking_summary(out, width, &label, line_count, false);
             }
-            let max_cols = width.saturating_sub(4).max(1); // "│ " prefix + 1 margin
+            let max_cols = width.saturating_sub(3).max(1); // "│ " prefix + 1 margin
             let mut rows = 0u16;
             for line in content.lines() {
                 let segments = wrap_line(line, max_cols);
@@ -359,7 +361,7 @@ pub(super) fn render_block<S: LayoutSink>(
                 }
                 for seg in &segments {
                     out.set_dim_italic();
-                    out.print_string(format!(" │ {}", seg));
+                    out.print_string(format!("│ {}", seg));
                     out.reset_style();
                     out.newline();
                     rows += 1;
@@ -367,7 +369,7 @@ pub(super) fn render_block<S: LayoutSink>(
             }
             rows
         }
-        Block::Text { content } => render_markdown_inner(out, content, width, " ", false, None),
+        Block::Text { content } => render_markdown_inner(out, content, width, "", false, None),
         Block::CodeLine { content, lang } => {
             render_code_block(out, &[content.as_str()], lang, width, false, None)
         }
@@ -413,7 +415,7 @@ pub(super) fn render_block<S: LayoutSink>(
             out.print_string("─".repeat(right));
             out.pop_style();
             out.newline();
-            1 + render_markdown_inner(out, summary, width, " ", true, None)
+            1 + render_markdown_inner(out, summary, width, "", true, None)
         }
         Block::Exec { command, output } => {
             let char_len = command.chars().count() + 1;
@@ -425,7 +427,7 @@ pub(super) fn render_block<S: LayoutSink>(
                 bold: true,
                 ..Default::default()
             });
-            out.print(" !");
+            out.print("!");
             out.set_fg(ColorValue::Named(NamedColor::Reset));
             out.print_string(format!("{}{}", command, " ".repeat(trailing)));
             out.pop_style();
@@ -441,7 +443,7 @@ pub(super) fn render_block<S: LayoutSink>(
             from_slug: _,
             content,
         } => {
-            let header = format!(" ➜ {from_id}");
+            let header = format!("➜ {from_id}");
             out.push_style(SpanStyle {
                 fg: Some(crate::theme::AGENT.into()),
                 bold: true,
@@ -451,10 +453,10 @@ pub(super) fn render_block<S: LayoutSink>(
             out.pop_style();
             out.newline();
             let bctx = super::BoxContext {
-                left: " \u{2502} ",
+                left: "\u{2502} ",
                 right: "",
                 color: crate::theme::AGENT.into(),
-                inner_w: width.saturating_sub(4),
+                inner_w: width.saturating_sub(3),
             };
             1 + render_markdown_inner(out, content, width, bctx.left, true, Some(&bctx))
         }
@@ -498,7 +500,7 @@ fn render_agent_block<S: LayoutSink>(
         bold: true,
         ..Default::default()
     });
-    out.print_string(format!(" + {agent_id}"));
+    out.print_string(format!("+ {agent_id}"));
 
     if !blocking {
         out.push_fg(ColorValue::Role(ColorRole::Muted));
@@ -549,7 +551,7 @@ fn render_agent_block<S: LayoutSink>(
     let visible = tool_calls.iter().rev().take(3).collect::<Vec<_>>();
     for entry in visible.iter().rev() {
         out.push_fg(crate::theme::AGENT.into());
-        out.print(" \u{2502} "); // │
+        out.print("\u{2502} "); // │
         out.pop_style();
 
         out.push_dim();
@@ -578,9 +580,9 @@ fn render_agent_block<S: LayoutSink>(
     }
 
     // Bottom border
-    let border_w = width.saturating_sub(2);
+    let border_w = width.saturating_sub(1);
     out.push_fg(crate::theme::AGENT.into());
-    out.print_string(format!(" \u{2570}{}", "\u{2500}".repeat(border_w)));
+    out.print_string(format!("\u{2570}{}", "\u{2500}".repeat(border_w)));
     out.pop_style();
     out.newline();
     rows += 1;
@@ -629,19 +631,19 @@ pub(super) fn render_tool<S: LayoutSink>(
     let mut rows = print_tool_line(out, name, summary, color, time, tl.as_deref(), width);
     if name == "web_fetch" {
         if let Some(prompt) = args.get("prompt").and_then(|v| v.as_str()) {
-            let segs = wrap_line(prompt, width.saturating_sub(4));
+            let segs = wrap_line(prompt, width.saturating_sub(3));
             if segs.len() > 1 {
                 out.mark_wrapped();
             }
             for seg in &segs {
-                print_dim(out, &format!("   {}", seg));
+                print_dim(out, &format!("  {}", seg));
                 out.newline();
                 rows += 1;
             }
         }
     }
     if let Some(msg) = user_message {
-        print_dim(out, &format!("   {msg}"));
+        print_dim(out, &format!("  {msg}"));
         out.newline();
         rows += 1;
     }
@@ -665,12 +667,12 @@ fn render_confirm_result<S: LayoutSink>(
     let mut rows = 2u16;
 
     out.push_fg(theme::APPLY.into());
-    out.print("   allow? ");
+    out.print("  allow? ");
     out.pop_style();
     print_dim(out, tool);
     out.newline();
 
-    let prefix = "   \u{2502} ";
+    let prefix = "  \u{2502} ";
     let prefix_len = prefix.chars().count();
     let segments = wrap_line(desc, width.saturating_sub(prefix_len));
     if segments.len() > 1 {
@@ -689,7 +691,7 @@ fn render_confirm_result<S: LayoutSink>(
 
     if let Some(c) = choice {
         rows += 1;
-        out.print("   ");
+        out.print("  ");
         match c {
             ConfirmChoice::Yes | ConfirmChoice::YesAutoApply => {
                 print_dim(out, "approved");
@@ -736,7 +738,7 @@ struct ToolLineLayout {
 }
 
 fn tool_line_layout(name: &str, suffix_len: usize, width: usize) -> ToolLineLayout {
-    let prefix_len = 3 + name.len() + 1; // " ⏺ " + name + " "
+    let prefix_len = 2 + name.len() + 1; // "⏺ " + name + " "
     let max_summary = width.saturating_sub(prefix_len + suffix_len + 1);
     ToolLineLayout {
         prefix_len,
@@ -753,7 +755,6 @@ fn print_tool_line<S: LayoutSink>(
     timeout_label: Option<&str>,
     width: usize,
 ) -> u16 {
-    out.print(" ");
     out.push_fg(pill_color);
     out.print("\u{23fa}");
     out.pop_style();
@@ -1422,7 +1423,7 @@ fn render_wrapped_output<S: LayoutSink>(
     width: usize,
 ) -> u16 {
     let _perf = crate::perf::begin("render:wrapped_output");
-    let max_cols = width.saturating_sub(4); // "   " prefix + 1 margin
+    let max_cols = width.saturating_sub(3); // "  " prefix + 1 margin
 
     // Pre-wrap all lines so we can count visual rows.
     let wrapped: Vec<String> = content
@@ -1443,7 +1444,7 @@ fn render_wrapped_output<S: LayoutSink>(
         let skipped = total - MAX_TOOL_BLOCK_ROWS;
         print_dim(
             out,
-            &format!("   ... {} above", pluralize(skipped, "line", "lines")),
+            &format!("  ... {} above", pluralize(skipped, "line", "lines")),
         );
         out.newline();
         rows += 1;
@@ -1452,10 +1453,10 @@ fn render_wrapped_output<S: LayoutSink>(
     for seg in &wrapped[start..] {
         if is_error {
             out.push_fg(theme::ERROR.into());
-            out.print_string(format!("   {}", seg));
+            out.print_string(format!("  {}", seg));
             out.pop_style();
         } else {
-            print_dim(out, &format!("   {}", seg));
+            print_dim(out, &format!("  {}", seg));
         }
         out.newline();
         rows += 1;
@@ -1470,7 +1471,7 @@ fn render_default_output<S: LayoutSink>(
     width: usize,
 ) -> u16 {
     let preview = result_preview(content, DEFAULT_PREVIEW_LINES);
-    let max_cols = width.saturating_sub(4);
+    let max_cols = width.saturating_sub(3);
     let segs = wrap_line(&preview, max_cols);
     if segs.len() > 1 {
         out.mark_wrapped();
@@ -1479,10 +1480,10 @@ fn render_default_output<S: LayoutSink>(
     for seg in &segs {
         if is_error {
             out.push_fg(theme::ERROR.into());
-            out.print_string(format!("   {}", seg));
+            out.print_string(format!("  {}", seg));
             out.pop_style();
         } else {
-            print_dim(out, &format!("   {}", seg));
+            print_dim(out, &format!("  {}", seg));
         }
         out.newline();
         rows += 1;

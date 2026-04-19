@@ -200,7 +200,7 @@ impl Screen {
             last_status_position: None,
             last_viewport_text: Vec::new(),
             transcript_gutters: crate::window::WindowGutters {
-                pad_left: 0,
+                pad_left: 1,
                 pad_right: 1,
                 scrollbar: Some(crate::window::GutterSide::Right),
             },
@@ -1631,7 +1631,10 @@ impl Screen {
             let byte_start = cell_to_byte(line, sel_start);
             let byte_end = cell_to_byte(line, sel_end);
             let sub = &line[byte_start..byte_end];
-            out.move_to(sel_start as u16, line_idx as u16);
+            // Offset by the transcript window's left gutter so the
+            // highlight lands on the content cells, not on the gutter.
+            let col0 = (sel_start as u16) + self.transcript_gutters.pad_left;
+            out.move_to(col0, line_idx as u16);
             out.push_style(StyleState {
                 bg: Some(theme::selection_bg()),
                 ..StyleState::default()
@@ -2300,6 +2303,7 @@ impl Screen {
             viewport_rows,
             scroll_offset,
             &ephemeral_lines,
+            gutters.pad_left,
         );
 
         // Scrollbar on the rightmost column, matching the prompt.
@@ -2363,12 +2367,6 @@ impl Screen {
                 let max_col = (tw as u16).saturating_sub(1);
                 let col = history_cursor_col.min(max_col);
                 let cursor_row = viewport_rows.saturating_sub(1 + line);
-                // Pluck the character under the cursor from the
-                // viewport text so `draw_soft_cursor` can re-render it
-                // with inverted fg/bg (matching the prompt's cursor
-                // style, which preserves the underlying glyph).
-                // Pick the char at the cursor's cell column so wide
-                // glyphs render correctly beneath the cursor.
                 let under: String = self
                     .last_viewport_text
                     .get(cursor_row as usize)
@@ -2379,7 +2377,11 @@ impl Screen {
                     .and_then(|c| c)
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| " ".to_string());
-                draw_soft_cursor(out, col, cursor_row, &under);
+                // Offset by the left gutter so the cursor lands on the
+                // glyph inside the content rect (viewport_text holds pure
+                // content; the gutter is unstyled padding painted at
+                // col 0..pad_left by `paint_viewport`).
+                draw_soft_cursor(out, col + gutters.pad_left, cursor_row, &under);
                 (line, col)
             } else {
                 (history_cursor_line, history_cursor_col)
@@ -2474,7 +2476,8 @@ impl Screen {
         out.row = Some(0);
         out.move_to(0, 0);
 
-        let tw = (width.saturating_sub(1)).max(1);
+        let gutters = self.transcript_gutters;
+        let tw = (gutters.content_width(width as u16) as usize).max(1);
 
         // Reserve dialog + 1 gap (between dialog and status) + 1 status.
         let reserved: u16 = effective_dialog_height.saturating_add(2);
@@ -2502,6 +2505,7 @@ impl Screen {
             viewport_rows,
             0,
             &ephemeral_lines,
+            gutters.pad_left,
         );
 
         // Scrollbar on the rightmost column over the transcript region.
