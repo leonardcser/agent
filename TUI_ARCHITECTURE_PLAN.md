@@ -243,7 +243,7 @@ Purged terminal-scrollback-era code. All sub-phases shipped:
 ## Phase C — API surface lockdown (mostly ✅)
 
 - ✅ C1 (Transcript extraction), C2 (TranscriptSnapshot + SpanMeta), C3 (WindowGutters), C4 (block keymap), C5 (cmdline), C6 (selectable spans), C7 (CursorOwner), C8 (LayoutState + Viewport + floats), C9 (PaneIntent), C10 (api::VERSION).
-- Remaining: C5 tab completion, C7 unified selection renderer, C8 completer-as-float.
+- Remaining: C7 unified selection renderer, C8 completer-as-float.
 
 ## Phase D — Lua bindings ✅
 
@@ -486,9 +486,9 @@ Prompt uses per-char `SpanKind` walk with inline cursor rendering; transcript us
 
 ### Remaining Phase C/D/E items
 
-- ⬜ C5: cmdline tab completion
-- ⬜ C11: status line provider-driven content (`api::status::set_provider`)
-- ⬜ D7: Lua statusline providers (`smelt.statusline(fn)`)
+- ✅ C5: cmdline tab completion
+- ✅ C11: status line provider-driven content (`StatusItem` + `set_custom_status`)
+- ✅ D7: Lua statusline providers (`smelt.statusline(fn)`)
 - ⬜ E1: port slash commands to Lua (requires more API surface for dialog/state transitions)
 - ⬜ E2: default keybinds as Lua (requires mode-aware keymap registration)
 
