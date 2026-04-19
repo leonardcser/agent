@@ -138,9 +138,6 @@ pub struct Screen {
     reasoning_effort: protocol::ReasoningEffort,
     /// True once terminal auto-scrolling has pushed content into scrollback.
     pub has_scrollback: bool,
-    /// Terminal row where block content starts (top of conversation).
-    /// Set once when the first block is rendered; reset on purge/clear.
-    content_start_row: Option<u16>,
     /// Skip the next `mark_blocks_dirty` call so the next `draw_frame`
     /// picks up the blocks instead of a stale mid-dialog repaint.
     defer_pending_render: bool,
@@ -244,7 +241,6 @@ impl Screen {
             model_label: None,
             reasoning_effort: Default::default(),
             has_scrollback: false,
-            content_start_row: None,
             defer_pending_render: false,
             pending_dialog: false,
             dialog_open: false,
@@ -1489,7 +1485,7 @@ impl Screen {
         self.session_cost_usd = 0.0;
         self.task_label = None;
         self.has_scrollback = false;
-        self.content_start_row = None;
+
         let mut frame = Frame::begin(&*self.backend);
         let _ = frame.queue(cursor::MoveTo(0, 0));
         let _ = frame.queue(terminal::Clear(terminal::ClearType::All));
@@ -1983,7 +1979,7 @@ impl Screen {
         self.paint_prompt_region(out, width, &prompt, viewport_rows, gap_rows, prompt_height);
 
         self.dirty = false;
-        self.content_start_row = Some(0);
+
         self.has_scrollback = false;
 
         (clamped, clamped_cursor_line, clamped_cursor_col)
@@ -2058,7 +2054,7 @@ impl Screen {
         self.prompt.prev_dialog_gap = 0;
         self.prompt.prev_rows = 0;
         self.prompt.prev_prompt_ui_rows = 0;
-        self.content_start_row = Some(0);
+
         self.has_scrollback = false;
 
         let placement = if let Some(d) = &self.layout.dialog {
