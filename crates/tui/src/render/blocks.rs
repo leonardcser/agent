@@ -7,7 +7,7 @@ use std::time::Duration;
 use super::display::{ColorRole, ColorValue, DisplayBlock, NamedColor, SpanMeta, SpanStyle};
 use super::highlight::{
     print_cached_inline_diff, print_inline_diff, print_syntax_file, print_syntax_file_ext,
-    render_code_block, render_markdown_table, strip_markdown_markers, BashHighlighter,
+    render_code_block, render_markdown_table, BashHighlighter,
 };
 use super::history::ViewState;
 use super::layout_out::{display_width, LayoutSink, SpanCollector};
@@ -1177,55 +1177,56 @@ pub(crate) fn render_markdown_inner<S: LayoutSink>(
                 last_content_line = Some(lines[i]);
             }
             let trimmed = lines[i].trim_start();
-            if trimmed.starts_with('#') || trimmed.starts_with('>') {
-                let segments = wrap_line(lines[i], max_cols);
-                if segments.len() > 1 {
-                    out.mark_wrapped();
-                }
-                for (si, seg) in segments.iter().enumerate() {
-                    if si == 0 {
-                        out.set_source_text(lines[i]);
-                    } else {
-                        out.mark_soft_wrap_continuation();
-                    }
-                    if let Some(b) = bctx {
-                        b.print_left(out);
-                        let cols = print_styled_line(out, seg, dim);
-                        b.print_right(out, cols);
-                    } else {
-                        out.print(indent);
-                        print_styled_line(out, seg, dim);
-                    }
-                    out.newline();
-                }
-                rows += segments.len() as u16;
-            } else {
+            {
                 use super::highlight::{
                     emit_inline_spans, inline_spans_width, parse_inline_spans, wrap_inline_spans,
                     InlineSpan, InlineStyle,
                 };
                 let leading_ws = &lines[i][..lines[i].len() - trimmed.len()];
-                let (prefix, body) = split_list_prefix(trimmed);
                 let mut line_spans: Vec<InlineSpan> = Vec::new();
-                if !leading_ws.is_empty() {
+
+                if trimmed.starts_with('#') {
                     line_spans.push(InlineSpan {
-                        text: leading_ws.to_string(),
+                        text: trimmed.to_string(),
                         style: InlineStyle {
+                            bold: true,
                             dim,
+                            fg: Some(theme::HEADING.into()),
                             ..Default::default()
                         },
                     });
-                }
-                if !prefix.is_empty() {
+                } else if trimmed.starts_with('>') {
                     line_spans.push(InlineSpan {
-                        text: prefix.to_string(),
+                        text: trimmed.to_string(),
                         style: InlineStyle {
                             dim: true,
+                            italic: true,
                             ..Default::default()
                         },
                     });
+                } else {
+                    let (prefix, body) = split_list_prefix(trimmed);
+                    if !leading_ws.is_empty() {
+                        line_spans.push(InlineSpan {
+                            text: leading_ws.to_string(),
+                            style: InlineStyle {
+                                dim,
+                                ..Default::default()
+                            },
+                        });
+                    }
+                    if !prefix.is_empty() {
+                        line_spans.push(InlineSpan {
+                            text: prefix.to_string(),
+                            style: InlineStyle {
+                                dim: true,
+                                ..Default::default()
+                            },
+                        });
+                    }
+                    line_spans.extend(parse_inline_spans(body, dim));
                 }
-                line_spans.extend(parse_inline_spans(body, dim));
+
                 let wrapped = wrap_inline_spans(&line_spans, max_cols);
                 if wrapped.len() > 1 {
                     out.mark_wrapped();
@@ -1252,68 +1253,6 @@ pub(crate) fn render_markdown_inner<S: LayoutSink>(
         }
     }
     rows
-}
-
-/// Render a single line with block-level detection (headings, blockquotes,
-/// list markers) then inline styling via the shared `print_inline_styled`.
-/// Returns the number of visible columns printed.
-fn print_styled_line<S: LayoutSink>(out: &mut S, text: &str, dim: bool) -> usize {
-    use super::highlight::print_inline_styled;
-    use unicode_width::UnicodeWidthStr;
-
-    let trimmed = text.trim_start();
-    if trimmed.starts_with('#') {
-        out.push_style(SpanStyle {
-            fg: Some(theme::HEADING.into()),
-            bold: true,
-            dim,
-            ..Default::default()
-        });
-        out.print(trimmed);
-        out.pop_style();
-        return trimmed.chars().count();
-    }
-
-    if trimmed.starts_with('>') {
-        let content = trimmed.strip_prefix('>').unwrap().trim_start();
-        let prefix = &trimmed[..trimmed.len() - content.len()];
-        out.push_style(SpanStyle {
-            dim: true,
-            italic: true,
-            ..Default::default()
-        });
-        if let Some(first_ch) = content.chars().next() {
-            let rest = &content[first_ch.len_utf8()..];
-            out.print_with_meta(
-                &first_ch.to_string(),
-                super::display::SpanMeta {
-                    selectable: true,
-                    copy_as: Some(format!("{prefix}{first_ch}")),
-                },
-            );
-            if !rest.is_empty() {
-                out.print(rest);
-            }
-        }
-        out.pop_style();
-        return content.chars().count();
-    }
-
-    // Split off list-item markers and print them dim.
-    let (prefix, body) = split_list_prefix(trimmed);
-    let leading_ws = &text[..text.len() - trimmed.len()];
-    if !leading_ws.is_empty() {
-        out.print(leading_ws);
-    }
-    if !prefix.is_empty() {
-        out.push_dim();
-        out.print(prefix);
-        out.pop_style();
-    }
-
-    print_inline_styled(out, body, dim);
-    let visual = strip_markdown_markers(body).width();
-    leading_ws.chars().count() + prefix.chars().count() + visual
 }
 
 /// Split a list-item prefix (`- `, `* `, `1. `, etc.) from the line content.

@@ -1488,6 +1488,7 @@ pub(crate) struct InlineStyle {
     pub dim: bool,
     pub crossedout: bool,
     pub code: bool,
+    pub fg: Option<super::display::ColorValue>,
 }
 
 #[derive(Clone, Debug)]
@@ -1658,7 +1659,7 @@ pub(crate) fn emit_inline_spans<S: LayoutSink>(out: &mut S, spans: &[InlineSpan]
             fg: if span.style.code {
                 Some(ColorValue::Role(ColorRole::Accent))
             } else {
-                None
+                span.style.fg
             },
             bold: span.style.bold,
             italic: span.style.italic,
