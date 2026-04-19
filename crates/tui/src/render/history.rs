@@ -736,7 +736,7 @@ impl BlockHistory {
         pad_left: u16,
     ) -> u16 {
         let _perf = crate::perf::begin("history:paint_viewport");
-        if viewport_rows == 0 || (self.order.is_empty() && extra_lines.is_empty()) {
+        if viewport_rows == 0 {
             return 0;
         }
         if width != self.cache_width {
