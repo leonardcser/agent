@@ -1325,12 +1325,7 @@ impl App {
     // ── Mouse event dispatch ─────────────────────────────────────────────
     fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         use crossterm::event::MouseButton;
-        // The status bar is a self-contained UI strip on the last row
-        // of the terminal. Clicks / scrolls on it must not bleed into
-        // the prompt below — otherwise clicking anywhere on the status
-        // line focuses the prompt and jumps its cursor.
-        let (_, h) = self.screen.size();
-        if h > 0 && me.row == h - 1 {
+        if self.screen.layout.hit_test(me.row, me.column) == render::HitRegion::Status {
             return EventOutcome::Noop;
         }
         // Drag + release drive tmux-style click-drag-copy. Works in
@@ -1421,10 +1416,10 @@ impl App {
                     }
                 }
 
-                let (_, height) = self.screen.size();
-                let prompt_rows = self.screen.prev_prompt_rows();
-                let prompt_top = height.saturating_sub(prompt_rows);
-                if me.row >= prompt_top {
+                if matches!(
+                    self.screen.layout.hit_test(me.row, me.column),
+                    render::HitRegion::Prompt | render::HitRegion::Status
+                ) {
                     if self.app_focus != crate::app::AppFocus::Prompt {
                         self.app_focus = crate::app::AppFocus::Prompt;
                         self.screen.mark_dirty();

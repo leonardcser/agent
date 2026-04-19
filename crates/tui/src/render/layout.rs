@@ -168,15 +168,21 @@ impl LayoutState {
 
     pub fn hit_test(&self, row: u16, col: u16) -> HitRegion {
         if let Some(ref d) = self.dialog {
-            if d.rect.contains(row, col) {
-                return HitRegion::Dialog;
-            }
             if row == d.status_row {
                 return HitRegion::Status;
             }
+            if d.rect.contains(row, col) {
+                return HitRegion::Dialog;
+            }
         }
-        if self.prompt.height > 0 && self.prompt.contains(row, col) {
-            return HitRegion::Prompt;
+        if self.prompt.height > 0 {
+            // Status bar is the last row of the prompt area.
+            if row == self.prompt.bottom().saturating_sub(1) {
+                return HitRegion::Status;
+            }
+            if self.prompt.contains(row, col) {
+                return HitRegion::Prompt;
+            }
         }
         if self.transcript.contains(row, col) {
             return HitRegion::Transcript;
@@ -257,7 +263,8 @@ mod tests {
         assert_eq!(layout.hit_test(33, 0), HitRegion::Transcript);
         assert_eq!(layout.hit_test(34, 0), HitRegion::Outside); // gap
         assert_eq!(layout.hit_test(35, 0), HitRegion::Prompt);
-        assert_eq!(layout.hit_test(39, 0), HitRegion::Prompt);
+        assert_eq!(layout.hit_test(38, 0), HitRegion::Prompt);
+        assert_eq!(layout.hit_test(39, 0), HitRegion::Status); // last prompt row
     }
 
     #[test]
