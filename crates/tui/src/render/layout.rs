@@ -61,6 +61,7 @@ pub struct LayoutState {
     pub gap: u16,
     pub prompt: Rect,
     pub dialog: Option<DialogLayout>,
+    pub cmdline: Option<Rect>,
     pub transcript_scrollbar: Option<ScrollbarGeom>,
 }
 
@@ -77,6 +78,7 @@ pub struct LayoutInput {
     pub prompt_height: u16,
     pub dialog_height: Option<u16>,
     pub constrain_dialog: bool,
+    pub cmdline_open: bool,
 }
 
 impl LayoutState {
@@ -87,13 +89,21 @@ impl LayoutState {
             prompt_height,
             dialog_height,
             constrain_dialog,
+            cmdline_open,
         } = *input;
 
-        if let Some(dh) = dialog_height {
+        let mut state = if let Some(dh) = dialog_height {
             Self::compute_dialog(term_width, term_height, dh, constrain_dialog)
         } else {
             Self::compute_normal(term_width, term_height, prompt_height)
+        };
+
+        if cmdline_open {
+            let cmdline_row = term_height.saturating_sub(1);
+            state.cmdline = Some(Rect::new(cmdline_row, 0, term_width, 1));
         }
+
+        state
     }
 
     fn compute_normal(term_width: u16, term_height: u16, prompt_height: u16) -> Self {
@@ -112,6 +122,7 @@ impl LayoutState {
             gap,
             prompt,
             dialog: None,
+            cmdline: None,
             transcript_scrollbar: None,
         }
     }
@@ -129,7 +140,6 @@ impl LayoutState {
         } else {
             dialog_height
         };
-        // Reserve: dialog + 1 gap + 1 status row.
         let reserved = effective_dialog.saturating_add(2);
         let viewport_rows = term_height.saturating_sub(reserved);
         let dialog_row = viewport_rows;
@@ -154,6 +164,7 @@ impl LayoutState {
             gap: 0,
             prompt: Rect::default(),
             dialog: dialog_layout,
+            cmdline: None,
             transcript_scrollbar: None,
         }
     }
@@ -167,6 +178,11 @@ impl LayoutState {
     }
 
     pub fn hit_test(&self, row: u16, col: u16) -> HitRegion {
+        if let Some(ref cl) = self.cmdline {
+            if cl.contains(row, col) {
+                return HitRegion::Cmdline;
+            }
+        }
         if let Some(ref d) = self.dialog {
             if row == d.status_row {
                 return HitRegion::Status;
@@ -176,7 +192,6 @@ impl LayoutState {
             }
         }
         if self.prompt.height > 0 {
-            // Status bar is the last row of the prompt area.
             if row == self.prompt.bottom().saturating_sub(1) {
                 return HitRegion::Status;
             }
@@ -196,6 +211,7 @@ pub enum HitRegion {
     Transcript,
     Prompt,
     Dialog,
+    Cmdline,
     Status,
     Outside,
 }
@@ -212,6 +228,7 @@ mod tests {
             prompt_height: 5,
             dialog_height: None,
             constrain_dialog: false,
+            cmdline_open: false,
         });
         assert_eq!(layout.transcript.top, 0);
         assert_eq!(layout.transcript.height, 34); // 40 - 5 - 1 gap
@@ -229,6 +246,7 @@ mod tests {
             prompt_height: 15,
             dialog_height: None,
             constrain_dialog: false,
+            cmdline_open: false,
         });
         assert_eq!(layout.prompt.height, 10); // capped to 20/2
         assert_eq!(layout.transcript.height, 9); // 20 - 10 - 1
@@ -242,6 +260,7 @@ mod tests {
             prompt_height: 0,
             dialog_height: Some(10),
             constrain_dialog: false,
+            cmdline_open: false,
         });
         let d = layout.dialog.as_ref().unwrap();
         assert_eq!(layout.transcript.height, 28); // 40 - (10 + 2)
@@ -258,6 +277,7 @@ mod tests {
             prompt_height: 5,
             dialog_height: None,
             constrain_dialog: false,
+            cmdline_open: false,
         });
         assert_eq!(layout.hit_test(0, 0), HitRegion::Transcript);
         assert_eq!(layout.hit_test(33, 0), HitRegion::Transcript);
@@ -275,6 +295,7 @@ mod tests {
             prompt_height: 10,
             dialog_height: None,
             constrain_dialog: false,
+            cmdline_open: false,
         });
         // min cap is 3, so prompt_height = 3, but that's the whole term
         assert!(layout.transcript.height <= 3);
@@ -289,10 +310,28 @@ mod tests {
             prompt_height: 0,
             dialog_height: Some(10),
             constrain_dialog: false,
+            cmdline_open: false,
         });
         let d = layout.dialog.as_ref().unwrap();
         assert_eq!(layout.hit_test(0, 0), HitRegion::Transcript);
         assert_eq!(layout.hit_test(d.rect.top, 0), HitRegion::Dialog);
         assert_eq!(layout.hit_test(d.status_row, 0), HitRegion::Status);
+    }
+
+    #[test]
+    fn cmdline_overlays_bottom_row() {
+        let layout = LayoutState::compute(&LayoutInput {
+            term_width: 80,
+            term_height: 40,
+            prompt_height: 5,
+            dialog_height: None,
+            constrain_dialog: false,
+            cmdline_open: true,
+        });
+        let cl = layout.cmdline.as_ref().unwrap();
+        assert_eq!(cl.top, 39);
+        assert_eq!(cl.height, 1);
+        assert_eq!(layout.hit_test(39, 0), HitRegion::Cmdline);
+        assert_eq!(layout.hit_test(38, 0), HitRegion::Prompt);
     }
 }
