@@ -4,13 +4,38 @@ use crossterm::style::Color;
 /// Nvim-style `:` command line rendered inside the status bar row.
 #[derive(Default)]
 pub struct CmdlineState {
+    pub active: bool,
     pub buf: String,
     pub cursor: usize,
+    history: Vec<String>,
+    history_idx: Option<usize>,
+    stash: String,
 }
 
 impl CmdlineState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn open(&mut self) {
+        self.active = true;
+        self.buf.clear();
+        self.cursor = 0;
+        self.reset_history_browse();
+    }
+
+    pub fn close(&mut self) {
+        self.active = false;
+        self.buf.clear();
+        self.cursor = 0;
+        self.reset_history_browse();
+    }
+
+    pub fn submit(&mut self) -> String {
+        let line = self.buf.clone();
+        self.push_history(line.clone());
+        self.close();
+        line
     }
 
     pub fn insert_char(&mut self, ch: char) {
@@ -67,6 +92,52 @@ impl CmdlineState {
 
     pub fn move_end(&mut self) {
         self.cursor = self.buf.len();
+    }
+
+    pub fn push_history(&mut self, line: String) {
+        if line.is_empty() {
+            return;
+        }
+        if self.history.last().map(|l| l == &line).unwrap_or(false) {
+            return;
+        }
+        self.history.push(line);
+    }
+
+    pub fn history_up(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let idx = match self.history_idx {
+            None => {
+                self.stash = self.buf.clone();
+                self.history.len() - 1
+            }
+            Some(0) => return,
+            Some(i) => i - 1,
+        };
+        self.history_idx = Some(idx);
+        self.buf = self.history[idx].clone();
+        self.cursor = self.buf.len();
+    }
+
+    pub fn history_down(&mut self) {
+        let Some(idx) = self.history_idx else {
+            return;
+        };
+        if idx + 1 >= self.history.len() {
+            self.history_idx = None;
+            self.buf = std::mem::take(&mut self.stash);
+        } else {
+            self.history_idx = Some(idx + 1);
+            self.buf = self.history[idx + 1].clone();
+        }
+        self.cursor = self.buf.len();
+    }
+
+    pub fn reset_history_browse(&mut self) {
+        self.history_idx = None;
+        self.stash.clear();
     }
 
     pub fn render(&self, out: &mut RenderOut, width: u16, row: u16) {

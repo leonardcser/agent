@@ -92,7 +92,7 @@ impl App {
 
         // Cmdline mode: when the `:` command line is active, route
         // all key events to it. Esc cancels, Enter executes.
-        if self.screen.cmdline.is_some() {
+        if self.screen.cmdline.active {
             if let Event::Key(k) = ev {
                 return self.handle_cmdline_key(k, agent, active_dialog);
             }
@@ -1977,7 +1977,7 @@ impl App {
     // ── Cmdline (:) ───────────────────────────────────────────────────
 
     pub fn open_cmdline(&mut self) {
-        self.screen.cmdline = Some(render::CmdlineState::new());
+        self.screen.cmdline.open();
         self.screen.mark_dirty();
     }
 
@@ -1988,18 +1988,16 @@ impl App {
         active_dialog: &mut Option<Box<dyn render::Dialog>>,
     ) -> bool {
         use crossterm::event::KeyModifiers as M;
-        let cl = match self.screen.cmdline.as_mut() {
-            Some(cl) => cl,
-            None => return false,
-        };
+        if !self.screen.cmdline.active {
+            return false;
+        }
         match (k.code, k.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('c'), M::CONTROL) => {
-                self.screen.cmdline = None;
+                self.screen.cmdline.close();
                 self.screen.mark_dirty();
             }
             (KeyCode::Enter, _) => {
-                let line = cl.buf.clone();
-                self.screen.cmdline = None;
+                let line = self.screen.cmdline.submit();
                 self.screen.mark_dirty();
                 if !line.is_empty() {
                     let action = super::commands::run_command(self, &format!(":{line}"));
@@ -2028,39 +2026,47 @@ impl App {
                 }
             }
             (KeyCode::Backspace, _) => {
-                cl.backspace();
-                if cl.buf.is_empty() {
-                    self.screen.cmdline = None;
+                self.screen.cmdline.backspace();
+                if self.screen.cmdline.buf.is_empty() {
+                    self.screen.cmdline.close();
                 }
                 self.screen.mark_dirty();
             }
             (KeyCode::Delete, _) => {
-                cl.delete();
+                self.screen.cmdline.delete();
                 self.screen.mark_dirty();
             }
             (KeyCode::Left, _) => {
-                cl.move_left();
+                self.screen.cmdline.move_left();
                 self.screen.mark_dirty();
             }
             (KeyCode::Right, _) => {
-                cl.move_right();
+                self.screen.cmdline.move_right();
+                self.screen.mark_dirty();
+            }
+            (KeyCode::Up, _) => {
+                self.screen.cmdline.history_up();
+                self.screen.mark_dirty();
+            }
+            (KeyCode::Down, _) => {
+                self.screen.cmdline.history_down();
                 self.screen.mark_dirty();
             }
             (KeyCode::Home, _) | (KeyCode::Char('a'), M::CONTROL) => {
-                cl.move_start();
+                self.screen.cmdline.move_start();
                 self.screen.mark_dirty();
             }
             (KeyCode::End, _) | (KeyCode::Char('e'), M::CONTROL) => {
-                cl.move_end();
+                self.screen.cmdline.move_end();
                 self.screen.mark_dirty();
             }
             (KeyCode::Char('u'), M::CONTROL) => {
-                cl.buf.clear();
-                cl.cursor = 0;
+                self.screen.cmdline.buf.clear();
+                self.screen.cmdline.cursor = 0;
                 self.screen.mark_dirty();
             }
             (KeyCode::Char(ch), M::NONE | M::SHIFT) => {
-                cl.insert_char(ch);
+                self.screen.cmdline.insert_char(ch);
                 self.screen.mark_dirty();
             }
             _ => {}

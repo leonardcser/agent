@@ -136,7 +136,7 @@ pub struct Screen {
     task_label: Option<String>,
 
     /// Nvim-style command line rendered inside the status bar row.
-    pub(crate) cmdline: Option<super::cmdline::CmdlineState>,
+    pub(crate) cmdline: super::cmdline::CmdlineState,
     /// Who owns the soft cursor this frame. Recomputed at the start of
     /// each paint via `refresh_cursor_owner`.
     cursor_owner: CursorOwner,
@@ -219,7 +219,7 @@ impl Screen {
             btw: None,
             notification: None,
             task_label: None,
-            cmdline: None,
+            cmdline: super::cmdline::CmdlineState::new(),
             cursor_owner: CursorOwner::Prompt,
             backend,
             focused: true,
@@ -460,9 +460,9 @@ impl Screen {
     /// Render the status line content at the current cursor position.
     /// Responsively drops/truncates elements when the terminal is too narrow.
     fn render_status_line(&self, out: &mut RenderOut) {
-        if let Some(ref cl) = self.cmdline {
+        if self.cmdline.active {
             let (w, h) = self.size();
-            cl.render(out, w, h - 1);
+            self.cmdline.render(out, w, h - 1);
             return;
         }
         let (w, _) = self.size();
@@ -913,7 +913,7 @@ impl Screen {
     }
 
     fn refresh_cursor_owner(&mut self) {
-        self.cursor_owner = if self.cmdline.is_some() {
+        self.cursor_owner = if self.cmdline.active {
             CursorOwner::Cmdline
         } else if self.dialog_open {
             CursorOwner::Dialog
