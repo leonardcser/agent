@@ -321,13 +321,8 @@ impl App {
         // to the built-in keymap dispatcher.
         if let Event::Key(k) = *ev {
             if let Some(chord) = crate::lua::chord_string(k) {
-                let w = render::term_width();
-                let transcript_text = self.screen.full_transcript_text(w).join("\n");
-                let prompt_text = self.input.buffer.buf.clone();
-                self.lua.set_context(crate::lua::LuaContext {
-                    transcript_text: Some(transcript_text),
-                    prompt_text: Some(prompt_text),
-                });
+                let ctx = self.build_lua_context();
+                self.lua.set_context(ctx);
                 let handled = self.lua.run_keymap(&chord);
                 self.lua.clear_context();
                 if handled {
@@ -1356,6 +1351,30 @@ impl App {
     /// Current (total_transcript_rows, viewport_rows) — needed by the
     /// pin math. Reads the width from the renderer and measures the
     /// transcript against it.
+    pub(super) fn build_lua_context(&mut self) -> crate::lua::LuaContext {
+        let w = render::term_width();
+        let transcript_text = self.screen.full_transcript_text(w).join("\n");
+        let prompt_text = self.input.buffer.buf.clone();
+        let focused_window = match self.app_focus {
+            crate::app::AppFocus::Content => "transcript",
+            crate::app::AppFocus::Prompt => "prompt",
+        };
+        let vim_mode = match self.app_focus {
+            crate::app::AppFocus::Content => self
+                .transcript_window
+                .vim
+                .as_ref()
+                .map(|v| format!("{:?}", v.mode())),
+            crate::app::AppFocus::Prompt => self.input.vim_mode().map(|m| format!("{m:?}")),
+        };
+        crate::lua::LuaContext {
+            transcript_text: Some(transcript_text),
+            prompt_text: Some(prompt_text),
+            focused_window: Some(focused_window.to_string()),
+            vim_mode,
+        }
+    }
+
     fn transcript_dims(&mut self) -> (u16, u16) {
         let w = render::term_width();
         let total = self.screen.full_transcript_text(w).len() as u16;
@@ -1867,9 +1886,7 @@ impl App {
         // place the cursor at the *top* of it, not the last line.
         let line_idx = geom.line_of_row(rel_row).unwrap_or(0) as usize;
         let line_idx = line_idx.min(rows.len() - 1);
-        let col = self
-            .screen
-            .snap_col_to_selectable(line_idx, col as usize);
+        let col = self.screen.snap_col_to_selectable(line_idx, col as usize);
         self.transcript_window
             .jump_to_line_col(&rows, line_idx, col, viewport_rows);
         self.screen.mark_dirty();

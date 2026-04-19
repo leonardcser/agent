@@ -127,6 +127,8 @@ type SharedContext = Arc<Mutex<LuaContext>>;
 pub struct LuaContext {
     pub transcript_text: Option<String>,
     pub prompt_text: Option<String>,
+    pub focused_window: Option<String>,
+    pub vim_mode: Option<String>,
 }
 
 /// User-scoped Lua state + any recorded startup error.
@@ -235,7 +237,9 @@ impl LuaRuntime {
         let transcript_tbl = lua.create_table()?;
         let ctx_clone = context.clone();
         let transcript_text = lua.create_function(move |_, ()| {
-            let ctx = ctx_clone.lock().map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+            let ctx = ctx_clone
+                .lock()
+                .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
             Ok(ctx.transcript_text.clone().unwrap_or_default())
         })?;
         transcript_tbl.set("text", transcript_text)?;
@@ -245,11 +249,33 @@ impl LuaRuntime {
         let buf_tbl = lua.create_table()?;
         let ctx_clone = context.clone();
         let buf_text = lua.create_function(move |_, ()| {
-            let ctx = ctx_clone.lock().map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+            let ctx = ctx_clone
+                .lock()
+                .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
             Ok(ctx.prompt_text.clone().unwrap_or_default())
         })?;
         buf_tbl.set("text", buf_text)?;
         api.set("buf", buf_tbl)?;
+
+        // smelt.api.win.focus() / smelt.api.win.mode()
+        let win_tbl = lua.create_table()?;
+        let ctx_clone = context.clone();
+        let win_focus = lua.create_function(move |_, ()| {
+            let ctx = ctx_clone
+                .lock()
+                .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+            Ok(ctx.focused_window.clone().unwrap_or_default())
+        })?;
+        win_tbl.set("focus", win_focus)?;
+        let ctx_clone = context.clone();
+        let win_mode = lua.create_function(move |_, ()| {
+            let ctx = ctx_clone
+                .lock()
+                .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+            Ok(ctx.vim_mode.clone().unwrap_or_default())
+        })?;
+        win_tbl.set("mode", win_mode)?;
+        api.set("win", win_tbl)?;
 
         // smelt.api.cmd.register(name, fn)
         let cmd_tbl = lua.create_table()?;
@@ -292,8 +318,7 @@ impl LuaRuntime {
 
         // smelt.clipboard(text) — copy text to system clipboard.
         let clipboard_fn = lua.create_function(|_, text: String| {
-            crate::app::commands::copy_to_clipboard(&text)
-                .map_err(LuaError::RuntimeError)?;
+            crate::app::commands::copy_to_clipboard(&text).map_err(LuaError::RuntimeError)?;
             Ok(())
         })?;
         smelt.set("clipboard", clipboard_fn)?;
@@ -708,7 +733,7 @@ mod tests {
         let rt = LuaRuntime::new();
         rt.set_context(LuaContext {
             transcript_text: Some("hello world".to_string()),
-            prompt_text: None,
+            ..Default::default()
         });
         let text: String = rt
             .lua
@@ -729,8 +754,8 @@ mod tests {
     fn buf_text_reads_context() {
         let rt = LuaRuntime::new();
         rt.set_context(LuaContext {
-            transcript_text: None,
             prompt_text: Some("prompt content".to_string()),
+            ..Default::default()
         });
         let text: String = rt
             .lua

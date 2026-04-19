@@ -36,13 +36,8 @@ pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
         ),
         None => (name_arg, None),
     };
-    let w = crate::render::term_width();
-    let transcript_text = app.screen.full_transcript_text(w).join("\n");
-    let prompt_text = app.input.buffer.buf.clone();
-    app.lua.set_context(crate::lua::LuaContext {
-        transcript_text: Some(transcript_text),
-        prompt_text: Some(prompt_text),
-    });
+    let ctx = app.build_lua_context();
+    app.lua.set_context(ctx);
     app.lua.emit(crate::lua::AutocmdEvent::CmdPre);
     let outcome = if !name.is_empty() && app.lua.has_command(name) {
         app.lua.run_command(name, arg);
