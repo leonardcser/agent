@@ -1256,12 +1256,23 @@ impl Screen {
             if at.in_code_block.is_some() {
                 if at.current_line.trim_start().starts_with("```") {
                     at.current_line.clear();
+                    if let Some(id) = at.code_line_streaming_id.take() {
+                        self.history.set_status(id, Status::Done);
+                    }
                 } else if !at.current_line.is_empty() {
                     let lang = at.in_code_block.as_ref().unwrap().clone();
-                    self.history.push(Block::CodeLine {
+                    let block = Block::CodeLine {
                         content: std::mem::take(&mut at.current_line),
                         lang,
-                    });
+                    };
+                    if let Some(id) = at.code_line_streaming_id.take() {
+                        self.history.rewrite(id, block);
+                        self.history.set_status(id, Status::Done);
+                    } else {
+                        self.history.push(block);
+                    }
+                } else if let Some(id) = at.code_line_streaming_id.take() {
+                    self.history.set_status(id, Status::Done);
                 }
                 at.in_code_block = None;
             }
