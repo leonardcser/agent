@@ -74,6 +74,14 @@ pub fn cached_models(kind: AuthProvider) -> Vec<String> {
     }
 }
 
+/// Whether the user has stored credentials for this OAuth provider.
+pub fn is_logged_in(provider: AuthProvider) -> bool {
+    match provider {
+        AuthProvider::Codex => provider::codex::CodexTokens::load().is_some(),
+        AuthProvider::Copilot => provider::copilot::CopilotTokens::load().is_some(),
+    }
+}
+
 /// Refresh the cached model list from the provider's API. Returns the
 /// freshly fetched identifiers, or an empty vec on failure (logged by the
 /// underlying implementation).

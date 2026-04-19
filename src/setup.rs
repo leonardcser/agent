@@ -150,26 +150,6 @@ fn collect_provider(tmpl: &ProviderTemplate) -> Option<engine::config_file::NewP
     })
 }
 
-/// Template for providers whose login adds an OAuth-only config entry.
-fn oauth_new_provider(tmpl: &ProviderTemplate) -> engine::config_file::NewProvider {
-    engine::config_file::NewProvider {
-        name: tmpl.name.to_string(),
-        provider_type: tmpl.provider_type.to_string(),
-        api_base: tmpl.api_base.to_string(),
-        api_key_env: None,
-        models: vec![],
-    }
-}
-
-fn ensure_oauth_provider(tmpl: &ProviderTemplate) {
-    let provider = oauth_new_provider(tmpl);
-    match engine::config_file::ensure_provider(&provider) {
-        Ok(true) => println!("Added {} provider to config.", tmpl.name),
-        Ok(false) => {}
-        Err(e) => eprintln!("error: {e}"),
-    }
-}
-
 // ── OAuth flows ───────────────────────────────────────────────────────────
 
 async fn run_login(kind: AuthProvider) {
@@ -241,14 +221,14 @@ pub async fn run_initial_setup(config_path: &Path) -> bool {
     };
     let tmpl = &PROVIDERS[idx];
 
-    let provider = if let Some(kind) = tmpl.oauth {
+    if let Some(kind) = tmpl.oauth {
         run_login(kind).await;
-        oauth_new_provider(tmpl)
-    } else {
-        let Some(p) = collect_provider(tmpl) else {
-            return false;
-        };
-        p
+        println!("Provider auto-detected from credentials — no config file needed.");
+        return true;
+    }
+
+    let Some(provider) = collect_provider(tmpl) else {
+        return false;
     };
 
     match engine::config_file::write_initial_config(config_path, &provider) {
@@ -281,10 +261,7 @@ pub async fn run_auth_command() {
             return;
         };
         match choice {
-            0 => {
-                run_login(kind).await;
-                ensure_oauth_provider(tmpl);
-            }
+            0 => run_login(kind).await,
             1 => run_logout(kind, tmpl.label),
             _ => {}
         }

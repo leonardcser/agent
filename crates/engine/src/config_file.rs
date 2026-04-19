@@ -100,43 +100,6 @@ pub fn add_provider_to(provider: &NewProvider, path: &Path) -> Result<(), String
     write_config(path, &root)
 }
 
-/// Add a provider only if no provider of that type exists yet.
-/// Avoids double file reads by doing check + add in one pass.
-pub fn ensure_provider(provider: &NewProvider) -> Result<bool, String> {
-    ensure_provider_in(provider, &default_path())
-}
-
-pub fn ensure_provider_in(provider: &NewProvider, path: &Path) -> Result<bool, String> {
-    let mut root = read_config(path)?;
-    let map = root
-        .as_mapping_mut()
-        .ok_or("config root is not a mapping")?;
-
-    let providers_key = val("providers");
-    if !map.contains_key(&providers_key) {
-        map.insert(providers_key.clone(), Value::Sequence(Vec::new()));
-    }
-    let providers = map
-        .get_mut(&providers_key)
-        .and_then(|v| v.as_sequence_mut())
-        .ok_or("providers is not a list")?;
-
-    let already_exists = providers.iter().any(|p| {
-        p.as_mapping()
-            .and_then(|m| m.get(val("type")))
-            .and_then(|v| v.as_str())
-            == Some(&provider.provider_type)
-    });
-
-    if already_exists {
-        return Ok(false);
-    }
-
-    providers.push(Value::Mapping(provider.to_yaml()));
-    write_config(path, &root)?;
-    Ok(true)
-}
-
 /// Write a fresh config with a single provider (for first-time setup).
 pub fn write_initial_config(path: &Path, provider: &NewProvider) -> Result<(), String> {
     let mut root = serde_yml::Mapping::new();

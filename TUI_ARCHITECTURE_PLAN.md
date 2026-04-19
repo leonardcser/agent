@@ -443,18 +443,18 @@ Both `process_input` and `try_command_while_running` now call `run_command` so L
 
 **Files:** `kill_ring.rs`, `vim/mod.rs`, `window.rs`, `cursor.rs`, `events.rs`, `screen.rs`.
 
-### T5. YAML → Lua config migration ⬜
+### T5. OAuth provider auto-discovery ✅
 
-**Problem:** Config is YAML (`config.yaml`) but the plan wants nvim-style Lua config. Currently both exist independently — `init.lua` for keymaps/commands/autocmds, `config.yaml` for providers/settings/theme. The CLI `smelt auth` writes providers directly into YAML.
+**Problem:** `smelt auth` for OAuth providers (Codex, Copilot) mutated the user's `config.yaml` to add a provider entry. This is unnecessary — OAuth tokens are already stored separately in the OS keyring / state dir, and all connection details (api_base, type) are hardcoded.
 
-**Design:**
-- `init.lua` becomes the single user config file for behavior: settings, theme, keymaps, commands.
-- Providers move to a separate data file (`providers.yaml`) — CLI tools need to write them without parsing Lua, and providers are data (credentials + endpoints) not behavior.
-- New Lua API: `smelt.settings({vim_mode = true, ...})`, `smelt.theme({accent = "blue"})`, `smelt.set_default_model("gpt-4o")`.
-- Loading order: providers file → `init.lua` → CLI `--set` overrides.
-- **TODO (discuss):** `smelt auth` currently mutates the entire config YAML. With the split, it writes only to the providers file — needs a migration path for existing users.
+**Solution:** Auto-discover OAuth providers from stored credentials at startup. `Config::inject_oauth_providers()` checks `auth::is_logged_in()` for each OAuth provider and injects a synthetic `ProviderConfig` when credentials exist but no explicit config entry is present. `smelt auth` now only does login/logout — it never touches config files.
 
-**Files:** `config.rs`, `lua.rs`, `engine/config_file.rs`, `setup.rs`.
+- `ensure_provider` / `ensure_provider_in` deleted from `config_file.rs` (dead code)
+- `oauth_new_provider` / `ensure_oauth_provider` deleted from `setup.rs` (dead code)
+- Initial setup wizard skips config file creation for OAuth providers
+- API-key providers (OpenAI, Anthropic, custom) still use `config.yaml` — they need user-configured env vars and base URLs
+
+**Files:** `auth.rs` (`is_logged_in`), `config.rs` (`inject_oauth_providers`), `startup.rs`, `setup.rs`, `config_file.rs`.
 
 ### T6. Clean up dead scaffolding ✅ (partial)
 
