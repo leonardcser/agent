@@ -118,6 +118,17 @@ struct LuaHandle {
     dead: bool,
 }
 
+/// Snapshot of app state populated before dispatching a Lua callback.
+/// Lua functions can read from this to access transcript text, prompt
+/// text, etc. without holding borrows on `App`.
+type SharedContext = Arc<Mutex<LuaContext>>;
+
+#[derive(Default)]
+pub struct LuaContext {
+    pub transcript_text: Option<String>,
+    pub prompt_text: Option<String>,
+}
+
 /// User-scoped Lua state + any recorded startup error.
 pub struct LuaRuntime {
     pub lua: Lua,
@@ -144,6 +155,8 @@ pub struct LuaRuntime {
     /// `commands::run_command` — the re-entrancy queue that lets
     /// a Lua handler trigger a built-in without nesting borrows.
     pub pending_commands: SharedVec<String>,
+    /// Shared context populated by the app before dispatching callbacks.
+    context: SharedContext,
 }
 
 impl LuaRuntime {
@@ -161,6 +174,8 @@ impl LuaRuntime {
         let pending_timers: SharedVec<(Instant, LuaHandle)> = Arc::new(Mutex::new(Vec::new()));
         let pending_commands: SharedVec<String> = Arc::new(Mutex::new(Vec::new()));
 
+        let context: SharedContext = Arc::new(Mutex::new(LuaContext::default()));
+
         let load_error = Self::register_api(
             &lua,
             pending.clone(),
@@ -169,6 +184,7 @@ impl LuaRuntime {
             autocmds.clone(),
             pending_timers.clone(),
             pending_commands.clone(),
+            context.clone(),
         )
         .err()
         .map(|e| e.to_string());
@@ -183,6 +199,7 @@ impl LuaRuntime {
             autocmds,
             pending_timers,
             pending_commands,
+            context,
         };
 
         if rt.load_error.is_none() {
@@ -198,6 +215,7 @@ impl LuaRuntime {
         rt
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn register_api(
         lua: &Lua,
         pending: SharedVec<String>,
@@ -206,11 +224,32 @@ impl LuaRuntime {
         autocmds: SharedMap<AutocmdEvent, Vec<LuaHandle>>,
         pending_timers: SharedVec<(Instant, LuaHandle)>,
         pending_commands: SharedVec<String>,
+        context: SharedContext,
     ) -> LuaResult<()> {
         let smelt = lua.create_table()?;
 
         let api = lua.create_table()?;
         api.set("version", crate::api::VERSION)?;
+
+        // smelt.api.transcript.text() — read the full transcript text.
+        let transcript_tbl = lua.create_table()?;
+        let ctx_clone = context.clone();
+        let transcript_text = lua.create_function(move |_, ()| {
+            let ctx = ctx_clone.lock().map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+            Ok(ctx.transcript_text.clone().unwrap_or_default())
+        })?;
+        transcript_tbl.set("text", transcript_text)?;
+        api.set("transcript", transcript_tbl)?;
+
+        // smelt.api.buf.text() — read the prompt buffer text.
+        let buf_tbl = lua.create_table()?;
+        let ctx_clone = context.clone();
+        let buf_text = lua.create_function(move |_, ()| {
+            let ctx = ctx_clone.lock().map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+            Ok(ctx.prompt_text.clone().unwrap_or_default())
+        })?;
+        buf_tbl.set("text", buf_text)?;
+        api.set("buf", buf_tbl)?;
 
         // smelt.api.cmd.register(name, fn)
         let cmd_tbl = lua.create_table()?;
@@ -250,6 +289,14 @@ impl LuaRuntime {
             Ok(())
         })?;
         smelt.set("notify", notify)?;
+
+        // smelt.clipboard(text) — copy text to system clipboard.
+        let clipboard_fn = lua.create_function(|_, text: String| {
+            crate::app::commands::copy_to_clipboard(&text)
+                .map_err(LuaError::RuntimeError)?;
+            Ok(())
+        })?;
+        smelt.set("clipboard", clipboard_fn)?;
 
         // smelt.keymap(mode, chord, fn) — store the chord → handler
         // mapping. Mode is accepted for nvim-parity but currently
@@ -306,6 +353,22 @@ impl LuaRuntime {
         let src = std::fs::read_to_string(path)
             .map_err(|e| LuaError::RuntimeError(format!("read init.lua: {e}")))?;
         self.lua.load(&src).set_name("init.lua").exec()
+    }
+
+    /// Populate the shared context before dispatching a Lua callback.
+    /// The app calls this to make transcript/prompt text available to
+    /// Lua functions like `smelt.api.transcript.text()`.
+    pub fn set_context(&self, ctx: LuaContext) {
+        if let Ok(mut c) = self.context.lock() {
+            *c = ctx;
+        }
+    }
+
+    /// Clear the shared context after dispatching.
+    pub fn clear_context(&self) {
+        if let Ok(mut c) = self.context.lock() {
+            *c = LuaContext::default();
+        }
     }
 
     /// Drain any pending notifications queued from Lua callbacks.
@@ -638,5 +701,42 @@ mod tests {
         let errs = rt.drain_errors();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("broken"), "err: {}", errs[0]);
+    }
+
+    #[test]
+    fn transcript_text_reads_context() {
+        let rt = LuaRuntime::new();
+        rt.set_context(LuaContext {
+            transcript_text: Some("hello world".to_string()),
+            prompt_text: None,
+        });
+        let text: String = rt
+            .lua
+            .load("return smelt.api.transcript.text()")
+            .eval()
+            .expect("eval");
+        assert_eq!(text, "hello world");
+        rt.clear_context();
+        let text: String = rt
+            .lua
+            .load("return smelt.api.transcript.text()")
+            .eval()
+            .expect("eval");
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn buf_text_reads_context() {
+        let rt = LuaRuntime::new();
+        rt.set_context(LuaContext {
+            transcript_text: None,
+            prompt_text: Some("prompt content".to_string()),
+        });
+        let text: String = rt
+            .lua
+            .load("return smelt.api.buf.text()")
+            .eval()
+            .expect("eval");
+        assert_eq!(text, "prompt content");
     }
 }
