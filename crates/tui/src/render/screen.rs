@@ -9,8 +9,7 @@
 
 use super::blocks;
 use super::blocks::{
-    collect_trailing_thinking, gap_between, render_block, render_thinking_summary,
-    thinking_summary, Element,
+    collect_trailing_thinking, gap_between, render_thinking_summary, thinking_summary, Element,
 };
 use super::cache::{PersistedLayoutCache, RenderCache};
 use super::completions::{completion_reserved_rows, draw_completions, draw_menu};
@@ -1061,6 +1060,8 @@ impl Screen {
             table_rows: Vec::new(),
             table_data_rows: 0,
             streaming_id: None,
+            table_streaming_id: None,
+            code_line_streaming_id: None,
         });
 
         for ch in delta.chars() {
@@ -1074,19 +1075,63 @@ impl Screen {
                 at.current_line.push(ch);
             }
         }
-        // Reflect the in-flight paragraph (including the current line)
-        // as a streaming `Block::Text` so it flows through
-        // `paint_viewport` like any other block.
+        // Reflect the in-flight paragraph / table / code-line as a
+        // streaming block so everything flows through `paint_viewport`
+        // uniformly — no bespoke overlay rendering.
         Self::sync_streaming_text(&mut self.history, at);
         self.prompt.dirty = true;
     }
 
     fn sync_streaming_text(history: &mut BlockHistory, at: &mut ActiveText) {
-        // Tables and code blocks have their own committed blocks; only
-        // the plain-paragraph buffer needs a streaming reflection.
-        if at.in_code_block.is_some() || !at.table_rows.is_empty() {
+        // In-code-block partial line → streaming Block::CodeLine.
+        if let Some(ref lang) = at.in_code_block {
+            if !at.current_line.is_empty() {
+                let block = Block::CodeLine {
+                    content: at.current_line.clone(),
+                    lang: lang.clone(),
+                };
+                if let Some(id) = at.code_line_streaming_id {
+                    history.rewrite(id, block);
+                } else {
+                    let id = history.push(block);
+                    history.set_status(id, Status::Streaming);
+                    at.code_line_streaming_id = Some(id);
+                }
+            }
             return;
         }
+        // In-flight table — rows accumulated in `table_rows`, plus the
+        // current partial row if it starts with `|`.
+        let in_table =
+            !at.table_rows.is_empty() || at.current_line.trim_start().starts_with('|');
+        if in_table {
+            let mut content = String::new();
+            for row in &at.table_rows {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(row);
+            }
+            if at.current_line.trim_start().starts_with('|') {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(&at.current_line);
+            }
+            if content.is_empty() {
+                return;
+            }
+            let block = Block::Text { content };
+            if let Some(id) = at.table_streaming_id {
+                history.rewrite(id, block);
+            } else {
+                let id = history.push(block);
+                history.set_status(id, Status::Streaming);
+                at.table_streaming_id = Some(id);
+            }
+            return;
+        }
+        // Plain paragraph fall-through.
         let preview = match (at.paragraph.is_empty(), at.current_line.is_empty()) {
             (true, true) => None,
             (true, false) => Some(at.current_line.clone()),
@@ -1111,6 +1156,10 @@ impl Screen {
 
         if trimmed.starts_with("```") {
             if at.in_code_block.is_some() {
+                // Close out any in-flight code-line streaming block.
+                if let Some(id) = at.code_line_streaming_id.take() {
+                    history.set_status(id, Status::Done);
+                }
                 at.in_code_block = None;
                 return;
             } else {
@@ -1123,10 +1172,18 @@ impl Screen {
         }
 
         if let Some(ref lang) = at.in_code_block {
-            history.push(Block::CodeLine {
+            // Finalize the streaming partial code line (if any) with
+            // the full line content, then start fresh for the next line.
+            let block = Block::CodeLine {
                 content: line.to_string(),
                 lang: lang.clone(),
-            });
+            };
+            if let Some(id) = at.code_line_streaming_id.take() {
+                history.rewrite(id, block);
+                history.set_status(id, Status::Done);
+            } else {
+                history.push(block);
+            }
             return;
         }
 
@@ -1160,8 +1217,16 @@ impl Screen {
     fn commit_table(history: &mut BlockHistory, at: &mut ActiveText) {
         if !at.table_rows.is_empty() {
             let content = std::mem::take(&mut at.table_rows).join("\n");
-            history.push(Block::Text { content });
+            if let Some(id) = at.table_streaming_id.take() {
+                history.rewrite(id, Block::Text { content });
+                history.set_status(id, Status::Done);
+            } else {
+                history.push(Block::Text { content });
+            }
             at.table_data_rows = 0;
+        } else if let Some(id) = at.table_streaming_id.take() {
+            // Empty table — clean up the streaming block.
+            history.set_status(id, Status::Done);
         }
     }
 
@@ -2080,110 +2145,46 @@ impl Screen {
         }
     }
 
-    /// Whether any streaming overlay element is active.
+    /// Whether the animated thinking-summary overlay is active. All
+    /// other streams (text, tables, code lines, tools, agents, exec)
+    /// flow through streaming blocks in the main paint path; only the
+    /// aggregate thinking summary (shown when `show_thinking == false`)
+    /// remains as an overlay because it's a synthesized summary, not a
+    /// stream.
     fn has_ephemeral(&self) -> bool {
-        self.active_thinking.is_some()
-            || self.active_text.is_some()
-            || !self.active_tools.is_empty()
+        self.active_thinking.is_some() && !self.show_thinking
     }
 
-    /// Write every ephemeral element into `out` with `newline()` for
-    /// inter-item gaps. The caller feeds a `SpanCollector` and then
-    /// tail-crops the flat line stream — content-agnostic cropping,
-    /// so streaming bash output, a partial markdown table, and a
-    /// multi-line tool command are all dropped oldest-first together.
+    /// Paint the animated thinking-summary above the prompt when
+    /// thinking is hidden. Every other live element renders as a
+    /// streaming block in the main transcript.
     fn render_ephemeral_into<S: LayoutSink>(&self, out: &mut S, width: usize) {
-        // `last_committed` is borrowed — no clone. As streaming items
-        // are emitted they are also stored in `prev_synth` so the next
-        // item's gap is computed against the most recently emitted
-        // element rather than the last committed one.
-        let last_committed: Option<&Block> = self.history.last_block();
-        let mut prev_synth: Option<Block> = None;
-
-        // ── Active thinking (animated summary only when hidden) ────
-        if let Some(ref at) = self.active_thinking {
-            if !self.show_thinking {
-                // Animated summary: aggregate committed Thinking blocks
-                // with the in-flight text so the count keeps ticking
-                // even right after a paragraph commit.
-                let mut combined = collect_trailing_thinking(
-                    self.history.order.iter().map(|id| &self.history.blocks[id]),
-                );
-                if !at.paragraph.is_empty() {
-                    if !combined.is_empty() {
-                        combined.push('\n');
-                    }
-                    combined.push_str(&at.paragraph);
-                }
-                if !at.current_line.is_empty() {
-                    if !combined.is_empty() {
-                        combined.push('\n');
-                    }
-                    combined.push_str(&at.current_line);
-                }
-                if !combined.is_empty() {
-                    let (label, line_count) = thinking_summary(&combined);
-                    emit_newlines(out, self.thinking_summary_gap());
-                    render_thinking_summary(out, width, &label, line_count, true);
-                }
-            }
+        let Some(ref at) = self.active_thinking else {
+            return;
+        };
+        if self.show_thinking {
+            return;
         }
-
-        // ── Active text (partial table or in-code-block line only) ─
-        // The plain-paragraph stream lives as a streaming `Block::Text`
-        // in history via `sync_streaming_text`; only in-flight tables
-        // and code lines still render through the overlay until the
-        // block pushes them whole.
-        if let Some(ref at) = self.active_text {
-            let in_table =
-                !at.table_rows.is_empty() || at.current_line.trim_start().starts_with('|');
-
-            let block_opt: Option<Block> = if in_table {
-                let mut total = at.table_rows.iter().map(|r| r.len() + 1).sum::<usize>();
-                let cur_trim = at.current_line.trim_start();
-                let append_cur = cur_trim.starts_with('|');
-                if append_cur {
-                    total += at.current_line.len() + 1;
-                }
-                if total == 0 {
-                    None
-                } else {
-                    let mut content = String::with_capacity(total);
-                    for row in &at.table_rows {
-                        if !content.is_empty() {
-                            content.push('\n');
-                        }
-                        content.push_str(row);
-                    }
-                    if append_cur {
-                        if !content.is_empty() {
-                            content.push('\n');
-                        }
-                        content.push_str(&at.current_line);
-                    }
-                    Some(Block::Text { content })
-                }
-            } else if at.in_code_block.is_some() && !at.current_line.is_empty() {
-                Some(Block::CodeLine {
-                    content: at.current_line.clone(),
-                    lang: at.in_code_block.clone().unwrap_or_default(),
-                })
-            } else {
-                None
-            };
-
-            if let Some(block) = block_opt {
-                let gap = prev_synth
-                    .as_ref()
-                    .or(last_committed)
-                    .map(|p| gap_between(&Element::Block(p), &Element::Block(&block)))
-                    .unwrap_or(0);
-                emit_newlines(out, gap);
-                render_block(out, &block, None, width, self.show_thinking);
-                prev_synth = Some(block);
+        let mut combined = collect_trailing_thinking(
+            self.history.order.iter().map(|id| &self.history.blocks[id]),
+        );
+        if !at.paragraph.is_empty() {
+            if !combined.is_empty() {
+                combined.push('\n');
             }
+            combined.push_str(&at.paragraph);
         }
-
+        if !at.current_line.is_empty() {
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            combined.push_str(&at.current_line);
+        }
+        if !combined.is_empty() {
+            let (label, line_count) = thinking_summary(&combined);
+            emit_newlines(out, self.thinking_summary_gap());
+            render_thinking_summary(out, width, &label, line_count, true);
+        }
     }
 
     /// Flat-line viewport draw path.

@@ -994,6 +994,12 @@ pub(super) struct ActiveText {
     pub(super) table_data_rows: usize,
     /// Streaming block id for the in-flight paragraph (if any).
     pub(super) streaming_id: Option<BlockId>,
+    /// Streaming block id for the in-flight table (if any). Rewritten
+    /// with the accumulated table text on each new row.
+    pub(super) table_streaming_id: Option<BlockId>,
+    /// Streaming block id for the in-flight code line (if any).
+    /// Rewritten as characters flow; set to `Done` on newline.
+    pub(super) code_line_streaming_id: Option<BlockId>,
 }
 
 #[cfg(test)]
