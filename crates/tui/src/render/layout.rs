@@ -162,11 +162,6 @@ impl LayoutState {
         self.transcript.height
     }
 
-    #[allow(dead_code)]
-    pub fn prompt_top(&self) -> u16 {
-        self.prompt.top
-    }
-
     pub fn hit_test(&self, row: u16, col: u16) -> HitRegion {
         for f in self.floats.iter().rev() {
             if f.rect.contains(row, col) {
