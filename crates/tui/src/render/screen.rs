@@ -990,6 +990,24 @@ impl Screen {
                 }
                 ContentVisualKind::Line => (0, line_cells),
             };
+            // On empty lines within the selection, draw a single
+            // highlighted space (nvim behavior: virtual space on
+            // empty lines keeps the selection visually continuous).
+            if line_cells == 0 {
+                let is_interior = line_idx > range.start_line && line_idx < range.end_line;
+                let is_line_mode = matches!(range.kind, ContentVisualKind::Line);
+                if is_interior || is_line_mode {
+                    let col0 = self.transcript_gutters.pad_left;
+                    out.move_to(col0, line_idx as u16);
+                    out.push_style(StyleState {
+                        bg: Some(theme::selection_bg()),
+                        ..StyleState::default()
+                    });
+                    out.print(" ");
+                    out.pop_style();
+                }
+                continue;
+            }
             if sel_end <= sel_start {
                 continue;
             }
