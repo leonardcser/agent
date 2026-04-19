@@ -243,7 +243,7 @@ impl App {
             }
             "/yank-block" => {
                 let w = render::term_width();
-                let rows = self.screen.full_transcript_text(w);
+                let rows = self.screen.full_transcript_nav_text(w);
                 let abs_row = self.transcript_window.cursor_abs_row(rows.len());
                 if let Some(text) = self.screen.block_text_at_row(abs_row) {
                     let _ = copy_to_clipboard(&text);

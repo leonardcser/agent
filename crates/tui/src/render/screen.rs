@@ -9,7 +9,7 @@
 
 use super::blocks;
 use super::blocks::{
-    collect_trailing_thinking, gap_between, render_thinking_summary, thinking_summary, Element,
+    gap_between, render_thinking_summary, thinking_summary, Element,
 };
 use super::cache::{PersistedLayoutCache, RenderCache};
 use super::completions::{completion_actual_rows, draw_completions, draw_menu};
@@ -63,9 +63,30 @@ use super::{
     DialogPlacement, Frame, FramePrompt, RenderOut, StdioBackend, StyleState, TerminalBackend,
     SPINNER_FRAMES,
 };
+use super::display::DisplayLine;
 use crate::input::{InputSnapshot, InputState};
 use crate::keymap::hints;
 use crate::theme;
+
+/// Map a navigation column (char index among selectable cells) to
+/// a display column (char index in the full display line) using the
+/// `DisplayLine`'s span metadata.
+fn nav_col_to_display_col(dline: &DisplayLine, nav_col: usize) -> usize {
+    let mut sel_count = 0;
+    let mut display_idx = 0;
+    for span in &dline.spans {
+        for _ in span.text.chars() {
+            if span.meta.selectable {
+                if sel_count == nav_col {
+                    return display_idx;
+                }
+                sel_count += 1;
+            }
+            display_idx += 1;
+        }
+    }
+    display_idx
+}
 use crossterm::{
     cursor,
     style::{Color, Print, ResetColor},
@@ -123,6 +144,7 @@ pub struct Screen {
     /// during `draw_viewport_frame`. Used by the content pane's motion
     /// handlers and yank to reason over what the user actually sees.
     last_viewport_text: Vec<String>,
+    last_viewport_lines: Vec<super::display::DisplayLine>,
     /// Gutter reservations for the transcript window (padding +
     /// scrollbar column). Pushed from `App` so the paint path picks up
     /// the authoritative source without a reverse dependency.
@@ -207,6 +229,7 @@ impl Screen {
             last_app_focus: crate::app::AppFocus::Prompt,
             last_status_position: None,
             last_viewport_text: Vec::new(),
+            last_viewport_lines: Vec::new(),
             transcript_gutters: crate::window::WindowGutters {
                 pad_left: 1,
                 pad_right: 1,
@@ -239,7 +262,7 @@ impl Screen {
     /// rendered content and mouse hit-testing has a stable target.
     pub fn transcript_width(&self) -> usize {
         let (w, _) = self.backend.size();
-        (w as usize).saturating_sub(1).max(1)
+        (self.transcript_gutters.content_width(w) as usize).max(1)
     }
 
     pub fn show_thinking(&self) -> bool {
@@ -991,16 +1014,14 @@ impl Screen {
         if rows.is_empty() || viewport_rows == 0 {
             return;
         }
-        // `range` is viewport-relative: line 0 = top of viewport.
-        // `last_viewport_text` indexes top-down.
-        use crate::text_utils::cell_to_byte;
         use unicode_width::UnicodeWidthStr;
+        let sel_bg = theme::selection_bg();
+        let theme = crate::theme::snapshot();
         for line_idx in range.start_line..=range.end_line.min(rows.len().saturating_sub(1)) {
             if line_idx >= rows.len() || (line_idx as u16) >= viewport_rows {
                 break;
             }
             let line = &rows[line_idx];
-            // Columns are in display cells (set by `content_visual_range`).
             let line_cells = UnicodeWidthStr::width(line.as_str());
             let (sel_start, sel_end) = match range.kind {
                 ContentVisualKind::Char => {
@@ -1018,9 +1039,6 @@ impl Screen {
                 }
                 ContentVisualKind::Line => (0, line_cells),
             };
-            // On empty lines within the selection, draw a single
-            // highlighted space (nvim behavior: virtual space on
-            // empty lines keeps the selection visually continuous).
             if line_cells == 0 {
                 let is_interior = line_idx > range.start_line && line_idx < range.end_line;
                 let is_line_mode = matches!(range.kind, ContentVisualKind::Line);
@@ -1028,7 +1046,7 @@ impl Screen {
                     let col0 = self.transcript_gutters.pad_left;
                     out.move_to(col0, line_idx as u16);
                     out.push_style(StyleState {
-                        bg: Some(theme::selection_bg()),
+                        bg: Some(sel_bg),
                         ..StyleState::default()
                     });
                     out.print(" ");
@@ -1039,26 +1057,70 @@ impl Screen {
             if sel_end <= sel_start {
                 continue;
             }
-            let byte_start = cell_to_byte(line, sel_start);
-            let byte_end = cell_to_byte(line, sel_end);
-            let sub = &line[byte_start..byte_end];
-            // Offset by the transcript window's left gutter so the
-            // highlight lands on the content cells, not on the gutter.
-            let col0 = (sel_start as u16) + self.transcript_gutters.pad_left;
-            out.move_to(col0, line_idx as u16);
-            out.push_style(StyleState {
-                bg: Some(theme::selection_bg()),
-                ..StyleState::default()
-            });
-            out.print(sub);
+            // Walk DisplayLine spans to re-emit selected text with
+            // original styles preserved, only overriding the background.
+            // Non-selectable spans (gutters, padding) are skipped so
+            // their original appearance is preserved.
+            if let Some(dline) = self.last_viewport_lines.get(line_idx) {
+                let pad = self.transcript_gutters.pad_left;
+                let mut col: usize = 0;
+                for span in &dline.spans {
+                    let span_w = UnicodeWidthStr::width(span.text.as_str());
+                    let span_end = col + span_w;
+                    if span_end <= sel_start || col >= sel_end {
+                        col = span_end;
+                        continue;
+                    }
+                    if !span.meta.selectable {
+                        col = span_end;
+                        continue;
+                    }
+                    let clip_start = sel_start.saturating_sub(col);
+                    let clip_end = sel_end.min(span_end) - col;
+                    out.move_to((col + clip_start) as u16 + pad, line_idx as u16);
+                    let byte_start =
+                        crate::text_utils::cell_to_byte(&span.text, clip_start);
+                    let byte_end =
+                        crate::text_utils::cell_to_byte(&span.text, clip_end);
+                    let sub = &span.text[byte_start..byte_end];
+                    let style = StyleState {
+                        fg: span
+                            .style
+                            .fg
+                            .map(|c| super::paint::resolve(c, &theme, false)),
+                        bg: Some(sel_bg),
+                        bold: span.style.bold,
+                        dim: span.style.dim,
+                        italic: span.style.italic,
+                        crossedout: span.style.crossedout,
+                        underline: span.style.underline,
+                    };
+                    out.set_state(style);
+                    out.print(sub);
+                    col = span_end;
+                }
+            } else {
+                let byte_start = crate::text_utils::cell_to_byte(line, sel_start);
+                let byte_end = crate::text_utils::cell_to_byte(line, sel_end);
+                let sub = &line[byte_start..byte_end];
+                out.push_style(StyleState {
+                    bg: Some(sel_bg),
+                    ..StyleState::default()
+                });
+                out.print(sub);
+                out.pop_style();
+            }
             if matches!(range.kind, ContentVisualKind::Line) {
-                let used = UnicodeWidthStr::width(sub) as u16;
+                out.set_state(StyleState {
+                    bg: Some(sel_bg),
+                    ..StyleState::default()
+                });
+                let used = sel_end.saturating_sub(sel_start) as u16;
                 let remaining = width.saturating_sub(sel_start as u16 + used);
                 for _ in 0..remaining {
                     out.print(" ");
                 }
             }
-            out.pop_style();
         }
     }
 
@@ -1066,6 +1128,10 @@ impl Screen {
     /// ephemeral streaming content). Used by the content pane as the
     /// vim buffer so motions span the entire conversation, not just the
     /// current viewport slice.
+    pub fn has_transcript_content(&mut self) -> bool {
+        !self.transcript.history.is_empty() || self.has_ephemeral()
+    }
+
     pub fn full_transcript_text(&mut self, width: usize) -> Vec<String> {
         let _ = width;
         let tw = self.transcript_width() as u16;
@@ -1083,6 +1149,55 @@ impl Screen {
             }
         }
         rows
+    }
+
+    /// Navigation-only transcript text: selectable display characters
+    /// only (gutters, padding stripped). This is the buffer that vim
+    /// motions and cursor positioning operate on.
+    pub fn full_transcript_nav_text(&mut self, width: usize) -> Vec<String> {
+        let _ = width;
+        let tw = self.transcript_width() as u16;
+        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let mut rows = snap.nav_rows();
+        if self.has_ephemeral() {
+            let mut col = SpanCollector::new(tw);
+            self.render_ephemeral_into(&mut col, tw as usize);
+            for line in col.finish().lines {
+                let mut s = String::new();
+                for span in &line.spans {
+                    if !span.meta.selectable {
+                        continue;
+                    }
+                    s.push_str(&span.text);
+                }
+                rows.push(s);
+            }
+        }
+        rows
+    }
+
+    /// Map a nav column to a display column for an absolute row.
+    pub fn nav_col_to_display_col(&mut self, abs_row: usize, nav_col: usize) -> usize {
+        let tw = self.transcript_width() as u16;
+        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let snap_rows = snap.row_cells.len();
+        if abs_row < snap_rows {
+            snap.nav_col_to_display_col(abs_row, nav_col)
+        } else {
+            nav_col
+        }
+    }
+
+    /// Map a display column to a nav column for an absolute row.
+    pub fn display_col_to_nav_col(&mut self, abs_row: usize, display_col: usize) -> usize {
+        let tw = self.transcript_width() as u16;
+        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let snap_rows = snap.row_cells.len();
+        if abs_row < snap_rows {
+            snap.display_col_to_nav_col(abs_row, display_col)
+        } else {
+            display_col
+        }
     }
 
     /// Extract the full selectable text of the block at `abs_row`.
@@ -1562,19 +1677,7 @@ impl Screen {
         if self.show_thinking {
             return;
         }
-        let mut combined = collect_trailing_thinking(
-            self.transcript
-                .history
-                .order
-                .iter()
-                .map(|id| &self.transcript.history.blocks[id]),
-        );
-        if !at.paragraph.is_empty() {
-            if !combined.is_empty() {
-                combined.push('\n');
-            }
-            combined.push_str(&at.paragraph);
-        }
+        let mut combined = at.paragraph.clone();
         if !at.current_line.is_empty() {
             if !combined.is_empty() {
                 combined.push('\n');
@@ -1625,6 +1728,7 @@ impl Screen {
             scroll_offset,
             &ephemeral_lines,
             gutters.pad_left,
+            &mut self.last_viewport_lines,
         );
 
         let scrollbar_col = match gutters.scrollbar {
@@ -1700,11 +1804,23 @@ impl Screen {
         }
 
         if self.cursor_owner == CursorOwner::Transcript && viewport_rows > 0 {
-            let max_line = viewport_rows.saturating_sub(1);
+            let visible = self
+                .last_transcript_viewport
+                .as_ref()
+                .map(|v| v.total_rows.min(viewport_rows))
+                .unwrap_or(viewport_rows);
+            let max_line = visible.saturating_sub(1);
             let line = history_cursor_line.min(max_line);
+            let cursor_row = visible.saturating_sub(1 + line);
+            // cursor_col is a nav column (selectable chars only);
+            // convert to display column using the viewport's DisplayLine.
+            let display_col = self
+                .last_viewport_lines
+                .get(cursor_row as usize)
+                .map(|dline| nav_col_to_display_col(dline, history_cursor_col as usize))
+                .unwrap_or(history_cursor_col as usize);
             let max_col = (tw as u16).saturating_sub(1);
-            let col = history_cursor_col.min(max_col);
-            let cursor_row = viewport_rows.saturating_sub(1 + line);
+            let col = (display_col as u16).min(max_col);
             let under: String = self
                 .last_viewport_text
                 .get(cursor_row as usize)
@@ -1716,7 +1832,7 @@ impl Screen {
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| " ".to_string());
             draw_soft_cursor(out, col + gutters.pad_left, cursor_row, &under);
-            (line, col)
+            (line, history_cursor_col)
         } else {
             (history_cursor_line, history_cursor_col)
         }

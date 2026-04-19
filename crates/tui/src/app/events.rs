@@ -918,7 +918,7 @@ impl App {
                 self.input.cpos,
             ),
             crate::app::AppFocus::Content => {
-                let rows = self.screen.full_transcript_text(width);
+                let rows = self.screen.full_transcript_nav_text(width);
                 if rows.is_empty() {
                     return None;
                 }
@@ -964,18 +964,12 @@ impl App {
         let show_queued = agent_running || self.is_compacting();
         self.screen.set_dialog_open(false);
 
-        let visual = self.content_visual_range(w);
-        // Refresh the pin state every tick so that *any* reason to
-        // stabilize the viewport — active selection, vim visual,
-        // mouse drag, or simply the user being scrolled up — keeps
-        // streaming rows from shifting the visible slice. The pin
-        // auto-engages when `scroll_offset > 0` and auto-releases
-        // when the user scrolls back to the bottom.
         self.sync_transcript_pin();
         if self.transcript_window.is_pinned() {
             let (total, viewport) = self.transcript_dims();
             self.transcript_window.apply_pin(total, viewport);
         }
+        let visual = self.content_visual_range(w);
         // Status bar shows the *focused* window's vim mode. Without
         // this, the status bar caches the prompt's mode even when the
         // transcript window has focus.
@@ -1104,10 +1098,10 @@ impl App {
     fn handle_content_novim_key(&mut self, k: KeyEvent) -> EventOutcome {
         use crate::keymap::{lookup, KeyAction, KeyContext};
         use crossterm::event::KeyModifiers as M;
-        // Pull in the latest transcript text so cpos stays valid across
-        // streaming updates and so `buf` is populated before we read.
+        // Pull in the latest nav-only text (selectable chars) so cpos
+        // stays valid across streaming updates.
         let w = render::term_width();
-        let rows = self.screen.full_transcript_text(w);
+        let rows = self.screen.full_transcript_nav_text(w);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window.resync(&rows, viewport);
         let ctx = KeyContext {
@@ -1190,8 +1184,8 @@ impl App {
                         let s = crate::text_utils::snap(&buf, s);
                         let e = crate::text_utils::snap(&buf, e);
                         if s < e {
-                            let sel = buf[s..e].to_string();
-                            let _ = crate::app::commands::copy_to_clipboard(&sel);
+                            let copy = self.copy_nav_range(s, e);
+                            let _ = crate::app::commands::copy_to_clipboard(&copy);
                         }
                     }
                     self.screen.mark_dirty();
@@ -1202,7 +1196,7 @@ impl App {
             if let Some(new_cpos) = mv {
                 self.transcript_window.cpos = new_cpos;
                 let w = render::term_width();
-                let rows = self.screen.full_transcript_text(w);
+                let rows = self.screen.full_transcript_nav_text(w);
                 let viewport = self.viewport_rows_estimate();
                 self.transcript_window.resync(&rows, viewport);
                 self.sync_transcript_pin();
@@ -1222,7 +1216,7 @@ impl App {
     /// mouse wheel, Ctrl-U/D, arrows and j/k.
     fn move_content_cursor_by_lines(&mut self, delta: isize) {
         let w = render::term_width();
-        let rows = self.screen.full_transcript_text(w);
+        let rows = self.screen.full_transcript_nav_text(w);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
             .scroll_by_lines(delta, &rows, viewport);
@@ -1235,7 +1229,7 @@ impl App {
     /// consumed the key (caller should return `Redraw`).
     fn handle_content_vim_key(&mut self, k: KeyEvent) -> bool {
         let w = render::term_width();
-        let rows = self.screen.full_transcript_text(w);
+        let rows = self.screen.full_transcript_nav_text(w);
         let viewport = self.viewport_rows_estimate();
         match self.transcript_window.handle_key(k, &rows, viewport) {
             None => false,
@@ -1243,12 +1237,7 @@ impl App {
                 if let Some(raw) = yanked {
                     let buf = rows.join("\n");
                     let copy = if let Some(start) = buf.find(&raw) {
-                        let tw = self.screen.transcript_width() as u16;
-                        let snap = self
-                            .screen
-                            .transcript
-                            .snapshot(tw, self.screen.show_thinking());
-                        snap.copy_byte_range(start, start + raw.len())
+                        self.copy_nav_range(start, start + raw.len())
                     } else {
                         raw
                     };
@@ -1267,7 +1256,7 @@ impl App {
         if self.app_focus != crate::app::AppFocus::Content {
             return None;
         }
-        let rows = self.screen.full_transcript_text(width);
+        let rows = self.screen.full_transcript_nav_text(width);
         if rows.is_empty() {
             return None;
         }
@@ -1287,6 +1276,7 @@ impl App {
                 .range(self.transcript_window.cpos)?;
             (s, e, render::ContentVisualKind::Char)
         };
+        // Byte offsets in nav text → (line, nav_col).
         let offset_to_line_col = |off: usize| -> (usize, usize) {
             let off = crate::text_utils::snap(&buf, off);
             let prefix = &buf[..off];
@@ -1297,8 +1287,15 @@ impl App {
                 crate::text_utils::byte_to_cell(&buf[line_start..off], off - line_start),
             )
         };
-        let (start_line_abs, start_col) = offset_to_line_col(s);
-        let (end_line_abs, end_col) = offset_to_line_col(e);
+        let (start_line_abs, start_nav_col) = offset_to_line_col(s);
+        let (end_line_abs, end_nav_col) = offset_to_line_col(e);
+        // Nav columns → display columns for the painter.
+        let start_col = self
+            .screen
+            .nav_col_to_display_col(start_line_abs, start_nav_col);
+        let end_col = self
+            .screen
+            .nav_col_to_display_col(end_line_abs, end_nav_col);
         // Transcript-absolute line indices → viewport-relative so the
         // painter can walk `last_viewport_text` directly.
         let viewport = self.viewport_rows_estimate();
@@ -1336,15 +1333,10 @@ impl App {
             self.transcript_window.vim.as_ref().map(|v| v.mode()),
             Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
         );
-        // Auto-pin whenever the user is scrolled up off the bottom:
-        // new streaming rows grow off-screen below rather than pushing
-        // the visible rows upward. `scroll_offset == 0` means stuck to
-        // bottom, the normal "follow tail" behavior, so we release the
-        // pin there. Prompt input scroll is top-anchored and needs no
-        // equivalent: content growth naturally stays below the visible
-        // window.
-        let scrolled_up = self.transcript_window.scroll_offset > 0;
-        let want_pin = has_selection || in_vim_visual || self.mouse_drag_active || scrolled_up;
+        let cursor_off_bottom = self.transcript_window.scroll_offset > 0
+            || self.transcript_window.cursor_line > 0;
+        let want_pin =
+            has_selection || in_vim_visual || self.mouse_drag_active || cursor_off_bottom;
         if want_pin {
             if !self.transcript_window.is_pinned() {
                 let (total, viewport) = self.transcript_dims();
@@ -1489,10 +1481,9 @@ impl App {
                     }
                     return EventOutcome::Noop;
                 }
-                // Content pane click: focus + move cursor + anchor a
-                // potential drag-selection in vim Visual mode. If the
-                // user just clicks without dragging, the subsequent Up
-                // clears visual so nothing gets selected.
+                if !self.screen.has_transcript_content() {
+                    return EventOutcome::Noop;
+                }
                 self.app_focus = crate::app::AppFocus::Content;
                 // Route the event through the `Viewport`
                 // recorded by the last paint: scrollbar clicks latch a
@@ -1556,6 +1547,9 @@ impl App {
         ) {
             self.app_focus = crate::app::AppFocus::Prompt;
             self.scroll_prompt_by_lines(delta);
+            return;
+        }
+        if !self.screen.has_transcript_content() {
             return;
         }
         self.app_focus = crate::app::AppFocus::Content;
@@ -1754,7 +1748,7 @@ impl App {
     fn copy_content_selection_and_clear(&mut self, dragged: bool) {
         if dragged {
             let width = render::term_width();
-            let rows = self.screen.full_transcript_text(width);
+            let rows = self.screen.full_transcript_nav_text(width);
             let buf = rows.join("\n");
             let range = if let Some(vim) = self.transcript_window.vim.as_ref() {
                 vim.visual_range(&buf, self.transcript_window.cpos)
@@ -1767,13 +1761,8 @@ impl App {
                 let s = crate::text_utils::snap(&buf, s);
                 let e = crate::text_utils::snap(&buf, e);
                 if s < e {
-                    let tw = self.screen.transcript_width() as u16;
-                    let snap = self
-                        .screen
-                        .transcript
-                        .snapshot(tw, self.screen.show_thinking());
-                    let selection = snap.copy_byte_range(s, e);
-                    let _ = crate::app::commands::copy_to_clipboard(&selection);
+                    let copy = self.copy_nav_range(s, e);
+                    let _ = crate::app::commands::copy_to_clipboard(&copy);
                 }
             }
         }
@@ -1844,7 +1833,7 @@ impl App {
                 // `cursor_line` is measured relative to the old scroll
                 // and drifts off-screen as the viewport moves.
                 let w = render::term_width();
-                let rows = self.screen.full_transcript_text(w);
+                let rows = self.screen.full_transcript_nav_text(w);
                 let viewport = self.viewport_rows_estimate();
                 self.transcript_window
                     .reanchor_to_visible_row(&rows, viewport);
@@ -1872,7 +1861,7 @@ impl App {
     /// `col` are already clamped against the region by the caller.
     fn position_content_cursor_from_hit(&mut self, rel_row: u16, col: u16) {
         let w = render::term_width();
-        let rows = self.screen.full_transcript_text(w);
+        let rows = self.screen.full_transcript_nav_text(w);
         if rows.is_empty() {
             self.screen.mark_dirty();
             return;
@@ -1880,22 +1869,19 @@ impl App {
         let Some(region) = self.screen.transcript_viewport() else {
             return;
         };
-        // Content rect starts after the window's left gutter. Clicks
-        // inside the gutter snap to content col 0.
         let pad_left = self.transcript_window.gutters.pad_left;
-        let col = col.saturating_sub(pad_left);
+        let display_col = col.saturating_sub(pad_left) as usize;
         let viewport_rows = region.rows;
         let total = rows.len().min(u16::MAX as usize) as u16;
         let geom =
             render::ViewportGeom::new(total, viewport_rows, self.transcript_window.scroll_offset);
-        // Clicks in the leading-blank band (short buffer, bottom-anchored)
-        // snap to the first content line — clicking above content should
-        // place the cursor at the *top* of it, not the last line.
-        let line_idx = geom.line_of_row(rel_row).unwrap_or(0) as usize;
+        let line_idx = geom.line_of_row(rel_row).unwrap_or(total.saturating_sub(1)) as usize;
         let line_idx = line_idx.min(rows.len() - 1);
-        let col = self.screen.snap_col_to_selectable(line_idx, col as usize);
+        // Snap to nearest selectable cell, then convert to nav col.
+        let snapped = self.screen.snap_col_to_selectable(line_idx, display_col);
+        let nav_col = self.screen.display_col_to_nav_col(line_idx, snapped);
         self.transcript_window
-            .jump_to_line_col(&rows, line_idx, col, viewport_rows);
+            .jump_to_line_col(&rows, line_idx, nav_col, viewport_rows);
         self.screen.mark_dirty();
     }
 
@@ -1934,10 +1920,16 @@ impl App {
     }
 
     fn toggle_pane_focus(&mut self) {
-        self.app_focus = match self.app_focus {
+        let target = match self.app_focus {
             crate::app::AppFocus::Prompt => crate::app::AppFocus::Content,
             crate::app::AppFocus::Content => crate::app::AppFocus::Prompt,
         };
+        if target == crate::app::AppFocus::Content
+            && !self.screen.has_transcript_content()
+        {
+            return;
+        }
+        self.app_focus = target;
         if self.app_focus == crate::app::AppFocus::Content {
             self.refocus_content();
         }
@@ -1949,15 +1941,26 @@ impl App {
     /// is a no-op until the user triggers a click-to-position.
     fn refocus_content(&mut self) {
         let w = render::term_width();
-        let rows = self.screen.full_transcript_text(w);
+        let rows = self.screen.full_transcript_nav_text(w);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window.refocus(&rows, viewport);
         self.screen.mark_dirty();
     }
 
+    /// Copy text from a nav-buffer byte range, applying `copy_as`
+    /// substitutions via the snapshot's `copy_range`.
+    fn copy_nav_range(&mut self, start: usize, end: usize) -> String {
+        let tw = self.screen.transcript_width() as u16;
+        let snap = self
+            .screen
+            .transcript
+            .snapshot(tw, self.screen.show_thinking());
+        snap.copy_nav_byte_range(start, end)
+    }
+
     /// Determine which block the content cursor is currently on, if any.
-    /// Derives the absolute row from `cpos` (byte offset in the joined
-    /// transcript text), then looks up the snapshot's `block_of_row`.
+    /// Derives the absolute row from `cpos` (byte offset in the nav
+    /// buffer), then looks up the snapshot's `block_of_row`.
     fn focused_block_id(&mut self) -> Option<render::BlockId> {
         let tw = self.screen.transcript_width() as u16;
         let snap = self
@@ -1967,9 +1970,10 @@ impl App {
         if snap.rows.is_empty() {
             return None;
         }
+        let nav = snap.nav_rows();
         let mut acc = 0usize;
         let mut row = 0usize;
-        for (i, r) in snap.rows.iter().enumerate() {
+        for (i, r) in nav.iter().enumerate() {
             let next = acc + r.len() + 1;
             if self.transcript_window.cpos < next {
                 row = i;

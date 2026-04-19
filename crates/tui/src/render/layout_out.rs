@@ -83,6 +83,16 @@ pub(crate) trait LayoutSink {
 
     // ── Default helpers ──────────────────────────────────────────────
 
+    fn print_gutter(&mut self, text: &str) {
+        self.print_with_meta(
+            text,
+            crate::render::display::SpanMeta {
+                selectable: false,
+                copy_as: None,
+            },
+        );
+    }
+
     fn print_string(&mut self, s: String) {
         self.print(&s);
     }

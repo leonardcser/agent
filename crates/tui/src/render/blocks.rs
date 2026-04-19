@@ -124,32 +124,6 @@ pub(super) fn animated_dots() -> &'static str {
     &"..."[..n]
 }
 
-/// Concatenate trailing `Block::Thinking` content from the end of a block
-/// iterator. The iterator must yield blocks in forward order.
-pub(super) fn collect_trailing_thinking<'a, I>(blocks: I) -> String
-where
-    I: IntoIterator<Item = &'a super::Block>,
-    I::IntoIter: DoubleEndedIterator,
-{
-    let parts: Vec<&str> = blocks
-        .into_iter()
-        .rev()
-        .map_while(|b| match b {
-            super::Block::Thinking { content } => Some(content.as_str()),
-            _ => None,
-        })
-        .collect();
-    // Parts are in reverse order — join forward.
-    let mut out = String::new();
-    for part in parts.into_iter().rev() {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(part);
-    }
-    out
-}
-
 /// Extract a title and non-empty line count from thinking content.
 /// If the first non-empty line is a markdown bold title (`**...**`), use it as the label.
 pub(super) fn thinking_summary(content: &str) -> (String, usize) {
@@ -182,7 +156,7 @@ pub(super) fn render_thinking_summary<S: LayoutSink>(
 ) -> u16 {
     let dots = if animated { animated_dots() } else { "" };
     let summary = format!("{label} ({}){dots}", pluralize(line_count, "line", "lines"));
-    let max_cols = width.saturating_sub(4).max(1);
+    let max_cols = width.saturating_sub(3).max(1);
     let segs = wrap_line(&summary, max_cols);
     if segs.len() > 1 {
         out.mark_wrapped();
@@ -190,7 +164,8 @@ pub(super) fn render_thinking_summary<S: LayoutSink>(
     let mut rows = 0u16;
     for seg in &segs {
         out.set_dim_italic();
-        out.print_string(format!(" \u{2502} {}", seg));
+        out.print_gutter("\u{2502} ");
+        out.print(seg);
         out.reset_style();
         out.newline();
         rows += 1;
@@ -361,13 +336,9 @@ pub(super) fn render_block<S: LayoutSink>(
                 if segments.len() > 1 {
                     out.mark_wrapped();
                 }
-                let gutter_meta = SpanMeta {
-                    selectable: false,
-                    copy_as: None,
-                };
                 for seg in &segments {
                     out.set_dim_italic();
-                    out.print_with_meta("│ ", gutter_meta.clone());
+                    out.print_gutter("│ ");
                     out.print(seg);
                     out.reset_style();
                     out.newline();
@@ -417,9 +388,9 @@ pub(super) fn render_block<S: LayoutSink>(
             let left = remaining / 2;
             let right = remaining - left;
             out.push_dim();
-            out.print_string("─".repeat(left));
-            out.print(label);
-            out.print_string("─".repeat(right));
+            out.print_gutter(&"─".repeat(left));
+            out.print_gutter(label);
+            out.print_gutter(&"─".repeat(right));
             out.pop_style();
             out.newline();
             1 + render_markdown_inner(out, summary, width, "", true, None)
@@ -558,7 +529,7 @@ fn render_agent_block<S: LayoutSink>(
     let visible = tool_calls.iter().rev().take(3).collect::<Vec<_>>();
     for entry in visible.iter().rev() {
         out.push_fg(crate::theme::AGENT.into());
-        out.print("\u{2502} "); // │
+        out.print_gutter("\u{2502} "); // │
         out.pop_style();
 
         out.push_dim();
@@ -589,7 +560,7 @@ fn render_agent_block<S: LayoutSink>(
     // Bottom border
     let border_w = width.saturating_sub(1);
     out.push_fg(crate::theme::AGENT.into());
-    out.print_string(format!("\u{2570}{}", "\u{2500}".repeat(border_w)));
+    out.print_gutter(&format!("\u{2570}{}", "\u{2500}".repeat(border_w)));
     out.pop_style();
     out.newline();
     rows += 1;
@@ -698,7 +669,7 @@ fn render_confirm_result<S: LayoutSink>(
 
     if let Some(c) = choice {
         rows += 1;
-        out.print("  ");
+        out.print_gutter("  ");
         match c {
             ConfirmChoice::Yes | ConfirmChoice::YesAutoApply => {
                 print_dim(out, "approved");
@@ -794,7 +765,7 @@ fn print_tool_line<S: LayoutSink>(
 
         for (idx, seg) in wrapped[..show].iter().enumerate() {
             if idx > 0 {
-                out.print_string(" ".repeat(ly.prefix_len));
+                out.print_gutter(&" ".repeat(ly.prefix_len));
             }
             bh.print_line(out, seg);
             if idx == 0 {
@@ -811,7 +782,7 @@ fn print_tool_line<S: LayoutSink>(
 
         if total > MAX_TOOL_BLOCK_ROWS {
             let skipped = total - MAX_TOOL_BLOCK_ROWS;
-            out.print_string(" ".repeat(ly.prefix_len));
+            out.print_gutter(&" ".repeat(ly.prefix_len));
             print_dim(
                 out,
                 &format!("... {} below", pluralize(skipped, "line", "lines")),
@@ -1173,28 +1144,73 @@ pub(crate) fn render_markdown_inner<S: LayoutSink>(
             } else {
                 last_content_line = Some(lines[i]);
             }
-            let segments = wrap_line(lines[i], max_cols);
-            if segments.len() > 1 {
-                out.mark_wrapped();
-            }
-            for (si, seg) in segments.iter().enumerate() {
-                if si == 0 {
-                    out.set_source_text(lines[i]);
-                } else {
-                    out.mark_soft_wrap_continuation();
+            let trimmed = lines[i].trim_start();
+            if trimmed.starts_with('#') || trimmed.starts_with('>') {
+                let segments = wrap_line(lines[i], max_cols);
+                if segments.len() > 1 {
+                    out.mark_wrapped();
                 }
-                if let Some(b) = bctx {
-                    b.print_left(out);
-                    let cols = print_styled_line(out, seg, dim);
-                    b.print_right(out, cols);
-                } else {
-                    out.print(indent);
-                    print_styled_line(out, seg, dim);
+                for (si, seg) in segments.iter().enumerate() {
+                    if si == 0 {
+                        out.set_source_text(lines[i]);
+                    } else {
+                        out.mark_soft_wrap_continuation();
+                    }
+                    if let Some(b) = bctx {
+                        b.print_left(out);
+                        let cols = print_styled_line(out, seg, dim);
+                        b.print_right(out, cols);
+                    } else {
+                        out.print(indent);
+                        print_styled_line(out, seg, dim);
+                    }
+                    out.newline();
                 }
-                out.newline();
+                rows += segments.len() as u16;
+            } else {
+                use super::highlight::{
+                    emit_inline_spans, inline_spans_width, parse_inline_spans,
+                    wrap_inline_spans, InlineSpan, InlineStyle,
+                };
+                let leading_ws = &lines[i][..lines[i].len() - trimmed.len()];
+                let (prefix, body) = split_list_prefix(trimmed);
+                let mut line_spans: Vec<InlineSpan> = Vec::new();
+                if !leading_ws.is_empty() {
+                    line_spans.push(InlineSpan {
+                        text: leading_ws.to_string(),
+                        style: InlineStyle { dim, ..Default::default() },
+                    });
+                }
+                if !prefix.is_empty() {
+                    line_spans.push(InlineSpan {
+                        text: prefix.to_string(),
+                        style: InlineStyle { dim: true, ..Default::default() },
+                    });
+                }
+                line_spans.extend(parse_inline_spans(body, dim));
+                let wrapped = wrap_inline_spans(&line_spans, max_cols);
+                if wrapped.len() > 1 {
+                    out.mark_wrapped();
+                }
+                for (si, row_spans) in wrapped.iter().enumerate() {
+                    if si == 0 {
+                        out.set_source_text(lines[i]);
+                    } else {
+                        out.mark_soft_wrap_continuation();
+                    }
+                    if let Some(b) = bctx {
+                        b.print_left(out);
+                        emit_inline_spans(out, row_spans);
+                        b.print_right(out, inline_spans_width(row_spans));
+                    } else {
+                        out.print(indent);
+                        emit_inline_spans(out, row_spans);
+                    }
+                    out.newline();
+                }
+                rows += wrapped.len() as u16;
             }
             i += 1;
-            rows += segments.len() as u16;
         }
     }
     rows
@@ -1415,7 +1431,7 @@ fn render_plan_output<S: LayoutSink>(
     let label = " Plan ";
     let fill = inner_w.saturating_sub(label.len()).saturating_add(1);
     out.push_fg(theme::PLAN.into());
-    out.print_string(format!(
+    out.print_gutter(&format!(
         "  \u{250c}\u{2500}{label}{}\u{2510}",
         "\u{2500}".repeat(fill)
     ));
@@ -1435,7 +1451,7 @@ fn render_plan_output<S: LayoutSink>(
     // Bottom border: "   └──...──┘"
     // 3 + 1(└) + dashes + 1(┘) = 5 + inner_w + 2 → dashes = inner_w + 2
     out.push_fg(theme::PLAN.into());
-    out.print_string(format!(
+    out.print_gutter(&format!(
         "  \u{2514}{}\u{2518}",
         "\u{2500}".repeat(inner_w + 2)
     ));

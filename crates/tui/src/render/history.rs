@@ -633,6 +633,15 @@ impl BlockHistory {
 
     pub(super) fn ensure_rows(&mut self, i: usize, base: LayoutKey) -> u16 {
         let id = self.order[i];
+        // While streaming with thinking hidden, the ephemeral overlay
+        // renders the combined animated summary. Suppress the committed
+        // thinking block so it doesn't appear as a second summary.
+        if matches!(self.blocks.get(&id), Some(Block::Thinking { .. }))
+            && !base.show_thinking
+            && matches!(self.status(id), Status::Streaming)
+        {
+            return 0;
+        }
         let key = self.resolve_key(id, base);
         if let Some(rows) = self
             .artifacts
@@ -734,6 +743,7 @@ impl BlockHistory {
         scroll_offset: u16,
         extra_lines: &[super::display::DisplayLine],
         pad_left: u16,
+        viewport_lines_out: &mut Vec<super::display::DisplayLine>,
     ) -> u16 {
         let _perf = crate::perf::begin("history:paint_viewport");
         if viewport_rows == 0 {
@@ -752,8 +762,8 @@ impl BlockHistory {
         let mut per_block: Vec<(u16, u16)> = Vec::with_capacity(self.order.len());
         let mut total: u32 = 0;
         for i in 0..self.order.len() {
-            let gap = self.block_gap(i);
             let rows = self.ensure_rows(i, key);
+            let gap = if rows == 0 { 0 } else { self.block_gap(i) };
             total += gap as u32 + rows as u32;
             per_block.push((gap, rows));
         }
@@ -776,23 +786,8 @@ impl BlockHistory {
         let mut remaining_skip = skip as u32;
         let mut painted: u16 = 0;
 
-        // Bottom-anchor the transcript: when content is shorter than
-        // the viewport, emit leading blank rows so the last content
-        // row lands at the bottom of the viewport. `scroll_offset == 0`
-        // means "stuck to bottom" throughout the UI; cursor math and
-        // click/hit-testing both assume bottom-anchoring, so top-padding
-        // short transcripts keeps everything in lockstep.
-        let leading_blanks = geom.leading_blanks();
-        for _ in 0..leading_blanks {
-            if painted >= viewport_rows {
-                break;
-            }
-            let _ = out.queue(crossterm::terminal::Clear(
-                crossterm::terminal::ClearType::CurrentLine,
-            ));
-            out.newline();
-            painted += 1;
-        }
+        viewport_lines_out.clear();
+        viewport_lines_out.reserve(viewport_rows as usize);
 
         'blocks: for (i, (gap, _rows)) in per_block.iter().enumerate() {
             // Gap lines (blank rows).
@@ -808,6 +803,7 @@ impl BlockHistory {
                     crossterm::terminal::ClearType::CurrentLine,
                 ));
                 out.newline();
+                viewport_lines_out.push(super::display::DisplayLine::default());
                 painted += 1;
             }
             let id = self.order[i];
@@ -823,6 +819,7 @@ impl BlockHistory {
                     break 'blocks;
                 }
                 super::paint::paint_line(out, line, &pctx, pad_left);
+                viewport_lines_out.push(line.clone());
                 painted += 1;
             }
         }
@@ -837,6 +834,7 @@ impl BlockHistory {
                 break;
             }
             super::paint::paint_line(out, line, &pctx, pad_left);
+            viewport_lines_out.push(line.clone());
             painted += 1;
         }
 
@@ -849,6 +847,7 @@ impl BlockHistory {
                 crossterm::terminal::ClearType::CurrentLine,
             ));
             out.newline();
+            viewport_lines_out.push(super::display::DisplayLine::default());
             painted += 1;
         }
 
@@ -901,7 +900,7 @@ mod tests {
         });
 
         let mut out = RenderOut::buffer();
-        history.paint_viewport(&mut out, 80, false, 0, 50, 0, &[], 0);
+        history.paint_viewport(&mut out, 80, false, 0, 50, 0, &[], 0, &mut Vec::new());
         let rendered = String::from_utf8(out.into_bytes()).unwrap();
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("thinking (2 lines)"));
@@ -917,13 +916,13 @@ mod tests {
         });
 
         let mut sink = RenderOut::buffer();
-        history.paint_viewport(&mut sink, 100, true, 0, 50, 0, &[], 0);
+        history.paint_viewport(&mut sink, 100, true, 0, 50, 0, &[], 0, &mut Vec::new());
         history.flushed = 0;
-        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0);
+        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0, &mut Vec::new());
         history.flushed = 0;
-        history.paint_viewport(&mut sink, 100, true, 0, 50, 0, &[], 0);
+        history.paint_viewport(&mut sink, 100, true, 0, 50, 0, &[], 0, &mut Vec::new());
         history.flushed = 0;
-        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0);
+        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0, &mut Vec::new());
 
         let content_hash = history.content_hash(id);
         let keys: Vec<LayoutKey> = history
@@ -959,7 +958,7 @@ mod tests {
         });
 
         let mut sink = RenderOut::buffer();
-        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0);
+        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0, &mut Vec::new());
         let h0 = history.content_hash(id);
         assert!(!history.artifacts.get(&id).unwrap().is_empty());
 
@@ -978,7 +977,7 @@ mod tests {
         );
 
         history.flushed = 0;
-        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0);
+        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0, &mut Vec::new());
         let keys: Vec<u64> = history
             .artifacts
             .get(&id)

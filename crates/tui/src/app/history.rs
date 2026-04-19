@@ -87,6 +87,7 @@ impl App {
         self.reset_session_permissions();
         self.queued_messages.clear();
         self.screen.clear();
+        self.app_focus = crate::app::AppFocus::Prompt;
         self.input.clear();
         self.input.store.clear();
         self.engine.processes.clear();

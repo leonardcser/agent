@@ -48,7 +48,7 @@ pub struct TranscriptSnapshot {
 
 impl TranscriptSnapshot {
     /// Viewport-slice the snapshot into visible rows, matching
-    /// `paint_viewport`'s bottom-anchoring and skip logic.
+    /// `paint_viewport`'s top-anchoring and skip logic.
     pub fn viewport_rows(&self, viewport_rows: u16, scroll_offset: u16) -> Vec<String> {
         if viewport_rows == 0 {
             return Vec::new();
@@ -56,26 +56,22 @@ impl TranscriptSnapshot {
         let total = self.rows.len().min(u16::MAX as usize) as u16;
         let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_offset);
         let skip = geom.skip_from_top() as usize;
-        let leading_blanks = geom.leading_blanks() as usize;
 
         let mut out = Vec::with_capacity(viewport_rows as usize);
-        for _ in 0..leading_blanks {
-            if out.len() >= viewport_rows as usize {
-                break;
-            }
-            out.push(String::new());
-        }
         for row in self.rows.iter().skip(skip) {
             if out.len() >= viewport_rows as usize {
                 break;
             }
             out.push(row.clone());
         }
+        while out.len() < viewport_rows as usize {
+            out.push(String::new());
+        }
         out
     }
 
     /// Which block owns a given viewport row (accounting for scroll +
-    /// leading blanks). Returns `None` for gap rows or leading blanks.
+    /// trailing blanks). Returns `None` for gap rows or trailing blanks.
     pub fn viewport_block_at(
         &self,
         viewport_row: u16,
@@ -84,12 +80,8 @@ impl TranscriptSnapshot {
     ) -> Option<BlockId> {
         let total = self.rows.len().min(u16::MAX as usize) as u16;
         let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_offset);
-        let leading = geom.leading_blanks();
-        if viewport_row < leading {
-            return None;
-        }
         let skip = geom.skip_from_top();
-        let abs_row = (viewport_row - leading) as usize + skip as usize;
+        let abs_row = viewport_row as usize + skip as usize;
         self.block_of_row.get(abs_row).copied().flatten()
     }
 
@@ -98,10 +90,9 @@ impl TranscriptSnapshot {
         self.rows.len().min(u16::MAX as usize) as u16
     }
 
-    /// Logical (content-only) text for each row. Non-selectable cells
-    /// are stripped; `copy_as` substitutions are applied. This is what
-    /// vim motions should navigate — the cursor operates on content,
-    /// not on decorative padding.
+    /// Copy-oriented text for each row. Non-selectable cells are
+    /// stripped; `copy_as` substitutions are applied. Used by
+    /// `copy_range` and clipboard operations.
     pub fn logical_rows(&self) -> Vec<String> {
         self.row_cells
             .iter()
@@ -119,6 +110,108 @@ impl TranscriptSnapshot {
                 s
             })
             .collect()
+    }
+
+    /// Navigation rows — selectable display characters only, no
+    /// `copy_as` substitutions. This is the buffer vim motions
+    /// operate on: the cursor navigates the visible content chars
+    /// without touching decorative gutters or padding.
+    pub fn nav_rows(&self) -> Vec<String> {
+        self.row_cells
+            .iter()
+            .map(|cells| {
+                cells
+                    .iter()
+                    .filter(|c| c.meta.selectable)
+                    .map(|c| c.ch)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Map a navigation column (char index counting only selectable
+    /// cells) to a display column (char index in the full row).
+    pub fn nav_col_to_display_col(&self, row: usize, nav_col: usize) -> usize {
+        let Some(cells) = self.row_cells.get(row) else {
+            return nav_col;
+        };
+        let mut sel_count = 0;
+        for (i, cell) in cells.iter().enumerate() {
+            if cell.meta.selectable {
+                if sel_count == nav_col {
+                    return i;
+                }
+                sel_count += 1;
+            }
+        }
+        cells.len()
+    }
+
+    /// Map a display column (char index in the full row) to a
+    /// navigation column (char index among selectable cells only).
+    pub fn display_col_to_nav_col(&self, row: usize, display_col: usize) -> usize {
+        let Some(cells) = self.row_cells.get(row) else {
+            return display_col;
+        };
+        let mut sel_count = 0;
+        for (i, cell) in cells.iter().enumerate() {
+            if i >= display_col {
+                return sel_count;
+            }
+            if cell.meta.selectable {
+                sel_count += 1;
+            }
+        }
+        sel_count
+    }
+
+    /// Convert a byte offset in the nav text (`nav_rows().join("\n")`)
+    /// to a `(row, nav_col)` pair where `nav_col` is a char index among
+    /// selectable cells.
+    pub fn nav_byte_to_row_col(&self, byte: usize) -> (usize, usize) {
+        let mut acc = 0usize;
+        for (r, cells) in self.row_cells.iter().enumerate() {
+            let nav_row_len: usize = cells
+                .iter()
+                .filter(|c| c.meta.selectable)
+                .map(|c| c.ch.len_utf8())
+                .sum();
+            let row_end = acc + nav_row_len;
+            if byte <= row_end {
+                let mut col = 0;
+                let mut b = acc;
+                for cell in cells {
+                    if !cell.meta.selectable {
+                        continue;
+                    }
+                    if b >= byte {
+                        break;
+                    }
+                    b += cell.ch.len_utf8();
+                    col += 1;
+                }
+                return (r, col);
+            }
+            acc = row_end + 1; // +1 for \n separator
+        }
+        let last_row = self.row_cells.len().saturating_sub(1);
+        let last_col = self
+            .row_cells
+            .last()
+            .map(|c| c.iter().filter(|c| c.meta.selectable).count())
+            .unwrap_or(0);
+        (last_row, last_col)
+    }
+
+    /// Copy text from a byte range expressed in nav-buffer coordinates.
+    /// Converts to display `(row, col)` and delegates to `copy_range`
+    /// so `copy_as` substitutions are applied.
+    pub fn copy_nav_byte_range(&self, start: usize, end: usize) -> String {
+        let (sr, sc) = self.nav_byte_to_row_col(start);
+        let (er, ec) = self.nav_byte_to_row_col(end);
+        let sd = self.nav_col_to_display_col(sr, sc);
+        let ed = self.nav_col_to_display_col(er, ec);
+        self.copy_range(sr, sd, er, ed)
     }
 
     /// Map a display `(row, col)` position to a byte offset in the
@@ -376,15 +469,17 @@ impl Transcript {
         let mut row_of_block: HashMap<BlockId, Range<u16>> = HashMap::new();
 
         for i in 0..self.history.order.len() {
-            let gap = self.history.block_gap(i);
-            for _ in 0..gap {
-                rows.push(String::new());
-                row_cells.push(Vec::new());
-                soft_wrapped.push(false);
-                source_text.push(None);
-                block_of_row.push(None);
+            let block_rows = self.history.ensure_rows(i, base_key);
+            if block_rows > 0 {
+                let gap = self.history.block_gap(i);
+                for _ in 0..gap {
+                    rows.push(String::new());
+                    row_cells.push(Vec::new());
+                    soft_wrapped.push(false);
+                    source_text.push(None);
+                    block_of_row.push(None);
+                }
             }
-            let _ = self.history.ensure_rows(i, base_key);
             let id = self.history.order[i];
             let bkey = self.history.resolve_key(id, base_key);
             let start = rows.len() as u16;
@@ -750,5 +845,82 @@ mod tests {
         snap.source_text[0] = Some("hello world".into());
         snap.soft_wrapped[1] = true;
         assert_eq!(snap.copy_range(0, 0, 1, 5), "hello world");
+    }
+
+    #[test]
+    fn nav_rows_strips_non_selectable() {
+        let snap = make_snapshot(vec![vec![
+            non_selectable('│'),
+            non_selectable(' '),
+            cell('h'),
+            cell('i'),
+        ]]);
+        assert_eq!(snap.nav_rows(), vec!["hi"]);
+    }
+
+    #[test]
+    fn nav_rows_ignores_copy_as() {
+        let snap = make_snapshot(vec![vec![
+            copy_as('+', ""),
+            copy_as(' ', ""),
+            cell('a'),
+        ]]);
+        let nav = snap.nav_rows();
+        assert_eq!(nav, vec!["+ a"]);
+    }
+
+    #[test]
+    fn nav_col_to_display_col_skips_gutters() {
+        let snap = make_snapshot(vec![vec![
+            non_selectable('│'),
+            non_selectable(' '),
+            cell('h'),
+            cell('i'),
+        ]]);
+        assert_eq!(snap.nav_col_to_display_col(0, 0), 2);
+        assert_eq!(snap.nav_col_to_display_col(0, 1), 3);
+    }
+
+    #[test]
+    fn display_col_to_nav_col_skips_gutters() {
+        let snap = make_snapshot(vec![vec![
+            non_selectable('│'),
+            non_selectable(' '),
+            cell('h'),
+            cell('i'),
+        ]]);
+        assert_eq!(snap.display_col_to_nav_col(0, 0), 0);
+        assert_eq!(snap.display_col_to_nav_col(0, 1), 0);
+        assert_eq!(snap.display_col_to_nav_col(0, 2), 0);
+        assert_eq!(snap.display_col_to_nav_col(0, 3), 1);
+    }
+
+    #[test]
+    fn nav_byte_to_row_col_basic() {
+        let snap = make_snapshot(vec![
+            vec![non_selectable('│'), cell('a'), cell('b')],
+            vec![non_selectable('│'), cell('c'), cell('d')],
+        ]);
+        // nav text = "ab\ncd"
+        assert_eq!(snap.nav_byte_to_row_col(0), (0, 0)); // 'a'
+        assert_eq!(snap.nav_byte_to_row_col(1), (0, 1)); // 'b'
+        assert_eq!(snap.nav_byte_to_row_col(2), (0, 2)); // end of row 0
+        assert_eq!(snap.nav_byte_to_row_col(3), (1, 0)); // 'c'
+        assert_eq!(snap.nav_byte_to_row_col(4), (1, 1)); // 'd'
+    }
+
+    #[test]
+    fn copy_nav_byte_range_applies_copy_as() {
+        let snap = make_snapshot(vec![vec![
+            copy_as('+', ""),
+            copy_as(' ', ""),
+            cell('a'),
+            cell('d'),
+        ]]);
+        // nav text = "+ ad", copy_as makes '+' and ' ' copy as ""
+        // copy_nav_byte_range(0, 4) → all chars → copy_as applied
+        assert_eq!(snap.copy_nav_byte_range(0, 4), "ad");
+        // Only the last two selectable chars
+        assert_eq!(snap.copy_nav_byte_range(2, 4), "ad");
     }
 }

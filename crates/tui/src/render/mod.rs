@@ -759,7 +759,7 @@ impl BoxContext {
     /// Print the left border with color.
     pub fn print_left<S: layout_out::LayoutSink>(&self, out: &mut S) {
         out.push_fg(self.color);
-        out.print(self.left);
+        out.print_gutter(self.left);
         out.pop_style();
     }
 
@@ -767,10 +767,10 @@ impl BoxContext {
     pub fn print_right<S: layout_out::LayoutSink>(&self, out: &mut S, cols: usize) {
         let pad = self.inner_w.saturating_sub(cols);
         if pad > 0 {
-            out.print_string(" ".repeat(pad));
+            out.print_gutter(&" ".repeat(pad));
         }
         out.push_fg(self.color);
-        out.print(self.right);
+        out.print_gutter(self.right);
         out.pop_style();
     }
 }

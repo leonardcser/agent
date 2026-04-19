@@ -141,21 +141,14 @@ pub(super) fn render_highlighted<S: LayoutSink>(
         let visual_rows = split_regions_into_rows(out, &regions, max_content);
         for (vi, vrow) in visual_rows.iter().enumerate() {
             if total_rows >= skip && emitted < emit_limit {
-                let gutter_meta = super::display::SpanMeta {
-                    selectable: false,
-                    copy_as: None,
-                };
-                out.print_with_meta(indent, gutter_meta.clone());
+                out.print_gutter(indent);
                 if vi == 0 {
                     out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
-                    out.print_with_meta(
-                        &format!(" {:>w$}", i + 1, w = gutter_width),
-                        gutter_meta.clone(),
-                    );
+                    out.print_gutter(&format!(" {:>w$}", i + 1, w = gutter_width));
                     out.reset_style();
-                    out.print_with_meta("   ", gutter_meta);
+                    out.print_gutter("   ");
                 } else {
-                    out.print_with_meta(&blank_gutter, gutter_meta);
+                    out.print_gutter(&blank_gutter);
                 }
                 print_split_regions(out, vrow, None);
                 out.newline();
@@ -625,13 +618,9 @@ pub(super) fn print_cached_inline_diff<S: LayoutSink>(
         }
         match line {
             CachedDiffLine::Ellipsis => {
-                let gutter_meta = super::display::SpanMeta {
-                    selectable: false,
-                    copy_as: None,
-                };
-                out.print_with_meta(indent, gutter_meta.clone());
+                out.print_gutter(indent);
                 out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
-                out.print_with_meta(&format!("{:>w$}", "...", w = 1 + gutter_width), gutter_meta);
+                out.print_gutter(&format!("{:>w$}", "...", w = 1 + gutter_width));
                 out.reset_style();
                 out.newline();
             }
@@ -651,25 +640,20 @@ pub(super) fn print_cached_inline_diff<S: LayoutSink>(
                     ),
                     CachedDiffLine::Ellipsis => unreachable!(),
                 };
-                let gutter_meta = super::display::SpanMeta {
-                    selectable: false,
-                    copy_as: None,
-                };
                 for (vi, vrow) in visual_rows.iter().enumerate() {
-                    out.print_with_meta(indent, gutter_meta.clone());
+                    out.print_gutter(indent);
                     if let Some((ch, color)) = sign {
                         let bgv = bg.unwrap();
                         out.set_bg(bgv);
                         if vi == 0 {
                             out.set_fg(color);
-                            out.print_with_meta(
+                            out.print_gutter(
                                 &format!(" {:>w$} ", lineno, w = gutter_width),
-                                gutter_meta.clone(),
                             );
                             out.set_fg(color);
-                            out.print_with_meta(&format!("{} ", ch), gutter_meta.clone());
+                            out.print_gutter(&format!("{} ", ch));
                         } else {
-                            out.print_with_meta(&blank_gutter, gutter_meta.clone());
+                            out.print_gutter(&blank_gutter);
                         }
                         let _content_cols = print_cached_spans(out, vrow, bg);
                         out.fill_line_bg(bgv, right_margin as u16);
@@ -677,14 +661,13 @@ pub(super) fn print_cached_inline_diff<S: LayoutSink>(
                     } else {
                         if vi == 0 {
                             out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
-                            out.print_with_meta(
+                            out.print_gutter(
                                 &format!(" {:>w$}", lineno, w = gutter_width),
-                                gutter_meta.clone(),
                             );
                             out.reset_style();
-                            out.print_with_meta("   ", gutter_meta.clone());
+                            out.print_gutter("   ");
                         } else {
-                            out.print_with_meta(&blank_gutter, gutter_meta.clone());
+                            out.print_gutter(&blank_gutter);
                         }
                         print_cached_spans(out, vrow, None);
                     }
@@ -1053,10 +1036,10 @@ pub(crate) fn render_markdown_table<S: LayoutSink>(
             if let Some(b) = bctx {
                 b.print_left(out);
             } else if !indent.is_empty() {
-                out.print(indent);
+                out.print_gutter(indent);
             }
             bar(out, dim);
-            out.print("┃");
+            out.print_gutter("┃");
             reset(out, dim);
             let mut line_cols = 1; // "┃"
             for (c, width) in widths.iter().enumerate() {
@@ -1066,15 +1049,15 @@ pub(crate) fn render_markdown_table<S: LayoutSink>(
                     .map(|s| s.as_str())
                     .unwrap_or("");
                 let visual_len = strip_markdown_markers(text).width();
-                out.print(" ");
+                out.print_gutter(" ");
                 print_inline_styled(out, text, dim);
                 let pad = width.saturating_sub(visual_len);
                 if pad > 0 {
-                    out.print_string(" ".repeat(pad));
+                    out.print_gutter(&" ".repeat(pad));
                 }
-                out.print(" ");
+                out.print_gutter(" ");
                 bar(out, dim);
-                out.print("┃");
+                out.print_gutter("┃");
                 reset(out, dim);
                 line_cols += width + 3; // " content pad ┃"
             }
@@ -1092,21 +1075,21 @@ pub(crate) fn render_markdown_table<S: LayoutSink>(
             if let Some(b) = bctx {
                 b.print_left(out);
             } else if !indent.is_empty() {
-                out.print(indent);
+                out.print_gutter(indent);
             }
             bar(out, dim);
-            out.print(l);
+            out.print_gutter(l);
             let mut line_cols = 1; // "l"
             for (c, width) in widths.iter().enumerate() {
                 let seg = width + 2;
-                out.print_string("━".repeat(seg));
+                out.print_gutter(&"━".repeat(seg));
                 line_cols += seg;
                 if c + 1 < widths.len() {
-                    out.print(j);
+                    out.print_gutter(j);
                     line_cols += 1;
                 }
             }
-            out.print(r);
+            out.print_gutter(r);
             line_cols += 1;
             reset(out, dim);
             if let Some(b) = bctx {
@@ -1495,6 +1478,166 @@ fn emit_inline_nodes<S: LayoutSink>(out: &mut S, nodes: &[InlineNode]) {
             }
         }
     }
+}
+
+// ── Parse-then-wrap pipeline ─────────────────────────────────────────
+//
+// Inline markdown is parsed into styled spans FIRST, then wrapped by
+// display width. This preserves formatting across soft-wrap boundaries.
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct InlineStyle {
+    pub bold: bool,
+    pub italic: bool,
+    pub dim: bool,
+    pub crossedout: bool,
+    pub code: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct InlineSpan {
+    pub text: String,
+    pub style: InlineStyle,
+}
+
+pub(crate) fn parse_inline_spans(text: &str, dim: bool) -> Vec<InlineSpan> {
+    let chars: Vec<char> = text.chars().collect();
+    let nodes = parse_inline(&chars, 0, chars.len());
+    let base = InlineStyle { dim, ..Default::default() };
+    let mut out = Vec::new();
+    flatten_nodes_into(&nodes, &base, &mut out);
+    out
+}
+
+fn flatten_nodes_into(nodes: &[InlineNode], style: &InlineStyle, out: &mut Vec<InlineSpan>) {
+    for node in nodes {
+        match node {
+            InlineNode::Text(s) if !s.is_empty() => {
+                out.push(InlineSpan { text: s.clone(), style: style.clone() });
+            }
+            InlineNode::Text(_) => {}
+            InlineNode::Code(s) => {
+                out.push(InlineSpan {
+                    text: s.clone(),
+                    style: InlineStyle { code: true, ..*style },
+                });
+            }
+            InlineNode::Bold(ch) => {
+                flatten_nodes_into(ch, &InlineStyle { bold: true, ..*style }, out);
+            }
+            InlineNode::Italic(ch) => {
+                flatten_nodes_into(ch, &InlineStyle { italic: true, ..*style }, out);
+            }
+            InlineNode::BoldItalic(ch) => {
+                flatten_nodes_into(
+                    ch,
+                    &InlineStyle { bold: true, italic: true, ..*style },
+                    out,
+                );
+            }
+            InlineNode::Strike(ch) => {
+                flatten_nodes_into(ch, &InlineStyle { crossedout: true, ..*style }, out);
+            }
+        }
+    }
+}
+
+pub(crate) fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<InlineSpan>> {
+    use unicode_width::UnicodeWidthChar;
+
+    if max_cols == 0 || spans.is_empty() {
+        return vec![spans.to_vec()];
+    }
+
+    let mut rows: Vec<Vec<InlineSpan>> = Vec::new();
+    let mut cur_row: Vec<InlineSpan> = Vec::new();
+    let mut col = 0usize;
+
+    for span in spans {
+        let mut remaining = span.text.as_str();
+        while !remaining.is_empty() {
+            let word_end = remaining
+                .find(' ')
+                .map(|i| i + 1)
+                .unwrap_or(remaining.len());
+            let word = &remaining[..word_end];
+            remaining = &remaining[word_end..];
+
+            let word_width: usize = word.chars().map(|c| c.width().unwrap_or(0)).sum();
+
+            if col + word_width > max_cols && col > 0 {
+                rows.push(std::mem::take(&mut cur_row));
+                col = 0;
+            }
+
+            if word_width > max_cols {
+                for ch in word.chars() {
+                    let cw = ch.width().unwrap_or(0);
+                    if col + cw > max_cols && col > 0 {
+                        rows.push(std::mem::take(&mut cur_row));
+                        col = 0;
+                    }
+                    append_char_to_row(&mut cur_row, ch, &span.style);
+                    col += cw;
+                }
+            } else {
+                append_text_to_row(&mut cur_row, word, &span.style);
+                col += word_width;
+            }
+        }
+    }
+
+    if !cur_row.is_empty() || rows.is_empty() {
+        rows.push(cur_row);
+    }
+
+    rows
+}
+
+fn append_text_to_row(row: &mut Vec<InlineSpan>, text: &str, style: &InlineStyle) {
+    if let Some(last) = row.last_mut() {
+        if last.style == *style {
+            last.text.push_str(text);
+            return;
+        }
+    }
+    row.push(InlineSpan { text: text.to_string(), style: style.clone() });
+}
+
+fn append_char_to_row(row: &mut Vec<InlineSpan>, ch: char, style: &InlineStyle) {
+    if let Some(last) = row.last_mut() {
+        if last.style == *style {
+            last.text.push(ch);
+            return;
+        }
+    }
+    row.push(InlineSpan { text: ch.to_string(), style: style.clone() });
+}
+
+pub(crate) fn emit_inline_spans<S: LayoutSink>(out: &mut S, spans: &[InlineSpan]) {
+    use super::display::{ColorRole, ColorValue, SpanStyle};
+
+    for span in spans {
+        let style = SpanStyle {
+            fg: if span.style.code {
+                Some(ColorValue::Role(ColorRole::Accent))
+            } else {
+                None
+            },
+            bold: span.style.bold,
+            italic: span.style.italic,
+            dim: span.style.dim,
+            crossedout: span.style.crossedout,
+            ..Default::default()
+        };
+        out.push_style(style);
+        out.print(&span.text);
+        out.pop_style();
+    }
+}
+
+pub(crate) fn inline_spans_width(spans: &[InlineSpan]) -> usize {
+    spans.iter().map(|s| UnicodeWidthStr::width(s.text.as_str())).sum()
 }
 
 #[cfg(test)]

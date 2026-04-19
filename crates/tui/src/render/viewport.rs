@@ -6,9 +6,8 @@
 //! Increasing `scroll_offset` moves the viewport upward through older
 //! content; `max_scroll()` clamps to the top.
 //!
-//! When `total < viewport_rows`, the short content bottom-anchors with
-//! `leading_blanks = viewport_rows - total` empty rows at the top, matching
-//! `BlockHistory::paint_viewport` and `viewport_text`.
+//! When `total < viewport_rows`, content top-anchors: the first content
+//! line is at screen row 0, with trailing blank rows below.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ViewportGeom {
@@ -36,9 +35,9 @@ impl ViewportGeom {
         self.scroll_offset.min(self.max_scroll())
     }
 
-    /// Leading blank rows painted above the content when it's shorter
-    /// than the viewport (content bottom-anchors).
-    pub fn leading_blanks(&self) -> u16 {
+    /// Trailing blank rows below the content when it's shorter
+    /// than the viewport (content top-anchors).
+    pub fn trailing_blanks(&self) -> u16 {
         self.viewport_rows.saturating_sub(self.total)
     }
 
@@ -49,30 +48,31 @@ impl ViewportGeom {
         max.saturating_sub(self.clamped_scroll())
     }
 
+    /// Number of content rows visible in the viewport.
+    pub fn visible_content_rows(&self) -> u16 {
+        self.total.min(self.viewport_rows)
+    }
+
     /// Screen row for a buffer line index, or `None` if offscreen.
     /// Lines are 0-indexed from the top of the flattened buffer; the
     /// returned row is 0-indexed from the top of the viewport.
     pub fn row_of_line(&self, line_idx: u16) -> Option<u16> {
+        if line_idx >= self.total {
+            return None;
+        }
         let skip = self.skip_from_top();
-        let leading = self.leading_blanks();
         if line_idx < skip {
             return None;
         }
-        let offset = line_idx - skip;
-        let row = leading + offset;
+        let row = line_idx - skip;
         (row < self.viewport_rows).then_some(row)
     }
 
     /// Buffer line index for a screen row, or `None` if the row lands in
-    /// a leading blank (no content at that row).
+    /// a trailing blank (no content at that row).
     pub fn line_of_row(&self, row: u16) -> Option<u16> {
-        let leading = self.leading_blanks();
-        if row < leading {
-            return None;
-        }
-        let offset = row - leading;
         let skip = self.skip_from_top();
-        let line = skip.saturating_add(offset);
+        let line = skip.saturating_add(row);
         (line < self.total).then_some(line)
     }
 
@@ -101,22 +101,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn short_content_bottom_anchors() {
+    fn short_content_top_anchors() {
         let g = ViewportGeom::new(3, 10, 0);
-        assert_eq!(g.leading_blanks(), 7);
+        assert_eq!(g.trailing_blanks(), 7);
         assert_eq!(g.skip_from_top(), 0);
-        assert_eq!(g.row_of_line(0), Some(7));
-        assert_eq!(g.row_of_line(2), Some(9));
+        assert_eq!(g.row_of_line(0), Some(0));
+        assert_eq!(g.row_of_line(2), Some(2));
         assert_eq!(g.row_of_line(3), None);
-        assert_eq!(g.line_of_row(6), None); // leading blank
-        assert_eq!(g.line_of_row(7), Some(0));
-        assert_eq!(g.line_of_row(9), Some(2));
+        assert_eq!(g.line_of_row(0), Some(0));
+        assert_eq!(g.line_of_row(2), Some(2));
+        assert_eq!(g.line_of_row(3), None); // trailing blank
     }
 
     #[test]
-    fn exact_fit_no_leading_blanks() {
+    fn exact_fit_no_trailing_blanks() {
         let g = ViewportGeom::new(10, 10, 0);
-        assert_eq!(g.leading_blanks(), 0);
+        assert_eq!(g.trailing_blanks(), 0);
         assert_eq!(g.max_scroll(), 0);
         assert_eq!(g.row_of_line(0), Some(0));
         assert_eq!(g.row_of_line(9), Some(9));
@@ -158,7 +158,6 @@ mod tests {
     fn apply_growth_preserves_pin() {
         let mut g = ViewportGeom::new(20, 10, 5);
         g.apply_growth(3);
-        // Same content window still shown: skip_from_top stays 5.
         assert_eq!(g.total, 23);
         assert_eq!(g.scroll_offset, 8);
         assert_eq!(g.skip_from_top(), 5);
@@ -174,9 +173,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_buffer_all_leading_blanks() {
+    fn empty_buffer_all_trailing_blanks() {
         let g = ViewportGeom::new(0, 10, 0);
-        assert_eq!(g.leading_blanks(), 10);
+        assert_eq!(g.trailing_blanks(), 10);
         assert_eq!(g.row_of_line(0), None);
         for row in 0..10 {
             assert_eq!(g.line_of_row(row), None);
@@ -190,7 +189,6 @@ mod tests {
             let max = total.saturating_sub(viewport);
             for &scroll in &[0u16, 1, max.saturating_sub(1), max, max + 1] {
                 let g = ViewportGeom::new(total, viewport, scroll);
-                // row_of_line ∘ line_of_row = id for every onscreen row.
                 for row in 0..viewport {
                     if let Some(line) = g.line_of_row(row) {
                         assert_eq!(
@@ -200,7 +198,6 @@ mod tests {
                         );
                     }
                 }
-                // Lines before skip and past total map to None.
                 let skip = g.skip_from_top();
                 if skip > 0 {
                     assert_eq!(g.row_of_line(skip - 1), None);
@@ -208,7 +205,6 @@ mod tests {
                 if total > 0 {
                     assert_eq!(g.row_of_line(total), None);
                 }
-                // The clamp never produces scroll > max_scroll.
                 assert!(g.clamped_scroll() <= g.max_scroll());
             }
         }
@@ -217,7 +213,7 @@ mod tests {
     #[test]
     fn single_line_viewport_one() {
         let g = ViewportGeom::new(1, 1, 0);
-        assert_eq!(g.leading_blanks(), 0);
+        assert_eq!(g.trailing_blanks(), 0);
         assert_eq!(g.row_of_line(0), Some(0));
         assert_eq!(g.line_of_row(0), Some(0));
     }
@@ -225,33 +221,27 @@ mod tests {
     #[test]
     fn apply_growth_clamps_to_new_max() {
         let mut g = ViewportGeom::new(10, 10, 0);
-        // Viewport exactly filled — scroll==0 is stuck-to-bottom.
         g.apply_growth(100);
         assert_eq!(g.total, 110);
         assert!(g.stuck_to_bottom());
     }
 
     #[test]
-    fn leading_blank_click_snaps_to_first_line() {
-        // Regression: clicking a leading-blank row on a short buffer used
-        // to fall back to `total-1` (last line) via `unwrap_or`. The fix
-        // in `position_content_cursor_from_hit` snaps to the first line
-        // instead — exercise the geom invariant that backs it.
+    fn trailing_blank_click_returns_none() {
         let g = ViewportGeom::new(3, 10, 0);
-        // Rows 0..=6 are leading blanks.
-        for row in 0..7 {
+        // Content lines 0..=2 are on rows 0..=2.
+        assert_eq!(g.line_of_row(0), Some(0));
+        assert_eq!(g.line_of_row(2), Some(2));
+        // Rows 3..=9 are trailing blanks.
+        for row in 3..10 {
             assert_eq!(g.line_of_row(row), None, "row {row} should be blank");
         }
-        // Content lines 0..=2 are on rows 7..=9.
-        assert_eq!(g.line_of_row(7), Some(0));
     }
 
     #[test]
     fn zero_viewport_never_panics() {
         let g = ViewportGeom::new(10, 0, 5);
-        // With no visible rows, the concept of "which row is line N"
-        // is degenerate; just exercise the code paths don't panic.
-        assert_eq!(g.leading_blanks(), 0);
+        assert_eq!(g.trailing_blanks(), 0);
         let _ = g.line_of_row(0);
         let _ = g.row_of_line(0);
     }

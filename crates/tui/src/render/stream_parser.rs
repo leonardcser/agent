@@ -80,21 +80,10 @@ impl StreamParser {
             }
             if ch == '\n' {
                 let line = std::mem::take(&mut at.current_line);
-                if line.trim().is_empty() && !at.paragraph.is_empty() {
+                if !at.paragraph.is_empty() {
                     at.paragraph.push('\n');
-                    let para = std::mem::take(&mut at.paragraph);
-                    if let Some(id) = at.streaming_id.take() {
-                        history.rewrite(id, Block::Thinking { content: para });
-                        history.set_status(id, Status::Done);
-                    } else {
-                        history.push(Block::Thinking { content: para });
-                    }
-                } else {
-                    if !at.paragraph.is_empty() {
-                        at.paragraph.push('\n');
-                    }
-                    at.paragraph.push_str(&line);
                 }
+                at.paragraph.push_str(&line);
             } else {
                 at.current_line.push(ch);
             }

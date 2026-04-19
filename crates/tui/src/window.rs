@@ -109,13 +109,11 @@ pub struct TranscriptWindow {
     pub cursor_col: u16,
     /// When `Some`, the viewport is in "pinned" mode: new content
     /// arriving at the bottom pushes into scrollback instead of
-    /// shifting the visible rows. Pinning is *delta-based*, not
-    /// absolute-based — we remember the last-observed transcript
-    /// row count and each frame add its growth to `scroll_offset`.
-    /// This way the user can still scroll freely (wheel, j/k motion
-    /// past viewport edge) while pinned; user scroll updates
-    /// `scroll_offset` directly, and the pin only reacts to content
-    /// growing.
+    /// shifting the visible rows. Each frame the delta (positive or
+    /// negative) in total rows is applied to `scroll_offset`, so the
+    /// same content stays onscreen even when streaming markdown
+    /// changes shape (e.g. `**bold` rendered → width change →
+    /// row-count fluctuation).
     pub pinned_last_total: Option<u16>,
 }
 
@@ -222,12 +220,13 @@ impl TranscriptWindow {
             self.cursor_col = 0;
             return;
         }
+        if let Some(vim) = self.vim.as_mut() {
+            if vim.mode() != crate::vim::ViMode::Normal {
+                vim.set_mode(crate::vim::ViMode::Normal);
+            }
+        }
         let offsets = self.mount(rows);
         self.sync_from_cpos(rows, &offsets, viewport_rows);
-        // Seed `curswant` from the current display column so the very
-        // first `j`/`k` after focus preserves the column. Without this
-        // the first vertical motion collapses to column 0 because
-        // `curswant` is `None`.
         if self.cursor.curswant().is_none() {
             self.cursor.set_curswant(Some(self.cursor_col as usize));
         }
@@ -287,12 +286,9 @@ impl TranscriptWindow {
         let Some(last) = self.pinned_last_total else {
             return;
         };
-        // Pin semantics are "preserve visible rows while content grows
-        // below" — always carry the delta even when the pin is engaged
-        // at the bottom (e.g. selection while stuck).
-        let delta = total_rows.saturating_sub(last);
-        if delta > 0 {
-            self.scroll_offset = self.scroll_offset.saturating_add(delta);
+        let delta = total_rows as i32 - last as i32;
+        if delta != 0 {
+            self.scroll_offset = (self.scroll_offset as i32 + delta).max(0) as u16;
         }
         self.pinned_last_total = Some(total_rows);
     }
