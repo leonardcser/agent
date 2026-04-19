@@ -249,7 +249,7 @@ The scrollback-commit rendering model is dead. Alt-buffer repaints every frame; 
 - ✅ **A3** (commit/flush/scroll-mode vocabulary): `BlockHistory::render`, `flushed`-counter gating, `last_block_rows`, `suppress_leading_gap`, `pending_head_skip`, `scroll_up`, scroll-mode `newline` branch — all deleted. `paint_viewport` is the only block painter.
 - ✅ **A4** (obsolete tests): shipped.
 - ✅ **A5**: `draw_frame` fully deleted. `tick_dialog` → `draw_viewport_dialog_frame` (alt-buffer, reserves `dialog_height + 1 gap + 1 status` at the bottom of the viewport). `draw_prompt` + the one unit-test caller route through `draw_viewport_frame`.
-- ✅ **A6** (A6.1–A6.4): `DirtyRegions { transcript, prompt, status, overlay }` replaces `PromptState::dirty`. `mark_dirty()` sets all regions; typed methods `mark_transcript_dirty()`, `mark_prompt_dirty()`, `mark_status_dirty()`, `mark_overlay_dirty()` (also dirties transcript) added. ~60 call sites migrated to narrowest applicable region. `needs_draw` and both `draw_viewport_*` frame methods check/clear `DirtyRegions`. A6.3 (overlay dirty on completer dismiss) is structural — `mark_overlay_dirty()` automatically dirties transcript underneath. A6.4 (partial repaint skip) enabled by the paint split: `draw_viewport_frame` delegates to `paint_transcript` / `paint_transcript_cursor` / `paint_prompt_region`, each independently callable. `draw_viewport_dialog_frame` shares `paint_transcript` — no more duplicated scrollbar/ephemeral/viewport-text logic.
+- ✅ **A6** (A6.1–A6.4): Simplified to a single `dirty: bool` on `Screen` (always full repaint when dirty). The original `DirtyRegions` per-region model was over-engineered — partial repaints added complexity without meaningful perf benefit under alt-buffer. ~60 call sites migrated from `PromptDrawState::dirty` to `self.dirty = true`. `needs_draw` checks `has_new_blocks || self.dirty`. A6.4 paint split shipped: `draw_viewport_frame` delegates to `paint_transcript` / `paint_transcript_cursor` / `paint_prompt_region`. `draw_viewport_dialog_frame` shares `paint_transcript` — no more duplicated scrollbar/ephemeral/viewport-text logic. Stale completer overlay fix: `paint_viewport` no longer returns early when transcript is empty — blank-fill loop always runs to clear leftover content from previous frames.
 - ✅ **A1**: every stream now flows through streaming blocks via `push` + `rewrite` + `set_status(Done)`. `active_exec` + `active_thinking` + `active_text` (including the table and in-code-line cases) + `active_tools` + `active_agents` all ship as `Block::Exec` / `Block::Thinking` / `Block::Text` / `Block::CodeLine` / `Block::ToolCall` / `Block::Agent` in history. `Element::ActiveTool` and `render_tool`'s overlay callers are deleted; `render_ephemeral_into` is now just the aggregate thinking-summary widget (kept intentionally — it's a summary, not a stream). `has_ephemeral` gates solely on `active_thinking && !show_thinking`.
 
 ### A1 — Atomic `active_*` → `Streaming` blocks cutover
@@ -301,34 +301,21 @@ Do all five `active_*` migrations in **one** coherent patch, not per-variant dua
 
 **Deletes**: normal-mode dual-paint path, ~200 lines.
 
-### A6 — Region-based dirty tracking (nvim `w_redr_type` inspired)
+### A6 — Dirty tracking simplification + paint split
 
-Replace the single `prompt.dirty` bool with a per-region dirty model. The current design uses one bool (`prompt.dirty`) to mean "redraw the entire screen" — the name lies about its scope, and adding partial repaints or new overlay regions keeps hitting the same confusion.
+Replace the misleading `PromptDrawState::dirty` with a clean `dirty: bool` on `Screen`. Alt-buffer repaints are cheap (full frame every draw); per-region partial repaints add complexity without meaningful benefit.
 
-**Model:**
+**Shipped:**
 
-```rust
-struct DirtyRegions {
-    transcript: bool,   // viewport content needs repaint
-    prompt: bool,       // prompt/input area changed
-    status: bool,       // status bar / cmdline changed
-    overlay: bool,      // completer/menu overlay opened, closed, or changed
-}
-```
+1. ✅ **A6.1 — Single `dirty: bool` on `Screen`**: replaces `PromptDrawState::dirty`. All ~60 call sites migrated. `needs_draw` checks `has_new_blocks || self.dirty`. `mark_dirty()` sets `self.dirty = true`.
 
-**Sub-tasks:**
+2. ✅ **A6.2 — Stale overlay fix**: `paint_viewport` no longer early-returns when transcript is empty — the blank-fill loop always runs, clearing leftover content (completer overlay residue) from previous frames.
 
-1. **A6.1 — Introduce `DirtyRegions` struct on `Screen`**: replace `PromptDrawState::dirty` with `DirtyRegions`. All existing `mark_dirty()` callers set the appropriate region(s). `needs_draw()` checks any region being dirty.
+3. ✅ **A6.3 — Split `draw_viewport_frame` into composable paint functions**: `paint_transcript` (history + ephemeral + scrollbar + viewport text capture), `paint_transcript_cursor` (block cursor + visual selection), and `paint_prompt_region` (prompt sections + cmdline overlay). `draw_viewport_dialog_frame` shares `paint_transcript` — eliminates ~75 lines of duplicated scrollbar/ephemeral/viewport-text code.
 
-2. **A6.2 — Typed `mark_*_dirty` methods**: `mark_transcript_dirty()`, `mark_prompt_dirty()`, `mark_status_dirty()`, `mark_overlay_dirty()`. Each `mark_dirty()` call site migrated to the narrowest applicable method. The catch-all `mark_dirty()` stays as sugar that dirties all regions.
+**Deletes**: `PromptDrawState::dirty`; `DirtyRegions` (never shipped — simplified to single bool before landing); duplicated transcript paint in dialog frame path.
 
-3. **A6.3 — Overlay dirty on completer open/close**: when completer opens or closes, mark both `overlay` and `transcript` dirty (transcript rows underneath need repainting). This makes the "completer residue" bug structurally impossible.
-
-4. ✅ **A6.4 — Split `draw_viewport_frame` into composable paint functions**: `paint_transcript` (history + ephemeral + scrollbar + viewport text capture), `paint_transcript_cursor` (block cursor + visual selection), and `paint_prompt_region` (prompt sections + cmdline overlay). `draw_viewport_dialog_frame` shares `paint_transcript` — eliminates ~75 lines of duplicated scrollbar/ephemeral/viewport-text code. Each function is independently callable, enabling future dirty-flag gating.
-
-**Deletes**: `prompt.dirty` as a proxy for "anything changed"; the misleading `PromptDrawState::dirty` field.
-
-**Phase A done when**: `Screen` has no `active_*`, no `render_ephemeral_into`, no `extra_lines`, no `PurgeRedraw`, no "flush" counter, no scroll-mode newlining in normal paint. Every block renders through one path; every stream mutates blocks in place. Dirty tracking is region-scoped.
+**Phase A done when**: `Screen` has no `active_*`, no `render_ephemeral_into`, no `extra_lines`, no `PurgeRedraw`, no "flush" counter, no scroll-mode newlining in normal paint. Every block renders through one path; every stream mutates blocks in place. Dirty tracking is a single `dirty: bool` with always-full-repaint semantics.
 
 ---
 
@@ -365,7 +352,8 @@ Both completers render above their anchor (reversed order, nearest item at botto
 ### Other pending items
 
 - ✅ **Reverse completer results order** — nearest items at bottom. Done in `draw_completions`.
-- ✅ **Fix completer overlay residue on dismiss** — addressed structurally by A6 (region-based dirty tracking).
+- ✅ **Fix completer overlay residue on dismiss** — addressed by A6: `paint_viewport` always blank-fills unpainted viewport rows (no early return on empty transcript).
+- ✅ **Fix completer ctrl+j/k direction** — swapped `move_up`/`move_down` for Up/Down and Ctrl+J/K/N/P since completer now renders above the input (nearest item at bottom).
 - ⬜ **Copy raw markdown instead of rendered output** — selection copy should extract source markdown for assistant blocks. Requires source-text mapping from display cells back to block content.
 - ⬜ **Selection flicker during streaming** — when viewport is pinned and buffer grows, selection highlight flickers. Root cause: `cpos` is a byte offset into display text that changes each frame.
 - ✅ **Window-level gutters** (task #26) — `WindowGutters { pad_left, pad_right, scrollbar }` is the single source of truth. `content_width()` subtracts reservations. All paint paths, cursor math, and hit-testing use it. `gutter_bg` on `DisplayLine` lets blocks bleed background into the gutter column without the `pad_left=0` special case.
