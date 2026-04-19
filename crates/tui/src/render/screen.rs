@@ -1057,6 +1057,13 @@ impl Screen {
         rows
     }
 
+    /// Extract the full selectable text of the block at `abs_row`.
+    pub fn block_text_at_row(&mut self, abs_row: usize) -> Option<String> {
+        let tw = self.transcript_width() as u16;
+        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        snap.block_text_at(abs_row)
+    }
+
     /// Snap a transcript `(row, col)` to the nearest selectable cell.
     /// Returns the adjusted column, or the original if no snap needed.
     pub fn snap_col_to_selectable(&mut self, abs_row: usize, col: usize) -> usize {

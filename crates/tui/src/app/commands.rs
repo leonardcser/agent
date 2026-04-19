@@ -1,5 +1,31 @@
 use super::*;
 
+pub const BUILTIN_COMMANDS: &[&str] = &[
+    "exit",
+    "quit",
+    "clear",
+    "new",
+    "compact",
+    "resume",
+    "rewind",
+    "vim",
+    "thinking",
+    "export",
+    "agents",
+    "ps",
+    "permissions",
+    "fork",
+    "branch",
+    "model",
+    "settings",
+    "theme",
+    "color",
+    "stats",
+    "cost",
+    "btw",
+    "yank-block",
+];
+
 pub enum ExecEvent {
     Output(String),
     Done(Option<i32>),
@@ -238,6 +264,18 @@ impl App {
                     self.screen.mark_dirty();
                 } else {
                     self.screen.notify_error(format!("unknown color: {}", name));
+                }
+                CommandAction::Continue
+            }
+            "/yank-block" => {
+                let w = render::term_width();
+                let rows = self.screen.full_transcript_text(w);
+                let abs_row = self.transcript_window.cursor_abs_row(rows.len());
+                if let Some(text) = self.screen.block_text_at_row(abs_row) {
+                    let _ = copy_to_clipboard(&text);
+                    self.screen.notify("block copied".into());
+                } else {
+                    self.screen.notify_error("no block at cursor".into());
                 }
                 CommandAction::Continue
             }

@@ -157,6 +157,15 @@ impl TranscriptWindow {
         self.vim.is_some()
     }
 
+    /// Absolute row index (from top) of the cursor in the transcript.
+    pub fn cursor_abs_row(&self, total_rows: usize) -> usize {
+        if total_rows == 0 {
+            return 0;
+        }
+        let from_bottom = self.cursor_line as usize + self.scroll_offset as usize;
+        (total_rows - 1).saturating_sub(from_bottom)
+    }
+
     /// Current selection range (vim visual takes priority over
     /// shift-selection anchor). Returns byte offsets in `buffer.buf`.
     pub fn selection_range(&self) -> Option<(usize, usize)> {

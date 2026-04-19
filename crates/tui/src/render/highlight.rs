@@ -631,10 +631,7 @@ pub(super) fn print_cached_inline_diff<S: LayoutSink>(
                 };
                 out.print_with_meta(indent, gutter_meta.clone());
                 out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
-                out.print_with_meta(
-                    &format!("{:>w$}", "...", w = 1 + gutter_width),
-                    gutter_meta,
-                );
+                out.print_with_meta(&format!("{:>w$}", "...", w = 1 + gutter_width), gutter_meta);
                 out.reset_style();
                 out.newline();
             }

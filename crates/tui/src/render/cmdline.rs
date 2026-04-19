@@ -10,6 +10,12 @@ pub struct CmdlineState {
     history: Vec<String>,
     history_idx: Option<usize>,
     stash: String,
+    pub(crate) completion: Option<CompletionState>,
+}
+
+pub(crate) struct CompletionState {
+    matches: Vec<String>,
+    index: usize,
 }
 
 impl CmdlineState {
@@ -41,6 +47,7 @@ impl CmdlineState {
     pub fn insert_char(&mut self, ch: char) {
         self.buf.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
+        self.completion = None;
     }
 
     pub fn backspace(&mut self) {
@@ -52,6 +59,7 @@ impl CmdlineState {
                 .unwrap_or(0);
             self.buf.drain(prev..self.cursor);
             self.cursor = prev;
+            self.completion = None;
         }
     }
 
@@ -63,6 +71,7 @@ impl CmdlineState {
                 .map(|(i, _)| self.cursor + i)
                 .unwrap_or(self.buf.len());
             self.buf.drain(self.cursor..next);
+            self.completion = None;
         }
     }
 
@@ -99,6 +108,7 @@ impl CmdlineState {
             .unwrap_or(0);
         self.buf.drain(start..end);
         self.cursor = start;
+        self.completion = None;
     }
 
     pub fn move_start(&mut self) {
@@ -153,6 +163,40 @@ impl CmdlineState {
     pub fn reset_history_browse(&mut self) {
         self.history_idx = None;
         self.stash.clear();
+    }
+
+    /// Tab-complete the current buffer against `commands`. Cycles through
+    /// matches on repeated Tab presses; Shift-Tab cycles backwards.
+    pub fn complete(&mut self, commands: &[&str], reverse: bool) {
+        if let Some(ref mut cs) = self.completion {
+            if !cs.matches.is_empty() {
+                if reverse {
+                    cs.index = if cs.index == 0 {
+                        cs.matches.len() - 1
+                    } else {
+                        cs.index - 1
+                    };
+                } else {
+                    cs.index = (cs.index + 1) % cs.matches.len();
+                }
+                self.buf = cs.matches[cs.index].clone();
+                self.cursor = self.buf.len();
+            }
+            return;
+        }
+        let mut matches: Vec<String> = commands
+            .iter()
+            .filter(|c| c.starts_with(self.buf.as_str()))
+            .map(|c| c.to_string())
+            .collect();
+        matches.sort();
+        if matches.is_empty() {
+            return;
+        }
+        let index = 0;
+        self.buf = matches[index].clone();
+        self.cursor = self.buf.len();
+        self.completion = Some(CompletionState { matches, index });
     }
 
     pub fn render(&self, out: &mut RenderOut, width: u16, row: u16) {

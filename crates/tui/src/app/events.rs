@@ -322,8 +322,9 @@ impl App {
         if let Event::Key(k) = *ev {
             if let Some(chord) = crate::lua::chord_string(k) {
                 let ctx = self.build_lua_context();
+                let vim_mode = ctx.vim_mode.clone();
                 self.lua.set_context(ctx);
-                let handled = self.lua.run_keymap(&chord);
+                let handled = self.lua.run_keymap(&chord, vim_mode.as_deref());
                 self.lua.clear_context();
                 if handled {
                     for msg in self.lua.drain_notifications() {
@@ -983,7 +984,13 @@ impl App {
                 self.transcript_window.vim.is_some(),
                 self.transcript_window.vim.as_ref().map(|v| v.mode()),
             ),
-            crate::app::AppFocus::Prompt => (self.input.vim_enabled(), self.input.vim_mode()),
+            crate::app::AppFocus::Prompt => {
+                let mut mode = self.input.vim_mode();
+                if self.mouse_drag_active {
+                    mode = Some(crate::vim::ViMode::Visual);
+                }
+                (self.input.vim_enabled() || self.mouse_drag_active, mode)
+            }
         };
         self.screen
             .set_status_vim(status_vim_enabled, status_vim_mode);
@@ -2099,6 +2106,17 @@ impl App {
             (KeyCode::Char('u'), M::CONTROL) => {
                 self.screen.cmdline.buf.clear();
                 self.screen.cmdline.cursor = 0;
+                self.screen.cmdline.completion = None;
+                self.screen.mark_dirty();
+            }
+            (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
+                let reverse = k.code == KeyCode::BackTab;
+                let lua_cmds = self.lua.command_names();
+                let mut all: Vec<&str> = super::commands::BUILTIN_COMMANDS.to_vec();
+                for c in &lua_cmds {
+                    all.push(c);
+                }
+                self.screen.cmdline.complete(&all, reverse);
                 self.screen.mark_dirty();
             }
             (KeyCode::Char(ch), M::NONE | M::SHIFT) => {

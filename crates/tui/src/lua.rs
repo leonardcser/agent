@@ -11,8 +11,8 @@
 //!   handlers synchronously; errors are logged and the next handler
 //!   runs (handler-dead tracking defers to D6).
 //! - **D4 user-command + keymap registration** — registration stores
-//!   `LuaRef` handles keyed by name; the app dispatcher looks up a
-//!   name in the Lua registry first, then falls back to Rust commands.
+//!   `LuaRef` handles keyed by `(mode, chord)`; mode `"n"` matches
+//!   Normal, `"i"` Insert, `"v"` Visual, `""` matches any mode.
 //! - **D5 re-entrancy** — pending ops queue defers state mutations
 //!   until after the dispatching handler returns. `smelt.defer(ms, fn)`
 //!   posts to `pending_timers`; the tick loop fires them when due.
@@ -144,9 +144,9 @@ pub struct LuaRuntime {
     pub lua_errors: SharedVec<String>,
     /// User commands registered from Lua, keyed by command name.
     commands: SharedMap<String, LuaHandle>,
-    /// Key chord → handler mapping (global scope; scope-qualified
-    /// variants land in a later slice).
-    keymaps: SharedMap<String, LuaHandle>,
+    /// Key chord → handler mapping, keyed by `(mode, chord)`.
+    /// An empty mode string `""` matches any mode.
+    keymaps: SharedMap<(String, String), LuaHandle>,
     /// Autocmd handlers, keyed by event kind.
     autocmds: SharedMap<AutocmdEvent, Vec<LuaHandle>>,
     /// `smelt.defer(ms, fn)` timers. `Instant` is the due time; the
@@ -170,7 +170,7 @@ impl LuaRuntime {
         let pending: SharedVec<String> = Arc::new(Mutex::new(Vec::new()));
         let errors: SharedVec<String> = Arc::new(Mutex::new(Vec::new()));
         let commands: SharedMap<String, LuaHandle> = Arc::new(Mutex::new(HashMap::new()));
-        let keymaps: SharedMap<String, LuaHandle> = Arc::new(Mutex::new(HashMap::new()));
+        let keymaps: SharedMap<(String, String), LuaHandle> = Arc::new(Mutex::new(HashMap::new()));
         let autocmds: SharedMap<AutocmdEvent, Vec<LuaHandle>> =
             Arc::new(Mutex::new(HashMap::new()));
         let pending_timers: SharedVec<(Instant, LuaHandle)> = Arc::new(Mutex::new(Vec::new()));
@@ -222,7 +222,7 @@ impl LuaRuntime {
         lua: &Lua,
         pending: SharedVec<String>,
         commands: SharedMap<String, LuaHandle>,
-        keymaps: SharedMap<String, LuaHandle>,
+        keymaps: SharedMap<(String, String), LuaHandle>,
         autocmds: SharedMap<AutocmdEvent, Vec<LuaHandle>>,
         pending_timers: SharedVec<(Instant, LuaHandle)>,
         pending_commands: SharedVec<String>,
@@ -323,16 +323,12 @@ impl LuaRuntime {
         })?;
         smelt.set("clipboard", clipboard_fn)?;
 
-        // smelt.keymap(mode, chord, fn) — store the chord → handler
-        // mapping. Mode is accepted for nvim-parity but currently
-        // unused; a future slice resolves it against the keymap
-        // layering (block → buffer → window → global).
         let keymaps_clone = keymaps.clone();
         let keymap_fn = lua.create_function(
-            move |lua, (_mode, chord, handler): (String, String, mlua::Function)| {
+            move |lua, (mode, chord, handler): (String, String, mlua::Function)| {
                 let key = lua.create_registry_value(handler)?;
                 if let Ok(mut map) = keymaps_clone.lock() {
-                    map.insert(chord, LuaHandle { key, dead: false });
+                    map.insert((mode, chord), LuaHandle { key, dead: false });
                 }
                 Ok(())
             },
@@ -448,13 +444,25 @@ impl LuaRuntime {
         true
     }
 
-    /// Dispatch a keymap chord to any Lua-registered handler. Returns
-    /// `true` when a handler ran.
-    pub fn run_keymap(&self, chord: &str) -> bool {
+    /// Dispatch a keymap chord to any Lua-registered handler. `current_mode`
+    /// is the vim mode name (e.g. "Normal", "Insert", "Visual") or `None`
+    /// when vim mode is disabled. A handler registered with mode `""` matches
+    /// any mode; `"n"` matches Normal, `"i"` Insert, `"v"` Visual.
+    pub fn run_keymap(&self, chord: &str, current_mode: Option<&str>) -> bool {
         let Ok(map) = self.keymaps.lock() else {
             return false;
         };
-        let Some(handle) = map.get(chord) else {
+        // Try mode-specific match first, then wildcard ""
+        let mode_char = current_mode.map(|m| match m {
+            "Normal" => "n",
+            "Insert" => "i",
+            "Visual" => "v",
+            _ => "n",
+        });
+        let handle = mode_char
+            .and_then(|mc| map.get(&(mc.to_string(), chord.to_string())))
+            .or_else(|| map.get(&(String::new(), chord.to_string())));
+        let Some(handle) = handle else {
             return false;
         };
         if handle.dead {
@@ -626,9 +634,32 @@ mod tests {
             )
             .exec()
             .expect("exec");
-        assert!(rt.run_keymap("<C-g>"));
+        // Mode "n" matches Normal
+        assert!(rt.run_keymap("<C-g>", Some("Normal")));
         assert_eq!(rt.drain_notifications(), vec!["ctrl-g".to_string()]);
-        assert!(!rt.run_keymap("<C-x>"));
+        // Wrong mode doesn't match
+        assert!(!rt.run_keymap("<C-g>", Some("Insert")));
+        // Unregistered chord
+        assert!(!rt.run_keymap("<C-x>", Some("Normal")));
+    }
+
+    #[test]
+    fn keymap_wildcard_mode() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                    smelt.keymap("", "<C-h>", function()
+                        smelt.notify("any-mode")
+                    end)
+                "#,
+            )
+            .exec()
+            .expect("exec");
+        assert!(rt.run_keymap("<C-h>", Some("Normal")));
+        assert_eq!(rt.drain_notifications(), vec!["any-mode".to_string()]);
+        assert!(rt.run_keymap("<C-h>", Some("Insert")));
+        assert!(rt.run_keymap("<C-h>", None));
     }
 
     #[test]

@@ -241,19 +241,13 @@ impl TranscriptSnapshot {
         for (r, row) in self.rows.iter().enumerate() {
             let row_end = acc + row.len();
             if byte <= row_end {
-                let col = row[..byte.saturating_sub(acc)]
-                    .chars()
-                    .count();
+                let col = row[..byte.saturating_sub(acc)].chars().count();
                 return (r, col);
             }
             acc = row_end + 1; // +1 for the `\n` join separator
         }
         let last_row = self.rows.len().saturating_sub(1);
-        let last_col = self
-            .rows
-            .last()
-            .map(|r| r.chars().count())
-            .unwrap_or(0);
+        let last_col = self.rows.last().map(|r| r.chars().count()).unwrap_or(0);
         (last_row, last_col)
     }
 
@@ -265,6 +259,30 @@ impl TranscriptSnapshot {
         let (sr, sc) = self.byte_to_row_col(start);
         let (er, ec) = self.byte_to_row_col(end);
         self.copy_range(sr, sc, er, ec)
+    }
+
+    /// Extract the selectable text of the block at `abs_row`. Uses
+    /// `block_of_row` to find the block, then `row_of_block` for its
+    /// full row range, and `copy_range` to get SpanMeta-aware text.
+    pub fn block_text_at(&self, abs_row: usize) -> Option<String> {
+        let block_id = (*self.block_of_row.get(abs_row)?)?;
+        let range = self.row_of_block.get(&block_id)?;
+        let start_row = range.start as usize;
+        let end_row = (range.end as usize).saturating_sub(1);
+        if end_row < start_row || start_row >= self.row_cells.len() {
+            return None;
+        }
+        let end_col = self
+            .row_cells
+            .get(end_row)
+            .map(|c| c.len().saturating_sub(1))
+            .unwrap_or(0);
+        let text = self.copy_range(start_row, 0, end_row, end_col);
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
     }
 
     /// Snap a `(row, col)` position to the nearest selectable cell,
@@ -1354,11 +1372,7 @@ mod tests {
 
     #[test]
     fn snap_to_selectable_direct_hit() {
-        let snap = make_snapshot(vec![vec![
-            non_selectable('│'),
-            cell('a'),
-            cell('b'),
-        ]]);
+        let snap = make_snapshot(vec![vec![non_selectable('│'), cell('a'), cell('b')]]);
         assert_eq!(snap.snap_to_selectable(0, 1), Some((0, 1)));
     }
 
@@ -1384,10 +1398,7 @@ mod tests {
 
     #[test]
     fn snap_to_selectable_none() {
-        let snap = make_snapshot(vec![vec![
-            non_selectable('│'),
-            non_selectable(' '),
-        ]]);
+        let snap = make_snapshot(vec![vec![non_selectable('│'), non_selectable(' ')]]);
         assert_eq!(snap.snap_to_selectable(0, 0), None);
     }
 }
