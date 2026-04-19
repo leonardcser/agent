@@ -42,6 +42,10 @@ pub(crate) trait LayoutSink {
     /// Both sinks emit/store the fill before the next `newline()` call.
     fn fill_line_bg(&mut self, bg: ColorValue, right_margin: u16);
 
+    /// Set the gutter background for the current line. Paint-time gutter
+    /// padding will be filled with this color instead of blank spaces.
+    fn set_gutter_bg(&mut self, _bg: ColorValue) {}
+
     /// Number of visible columns printed on the current row since the
     /// last `newline()`. Used by helpers that need to compute padding
     /// against the row width.
@@ -250,6 +254,10 @@ impl LayoutSink for SpanCollector {
         );
         self.cur_line.fill_bg = Some(bg);
         self.cur_line.fill_right_margin = right_margin;
+    }
+
+    fn set_gutter_bg(&mut self, bg: ColorValue) {
+        self.cur_line.gutter_bg = Some(bg);
     }
 
     fn cur_line_cols(&self) -> u16 {

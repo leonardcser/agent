@@ -29,6 +29,12 @@ pub struct DisplayLine {
     /// Optional bg color that extends from end-of-spans to
     /// `term_width - right_margin` at paint time. Used by diff and code
     /// rows to fill the row with a background color.
+    /// Optional bg color for the left gutter column(s). When set,
+    /// `paint_line` fills the gutter with this color instead of blank
+    /// spaces. Used by User blocks whose background bleeds into the
+    /// gutter while content stays in content-rect coords.
+    #[serde(default)]
+    pub gutter_bg: Option<ColorValue>,
     #[serde(default)]
     pub fill_bg: Option<ColorValue>,
     /// Width (in display columns) reserved on the right side when

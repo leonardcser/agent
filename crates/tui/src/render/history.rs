@@ -811,12 +811,6 @@ impl BlockHistory {
                 painted += 1;
             }
             let id = self.order[i];
-            let block = &self.blocks[&id];
-            let block_pad = if matches!(block, Block::User { .. }) {
-                0
-            } else {
-                pad_left
-            };
             let bkey = self.resolve_key(id, key);
             let display = self.artifacts.get(&id).and_then(|a| a.get(bkey));
             let Some(display) = display else { continue };
@@ -828,7 +822,7 @@ impl BlockHistory {
                 if painted >= viewport_rows {
                     break 'blocks;
                 }
-                super::paint::paint_line(out, line, &pctx, block_pad);
+                super::paint::paint_line(out, line, &pctx, pad_left);
                 painted += 1;
             }
         }

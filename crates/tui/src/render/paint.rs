@@ -27,11 +27,17 @@ pub(super) fn paint_line(
     pad_left: u16,
 ) {
     if pad_left > 0 {
+        if let Some(gbg) = line.gutter_bg {
+            out.set_bg_only(Some(resolve(gbg, ctx.theme, true)));
+        }
         let mut remaining = pad_left as usize;
         while remaining > 0 {
             let chunk = remaining.min(PAD_SPACES.len());
             out.print(&PAD_SPACES[..chunk]);
             remaining -= chunk;
+        }
+        if line.gutter_bg.is_some() {
+            out.set_bg_only(None);
         }
     }
     let mut visible_cols: u16 = pad_left;

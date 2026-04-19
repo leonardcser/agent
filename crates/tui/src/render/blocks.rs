@@ -69,6 +69,7 @@ fn apply_view_state(display: &mut super::display::DisplayBlock, state: ViewState
                 },
                 meta: Default::default(),
             }],
+            gutter_bg: None,
             fill_bg: None,
             fill_right_margin: 0,
         }
@@ -277,9 +278,6 @@ pub(super) fn render_block<S: LayoutSink>(
     match block {
         Block::User { text, image_labels } => {
             let is_command = crate::completer::Completer::is_command(text.trim());
-            // Each row: " " (1-char inner pad) + content + trailing pad.
-            // The block gets pad_left=0 at paint time so bg starts at col 0;
-            // the inner " " gives visual breathing room inside the bg bar.
             let text_w = width.saturating_sub(2).max(1);
             let all_lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
             let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
@@ -319,6 +317,7 @@ pub(super) fn render_block<S: LayoutSink>(
                     out.set_bg(user_bg);
                     out.print_with_meta(&" ".repeat(fill), pad_meta.clone());
                     out.reset_style();
+                    out.set_gutter_bg(user_bg);
                     out.newline();
                     rows += 1;
                     continue;
@@ -340,6 +339,7 @@ pub(super) fn render_block<S: LayoutSink>(
                     print_user_highlights(out, chunk, image_labels, is_command);
                     out.print_with_meta(&" ".repeat(trailing), pad_meta.clone());
                     out.reset_style();
+                    out.set_gutter_bg(user_bg);
                     out.newline();
                     rows += 1;
                 }
