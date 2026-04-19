@@ -1634,58 +1634,19 @@ impl Screen {
         }
     }
 
-    /// Flat-line viewport draw path.
-    ///
-    /// Repaints the entire screen every frame: a top region that holds
-    /// the transcript (history + any active streaming content) and the
-    /// prompt stack at the bottom. `scroll_offset` (in rows) shifts the
-    /// transcript slice upward (0 = stuck to bottom).
-    ///
-    /// Returns the clamped scroll offset (so the caller can normalize
-    /// its `history_scroll_offset` back to a valid range).
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw_viewport_frame(
+    /// Paint the transcript region: history blocks, ephemeral tail,
+    /// scrollbar, viewport text capture. Shared between the normal
+    /// viewport frame and the dialog frame.
+    fn paint_transcript(
         &mut self,
         out: &mut RenderOut,
         width: usize,
-        prompt: FramePrompt<'_>,
+        viewport_rows: u16,
         scroll_offset: u16,
-        history_cursor_line: u16,
-        history_cursor_col: u16,
-        visual_range: Option<ContentVisualRange>,
-    ) -> (u16, u16, u16) {
-        let _perf = crate::perf::begin("render:viewport_frame");
-        self.refresh_cursor_owner();
-        self.update_spinner();
-
-        let (term_w, term_h) = self.size();
-        out.init_cursor(0, term_w, term_h);
-
-        out.row = Some(0);
-        out.move_to(0, 0);
-
-        let natural_prompt_height =
-            self.measure_prompt_height(prompt.state, width, prompt.queued, prompt.prediction);
-        self.layout = super::layout::LayoutState::compute(&super::layout::LayoutInput {
-            term_width: term_w,
-            term_height: term_h,
-            prompt_height: natural_prompt_height,
-            dialog_height: None,
-            constrain_dialog: false,
-        });
-        let viewport_rows = self.layout.viewport_rows();
-        let prompt_height = self.layout.prompt.height;
-        let gap_rows = self.layout.gap;
-
-        // Reserve gutter columns (padding + scrollbar track) so the bar
-        // never overpaints transcript content. Layout width must match
-        // across total_rows / paint / viewport_text or mouse hit-testing
-        // drifts relative to what's actually drawn. The transcript
-        // window's `gutters` carry the authoritative reservation.
+    ) -> u16 {
         let gutters = self.transcript_gutters;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
 
-        // Build ephemeral tail (streaming overlays) as a flat DisplayBlock.
         let ephemeral_lines: Vec<crate::render::display::DisplayLine> = if self.has_ephemeral() {
             let mut col = SpanCollector::new(tw as u16);
             self.render_ephemeral_into(&mut col, tw);
@@ -1694,9 +1655,6 @@ impl Screen {
             Vec::new()
         };
 
-        // Compute total transcript rows for scrollbar + viewport geometry.
-        // The snapshot is cached; accessing it here ensures layout is warm
-        // before paint_viewport runs.
         let snapshot_total = self
             .transcript
             .snapshot(tw as u16, self.show_thinking)
@@ -1704,10 +1662,6 @@ impl Screen {
             .len() as u16;
         let total_transcript_rows = snapshot_total.saturating_add(ephemeral_lines.len() as u16);
 
-        // Paint transcript slice (history + ephemeral tail) into the
-        // viewport. We always repaint — keeping the viewport visually
-        // stable during selection is handled by the caller pinning
-        // `scroll_offset`, not by skipping the paint.
         let clamped = self.transcript.history.paint_viewport(
             out,
             tw,
@@ -1719,15 +1673,12 @@ impl Screen {
             gutters.pad_left,
         );
 
-        // Scrollbar on the rightmost column, matching the prompt.
-        // Visible whenever content overflows the viewport so the user
-        // has a predictable target to click / drag.
-        let geom =
-            super::viewport::ViewportGeom::new(total_transcript_rows, viewport_rows, clamped);
-        let scrollbar_col = match self.transcript_gutters.scrollbar {
+        let scrollbar_col = match gutters.scrollbar {
             Some(crate::window::GutterSide::Left) => 0,
             _ => (width as u16).saturating_sub(1),
         };
+        let geom =
+            super::viewport::ViewportGeom::new(total_transcript_rows, viewport_rows, clamped);
         let scrollbar_geom: Option<super::region::ScrollbarGeom> = if geom.max_scroll() > 0 {
             let max_scroll = geom.max_scroll() as usize;
             let inverted = max_scroll.saturating_sub(clamped as usize);
@@ -1746,6 +1697,7 @@ impl Screen {
         } else {
             None
         };
+
         self.last_transcript_viewport = Some(super::region::Viewport {
             top_row: 0,
             rows: viewport_rows,
@@ -1754,13 +1706,10 @@ impl Screen {
             scroll_offset: clamped,
             scrollbar: scrollbar_geom,
         });
-        // Record plain text for the content pane's motion handlers.
+
         {
             let snap = self.transcript.snapshot(tw as u16, self.show_thinking);
             let mut vt = snap.viewport_rows(viewport_rows, clamped);
-            // Append ephemeral lines (hidden-thinking summary) — they
-            // participate in the viewport text for vim motions but are
-            // not part of the cached snapshot.
             if !ephemeral_lines.is_empty() {
                 for line in &ephemeral_lines {
                     let mut s = String::new();
@@ -1774,49 +1723,63 @@ impl Screen {
             self.last_viewport_text = vt;
         }
 
-        // Overlay visual selection highlighting before drawing the cursor.
+        self.transcript.history.flushed = self.transcript.history.order.len();
+        clamped
+    }
+
+    /// Paint the transcript cursor (block cursor in content pane) and
+    /// visual selection overlay.
+    fn paint_transcript_cursor(
+        &self,
+        out: &mut RenderOut,
+        width: usize,
+        viewport_rows: u16,
+        history_cursor_line: u16,
+        history_cursor_col: u16,
+        visual_range: Option<&ContentVisualRange>,
+    ) -> (u16, u16) {
+        let gutters = self.transcript_gutters;
+        let tw = (gutters.content_width(width as u16) as usize).max(1);
+
         if let Some(range) = visual_range {
-            self.paint_visual_range(out, viewport_rows, tw as u16, &range);
+            self.paint_visual_range(out, viewport_rows, tw as u16, range);
         }
 
-        // When the content pane has focus, paint a block cursor at
-        // (col, row) within the viewport using the same colors as the
-        // prompt's soft cursor. `history_cursor_line` is the
-        // bottom-relative row (0 = bottom row of the viewport); the
-        // painter writes in top-down coords.
-        let (clamped_cursor_line, clamped_cursor_col) =
-            if self.cursor_owner == CursorOwner::Transcript && viewport_rows > 0 {
-                let max_line = viewport_rows.saturating_sub(1);
-                let line = history_cursor_line.min(max_line);
-                let max_col = (tw as u16).saturating_sub(1);
-                let col = history_cursor_col.min(max_col);
-                let cursor_row = viewport_rows.saturating_sub(1 + line);
-                let under: String = self
-                    .last_viewport_text
-                    .get(cursor_row as usize)
-                    .map(|row| {
-                        let byte = crate::text_utils::cell_to_byte(row, col as usize);
-                        row[byte..].chars().next()
-                    })
-                    .and_then(|c| c)
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| " ".to_string());
-                // Offset by the left gutter so the cursor lands on the
-                // glyph inside the content rect (viewport_text holds pure
-                // content; the gutter is unstyled padding painted at
-                // col 0..pad_left by `paint_viewport`).
-                draw_soft_cursor(out, col + gutters.pad_left, cursor_row, &under);
-                (line, col)
-            } else {
-                (history_cursor_line, history_cursor_col)
-            };
+        if self.cursor_owner == CursorOwner::Transcript && viewport_rows > 0 {
+            let max_line = viewport_rows.saturating_sub(1);
+            let line = history_cursor_line.min(max_line);
+            let max_col = (tw as u16).saturating_sub(1);
+            let col = history_cursor_col.min(max_col);
+            let cursor_row = viewport_rows.saturating_sub(1 + line);
+            let under: String = self
+                .last_viewport_text
+                .get(cursor_row as usize)
+                .map(|row| {
+                    let byte = crate::text_utils::cell_to_byte(row, col as usize);
+                    row[byte..].chars().next()
+                })
+                .and_then(|c| c)
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| " ".to_string());
+            draw_soft_cursor(out, col + gutters.pad_left, cursor_row, &under);
+            (line, col)
+        } else {
+            (history_cursor_line, history_cursor_col)
+        }
+    }
 
-        // Paint prompt stack at the bottom, leaving the gap row blank.
-        // Reset any lingering styling from the transcript paint above so
-        // the prompt starts from a clean default state.
+    /// Paint the prompt stack (input lines + status bar) and any
+    /// cmdline completer overlay.
+    fn paint_prompt_region(
+        &mut self,
+        out: &mut RenderOut,
+        width: usize,
+        prompt: &FramePrompt<'_>,
+        viewport_rows: u16,
+        gap_rows: u16,
+        prompt_height: u16,
+    ) {
         out.reset_style();
-        // Explicitly blank the gap row so stale residue from previous
-        // frames doesn't leak through.
         if gap_rows > 0 {
             out.move_to(0, viewport_rows);
             let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
@@ -1834,9 +1797,6 @@ impl Screen {
             prompt_height as usize,
         );
 
-        // Cmdline completer overlay: paint above the status/cmdline row.
-        // Use actual rows (not budget) for positioning so the overlay
-        // anchors flush against the status bar, growing upward.
         if self.cmdline.active {
             let actual = completion_actual_rows(self.cmdline.completer.as_ref());
             if actual > 0 {
@@ -1874,17 +1834,66 @@ impl Screen {
             }
         }
 
-        // State so other paths don't think they need to repaint.
         self.prompt.drawn = true;
-        self.dirty.clear();
         self.prompt.prev_rows = prompt_height;
-        self.prompt.anchor_row = Some(prompt_top);
-        self.prompt.prev_dialog_row = Some(prompt_top);
+        self.prompt.anchor_row = Some(viewport_rows + gap_rows);
+        self.prompt.prev_dialog_row = Some(viewport_rows + gap_rows);
         self.prompt.prev_prompt_ui_rows = prompt_height;
+    }
+
+    /// Flat-line viewport draw path. Paints transcript in the top
+    /// region, prompt stack at the bottom. Returns `(clamped_scroll,
+    /// cursor_line, cursor_col)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_viewport_frame(
+        &mut self,
+        out: &mut RenderOut,
+        width: usize,
+        prompt: FramePrompt<'_>,
+        scroll_offset: u16,
+        history_cursor_line: u16,
+        history_cursor_col: u16,
+        visual_range: Option<ContentVisualRange>,
+    ) -> (u16, u16, u16) {
+        let _perf = crate::perf::begin("render:viewport_frame");
+        self.refresh_cursor_owner();
+        self.update_spinner();
+
+        let (term_w, term_h) = self.size();
+        out.init_cursor(0, term_w, term_h);
+
+        let natural_prompt_height =
+            self.measure_prompt_height(prompt.state, width, prompt.queued, prompt.prediction);
+        self.layout = super::layout::LayoutState::compute(&super::layout::LayoutInput {
+            term_width: term_w,
+            term_height: term_h,
+            prompt_height: natural_prompt_height,
+            dialog_height: None,
+            constrain_dialog: false,
+        });
+        let viewport_rows = self.layout.viewport_rows();
+        let prompt_height = self.layout.prompt.height;
+        let gap_rows = self.layout.gap;
+
+        out.row = Some(0);
+        out.move_to(0, 0);
+
+        let clamped = self.paint_transcript(out, width, viewport_rows, scroll_offset);
+
+        let (clamped_cursor_line, clamped_cursor_col) = self.paint_transcript_cursor(
+            out,
+            width,
+            viewport_rows,
+            history_cursor_line,
+            history_cursor_col,
+            visual_range.as_ref(),
+        );
+
+        self.paint_prompt_region(out, width, &prompt, viewport_rows, gap_rows, prompt_height);
+
+        self.dirty.clear();
         self.content_start_row = Some(0);
         self.has_scrollback = false;
-        // Fully flushed — every frame re-renders everything.
-        self.transcript.history.flushed = self.transcript.history.order.len();
 
         (clamped, clamped_cursor_line, clamped_cursor_col)
     }
@@ -1911,7 +1920,6 @@ impl Screen {
         let has_ephemeral = self.has_ephemeral();
         let dialog_height_changed = dialog_height != self.prompt.prev_dialog_height;
 
-        // Fast path: nothing changed, return cached placement.
         if self.prompt.drawn
             && !has_new_blocks
             && !dialog_height_changed
@@ -1940,92 +1948,10 @@ impl Screen {
         out.row = Some(0);
         out.move_to(0, 0);
 
-        let gutters = self.transcript_gutters;
-        let tw = (gutters.content_width(width as u16) as usize).max(1);
+        self.paint_transcript(out, width, viewport_rows, 0);
 
-        // Build ephemeral tail.
-        let ephemeral_lines: Vec<crate::render::display::DisplayLine> = if has_ephemeral {
-            let mut col = SpanCollector::new(tw as u16);
-            self.render_ephemeral_into(&mut col, tw);
-            col.finish().lines
-        } else {
-            Vec::new()
-        };
-
-        let snapshot_total = self
-            .transcript
-            .snapshot(tw as u16, self.show_thinking)
-            .rows
-            .len() as u16;
-        let total_transcript_rows = snapshot_total.saturating_add(ephemeral_lines.len() as u16);
-
-        let clamped = self.transcript.history.paint_viewport(
-            out,
-            tw,
-            self.show_thinking,
-            0,
-            viewport_rows,
-            0,
-            &ephemeral_lines,
-            gutters.pad_left,
-        );
-
-        // Scrollbar on the rightmost column over the transcript region.
-        let scrollbar_col = match self.transcript_gutters.scrollbar {
-            Some(crate::window::GutterSide::Left) => 0,
-            _ => (width as u16).saturating_sub(1),
-        };
-        let dialog_geom =
-            super::viewport::ViewportGeom::new(total_transcript_rows, viewport_rows, clamped);
-        let scrollbar_geom: Option<super::region::ScrollbarGeom> = if dialog_geom.max_scroll() > 0 {
-            let max_scroll = dialog_geom.max_scroll() as usize;
-            let inverted = max_scroll.saturating_sub(clamped as usize);
-            let scrollbar = super::scrollbar::Scrollbar::new(
-                total_transcript_rows as usize,
-                viewport_rows as usize,
-                inverted,
-            );
-            super::scrollbar::paint_column(out, scrollbar_col, 0, viewport_rows, &scrollbar);
-            Some(super::region::ScrollbarGeom {
-                col: scrollbar_col,
-                top_row: 0,
-                rows: viewport_rows,
-                total_rows: total_transcript_rows,
-            })
-        } else {
-            None
-        };
-        self.last_transcript_viewport = Some(super::region::Viewport {
-            top_row: 0,
-            rows: viewport_rows,
-            content_width: tw as u16,
-            total_rows: total_transcript_rows,
-            scroll_offset: clamped,
-            scrollbar: scrollbar_geom,
-        });
-        {
-            let snap = self.transcript.snapshot(tw as u16, self.show_thinking);
-            let mut vt = snap.viewport_rows(viewport_rows, clamped);
-            if !ephemeral_lines.is_empty() {
-                for line in &ephemeral_lines {
-                    let mut s = String::new();
-                    for span in &line.spans {
-                        s.push_str(&span.text);
-                    }
-                    vt.push(s);
-                }
-                vt.truncate(viewport_rows as usize);
-            }
-            self.last_viewport_text = vt;
-        }
-
-        // Clear the band below the transcript down to (but excluding)
-        // the status bar so stale prompt/dialog residue from prior
-        // frames can't leak through. Status bar is painted by the
-        // caller via `queue_status_line` at `term_h - 1`.
         out.reset_style();
         if viewport_rows < term_h {
-            out.move_to(0, viewport_rows);
             for row in viewport_rows..term_h {
                 out.move_to(0, row);
                 let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
@@ -2043,7 +1969,6 @@ impl Screen {
         self.prompt.prev_prompt_ui_rows = 0;
         self.content_start_row = Some(0);
         self.has_scrollback = false;
-        self.transcript.history.flushed = self.transcript.history.order.len();
 
         let placement = if let Some(d) = &self.layout.dialog {
             let rect = d.rect;
