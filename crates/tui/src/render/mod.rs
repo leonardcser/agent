@@ -16,6 +16,7 @@ mod screen;
 mod scrollbar;
 mod selection;
 mod status;
+mod stream_parser;
 pub(crate) mod transcript;
 mod viewport;
 mod working;

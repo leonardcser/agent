@@ -77,6 +77,7 @@ use std::time::Duration;
 
 pub struct Screen {
     pub(crate) transcript: Transcript,
+    parser: super::stream_parser::StreamParser,
     prompt: PromptState,
     dirty: bool,
     working: WorkingState,
@@ -178,6 +179,7 @@ impl Screen {
     pub fn with_backend(backend: Box<dyn TerminalBackend>) -> Self {
         Self {
             transcript: Transcript::new(),
+            parser: super::stream_parser::StreamParser::new(),
             prompt: PromptState::new(),
             dirty: true,
             working: WorkingState::new(),
@@ -391,7 +393,8 @@ impl Screen {
     }
 
     pub fn start_active_agent(&mut self, agent_id: String) {
-        self.transcript.start_active_agent(agent_id);
+        self.parser
+            .start_active_agent(&mut self.transcript.history, agent_id);
         self.dirty = true;
     }
 
@@ -402,22 +405,30 @@ impl Screen {
         tool_calls: &[crate::app::AgentToolEntry],
         status: AgentBlockStatus,
     ) {
-        self.transcript
-            .update_active_agent(agent_id, slug, tool_calls, status);
+        self.parser.update_active_agent(
+            &mut self.transcript.history,
+            agent_id,
+            slug,
+            tool_calls,
+            status,
+        );
         self.dirty = true;
     }
 
     pub fn cancel_active_agents(&mut self) {
-        self.transcript.cancel_active_agents();
+        self.parser
+            .cancel_active_agents(&mut self.transcript.history);
     }
 
     pub fn finish_active_agent(&mut self, agent_id: &str) {
-        self.transcript.finish_active_agent(agent_id);
+        self.parser
+            .finish_active_agent(&mut self.transcript.history, agent_id);
         self.dirty = true;
     }
 
     pub fn finish_all_active_agents(&mut self) {
-        self.transcript.finish_all_active_agents();
+        self.parser
+            .finish_all_active_agents(&mut self.transcript.history);
         self.dirty = true;
     }
 
@@ -740,7 +751,7 @@ impl Screen {
     }
 
     pub fn begin_turn(&mut self) {
-        self.transcript.begin_turn();
+        self.parser.begin_turn();
     }
 
     pub fn push_tool_call(&mut self, block: Block, state: ToolState) {
@@ -754,12 +765,14 @@ impl Screen {
     }
 
     pub fn append_streaming_thinking(&mut self, delta: &str) {
-        self.transcript.append_streaming_thinking(delta);
+        self.parser
+            .append_streaming_thinking(&mut self.transcript.history, delta);
         self.dirty = true;
     }
 
     pub fn flush_streaming_thinking(&mut self) {
-        self.transcript.flush_streaming_thinking();
+        self.parser
+            .flush_streaming_thinking(&mut self.transcript.history);
         self.dirty = true;
     }
 
@@ -788,12 +801,14 @@ impl Screen {
     }
 
     pub fn append_streaming_text(&mut self, delta: &str) {
-        self.transcript.append_streaming_text(delta);
+        self.parser
+            .append_streaming_text(&mut self.transcript.history, delta);
         self.dirty = true;
     }
 
     pub fn flush_streaming_text(&mut self) {
-        self.transcript.flush_streaming_text();
+        self.parser
+            .flush_streaming_text(&mut self.transcript.history);
         self.dirty = true;
     }
 
@@ -804,46 +819,52 @@ impl Screen {
         summary: String,
         args: HashMap<String, serde_json::Value>,
     ) {
-        self.transcript.start_tool(call_id, name, summary, args);
+        self.parser
+            .start_tool(&mut self.transcript.history, call_id, name, summary, args);
         self.dirty = true;
     }
 
     pub fn start_exec(&mut self, command: String) {
-        self.transcript.start_exec(command);
+        self.parser
+            .start_exec(&mut self.transcript.history, command);
         self.dirty = true;
     }
 
     pub fn append_exec_output(&mut self, chunk: &str) {
-        self.transcript.append_exec_output(chunk);
+        self.parser
+            .append_exec_output(&mut self.transcript.history, chunk);
         self.dirty = true;
     }
 
     pub fn finish_exec(&mut self, exit_code: Option<i32>) {
-        self.transcript.finish_exec(exit_code);
+        self.parser.finish_exec(exit_code);
         self.dirty = true;
     }
 
     pub fn finalize_exec(&mut self) {
-        self.transcript.finalize_exec();
+        self.parser.finalize_exec(&mut self.transcript.history);
         self.dirty = true;
     }
 
     pub fn has_active_exec(&self) -> bool {
-        self.transcript.has_active_exec()
+        self.parser.has_active_exec()
     }
 
     pub fn append_active_output(&mut self, call_id: &str, chunk: &str) {
-        self.transcript.append_active_output(call_id, chunk);
+        self.parser
+            .append_active_output(&mut self.transcript.history, call_id, chunk);
         self.dirty = true;
     }
 
     pub fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
-        self.transcript.set_active_status(call_id, status);
+        self.parser
+            .set_active_status(&mut self.transcript.history, call_id, status);
         self.dirty = true;
     }
 
     pub fn set_active_user_message(&mut self, call_id: &str, msg: String) {
-        self.transcript.set_active_user_message(call_id, msg);
+        self.parser
+            .set_active_user_message(&mut self.transcript.history, call_id, msg);
         self.dirty = true;
     }
 
@@ -854,8 +875,13 @@ impl Screen {
         output: Option<ToolOutputRef>,
         engine_elapsed: Option<Duration>,
     ) {
-        self.transcript
-            .finish_tool(call_id, status, output, engine_elapsed);
+        self.parser.finish_tool(
+            &mut self.transcript.history,
+            call_id,
+            status,
+            output,
+            engine_elapsed,
+        );
         self.dirty = true;
     }
 
@@ -1180,17 +1206,20 @@ impl Screen {
 
     pub fn finish_turn(&mut self) {
         let _perf = crate::perf::begin("render:finish_turn");
-        self.transcript.finalize_active_tools();
+        self.parser
+            .finalize_active_tools(&mut self.transcript.history);
         self.mark_blocks_dirty();
     }
 
     pub fn finalize_active_tools(&mut self) {
-        self.transcript.finalize_active_tools();
+        self.parser
+            .finalize_active_tools(&mut self.transcript.history);
         self.dirty = true;
     }
 
     pub fn finalize_active_tools_as(&mut self, status: ToolStatus) {
-        self.transcript.finalize_active_tools_as(status);
+        self.parser
+            .finalize_active_tools_as(&mut self.transcript.history, status);
         self.dirty = true;
     }
 
@@ -1303,7 +1332,7 @@ impl Screen {
 
     pub fn clear(&mut self) {
         self.transcript.history.clear();
-        self.transcript.clear_active_state();
+        self.parser.clear();
         self.prompt = PromptState::new();
         self.prompt.anchor_row = Some(0);
         self.working.clear();
@@ -1467,6 +1496,7 @@ impl Screen {
 
     pub fn truncate_to(&mut self, block_idx: usize) {
         self.transcript.truncate_to(block_idx);
+        self.parser.clear_tools_and_agents();
         self.redraw();
     }
 
@@ -1499,7 +1529,7 @@ impl Screen {
         }
         // Refresh live elapsed on any streaming agent blocks so their
         // duration ticks up without needing an explicit engine event.
-        self.transcript.tick_active_agents();
+        self.parser.tick_active_agents(&mut self.transcript.history);
     }
 
     /// Returns true when there is content or prompt work to render.
@@ -1519,14 +1549,14 @@ impl Screen {
     /// remains as an overlay because it's a synthesized summary, not a
     /// stream.
     fn has_ephemeral(&self) -> bool {
-        self.transcript.active_thinking.is_some() && !self.show_thinking
+        self.parser.has_active_thinking() && !self.show_thinking
     }
 
     /// Paint the animated thinking-summary above the prompt when
     /// thinking is hidden. Every other live element renders as a
     /// streaming block in the main transcript.
     fn render_ephemeral_into<S: LayoutSink>(&self, out: &mut S, width: usize) {
-        let Some(ref at) = self.transcript.active_thinking else {
+        let Some(at) = self.parser.active_thinking() else {
             return;
         };
         if self.show_thinking {

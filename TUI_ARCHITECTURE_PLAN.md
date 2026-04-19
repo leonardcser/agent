@@ -305,42 +305,26 @@ D1–D6 shipped. `mlua` runtime, `smelt.api.*` surface, autocmd dispatch, user c
 - `render/blocks.rs` — `set_source_text(lines[i])` in `render_markdown_inner`, `copy_as` on HR + blockquote, `mark_soft_wrap_continuation` on wrap segments
 - `render/transcript.rs` — `source_text` + `soft_wrapped` on snapshot, `copy_range` source-text dispatch
 
-## R2 — Extract StreamParser from Transcript
+## R2 — Extract StreamParser from Transcript ✅
 
-**Problem:** `Transcript` mixes two concerns: (1) domain state (block store + snapshot cache) and (2) stream parsing (`active_thinking`, `active_text`, `active_tools`, `active_agents`, `stream_exec_id`). The `active_*` fields are character-level parser state machines that accumulate deltas, detect paragraph/code-block/table boundaries, and drive `history.rewrite()`. They're not dual storage — they're input adapters.
+**Problem:** `Transcript` mixed two concerns: (1) domain state (block store + snapshot cache) and (2) stream parsing (`active_thinking`, `active_text`, `active_tools`, `active_agents`, `stream_exec_id`). The streaming fields are transient input adapter state; the block store + snapshot are persistent domain state.
 
-**Approach:** Extract the parser state into `StreamParser` (or `StreamAccumulator`). `Transcript` becomes a pure block-store + snapshot. `StreamParser` takes a `&mut Transcript` (or `&mut BlockHistory`) when it needs to push/rewrite blocks.
+**Architecture:** `StreamParser` is a standalone struct owning all streaming state. Every method takes `&mut BlockHistory` for block mutations. `Screen` owns both as peers:
 
 ```rust
-struct StreamParser {
-    thinking: Option<ActiveThinking>,
-    text: Option<ActiveText>,
-    exec_id: Option<BlockId>,
-    tools: Vec<ActiveTool>,
-    agents: Vec<ActiveAgent>,
-}
-
-impl StreamParser {
-    fn append_thinking(&mut self, history: &mut BlockHistory, delta: &str);
-    fn flush_thinking(&mut self, history: &mut BlockHistory);
-    fn append_text(&mut self, history: &mut BlockHistory, delta: &str);
-    fn flush_text(&mut self, history: &mut BlockHistory);
-    fn start_tool(&mut self, history: &mut BlockHistory, ...);
-    fn finish_tool(&mut self, history: &mut BlockHistory, ...);
-    // etc.
+struct Screen {
+    transcript: Transcript,   // block store + snapshot cache
+    parser: StreamParser,     // transient streaming state
+    ...
 }
 ```
 
-**Benefits:**
-- `Transcript` becomes unit-testable as a pure data structure
-- `StreamParser` is unit-testable in isolation (feed it deltas, assert block outputs)
-- Clear ownership: parser is transient input state, transcript is persistent domain state
-- `Screen` can own both side-by-side: `transcript: Transcript`, `parser: StreamParser`
+Dependency is one-way: parser writes into `BlockHistory`, never reads the snapshot. `has_ephemeral` and `render_ephemeral_into` (thinking summary overlay) read `parser.active_thinking()` for accumulator state and `transcript.history` for committed blocks — the dual dependency is now explicit at the call site instead of hidden inside one struct.
 
-**Files touched:**
-- New: `render/stream_parser.rs`
-- Modified: `render/transcript.rs` (remove `active_*` fields, keep block-store + snapshot)
-- Modified: `render/screen.rs` (add `parser: StreamParser`, update forwarding calls)
+**What's implemented:**
+- `render/stream_parser.rs` — all streaming methods (thinking, text, code, table, tool, exec, agent lifecycles), `update_tool_state` helper
+- `render/transcript.rs` — stripped to block store + snapshot cache (~600 lines removed)
+- `render/screen.rs` — routes streaming calls through `self.parser.method(&mut self.transcript.history)`, `clear()` resets parser, `truncate_to()` clears parser tools/agents
 
 ## R3 — Remaining Phase C/D/E items (flat list)
 
