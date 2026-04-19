@@ -1,4 +1,5 @@
 use super::{draw_soft_cursor, selection, RenderOut};
+use crate::completer::{CompletionItem, Completer};
 use crossterm::style::Color;
 
 /// Nvim-style `:` command line rendered inside the status bar row.
@@ -10,12 +11,7 @@ pub struct CmdlineState {
     history: Vec<String>,
     history_idx: Option<usize>,
     stash: String,
-    pub(crate) completion: Option<CompletionState>,
-}
-
-pub(crate) struct CompletionState {
-    pub(crate) matches: Vec<String>,
-    pub(crate) index: usize,
+    pub(crate) completer: Option<Completer>,
 }
 
 impl CmdlineState {
@@ -28,6 +24,7 @@ impl CmdlineState {
         self.buf.clear();
         self.cursor = 0;
         self.reset_history_browse();
+        self.completer = None;
     }
 
     pub fn close(&mut self) {
@@ -35,10 +32,16 @@ impl CmdlineState {
         self.buf.clear();
         self.cursor = 0;
         self.reset_history_browse();
+        self.completer = None;
     }
 
     pub fn submit(&mut self) -> String {
-        let line = self.buf.clone();
+        let accepted = if let Some(ref comp) = self.completer {
+            comp.selected_item().map(|i| i.label.clone())
+        } else {
+            None
+        };
+        let line = accepted.unwrap_or_else(|| self.buf.clone());
         self.push_history(line.clone());
         self.close();
         line
@@ -47,7 +50,6 @@ impl CmdlineState {
     pub fn insert_char(&mut self, ch: char) {
         self.buf.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
-        self.completion = None;
     }
 
     pub fn backspace(&mut self) {
@@ -59,7 +61,6 @@ impl CmdlineState {
                 .unwrap_or(0);
             self.buf.drain(prev..self.cursor);
             self.cursor = prev;
-            self.completion = None;
         }
     }
 
@@ -71,7 +72,6 @@ impl CmdlineState {
                 .map(|(i, _)| self.cursor + i)
                 .unwrap_or(self.buf.len());
             self.buf.drain(self.cursor..next);
-            self.completion = None;
         }
     }
 
@@ -108,7 +108,6 @@ impl CmdlineState {
             .unwrap_or(0);
         self.buf.drain(start..end);
         self.cursor = start;
-        self.completion = None;
     }
 
     pub fn move_start(&mut self) {
@@ -165,38 +164,28 @@ impl CmdlineState {
         self.stash.clear();
     }
 
-    /// Tab-complete the current buffer against `commands`. Cycles through
-    /// matches on repeated Tab presses; Shift-Tab cycles backwards.
-    pub fn complete(&mut self, commands: &[&str], reverse: bool) {
-        if let Some(ref mut cs) = self.completion {
-            if !cs.matches.is_empty() {
-                if reverse {
-                    cs.index = if cs.index == 0 {
-                        cs.matches.len() - 1
-                    } else {
-                        cs.index - 1
-                    };
-                } else {
-                    cs.index = (cs.index + 1) % cs.matches.len();
+    /// Rebuild the completer from `Completer::commands` plus any
+    /// Lua-registered names. Called after every edit so the dropdown
+    /// stays visible and up-to-date.
+    pub fn update_completer(&mut self, lua_commands: &[String]) {
+        let mut comp = Completer::commands(0);
+        if !lua_commands.is_empty() {
+            let mut items: Vec<CompletionItem> = comp
+                .all_items()
+                .to_vec();
+            for name in lua_commands {
+                if !items.iter().any(|i| i.label == *name) {
+                    items.push(CompletionItem {
+                        label: name.clone(),
+                        description: Some("(lua)".into()),
+                        ..Default::default()
+                    });
                 }
-                self.buf = cs.matches[cs.index].clone();
-                self.cursor = self.buf.len();
             }
-            return;
+            comp.refresh_items(items);
         }
-        let mut matches: Vec<String> = commands
-            .iter()
-            .filter(|c| c.starts_with(self.buf.as_str()))
-            .map(|c| c.to_string())
-            .collect();
-        matches.sort();
-        if matches.is_empty() {
-            return;
-        }
-        let index = 0;
-        self.buf = matches[index].clone();
-        self.cursor = self.buf.len();
-        self.completion = Some(CompletionState { matches, index });
+        comp.update_query(self.buf.clone());
+        self.completer = Some(comp);
     }
 
     pub fn render(&self, out: &mut RenderOut, width: u16, row: u16) {

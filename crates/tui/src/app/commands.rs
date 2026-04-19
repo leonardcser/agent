@@ -1,31 +1,5 @@
 use super::*;
 
-pub const BUILTIN_COMMANDS: &[&str] = &[
-    "exit",
-    "quit",
-    "clear",
-    "new",
-    "compact",
-    "resume",
-    "rewind",
-    "vim",
-    "thinking",
-    "export",
-    "agents",
-    "ps",
-    "permissions",
-    "fork",
-    "branch",
-    "model",
-    "settings",
-    "theme",
-    "color",
-    "stats",
-    "cost",
-    "btw",
-    "yank-block",
-];
-
 pub enum ExecEvent {
     Output(String),
     Done(Option<i32>),

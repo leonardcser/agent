@@ -1756,48 +1756,31 @@ impl Screen {
             prompt_height as usize,
         );
 
-        // Cmdline completer overlay: when the `:` cmdline has an active
-        // completion, paint the dropdown above the status/cmdline row.
+        // Cmdline completer overlay: paint above the status/cmdline row.
         if self.cmdline.active {
-            if let Some(ref cs) = self.cmdline.completion {
-                let num_matches = cs.matches.len();
-                if num_matches > 0 {
-                    let status_row = self.layout.prompt.bottom().saturating_sub(1);
-                    let max_visible = 8.min(num_matches).min(status_row as usize);
-                    if max_visible > 0 {
-                        let overlay_top = status_row.saturating_sub(max_visible as u16);
-                        out.move_to(0, overlay_top);
-                        out.row = Some(overlay_top);
-                        let start = cs.index.saturating_sub(max_visible / 2);
-                        let start = if start + max_visible > num_matches {
-                            num_matches.saturating_sub(max_visible)
-                        } else {
-                            start
-                        };
-                        for (i, m) in cs.matches[start..start + max_visible].iter().enumerate() {
-                            let is_selected = start + i == cs.index;
-                            out.push_style(StyleState {
-                                bg: Some(Color::AnsiValue(if is_selected { 236 } else { 233 })),
-                                fg: if is_selected {
-                                    Some(theme::accent())
-                                } else {
-                                    None
-                                },
-                                ..StyleState::default()
-                            });
-                            out.print(&format!("  {}", m));
-                            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-                            out.pop_style();
-                            if i + 1 < max_visible {
-                                out.newline();
-                            }
-                        }
+            let comp_budget =
+                completion_reserved_rows(self.cmdline.completer.as_ref());
+            if comp_budget > 0 {
+                let status_row = self.layout.prompt.bottom().saturating_sub(1);
+                let max_overlay = status_row as usize;
+                let comp_rows_avail = comp_budget.min(max_overlay);
+                if comp_rows_avail > 0 {
+                    let overlay_top = status_row.saturating_sub(comp_rows_avail as u16);
+                    out.move_to(0, overlay_top);
+                    out.row = Some(overlay_top);
+                    let drawn = draw_completions(
+                        out,
+                        self.cmdline.completer.as_ref(),
+                        comp_rows_avail,
+                        false,
+                    );
+                    if drawn > 0 {
                         self.layout.push_float(
                             super::layout::Rect::new(
                                 overlay_top,
                                 0,
                                 self.layout.term_width,
-                                max_visible as u16,
+                                drawn as u16,
                             ),
                             2,
                             super::layout::HitRegion::Completer,
