@@ -991,15 +991,13 @@ impl Screen {
     /// vim buffer so motions span the entire conversation, not just the
     /// current viewport slice.
     pub fn full_transcript_text(&mut self, width: usize) -> Vec<String> {
-        // Ignore the caller-supplied width: transcript layout always
-        // uses `transcript_width` so scrollbar hit-testing, cursor
-        // positioning and paint math stay in lockstep.
         let _ = width;
-        let tw = self.transcript_width();
-        let mut rows = self.transcript.history.full_text(tw, self.show_thinking);
+        let tw = self.transcript_width() as u16;
+        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let mut rows = snap.rows.clone();
         if self.has_ephemeral() {
-            let mut col = SpanCollector::new(tw as u16);
-            self.render_ephemeral_into(&mut col, tw);
+            let mut col = SpanCollector::new(tw);
+            self.render_ephemeral_into(&mut col, tw as usize);
             for line in col.finish().lines {
                 let mut s = String::new();
                 for span in &line.spans {
@@ -1615,13 +1613,24 @@ impl Screen {
             scroll_offset: clamped,
         });
         // Record plain text for the content pane's motion handlers.
-        self.last_viewport_text = self.transcript.history.viewport_text(
-            tw,
-            self.show_thinking,
-            viewport_rows,
-            clamped,
-            &ephemeral_lines,
-        );
+        {
+            let snap = self.transcript.snapshot(tw as u16, self.show_thinking);
+            let mut vt = snap.viewport_rows(viewport_rows, clamped);
+            // Append ephemeral lines (hidden-thinking summary) — they
+            // participate in the viewport text for vim motions but are
+            // not part of the cached snapshot.
+            if !ephemeral_lines.is_empty() {
+                for line in &ephemeral_lines {
+                    let mut s = String::new();
+                    for span in &line.spans {
+                        s.push_str(&span.text);
+                    }
+                    vt.push(s);
+                }
+                vt.truncate(viewport_rows as usize);
+            }
+            self.last_viewport_text = vt;
+        }
 
         // Overlay visual selection highlighting before drawing the cursor.
         if let Some(range) = visual_range {
@@ -1815,13 +1824,21 @@ impl Screen {
             total_rows: total_transcript_rows,
             scroll_offset: clamped,
         });
-        self.last_viewport_text = self.transcript.history.viewport_text(
-            tw,
-            self.show_thinking,
-            viewport_rows,
-            clamped,
-            &ephemeral_lines,
-        );
+        {
+            let snap = self.transcript.snapshot(tw as u16, self.show_thinking);
+            let mut vt = snap.viewport_rows(viewport_rows, clamped);
+            if !ephemeral_lines.is_empty() {
+                for line in &ephemeral_lines {
+                    let mut s = String::new();
+                    for span in &line.spans {
+                        s.push_str(&span.text);
+                    }
+                    vt.push(s);
+                }
+                vt.truncate(viewport_rows as usize);
+            }
+            self.last_viewport_text = vt;
+        }
 
         // Clear the band below the transcript down to (but excluding)
         // the status bar so stale prompt/dialog residue from prior

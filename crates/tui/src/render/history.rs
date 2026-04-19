@@ -369,6 +369,10 @@ pub(super) struct BlockHistory {
     /// last drain. Drained by the app loop to emit `block_done`
     /// autocmds into the Lua runtime.
     pub(super) finished_blocks: Vec<BlockId>,
+    /// Monotonic generation counter — bumped on every content mutation
+    /// (push, rewrite, status change, view state change, truncate,
+    /// clear). Used by `TranscriptSnapshot` to detect staleness.
+    generation: u64,
 }
 
 impl BlockHistory {
@@ -386,7 +390,16 @@ impl BlockHistory {
             cache_dirty: false,
             flushed: 0,
             finished_blocks: Vec::new(),
+            generation: 0,
         }
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn bump_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Drain block ids that transitioned `Streaming` → `Done` since the
@@ -442,6 +455,7 @@ impl BlockHistory {
             art.clear();
         }
         self.cache_dirty = true;
+        self.bump_generation();
     }
 
     /// Current status for `id`. Defaults to [`Status::Done`].
@@ -464,6 +478,7 @@ impl BlockHistory {
         } else {
             self.statuses.insert(id, status);
         }
+        self.bump_generation();
     }
 
     /// Append `block` and return a fresh monotonic `BlockId`. Each
@@ -480,6 +495,7 @@ impl BlockHistory {
         self.content_hashes.insert(id, hash);
         self.artifacts.entry(id).or_default();
         self.cache_dirty = true;
+        self.bump_generation();
         id
     }
 
@@ -516,6 +532,7 @@ impl BlockHistory {
         self.blocks.insert(id, block);
         self.content_hashes.insert(id, hash);
         self.cache_dirty = true;
+        self.bump_generation();
     }
 
     /// Iterator over `BlockId`s currently in the `Streaming` state, in
@@ -544,6 +561,7 @@ impl BlockHistory {
             if !artifact.is_empty() {
                 artifact.clear();
                 self.cache_dirty = true;
+                self.bump_generation();
             }
         }
     }
@@ -563,6 +581,7 @@ impl BlockHistory {
         self.statuses.clear();
         self.flushed = 0;
         self.cache_dirty = true;
+        self.bump_generation();
     }
 
     /// Width-aware invalidation: prune cached layouts that are no longer
@@ -660,6 +679,7 @@ impl BlockHistory {
         }
         self.flushed = self.flushed.min(self.order.len());
         self.cache_dirty = true;
+        self.bump_generation();
         self.gc_tool_states();
     }
 
@@ -711,134 +731,6 @@ impl BlockHistory {
         total.min(u16::MAX as u32) as u16
     }
 
-    pub(super) fn full_text(&mut self, width: usize, show_thinking: bool) -> Vec<String> {
-        let key = LayoutKey {
-            view_state: super::history::ViewState::Expanded,
-            width: width as u16,
-            show_thinking,
-            content_hash: 0,
-        };
-        let collect_display = |line: &super::display::DisplayLine| -> String {
-            let mut s = String::new();
-            for span in &line.spans {
-                s.push_str(&span.text);
-            }
-            s
-        };
-        let mut out: Vec<String> = Vec::new();
-        for i in 0..self.order.len() {
-            let gap = self.block_gap(i);
-            for _ in 0..gap {
-                out.push(String::new());
-            }
-            let _ = self.ensure_rows(i, key);
-            let id = self.order[i];
-            let bkey = self.resolve_key(id, key);
-            if let Some(display) = self.artifacts.get(&id).and_then(|a| a.get(bkey)) {
-                for line in &display.lines {
-                    out.push(collect_display(line));
-                }
-            }
-        }
-        out
-    }
-
-    /// Mirror of `paint_viewport`'s slicing that returns the plain-text
-    /// of each visible row. Used by the content pane to reason over
-    /// what the user sees (motions, yank).
-    pub(super) fn viewport_text(
-        &mut self,
-        width: usize,
-        show_thinking: bool,
-        viewport_rows: u16,
-        scroll_offset: u16,
-        extra_lines: &[super::display::DisplayLine],
-    ) -> Vec<String> {
-        if viewport_rows == 0 {
-            return Vec::new();
-        }
-        let key = LayoutKey {
-            view_state: super::history::ViewState::Expanded,
-            width: width as u16,
-            show_thinking,
-            content_hash: 0,
-        };
-        let mut per_block: Vec<(u16, u16)> = Vec::with_capacity(self.order.len());
-        let mut total: u32 = 0;
-        for i in 0..self.order.len() {
-            let gap = self.block_gap(i);
-            let rows = self.ensure_rows(i, key);
-            total += gap as u32 + rows as u32;
-            per_block.push((gap, rows));
-        }
-        total += extra_lines.len() as u32;
-        let total = total.min(u16::MAX as u32) as u16;
-
-        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_offset);
-        let skip = geom.skip_from_top();
-        let leading_blanks = geom.leading_blanks();
-
-        let mut out: Vec<String> = Vec::with_capacity(viewport_rows as usize);
-        let mut remaining_skip = skip as u32;
-
-        let collect_display = |line: &super::display::DisplayLine| -> String {
-            let mut s = String::new();
-            for span in &line.spans {
-                s.push_str(&span.text);
-            }
-            s
-        };
-
-        // Mirror `paint_viewport`'s bottom-anchoring: short transcripts
-        // get leading blank rows so the last content line sits at the
-        // viewport bottom. Mouse hit-testing and vim motions index
-        // into this vector directly, so the row layout must match.
-        for _ in 0..leading_blanks {
-            if out.len() as u16 >= viewport_rows {
-                break;
-            }
-            out.push(String::new());
-        }
-
-        'blocks: for (i, (gap, _rows)) in per_block.iter().enumerate() {
-            for _ in 0..*gap {
-                if remaining_skip > 0 {
-                    remaining_skip -= 1;
-                    continue;
-                }
-                if out.len() as u16 >= viewport_rows {
-                    break 'blocks;
-                }
-                out.push(String::new());
-            }
-            let id = self.order[i];
-            let bkey = self.resolve_key(id, key);
-            let display = self.artifacts.get(&id).and_then(|a| a.get(bkey));
-            let Some(display) = display else { continue };
-            for line in &display.lines {
-                if remaining_skip > 0 {
-                    remaining_skip -= 1;
-                    continue;
-                }
-                if out.len() as u16 >= viewport_rows {
-                    break 'blocks;
-                }
-                out.push(collect_display(line));
-            }
-        }
-        for line in extra_lines {
-            if remaining_skip > 0 {
-                remaining_skip -= 1;
-                continue;
-            }
-            if out.len() as u16 >= viewport_rows {
-                break;
-            }
-            out.push(collect_display(line));
-        }
-        out
-    }
-
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn paint_viewport(
@@ -888,17 +780,7 @@ impl BlockHistory {
         };
 
         out.row = Some(top_row);
-        out.move_to(pad_left, top_row);
-
-        // Emit the window-level left gutter by prepending pad_left
-        // blank cells at the start of every content row. Paints once
-        // for the current row; `seed_row` re-pads after each newline.
-        let pad_str = " ".repeat(pad_left as usize);
-        let seed_row = |out: &mut RenderOut| {
-            if pad_left > 0 {
-                out.print(&pad_str);
-            }
-        };
+        out.move_to(0, top_row);
 
         let mut remaining_skip = skip as u32;
         let mut painted: u16 = 0;
@@ -920,9 +802,6 @@ impl BlockHistory {
             out.newline();
             painted += 1;
         }
-        if painted < viewport_rows {
-            seed_row(out);
-        }
 
         'blocks: for (i, (gap, _rows)) in per_block.iter().enumerate() {
             // Gap lines (blank rows).
@@ -934,17 +813,19 @@ impl BlockHistory {
                 if painted >= viewport_rows {
                     break 'blocks;
                 }
-                // Blank row: clear to EOL then advance.
                 let _ = out.queue(crossterm::terminal::Clear(
                     crossterm::terminal::ClearType::CurrentLine,
                 ));
                 out.newline();
                 painted += 1;
-                if painted < viewport_rows {
-                    seed_row(out);
-                }
             }
             let id = self.order[i];
+            let block = &self.blocks[&id];
+            let block_pad = if matches!(block, Block::User { .. }) {
+                0
+            } else {
+                pad_left
+            };
             let bkey = self.resolve_key(id, key);
             let display = self.artifacts.get(&id).and_then(|a| a.get(bkey));
             let Some(display) = display else { continue };
@@ -956,11 +837,8 @@ impl BlockHistory {
                 if painted >= viewport_rows {
                     break 'blocks;
                 }
-                super::paint::paint_line(out, line, &pctx);
+                super::paint::paint_line(out, line, &pctx, block_pad);
                 painted += 1;
-                if painted < viewport_rows {
-                    seed_row(out);
-                }
             }
         }
 
@@ -973,11 +851,8 @@ impl BlockHistory {
             if painted >= viewport_rows {
                 break;
             }
-            super::paint::paint_line(out, line, &pctx);
+            super::paint::paint_line(out, line, &pctx, pad_left);
             painted += 1;
-            if painted < viewport_rows {
-                seed_row(out);
-            }
         }
 
         // Blank-fill any remaining viewport rows so leftover content from

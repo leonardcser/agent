@@ -6,11 +6,77 @@
 
 use super::history::{
     ActiveAgent, ActiveText, ActiveThinking, ActiveTool, AgentBlockStatus, Block, BlockHistory,
-    BlockId, Status, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
+    BlockId, LayoutKey, Status, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
 use super::is_table_separator;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::time::{Duration, Instant};
+
+/// Cached, width-keyed projection of the full transcript into plain-text
+/// rows with block↔row mappings. Built lazily by `Transcript::snapshot()`
+/// and invalidated on any block mutation or width change.
+pub struct TranscriptSnapshot {
+    pub width: u16,
+    pub show_thinking: bool,
+    /// One entry per row in the full transcript (including gap rows).
+    pub rows: Vec<String>,
+    /// For each row, the `BlockId` that produced it (`None` for gap rows).
+    pub block_of_row: Vec<Option<BlockId>>,
+    /// Row range `[start..end)` for each block, in insertion order.
+    pub row_of_block: HashMap<BlockId, Range<u16>>,
+    /// Generation counter at build time — compared against
+    /// `BlockHistory`'s counter to detect staleness.
+    generation: u64,
+}
+
+impl TranscriptSnapshot {
+    /// Viewport-slice the snapshot into visible rows, matching
+    /// `paint_viewport`'s bottom-anchoring and skip logic.
+    pub fn viewport_rows(&self, viewport_rows: u16, scroll_offset: u16) -> Vec<String> {
+        if viewport_rows == 0 {
+            return Vec::new();
+        }
+        let total = self.rows.len().min(u16::MAX as usize) as u16;
+        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_offset);
+        let skip = geom.skip_from_top() as usize;
+        let leading_blanks = geom.leading_blanks() as usize;
+
+        let mut out = Vec::with_capacity(viewport_rows as usize);
+        for _ in 0..leading_blanks {
+            if out.len() >= viewport_rows as usize {
+                break;
+            }
+            out.push(String::new());
+        }
+        for row in self.rows.iter().skip(skip) {
+            if out.len() >= viewport_rows as usize {
+                break;
+            }
+            out.push(row.clone());
+        }
+        out
+    }
+
+    /// Which block owns a given viewport row (accounting for scroll +
+    /// leading blanks). Returns `None` for gap rows or leading blanks.
+    pub fn viewport_block_at(
+        &self,
+        viewport_row: u16,
+        viewport_rows: u16,
+        scroll_offset: u16,
+    ) -> Option<BlockId> {
+        let total = self.rows.len().min(u16::MAX as usize) as u16;
+        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_offset);
+        let leading = geom.leading_blanks();
+        if viewport_row < leading {
+            return None;
+        }
+        let skip = geom.skip_from_top();
+        let abs_row = (viewport_row - leading) as usize + skip as usize;
+        self.block_of_row.get(abs_row).copied().flatten()
+    }
+}
 
 pub struct Transcript {
     pub(super) history: BlockHistory,
@@ -19,6 +85,7 @@ pub struct Transcript {
     pub(super) stream_exec_id: Option<BlockId>,
     pub(super) active_tools: Vec<ActiveTool>,
     pub(super) active_agents: Vec<ActiveAgent>,
+    cached_snapshot: Option<TranscriptSnapshot>,
 }
 
 impl Transcript {
@@ -30,6 +97,72 @@ impl Transcript {
             stream_exec_id: None,
             active_tools: Vec::new(),
             active_agents: Vec::new(),
+            cached_snapshot: None,
+        }
+    }
+
+    /// Get or rebuild the cached transcript snapshot at the given width.
+    /// The snapshot is invalidated when blocks change (generation mismatch)
+    /// or width/show_thinking changes.
+    pub fn snapshot(&mut self, width: u16, show_thinking: bool) -> &TranscriptSnapshot {
+        let gen = self.history.generation();
+        let valid = self.cached_snapshot.as_ref().is_some_and(|s| {
+            s.generation == gen && s.width == width && s.show_thinking == show_thinking
+        });
+        if !valid {
+            self.cached_snapshot = Some(self.build_snapshot(width, show_thinking));
+        }
+        self.cached_snapshot.as_ref().unwrap()
+    }
+
+    fn build_snapshot(&mut self, width: u16, show_thinking: bool) -> TranscriptSnapshot {
+        let base_key = LayoutKey {
+            view_state: ViewState::Expanded,
+            width,
+            show_thinking,
+            content_hash: 0,
+        };
+        let collect_text = |line: &super::display::DisplayLine| -> String {
+            let mut s = String::new();
+            for span in &line.spans {
+                s.push_str(&span.text);
+            }
+            s
+        };
+
+        let mut rows: Vec<String> = Vec::new();
+        let mut block_of_row: Vec<Option<BlockId>> = Vec::new();
+        let mut row_of_block: HashMap<BlockId, Range<u16>> = HashMap::new();
+
+        for i in 0..self.history.order.len() {
+            let gap = self.history.block_gap(i);
+            for _ in 0..gap {
+                rows.push(String::new());
+                block_of_row.push(None);
+            }
+            let _ = self.history.ensure_rows(i, base_key);
+            let id = self.history.order[i];
+            let bkey = self.history.resolve_key(id, base_key);
+            let start = rows.len() as u16;
+            if let Some(display) = self.history.artifacts.get(&id).and_then(|a| a.get(bkey)) {
+                for line in &display.lines {
+                    rows.push(collect_text(line));
+                    block_of_row.push(Some(id));
+                }
+            }
+            let end = rows.len() as u16;
+            if end > start {
+                row_of_block.insert(id, start..end);
+            }
+        }
+
+        TranscriptSnapshot {
+            width,
+            show_thinking,
+            rows,
+            block_of_row,
+            row_of_block,
+            generation: self.history.generation(),
         }
     }
 

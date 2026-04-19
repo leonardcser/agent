@@ -20,6 +20,7 @@ mod working;
 
 pub(crate) use region::{ScrollbarGeom, TranscriptHit};
 pub use screen::{BtwBlock, ContentVisualKind, ContentVisualRange, Notification, Screen};
+pub use transcript::TranscriptSnapshot;
 pub use viewport::ViewportGeom;
 
 pub use history::{
