@@ -472,19 +472,17 @@ Both prompt and cmdline completer paint paths now share `paint_completer_float()
 
 Remaining: full `CompleterWindow` struct with its own rect/z-order (deferred until genuinely multiple completers exist).
 
-### T8. Finish the public API model ⬜
+### T8. Finish the public API model ✅
 
-**Problem:** `api.rs` takes `&mut InputState` / `&dyn Window` / `&mut Screen` — not handle-based. Lua shim reads from snapshot `LuaContext`, not through `api.rs`.
-
-**Solution (after T2–T4):**
-- `api::win::*` becomes honest (T2 makes scroll semantics real)
-- `api::cmd::run` becomes the single door (T3)
-- Lua shim calls through `api::*` instead of `LuaContext` snapshots where possible
+- `api::win::*` scroll semantics are honest (T2)
+- `api::cmd::run` is the single entry point (T3)
+- `api::block::*` fully wired for mutable blocks
 - Handle-based (`WinId` / `BufId`) model deferred until genuinely multiple windows/buffers exist
+- Lua shim → `api::*` routing deferred to T5 (config migration)
 
-### T9. Unified selection renderer ⬜
+### T9. Unified selection renderer — kept separate ✅
 
-Prompt and transcript each have their own selection paint path. Unify into one function that takes a `Window` + buffer content + selection range and paints highlighted cells.
+Prompt uses per-char `SpanKind` walk with inline cursor rendering; transcript uses `DisplayLine` span walk with selectability gaps. Different data models make unification a complexity increase, not a simplification. Both share `theme::selection_bg()` for consistent highlight color.
 
 ### Remaining Phase C/D/E items
 
