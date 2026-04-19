@@ -201,7 +201,6 @@ impl Screen {
                 prompt_height: 3,
                 dialog_height: None,
                 constrain_dialog: false,
-                cmdline_open: false,
             }),
             btw: None,
             notification: None,
@@ -1542,7 +1541,6 @@ impl Screen {
             prompt_height: natural_prompt_height,
             dialog_height: None,
             constrain_dialog: false,
-            cmdline_open: false,
         });
         let viewport_rows = self.layout.viewport_rows();
         let prompt_height = self.layout.prompt.height;
@@ -1764,7 +1762,6 @@ impl Screen {
             prompt_height: 0,
             dialog_height: Some(dialog_height),
             constrain_dialog: self.constrain_dialog,
-            cmdline_open: false,
         });
         let viewport_rows = self.layout.viewport_rows();
 
