@@ -599,7 +599,10 @@ mod tests {
     fn chord_string_formats_nvim_style() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as M};
         let ev = |code, mods| KeyEvent::new(code, mods);
-        assert_eq!(chord_string(ev(KeyCode::Char('j'), M::NONE)).as_deref(), Some("j"));
+        assert_eq!(
+            chord_string(ev(KeyCode::Char('j'), M::NONE)).as_deref(),
+            Some("j")
+        );
         assert_eq!(
             chord_string(ev(KeyCode::Char('g'), M::CONTROL)).as_deref(),
             Some("<C-g>")
@@ -608,7 +611,10 @@ mod tests {
             chord_string(ev(KeyCode::Tab, M::SHIFT)).as_deref(),
             Some("<S-Tab>")
         );
-        assert_eq!(chord_string(ev(KeyCode::Esc, M::NONE)).as_deref(), Some("<Esc>"));
+        assert_eq!(
+            chord_string(ev(KeyCode::Esc, M::NONE)).as_deref(),
+            Some("<Esc>")
+        );
         assert_eq!(
             chord_string(ev(KeyCode::Char('x'), M::ALT)).as_deref(),
             Some("<M-x>")

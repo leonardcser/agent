@@ -20,8 +20,21 @@ const PAD_SPACES: &str =
 /// Paint a single `DisplayLine`: emit its spans, fill the row bg if
 /// requested, then advance via `newline`. Drops the bg before `newline`
 /// so `Clear::UntilNewLine` doesn't bleed the fill color into scrollback.
-pub(super) fn paint_line(out: &mut RenderOut, line: &DisplayLine, ctx: &PaintContext) {
-    let mut visible_cols: u16 = 0;
+pub(super) fn paint_line(
+    out: &mut RenderOut,
+    line: &DisplayLine,
+    ctx: &PaintContext,
+    pad_left: u16,
+) {
+    if pad_left > 0 {
+        let mut remaining = pad_left as usize;
+        while remaining > 0 {
+            let chunk = remaining.min(PAD_SPACES.len());
+            out.print(&PAD_SPACES[..chunk]);
+            remaining -= chunk;
+        }
+    }
+    let mut visible_cols: u16 = pad_left;
     for span in &line.spans {
         apply_style(out, &span.style, ctx.theme);
         out.print(&span.text);

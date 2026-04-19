@@ -118,7 +118,7 @@ pub(super) fn render_highlighted<S: LayoutSink>(
     max_rows: u16,
 ) -> u16 {
     let _perf = crate::perf::begin("render:highlighted");
-    let indent = "   ";
+    let indent = "  ";
     let theme = syntax_theme();
     let gutter_width = format!("{}", lines.len()).len();
     let prefix_len = indent.len() + 1 + gutter_width + 3;
@@ -594,7 +594,7 @@ pub(super) fn print_cached_inline_diff<S: LayoutSink>(
 ) -> u16 {
     let _perf = crate::perf::begin("render:inline_diff_cached");
 
-    let indent = "   ";
+    let indent = "  ";
     let gutter_width = format!("{}", cache.max_display_lineno).len();
     let prefix_len = indent.len() + 1 + gutter_width + 3;
     let right_margin = indent.len();
@@ -683,7 +683,7 @@ pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &
 }
 
 pub(super) fn count_cached_inline_diff_rows(cache: &CachedInlineDiff) -> u16 {
-    let indent = "   ";
+    let indent = "  ";
     let gutter_width = format!("{}", cache.max_display_lineno).len();
     let prefix_len = indent.len() + 1 + gutter_width + 3;
     let right_margin = indent.len();
