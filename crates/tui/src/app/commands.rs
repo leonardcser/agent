@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) enum ExecEvent {
+pub enum ExecEvent {
     Output(String),
     Done(Option<i32>),
 }

@@ -279,8 +279,8 @@ impl App {
     /// Shared event-routing preamble for both the idle and
     /// agent-running paths. Handles the routes that behave identically
     /// regardless of whether the agent is streaming: paste (drops the
-    /// prompt prediction), resize, mouse (wheel + click + drag-select
-    /// + scrollbar), `Ctrl-W` pane chord, transcript-window key
+    /// prompt prediction), resize, mouse (wheel, click, drag-select,
+    /// scrollbar), `Ctrl-W` pane chord, transcript-window key
     /// routing when `Content` has focus, and dialog/overlay keys.
     ///
     /// Returns `Some(outcome)` when the event was fully handled and

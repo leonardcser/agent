@@ -429,10 +429,6 @@ impl BlockHistory {
         &self.blocks[&self.order[i]]
     }
 
-    pub(super) fn last_block(&self) -> Option<&Block> {
-        self.order.last().and_then(|id| self.blocks.get(id))
-    }
-
     /// Current view state for `id`. Defaults to [`ViewState::Expanded`]
     /// when no explicit state has been set.
     pub(super) fn view_state(&self, id: BlockId) -> ViewState {
@@ -711,11 +707,7 @@ impl BlockHistory {
     ///
     /// Returns the clamped scroll offset (for the caller to sync state).
     /// Plain-text rendering of the full transcript at the given width.
-    /// One string per rendered row, gaps between blocks included as
-    /// empty entries. Used by the content pane as the `vim` buffer.
-    /// Total number of rows the full transcript would occupy at
-    /// `width`. Mirrors the gap + layout-rows math in `paint_viewport`
-    /// without painting anything. Used for scrollbar geometry.
+    #[cfg(test)]
     pub(super) fn total_rows(&mut self, width: usize, show_thinking: bool) -> u16 {
         let key = LayoutKey {
             view_state: super::history::ViewState::Expanded,
@@ -731,7 +723,6 @@ impl BlockHistory {
         total.min(u16::MAX as u32) as u16
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn paint_viewport(
         &mut self,
@@ -987,7 +978,7 @@ mod tests {
         let h1 = history.content_hash(id);
         assert_ne!(h0, h1, "content hash must update on rewrite");
         assert_eq!(
-            history.order.iter().copied().collect::<Vec<_>>(),
+            history.order.to_vec(),
             vec![id],
             "rewrite must not change order"
         );

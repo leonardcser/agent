@@ -901,13 +901,14 @@ impl Transcript {
     }
 
     pub fn cancel_active_agents(&mut self) {
-        let updates: Vec<(
+        type AgentCancel = (
             BlockId,
             String,
             Duration,
             Vec<crate::app::AgentToolEntry>,
             Option<String>,
-        )> = self
+        );
+        let updates: Vec<AgentCancel> = self
             .active_agents
             .iter_mut()
             .map(|a| {
