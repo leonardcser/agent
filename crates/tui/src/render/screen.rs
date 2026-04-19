@@ -85,7 +85,7 @@ use super::selection::{
     render_styled_chars, spans_to_string, wrap_and_locate_cursor, wrap_line, SpanKind,
 };
 use super::status::{
-    draw_bar, render_status_spans, vim_mode_label, BarSpan, StatusPosition, StatusSpan,
+    draw_bar, render_status_spans, vim_mode_label, BarSpan, StatusItem, StatusPosition, StatusSpan,
 };
 use super::working::WorkingState;
 use super::{
@@ -188,6 +188,10 @@ pub struct Screen {
     /// Short task label (slug) shown on the status bar after the throbber.
     task_label: Option<String>,
 
+    /// Custom status items from a Lua provider. When `Some`, these
+    /// replace the built-in status spans entirely.
+    custom_status_items: Option<Vec<StatusItem>>,
+
     /// Nvim-style command line rendered inside the status bar row.
     pub(crate) cmdline: super::cmdline::CmdlineState,
     /// Who owns the soft cursor this frame. Recomputed at the start of
@@ -275,6 +279,7 @@ impl Screen {
             btw: None,
             notification: None,
             task_label: None,
+            custom_status_items: None,
             cmdline: super::cmdline::CmdlineState::new(),
             cursor_owner: CursorOwner::Prompt,
             backend,
@@ -537,6 +542,12 @@ impl Screen {
         let (w, _) = self.size();
         let width = w as usize;
         let status_bg = Color::AnsiValue(233);
+
+        if let Some(ref items) = self.custom_status_items {
+            let mut spans: Vec<StatusSpan> = items.iter().map(|i| i.to_span(status_bg)).collect();
+            render_status_spans(out, &mut spans, width, status_bg);
+            return;
+        }
 
         // ── Build all status spans ──
         let mut spans: Vec<StatusSpan> = Vec::with_capacity(16);
@@ -1325,6 +1336,11 @@ impl Screen {
             self.last_status_position = p;
             self.dirty = true;
         }
+    }
+
+    pub fn set_custom_status(&mut self, items: Option<Vec<StatusItem>>) {
+        self.custom_status_items = items;
+        self.dirty = true;
     }
 
     pub fn set_status_vim(&mut self, enabled: bool, mode: Option<crate::vim::ViMode>) {

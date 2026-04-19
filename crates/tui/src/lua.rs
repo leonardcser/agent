@@ -159,6 +159,9 @@ pub struct LuaRuntime {
     pub pending_commands: SharedVec<String>,
     /// Shared context populated by the app before dispatching callbacks.
     context: SharedContext,
+    /// Lua function registered via `smelt.statusline(fn)`. Called each
+    /// tick to produce custom status items.
+    statusline_provider: Arc<Mutex<Option<LuaHandle>>>,
 }
 
 impl LuaRuntime {
@@ -175,6 +178,7 @@ impl LuaRuntime {
             Arc::new(Mutex::new(HashMap::new()));
         let pending_timers: SharedVec<(Instant, LuaHandle)> = Arc::new(Mutex::new(Vec::new()));
         let pending_commands: SharedVec<String> = Arc::new(Mutex::new(Vec::new()));
+        let statusline_provider: Arc<Mutex<Option<LuaHandle>>> = Arc::new(Mutex::new(None));
 
         let context: SharedContext = Arc::new(Mutex::new(LuaContext::default()));
 
@@ -186,6 +190,7 @@ impl LuaRuntime {
             autocmds.clone(),
             pending_timers.clone(),
             pending_commands.clone(),
+            statusline_provider.clone(),
             context.clone(),
         )
         .err()
@@ -202,6 +207,7 @@ impl LuaRuntime {
             pending_timers,
             pending_commands,
             context,
+            statusline_provider,
         };
 
         if rt.load_error.is_none() {
@@ -226,6 +232,7 @@ impl LuaRuntime {
         autocmds: SharedMap<AutocmdEvent, Vec<LuaHandle>>,
         pending_timers: SharedVec<(Instant, LuaHandle)>,
         pending_commands: SharedVec<String>,
+        statusline_provider: Arc<Mutex<Option<LuaHandle>>>,
         context: SharedContext,
     ) -> LuaResult<()> {
         let smelt = lua.create_table()?;
@@ -365,6 +372,17 @@ impl LuaRuntime {
             Ok(())
         })?;
         smelt.set("defer", defer_fn)?;
+
+        // smelt.statusline(fn) — register a status line provider.
+        let sl_clone = statusline_provider.clone();
+        let statusline_fn = lua.create_function(move |lua, handler: mlua::Function| {
+            let key = lua.create_registry_value(handler)?;
+            if let Ok(mut slot) = sl_clone.lock() {
+                *slot = Some(LuaHandle { key, dead: false });
+            }
+            Ok(())
+        })?;
+        smelt.set("statusline", statusline_fn)?;
 
         lua.globals().set("smelt", smelt)?;
         Ok(())
@@ -528,6 +546,47 @@ impl LuaRuntime {
         }
     }
 
+    /// Call the Lua statusline provider (if registered) and return
+    /// the resulting status items. Returns `None` if no provider is set.
+    pub fn tick_statusline(&self) -> Option<Vec<crate::render::StatusItem>> {
+        let handle = self.statusline_provider.lock().ok()?;
+        let handle = handle.as_ref()?;
+        if handle.dead {
+            return None;
+        }
+        let func = self
+            .lua
+            .registry_value::<mlua::Function>(&handle.key)
+            .ok()?;
+        match func.call::<mlua::Table>(()) {
+            Ok(table) => {
+                let mut items = Vec::new();
+                for pair in table.sequence_values::<mlua::Table>() {
+                    let Ok(entry) = pair else { continue };
+                    let text: String = entry.get("text").unwrap_or_default();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    items.push(crate::render::StatusItem {
+                        text,
+                        fg: ansi_color_from_lua(&entry, "fg"),
+                        bg: ansi_color_from_lua(&entry, "bg"),
+                        bold: entry.get("bold").unwrap_or(false),
+                        priority: entry.get("priority").unwrap_or(0),
+                        align_right: entry.get("align_right").unwrap_or(false),
+                        truncatable: entry.get("truncatable").unwrap_or(false),
+                        group: entry.get("group").unwrap_or(false),
+                    });
+                }
+                Some(items)
+            }
+            Err(e) => {
+                self.record_error(format!("statusline: {e}"));
+                None
+            }
+        }
+    }
+
     fn record_error(&self, msg: String) {
         if let Ok(mut q) = self.lua_errors.lock() {
             q.push(msg);
@@ -549,6 +608,11 @@ impl LuaRuntime {
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default()
     }
+}
+
+fn ansi_color_from_lua(table: &mlua::Table, key: &str) -> Option<crossterm::style::Color> {
+    let val: u8 = table.get(key).ok()?;
+    Some(crossterm::style::Color::AnsiValue(val))
 }
 
 impl Default for LuaRuntime {

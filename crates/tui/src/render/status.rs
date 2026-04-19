@@ -9,6 +9,38 @@
 use super::{selection::truncate_str, RenderOut, StyleState};
 use crossterm::{cursor, style::Color, terminal, QueueableCommand};
 
+/// A structured status item that Lua (or internal code) provides.
+/// Rust owns width fitting, priority dropping, and truncation.
+#[derive(Clone, Debug)]
+pub struct StatusItem {
+    pub text: String,
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
+    pub bold: bool,
+    pub priority: u8,
+    pub align_right: bool,
+    pub truncatable: bool,
+    pub group: bool,
+}
+
+impl StatusItem {
+    pub(crate) fn to_span(&self, fill_bg: Color) -> StatusSpan {
+        StatusSpan {
+            text: self.text.clone(),
+            style: StyleState {
+                fg: self.fg,
+                bg: Some(self.bg.unwrap_or(fill_bg)),
+                bold: self.bold,
+                ..StyleState::default()
+            },
+            priority: self.priority,
+            align_right: self.align_right,
+            truncatable: self.truncatable,
+            group: self.group,
+        }
+    }
+}
+
 /// Buffer-agnostic cursor + scroll snapshot for the status bar.
 /// One record covers every focused window (prompt, transcript). Set
 /// once per tick by `App::tick_prompt` so the status bar stays in
