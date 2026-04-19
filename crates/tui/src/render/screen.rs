@@ -258,6 +258,10 @@ impl Screen {
     /// Width available for transcript content. Reserves the rightmost
     /// column for the scrollbar track so the scrollbar never overpaints
     /// rendered content and mouse hit-testing has a stable target.
+    pub fn transcript_gutters(&self) -> &crate::window::WindowGutters {
+        &self.transcript_gutters
+    }
+
     pub fn transcript_width(&self) -> usize {
         let (w, _) = self.backend.size();
         (self.transcript_gutters.content_width(w) as usize).max(1)
@@ -1128,8 +1132,7 @@ impl Screen {
         !self.transcript.history.is_empty() || self.has_ephemeral()
     }
 
-    pub fn full_transcript_text(&mut self, width: usize) -> Vec<String> {
-        let _ = width;
+    pub fn full_transcript_text(&mut self) -> Vec<String> {
         let tw = self.transcript_width() as u16;
         let snap = self.transcript.snapshot(tw, self.show_thinking);
         let mut rows = snap.rows.clone();
@@ -1150,8 +1153,7 @@ impl Screen {
     /// Navigation-only transcript text: selectable display characters
     /// only (gutters, padding stripped). This is the buffer that vim
     /// motions and cursor positioning operate on.
-    pub fn full_transcript_nav_text(&mut self, width: usize) -> Vec<String> {
-        let _ = width;
+    pub fn full_transcript_nav_text(&mut self) -> Vec<String> {
         let tw = self.transcript_width() as u16;
         let snap = self.transcript.snapshot(tw, self.show_thinking);
         let mut rows = snap.nav_rows();
@@ -1357,17 +1359,6 @@ impl Screen {
 
     pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
         self.transcript.drain_finished_blocks()
-    }
-
-    /// Push the transcript window's gutter reservation into the paint
-    /// path. Called by `App` whenever the transcript window mutates its
-    /// gutters so the scrollbar column and content-width math stay
-    /// consistent.
-    pub fn set_transcript_gutters(&mut self, gutters: crate::window::WindowGutters) {
-        if self.transcript_gutters != gutters {
-            self.transcript_gutters = gutters;
-            self.dirty = true;
-        }
     }
 
     pub fn rewrite_block(&mut self, id: BlockId, block: Block) {

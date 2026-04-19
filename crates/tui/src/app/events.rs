@@ -920,7 +920,7 @@ impl App {
     /// `<line>:<col> <pct>%` formatter and the numbers stay in sync
     /// with the actual cursor position regardless of which code path
     /// moved it (key, motion, mouse click, scroll).
-    fn compute_status_position(&mut self, width: usize) -> Option<render::StatusPosition> {
+    fn compute_status_position(&mut self) -> Option<render::StatusPosition> {
         use crate::text_utils::byte_to_cell;
         let (buf_ref, cpos) = match self.app_focus {
             crate::app::AppFocus::Prompt => (
@@ -928,7 +928,7 @@ impl App {
                 self.input.cpos,
             ),
             crate::app::AppFocus::Content => {
-                let rows = self.screen.full_transcript_nav_text(width);
+                let rows = self.screen.full_transcript_nav_text();
                 if rows.is_empty() {
                     return None;
                 }
@@ -979,7 +979,7 @@ impl App {
             let (total, viewport) = self.transcript_dims();
             self.transcript_window.apply_pin(total, viewport);
         }
-        let visual = self.content_visual_range(w);
+        let visual = self.content_visual_range();
         // Status bar shows the *focused* window's vim mode. Without
         // this, the status bar caches the prompt's mode even when the
         // transcript window has focus.
@@ -998,7 +998,7 @@ impl App {
         };
         self.screen
             .set_status_vim(status_vim_enabled, status_vim_mode);
-        let status_position = self.compute_status_position(w);
+        let status_position = self.compute_status_position();
         self.screen.set_status_position(status_position);
         let (queued, prediction): (&[String], Option<&str>) = if show_queued {
             (&self.queued_messages, None)
@@ -1110,8 +1110,8 @@ impl App {
         use crossterm::event::KeyModifiers as M;
         // Pull in the latest nav-only text (selectable chars) so cpos
         // stays valid across streaming updates.
-        let w = render::term_width();
-        let rows = self.screen.full_transcript_nav_text(w);
+
+        let rows = self.screen.full_transcript_nav_text();
         let viewport = self.viewport_rows_estimate();
         self.transcript_window.resync(&rows, viewport);
         let ctx = KeyContext {
@@ -1205,8 +1205,8 @@ impl App {
             };
             if let Some(new_cpos) = mv {
                 self.transcript_window.cpos = new_cpos;
-                let w = render::term_width();
-                let rows = self.screen.full_transcript_nav_text(w);
+        
+                let rows = self.screen.full_transcript_nav_text();
                 let viewport = self.viewport_rows_estimate();
                 self.transcript_window.resync(&rows, viewport);
                 self.sync_transcript_pin();
@@ -1225,8 +1225,8 @@ impl App {
     /// vertical motion shares one code path (with `curswant`) across
     /// mouse wheel, Ctrl-U/D, arrows and j/k.
     fn move_content_cursor_by_lines(&mut self, delta: isize) {
-        let w = render::term_width();
-        let rows = self.screen.full_transcript_nav_text(w);
+
+        let rows = self.screen.full_transcript_nav_text();
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
             .scroll_by_lines(delta, &rows, viewport);
@@ -1238,8 +1238,8 @@ impl App {
     /// state back onto our scroll + cursor. Returns `true` when vim
     /// consumed the key (caller should return `Redraw`).
     fn handle_content_vim_key(&mut self, k: KeyEvent) -> bool {
-        let w = render::term_width();
-        let rows = self.screen.full_transcript_nav_text(w);
+
+        let rows = self.screen.full_transcript_nav_text();
         let viewport = self.viewport_rows_estimate();
         match self.transcript_window.handle_key(k, &rows, viewport) {
             None => false,
@@ -1262,11 +1262,11 @@ impl App {
 
     /// Compute the content pane's visual selection range (if any) in
     /// absolute transcript coordinates for the renderer to highlight.
-    fn content_visual_range(&mut self, width: usize) -> Option<render::ContentVisualRange> {
+    fn content_visual_range(&mut self) -> Option<render::ContentVisualRange> {
         if self.app_focus != crate::app::AppFocus::Content {
             return None;
         }
-        let rows = self.screen.full_transcript_nav_text(width);
+        let rows = self.screen.full_transcript_nav_text();
         if rows.is_empty() {
             return None;
         }
@@ -1361,8 +1361,7 @@ impl App {
     /// pin math. Reads the width from the renderer and measures the
     /// transcript against it.
     pub(super) fn build_lua_context(&mut self) -> crate::lua::LuaContext {
-        let w = render::term_width();
-        let transcript_text = self.screen.full_transcript_text(w).join("\n");
+        let transcript_text = self.screen.full_transcript_text().join("\n");
         let prompt_text = self.input.buffer.buf.clone();
         let focused_window = match self.app_focus {
             crate::app::AppFocus::Content => "transcript",
@@ -1385,8 +1384,8 @@ impl App {
     }
 
     fn transcript_dims(&mut self) -> (u16, u16) {
-        let w = render::term_width();
-        let total = self.screen.full_transcript_text(w).len() as u16;
+
+        let total = self.screen.full_transcript_text().len() as u16;
         let viewport = self.viewport_rows_estimate();
         (total, viewport)
     }
@@ -1757,8 +1756,8 @@ impl App {
     /// though vim Visual selects the char under the cursor by default.
     fn copy_content_selection_and_clear(&mut self, dragged: bool) {
         if dragged {
-            let width = render::term_width();
-            let rows = self.screen.full_transcript_nav_text(width);
+
+            let rows = self.screen.full_transcript_nav_text();
             let buf = rows.join("\n");
             let range = if let Some(vim) = self.transcript_window.vim.as_ref() {
                 vim.visual_range(&buf, self.transcript_window.cpos)
@@ -1842,8 +1841,8 @@ impl App {
                 // the cursor would appear frozen — its stored
                 // `cursor_line` is measured relative to the old scroll
                 // and drifts off-screen as the viewport moves.
-                let w = render::term_width();
-                let rows = self.screen.full_transcript_nav_text(w);
+        
+                let rows = self.screen.full_transcript_nav_text();
                 let viewport = self.viewport_rows_estimate();
                 self.transcript_window
                     .reanchor_to_visible_row(&rows, viewport);
@@ -1870,8 +1869,8 @@ impl App {
     /// all match what the user is actually looking at. `rel_row` and
     /// `col` are already clamped against the region by the caller.
     fn position_content_cursor_from_hit(&mut self, rel_row: u16, col: u16) {
-        let w = render::term_width();
-        let rows = self.screen.full_transcript_nav_text(w);
+
+        let rows = self.screen.full_transcript_nav_text();
         if rows.is_empty() {
             self.screen.mark_dirty();
             return;
@@ -1879,7 +1878,7 @@ impl App {
         let Some(region) = self.screen.transcript_viewport() else {
             return;
         };
-        let pad_left = self.transcript_window.gutters.pad_left;
+        let pad_left = self.screen.transcript_gutters().pad_left;
         let display_col = col.saturating_sub(pad_left) as usize;
         let viewport_rows = region.rows;
         let total = rows.len().min(u16::MAX as usize) as u16;
@@ -1948,8 +1947,8 @@ impl App {
     /// resumed session has stale/zero state and the first key press
     /// is a no-op until the user triggers a click-to-position.
     fn refocus_content(&mut self) {
-        let w = render::term_width();
-        let rows = self.screen.full_transcript_nav_text(w);
+
+        let rows = self.screen.full_transcript_nav_text();
         let viewport = self.viewport_rows_estimate();
         self.transcript_window.refocus(&rows, viewport);
         self.screen.mark_dirty();
