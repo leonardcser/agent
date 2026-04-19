@@ -1180,9 +1180,7 @@ impl App {
                         let e = crate::text_utils::snap(&buf, e);
                         if s < e {
                             let sel = buf[s..e].to_string();
-                            let n = sel.chars().count();
                             let _ = crate::app::commands::copy_to_clipboard(&sel);
-                            self.screen.notify(format!("copied {} chars", n));
                         }
                     }
                     self.screen.mark_dirty();
@@ -1233,8 +1231,6 @@ impl App {
             Some(yanked) => {
                 if let Some(text) = yanked {
                     let _ = crate::app::commands::copy_to_clipboard(&text);
-                    self.screen
-                        .notify(format!("yanked {} chars", text.chars().count()));
                 }
                 // Live-streaming updates can't shift the transcript
                 // under the user while a visual selection is active.
@@ -1678,9 +1674,7 @@ impl App {
     fn copy_prompt_selection_on_release(&mut self) {
         if let Some((s, e)) = self.input.selection_range() {
             let text: String = self.input.buffer.buf[s..e].to_string();
-            let chars = text.chars().count();
             let _ = crate::app::commands::copy_to_clipboard(&text);
-            self.screen.notify(format!("copied {} chars", chars));
         }
         self.input.cursor.clear_anchor();
         self.screen.mark_dirty();
@@ -1693,9 +1687,7 @@ impl App {
         let cpos = self.input.cpos;
         if let Some((s, e)) = self.input.select_word_at(cpos) {
             let text = self.input.buffer.buf[s..e].to_string();
-            let chars = text.chars().count();
             let _ = crate::app::commands::copy_to_clipboard(&text);
-            self.screen.notify(format!("copied {} chars", chars));
         }
         self.screen.mark_dirty();
     }
@@ -1706,9 +1698,7 @@ impl App {
         let cpos = self.transcript_window.cpos;
         if let Some((s, e)) = self.transcript_window.select_word_at(cpos) {
             let text = self.transcript_window.buffer.buf[s..e].to_string();
-            let chars = text.chars().count();
             let _ = crate::app::commands::copy_to_clipboard(&text);
-            self.screen.notify(format!("copied {} chars", chars));
         }
         self.sync_transcript_pin();
         self.screen.mark_dirty();
@@ -1718,7 +1708,6 @@ impl App {
     /// a bare click (no drag) exits Visual mode without copying, even
     /// though vim Visual selects the char under the cursor by default.
     fn copy_content_selection_and_clear(&mut self, dragged: bool) {
-        let mut copied_len: Option<usize> = None;
         if dragged {
             let width = render::term_width();
             let rows = self.screen.full_transcript_text(width);
@@ -1740,9 +1729,7 @@ impl App {
                         .transcript
                         .snapshot(tw, self.screen.show_thinking());
                     let selection = snap.copy_byte_range(s, e);
-                    let chars = selection.chars().count();
                     let _ = crate::app::commands::copy_to_clipboard(&selection);
-                    copied_len = Some(chars);
                 }
             }
         }
@@ -1750,9 +1737,6 @@ impl App {
             vim.set_mode(crate::vim::ViMode::Normal);
         } else {
             self.transcript_window.cursor.clear_anchor();
-        }
-        if let Some(n) = copied_len {
-            self.screen.notify(format!("copied {} chars", n));
         }
         self.sync_transcript_pin();
         self.screen.mark_dirty();
