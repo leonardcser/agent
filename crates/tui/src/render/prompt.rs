@@ -1,6 +1,5 @@
 pub(super) struct PromptState {
     pub drawn: bool,
-    pub dirty: bool,
     pub prev_rows: u16,
     /// Just the prompt UI rows from the previous frame (input +
     /// queued + notifications + status bar), excluding ephemeral
@@ -39,7 +38,6 @@ impl PromptState {
     pub fn new() -> Self {
         Self {
             drawn: false,
-            dirty: true,
             prev_rows: 0,
             prev_prompt_ui_rows: 0,
             anchor_row: None,

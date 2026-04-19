@@ -2014,8 +2014,6 @@ impl App {
 
     pub fn open_cmdline(&mut self) {
         self.screen.cmdline.open();
-        let lua_cmds = self.lua.command_names();
-        self.screen.cmdline.update_completer(&lua_cmds);
         self.screen.mark_dirty();
     }
 
@@ -2067,16 +2065,26 @@ impl App {
             (KeyCode::Tab, _)
             | (KeyCode::Char('j'), M::CONTROL)
             | (KeyCode::Char('n'), M::CONTROL) => {
-                if let Some(ref mut comp) = self.screen.cmdline.completer {
-                    comp.move_down();
+                if self.screen.cmdline.completer.is_some() {
+                    if let Some(ref mut comp) = self.screen.cmdline.completer {
+                        comp.move_down();
+                    }
+                } else {
+                    let lua_cmds = self.lua.command_names();
+                    self.screen.cmdline.update_completer(&lua_cmds);
                 }
                 self.screen.mark_dirty();
             }
             (KeyCode::BackTab, _)
             | (KeyCode::Char('k'), M::CONTROL)
             | (KeyCode::Char('p'), M::CONTROL) => {
-                if let Some(ref mut comp) = self.screen.cmdline.completer {
-                    comp.move_up();
+                if self.screen.cmdline.completer.is_some() {
+                    if let Some(ref mut comp) = self.screen.cmdline.completer {
+                        comp.move_up();
+                    }
+                } else {
+                    let lua_cmds = self.lua.command_names();
+                    self.screen.cmdline.update_completer(&lua_cmds);
                 }
                 self.screen.mark_dirty();
             }
@@ -2140,7 +2148,7 @@ impl App {
             }
             _ => {}
         }
-        if needs_completer_update {
+        if needs_completer_update && self.screen.cmdline.completer.is_some() {
             let lua_cmds = self.lua.command_names();
             self.screen.cmdline.update_completer(&lua_cmds);
         }

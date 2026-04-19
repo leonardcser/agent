@@ -249,6 +249,7 @@ The scrollback-commit rendering model is dead. Alt-buffer repaints every frame; 
 - ✅ **A3** (commit/flush/scroll-mode vocabulary): `BlockHistory::render`, `flushed`-counter gating, `last_block_rows`, `suppress_leading_gap`, `pending_head_skip`, `scroll_up`, scroll-mode `newline` branch — all deleted. `paint_viewport` is the only block painter.
 - ✅ **A4** (obsolete tests): shipped.
 - ✅ **A5**: `draw_frame` fully deleted. `tick_dialog` → `draw_viewport_dialog_frame` (alt-buffer, reserves `dialog_height + 1 gap + 1 status` at the bottom of the viewport). `draw_prompt` + the one unit-test caller route through `draw_viewport_frame`.
+- ✅ **A6** (A6.1 + A6.2): `DirtyRegions { transcript, prompt, status, overlay }` replaces `PromptState::dirty`. `mark_dirty()` sets all regions; typed methods `mark_transcript_dirty()`, `mark_prompt_dirty()`, `mark_status_dirty()`, `mark_overlay_dirty()` (also dirties transcript) added. ~60 call sites migrated to narrowest applicable region. `needs_draw` and both `draw_viewport_*` frame methods check/clear `DirtyRegions`. A6.3 (overlay dirty on completer dismiss) is structural — `mark_overlay_dirty()` automatically dirties transcript underneath. A6.4 (partial repaint skip) deferred.
 - ✅ **A1**: every stream now flows through streaming blocks via `push` + `rewrite` + `set_status(Done)`. `active_exec` + `active_thinking` + `active_text` (including the table and in-code-line cases) + `active_tools` + `active_agents` all ship as `Block::Exec` / `Block::Thinking` / `Block::Text` / `Block::CodeLine` / `Block::ToolCall` / `Block::Agent` in history. `Element::ActiveTool` and `render_tool`'s overlay callers are deleted; `render_ephemeral_into` is now just the aggregate thinking-summary widget (kept intentionally — it's a summary, not a stream). `has_ephemeral` gates solely on `active_thinking && !show_thinking`.
 
 ### A1 — Atomic `active_*` → `Streaming` blocks cutover
@@ -300,7 +301,74 @@ Do all five `active_*` migrations in **one** coherent patch, not per-variant dua
 
 **Deletes**: normal-mode dual-paint path, ~200 lines.
 
-**Phase A done when**: `Screen` has no `active_*`, no `render_ephemeral_into`, no `extra_lines`, no `PurgeRedraw`, no "flush" counter, no scroll-mode newlining in normal paint. Every block renders through one path; every stream mutates blocks in place.
+### A6 — Region-based dirty tracking (nvim `w_redr_type` inspired)
+
+Replace the single `prompt.dirty` bool with a per-region dirty model. The current design uses one bool (`prompt.dirty`) to mean "redraw the entire screen" — the name lies about its scope, and adding partial repaints or new overlay regions keeps hitting the same confusion.
+
+**Model:**
+
+```rust
+struct DirtyRegions {
+    transcript: bool,   // viewport content needs repaint
+    prompt: bool,       // prompt/input area changed
+    status: bool,       // status bar / cmdline changed
+    overlay: bool,      // completer/menu overlay opened, closed, or changed
+}
+```
+
+**Sub-tasks:**
+
+1. **A6.1 — Introduce `DirtyRegions` struct on `Screen`**: replace `PromptDrawState::dirty` with `DirtyRegions`. All existing `mark_dirty()` callers set the appropriate region(s). `needs_draw()` checks any region being dirty.
+
+2. **A6.2 — Typed `mark_*_dirty` methods**: `mark_transcript_dirty()`, `mark_prompt_dirty()`, `mark_status_dirty()`, `mark_overlay_dirty()`. Each `mark_dirty()` call site migrated to the narrowest applicable method. The catch-all `mark_dirty()` stays as sugar that dirties all regions.
+
+3. **A6.3 — Overlay dirty on completer open/close**: when completer opens or closes, mark both `overlay` and `transcript` dirty (transcript rows underneath need repainting). This makes the "completer residue" bug structurally impossible.
+
+4. **A6.4 — Partial repaint in `draw_viewport_frame`**: when only `prompt` or `status` is dirty (not `transcript`), skip the transcript `paint_viewport` call and only repaint the prompt/status/overlay regions. Full viewport repaint when `transcript` is dirty.
+
+**Deletes**: `prompt.dirty` as a proxy for "anything changed"; the misleading `PromptDrawState::dirty` field.
+
+**Phase A done when**: `Screen` has no `active_*`, no `render_ephemeral_into`, no `extra_lines`, no `PurgeRedraw`, no "flush" counter, no scroll-mode newlining in normal paint. Every block renders through one path; every stream mutates blocks in place. Dirty tracking is region-scoped.
+
+---
+
+## Pending UX tasks (from completer/cmdline unification work)
+
+These are concrete UX improvements identified during the completer overlay + cmdline work. They don't belong to a specific architecture phase — they're polish items that can be done independently.
+
+### Completer behavior: two distinct UIs
+
+The cmdline (`:`) and prompt (`/`) completers share the same `Completer` engine but have **distinct presentation and activation rules**, mirroring how nvim's cmdline completion differs from insert-mode completion.
+
+**Cmdline completer (`:` in status bar):**
+- Activated on **Tab** press (not auto-shown on every keystroke).
+- Results have **no prefix** — items are bare command names.
+- Left indent **aligns after the `:`** in the status bar (column 1).
+- Renders as a floating overlay above the status bar.
+- Nvim-style: cmdline completion is opt-in via Tab.
+
+**Prompt completer (`/` in prompt buffer):**
+- Activated **immediately** when `/` is typed at position 0 (auto-shown, no Tab required).
+- Results are **prefixed with `/`** — items render as `/quit`, `/compact`, etc.
+- Left indent **aligns with the `/`** character's position in the prompt buffer.
+- Renders as a floating overlay above the prompt.
+- This is a UI shortcut in the prompt — the canonical command surface is `:`.
+
+Both completers render above their anchor (reversed order, nearest item at bottom). Both share `draw_completions` but with different `CompleterKind` settings controlling prefix and indent.
+
+**Implementation plan:**
+1. ✅ `draw_completions` accepts `CompletionStyle { prefix, left_indent }`. Cmdline passes `prefix: Some(""), left_indent: 1`. Prompt uses default (`prefix: None` → falls through to kind-based `/`, `left_indent: 2`).
+2. ✅ `"/"` prefix restored for `CompleterKind::Command` in the default (prompt) path. Cmdline overrides to `""`.
+3. ✅ Cmdline completer is Tab-activated: `open_cmdline` no longer auto-shows; Tab opens the completer on first press, navigates on subsequent presses. Text edits only update if completer is already open.
+4. ⬜ Compute prompt completer indent from the `/` character's visual column in the prompt layout (currently hardcoded to 2).
+
+### Other pending items
+
+- ✅ **Reverse completer results order** — nearest items at bottom. Done in `draw_completions`.
+- ✅ **Fix completer overlay residue on dismiss** — addressed structurally by A6 (region-based dirty tracking).
+- ⬜ **Copy raw markdown instead of rendered output** — selection copy should extract source markdown for assistant blocks. Requires source-text mapping from display cells back to block content.
+- ⬜ **Selection flicker during streaming** — when viewport is pinned and buffer grows, selection highlight flickers. Root cause: `cpos` is a byte offset into display text that changes each frame.
+- ⬜ **Window-level gutters** (task #26) — left/right padding as window properties.
 
 ---
 

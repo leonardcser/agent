@@ -16,18 +16,40 @@ pub(super) fn completion_layout(completer: &crate::completer::Completer) -> (usi
     (list_rows, hint_rows, empty_gap)
 }
 
-pub(super) fn completion_reserved_rows(completer: Option<&crate::completer::Completer>) -> usize {
+/// Rows that `draw_completions` will paint. Used to anchor the
+/// overlay flush against the prompt/status bar, growing upward.
+pub(super) fn completion_actual_rows(completer: Option<&crate::completer::Completer>) -> usize {
     let Some(comp) = completer else {
         return 0;
     };
-    if comp.results.is_empty() && !comp.is_picker() {
+    if comp.results.is_empty() {
+        if comp.is_picker() {
+            let (_, hint_rows, empty_gap) = completion_layout(comp);
+            return 1 + hint_rows + empty_gap;
+        }
         return 0;
     }
     let (list_rows, hint_rows, empty_gap) = completion_layout(comp);
     if list_rows == 0 {
         return 0;
     }
-    list_rows + hint_rows + empty_gap
+    let visible = list_rows.min(comp.results.len());
+    visible + hint_rows + empty_gap
+}
+
+/// Caller-side presentation overrides for `draw_completions`.
+pub(super) struct CompletionStyle<'a> {
+    pub prefix: Option<&'a str>,
+    pub left_indent: u16,
+}
+
+impl Default for CompletionStyle<'_> {
+    fn default() -> Self {
+        Self {
+            prefix: None,
+            left_indent: 1,
+        }
+    }
 }
 
 pub(super) fn draw_completions(
@@ -35,6 +57,7 @@ pub(super) fn draw_completions(
     completer: Option<&crate::completer::Completer>,
     max_rows: usize,
     vim_enabled: bool,
+    style: &CompletionStyle<'_>,
 ) -> usize {
     use crate::completer::CompleterKind;
 
@@ -45,6 +68,8 @@ pub(super) fn draw_completions(
         return 0;
     }
 
+    let indent = " ".repeat(style.left_indent as usize);
+
     let (_, hint_rows, empty_gap) = completion_layout(comp);
     let show_hints = hint_rows > 0;
     let list_rows = max_rows.saturating_sub(hint_rows + empty_gap);
@@ -52,7 +77,8 @@ pub(super) fn draw_completions(
     if comp.results.is_empty() {
         if comp.is_picker() {
             out.push_dim();
-            out.print("  no results");
+            out.print(&indent);
+            out.print("no results");
             out.pop_style();
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             if show_hints && max_rows > hint_rows + empty_gap {
@@ -78,32 +104,39 @@ pub(super) fn draw_completions(
         }
     }
     let end = start + visible_rows;
-    let last = visible_rows - 1;
 
     let is_color_picker = matches!(comp.kind, CompleterKind::Theme | CompleterKind::Color);
 
-    let prefix = match comp.kind {
+    let prefix = style.prefix.unwrap_or(match comp.kind {
         CompleterKind::Command => "/",
         CompleterKind::File => "./",
         _ => "",
-    };
+    });
     let max_label = comp
         .results
         .iter()
         .map(|i| prefix.len() + i.label.len())
         .max()
         .unwrap_or(0);
-    let avail = term_width().saturating_sub(4);
+    let avail = term_width().saturating_sub(style.left_indent as usize + 2);
 
     let mut drawn = 0;
-    for (i, item) in comp.results[start..end].iter().enumerate() {
+
+    if show_hints {
+        draw_settings_hints(out, vim_enabled);
+        out.newline();
+        drawn += hint_rows + empty_gap;
+    }
+
+    let slice = &comp.results[start..end];
+    for (i, item) in slice.iter().enumerate().rev() {
         let idx = start + i;
         let selected = idx == comp.selected;
         let raw = format!("{}{}", prefix, item.label);
         let label: String = raw.chars().take(avail).collect();
 
         if is_color_picker {
-            out.print("  ");
+            out.print(&indent);
             if selected {
                 let ansi = item.ansi_color.unwrap_or(theme::accent_value());
                 out.push_fg(Color::AnsiValue(ansi));
@@ -121,7 +154,7 @@ pub(super) fn draw_completions(
                 out.pop_style();
             }
         } else {
-            out.print("  ");
+            out.print(&indent);
             if selected {
                 out.push_fg(theme::accent());
                 out.print(&label);
@@ -146,16 +179,11 @@ pub(super) fn draw_completions(
         }
 
         drawn += 1;
-        if i < last || show_hints {
+        if i > 0 {
             out.newline();
         } else {
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
         }
-    }
-
-    if show_hints && drawn < max_rows {
-        draw_settings_hints(out, vim_enabled);
-        drawn += 2;
     }
 
     drawn
@@ -342,13 +370,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_completer_with_no_results_reserves_no_rows() {
+    fn file_completer_with_no_results_paints_no_rows() {
         let mut comp = crate::completer::Completer::files(0);
         comp.update_query("zzzzzz".into());
 
         assert!(comp.results.is_empty());
         assert!(!comp.is_picker());
-        assert_eq!(completion_reserved_rows(Some(&comp)), 0);
+        assert_eq!(completion_actual_rows(Some(&comp)), 0);
     }
 
     #[test]
@@ -371,8 +399,9 @@ mod tests {
         let rows = draw_completions(
             &mut out,
             Some(&comp),
-            completion_reserved_rows(Some(&comp)),
+            completion_actual_rows(Some(&comp)),
             true,
+            &Default::default(),
         );
         let rendered = String::from_utf8(out.into_bytes()).unwrap();
         assert!(rows >= 4);
@@ -382,26 +411,5 @@ mod tests {
                 && rendered.contains("ctrl+j/k: navigate"),
             "rendered: {rendered:?}"
         );
-    }
-
-    #[test]
-    fn completion_reserved_rows_is_stable_for_settings_filtering() {
-        let state = crate::input::SettingsState {
-            vim: true,
-            auto_compact: false,
-            show_tps: true,
-            show_tokens: true,
-            show_cost: true,
-            show_prediction: true,
-            show_slug: true,
-            show_thinking: true,
-            restrict_to_workspace: false,
-            redact_secrets: true,
-        };
-        let mut comp = crate::completer::Completer::settings(&state);
-        let rows_before = completion_reserved_rows(Some(&comp));
-        comp.update_query("thi".into());
-        let rows_after = completion_reserved_rows(Some(&comp));
-        assert_eq!(rows_before, rows_after);
     }
 }

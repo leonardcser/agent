@@ -1,5 +1,5 @@
 use super::{draw_soft_cursor, selection, RenderOut};
-use crate::completer::{CompletionItem, Completer};
+use crate::completer::{Completer, CompletionItem};
 use crossterm::style::Color;
 
 /// Nvim-style `:` command line rendered inside the status bar row.
@@ -170,9 +170,7 @@ impl CmdlineState {
     pub fn update_completer(&mut self, lua_commands: &[String]) {
         let mut comp = Completer::commands(0);
         if !lua_commands.is_empty() {
-            let mut items: Vec<CompletionItem> = comp
-                .all_items()
-                .to_vec();
+            let mut items: Vec<CompletionItem> = comp.all_items().to_vec();
             for name in lua_commands {
                 if !items.iter().any(|i| i.label == *name) {
                     items.push(CompletionItem {
