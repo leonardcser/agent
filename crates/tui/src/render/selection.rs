@@ -9,54 +9,63 @@ use super::{cursor_colors, RenderOut};
 use crate::attachment::{AttachmentId, AttachmentStore};
 use crate::input::ATTACHMENT_MARKER;
 use crate::theme;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(crate) fn truncate_str(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
+    if UnicodeWidthStr::width(s) <= max {
         return s.to_string();
     }
-    let mut truncated: String = s.chars().take(max.saturating_sub(1)).collect();
+    let target = max.saturating_sub(1);
+    let mut truncated = String::new();
+    let mut col = 0;
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col + w > target {
+            break;
+        }
+        truncated.push(ch);
+        col += w;
+    }
     truncated.push('…');
     truncated
 }
 
 /// Wrap a line to fit within `width` display columns, breaking at word boundaries.
-/// Words longer than `width` are broken character-by-character.
+/// Words longer than `width` are broken character-by-character. Width is measured
+/// in terminal columns (wide chars like CJK count as 2).
 pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![line.to_string()];
     }
     let mut chunks: Vec<String> = Vec::new();
 
-    // Handle embedded newlines: split into logical lines first, then wrap each.
     for logical_line in line.split('\n') {
         let mut current = String::new();
         let mut col = 0;
 
         for word in logical_line.split_inclusive(' ') {
-            let wlen = word.chars().count();
+            let wlen = UnicodeWidthStr::width(word);
             if col + wlen > width && col > 0 {
                 chunks.push(current);
                 current = String::new();
                 col = 0;
             }
             if wlen > width {
-                // Word is longer than the line — hard-wrap it character by character.
                 for ch in word.chars() {
-                    if col >= width {
+                    let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if col + cw > width && col > 0 {
                         chunks.push(current);
                         current = String::new();
                         col = 0;
                     }
                     current.push(ch);
-                    col += 1;
+                    col += cw;
                 }
             } else {
                 current.push_str(word);
                 col += wlen;
             }
         }
-        // Always emit at least one chunk per logical line (preserves blank lines).
         chunks.push(current);
     }
     chunks

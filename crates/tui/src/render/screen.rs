@@ -2093,12 +2093,8 @@ impl Screen {
         for msg in queued {
             let geom = blocks::UserBlockGeometry::new(msg, text_w);
             for line in &geom.lines {
-                let chars = line.chars().count();
-                queued_rows += if chars == 0 {
-                    1
-                } else {
-                    chars.div_ceil(text_w) as u16
-                };
+                let w = super::layout_out::display_width(line);
+                queued_rows += if w == 0 { 1 } else { w.div_ceil(text_w) as u16 };
             }
         }
 
@@ -2652,9 +2648,9 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
             }
             let chunks = wrap_line(line, text_w);
             for chunk in &chunks {
-                let chunk_len = chunk.chars().count();
+                let chunk_w = super::layout_out::display_width(chunk);
                 let trailing = if geom.block_w > 0 {
-                    geom.block_w.saturating_sub(chunk_len)
+                    geom.block_w.saturating_sub(chunk_w)
                 } else {
                     1
                 };

@@ -21,7 +21,7 @@ pub use rewind::RewindDialog;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{cursor, terminal, QueueableCommand};
 
-use super::{draw_soft_cursor, wrap_line, ConfirmChoice, RenderOut};
+use super::{draw_soft_cursor, truncate_str, wrap_line, ConfirmChoice, RenderOut};
 
 pub enum DialogResult {
     Dismissed,
@@ -611,13 +611,4 @@ pub(crate) fn finish_dialog_frame(
             draw_soft_cursor(out, col, r, " ");
         }
     }
-}
-
-pub(crate) fn truncate_str(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut truncated: String = s.chars().take(max.saturating_sub(1)).collect();
-    truncated.push('\u{2026}');
-    truncated
 }

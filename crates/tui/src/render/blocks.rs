@@ -10,7 +10,7 @@ use super::highlight::{
     render_code_block, render_markdown_table, strip_markdown_markers, BashHighlighter,
 };
 use super::history::ViewState;
-use super::layout_out::{LayoutSink, SpanCollector};
+use super::layout_out::{display_width, LayoutSink, SpanCollector};
 use super::{
     truncate_str, wrap_line, ApprovalScope, Block, ConfirmChoice, LayoutContext, ToolOutput,
     ToolState, ToolStatus,
@@ -35,13 +35,13 @@ impl UserBlockGeometry {
             .iter()
             .map(|l| l.trim_end().to_string())
             .collect();
-        let wraps = lines.iter().any(|l| l.chars().count() > text_w);
+        let wraps = lines.iter().any(|l| display_width(l) > text_w);
         let multiline = lines.len() > 1 || wraps;
         let block_w = if multiline {
             if wraps {
                 text_w + 1
             } else {
-                lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 1
+                lines.iter().map(|l| display_width(l)).max().unwrap_or(0) + 1
             }
         } else {
             0
@@ -313,9 +313,9 @@ pub(super) fn render_block<S: LayoutSink>(
                     out.mark_wrapped();
                 }
                 for chunk in &chunks {
-                    let chunk_len = chunk.chars().count();
+                    let chunk_w = display_width(chunk);
                     let trailing = if geom.block_w > 0 {
-                        geom.block_w.saturating_sub(chunk_len)
+                        geom.block_w.saturating_sub(chunk_w)
                     } else {
                         1
                     };
