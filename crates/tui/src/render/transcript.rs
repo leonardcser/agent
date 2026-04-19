@@ -13,6 +13,14 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
+/// One display cell in the snapshot, carrying the character and its
+/// copy/selection metadata from the span that produced it.
+#[derive(Clone, Debug)]
+pub struct SnapshotCell {
+    pub ch: char,
+    pub meta: super::display::SpanMeta,
+}
+
 /// Cached, width-keyed projection of the full transcript into plain-text
 /// rows with block↔row mappings. Built lazily by `Transcript::snapshot()`
 /// and invalidated on any block mutation or width change.
@@ -21,6 +29,10 @@ pub struct TranscriptSnapshot {
     pub show_thinking: bool,
     /// One entry per row in the full transcript (including gap rows).
     pub rows: Vec<String>,
+    /// Per-cell metadata for each row, parallel to `rows`. Each inner
+    /// vec has one `SnapshotCell` per display column. Used by
+    /// `copy_range` to respect `SpanMeta.selectable` / `copy_as`.
+    pub row_cells: Vec<Vec<SnapshotCell>>,
     /// For each row, the `BlockId` that produced it (`None` for gap rows).
     pub block_of_row: Vec<Option<BlockId>>,
     /// Row range `[start..end)` for each block, in insertion order.
@@ -76,6 +88,73 @@ impl TranscriptSnapshot {
         let abs_row = (viewport_row - leading) as usize + skip as usize;
         self.block_of_row.get(abs_row).copied().flatten()
     }
+
+    /// Total rows in the snapshot.
+    pub fn total_rows(&self) -> u16 {
+        self.rows.len().min(u16::MAX as usize) as u16
+    }
+
+    /// Extract copy text from a rectangular range of display cells,
+    /// respecting `SpanMeta`. Non-selectable cells are skipped;
+    /// `copy_as` substitutions are applied; rows are joined with `\n`.
+    pub fn copy_range(
+        &self,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+    ) -> String {
+        let mut out = String::new();
+        let end_row = end_row.min(self.row_cells.len().saturating_sub(1));
+        for r in start_row..=end_row {
+            let cells = match self.row_cells.get(r) {
+                Some(c) => c,
+                None => continue,
+            };
+            if r > start_row {
+                out.push('\n');
+            }
+            let c_start = if r == start_row { start_col } else { 0 };
+            let c_end = if r == end_row {
+                end_col.min(cells.len())
+            } else {
+                cells.len()
+            };
+            for cell in &cells[c_start..c_end] {
+                if !cell.meta.selectable {
+                    continue;
+                }
+                match &cell.meta.copy_as {
+                    Some(s) => out.push_str(s),
+                    None => out.push(cell.ch),
+                }
+            }
+        }
+        out
+    }
+
+    /// Snap a `(row, col)` position to the nearest selectable cell,
+    /// searching forward then backward on the same row. Returns the
+    /// adjusted `(row, col)` or `None` if the row has no selectable cells.
+    pub fn snap_to_selectable(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        let cells = self.row_cells.get(row)?;
+        if cells.get(col).is_some_and(|c| c.meta.selectable) {
+            return Some((row, col));
+        }
+        // Search forward
+        for (c, cell) in cells.iter().enumerate().skip(col + 1) {
+            if cell.meta.selectable {
+                return Some((row, c));
+            }
+        }
+        // Search backward
+        for c in (0..col).rev() {
+            if cells[c].meta.selectable {
+                return Some((row, c));
+            }
+        }
+        None
+    }
 }
 
 pub struct Transcript {
@@ -122,15 +201,9 @@ impl Transcript {
             show_thinking,
             content_hash: 0,
         };
-        let collect_text = |line: &super::display::DisplayLine| -> String {
-            let mut s = String::new();
-            for span in &line.spans {
-                s.push_str(&span.text);
-            }
-            s
-        };
 
         let mut rows: Vec<String> = Vec::new();
+        let mut row_cells: Vec<Vec<SnapshotCell>> = Vec::new();
         let mut block_of_row: Vec<Option<BlockId>> = Vec::new();
         let mut row_of_block: HashMap<BlockId, Range<u16>> = HashMap::new();
 
@@ -138,6 +211,7 @@ impl Transcript {
             let gap = self.history.block_gap(i);
             for _ in 0..gap {
                 rows.push(String::new());
+                row_cells.push(Vec::new());
                 block_of_row.push(None);
             }
             let _ = self.history.ensure_rows(i, base_key);
@@ -146,7 +220,19 @@ impl Transcript {
             let start = rows.len() as u16;
             if let Some(display) = self.history.artifacts.get(&id).and_then(|a| a.get(bkey)) {
                 for line in &display.lines {
-                    rows.push(collect_text(line));
+                    let mut text = String::new();
+                    let mut cells = Vec::new();
+                    for span in &line.spans {
+                        for ch in span.text.chars() {
+                            text.push(ch);
+                            cells.push(SnapshotCell {
+                                ch,
+                                meta: span.meta.clone(),
+                            });
+                        }
+                    }
+                    rows.push(text);
+                    row_cells.push(cells);
                     block_of_row.push(Some(id));
                 }
             }
@@ -160,6 +246,7 @@ impl Transcript {
             width,
             show_thinking,
             rows,
+            row_cells,
             block_of_row,
             row_of_block,
             generation: self.history.generation(),
@@ -1046,5 +1133,127 @@ impl Transcript {
                 _ => None,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::display::SpanMeta;
+
+    fn cell(ch: char) -> SnapshotCell {
+        SnapshotCell {
+            ch,
+            meta: SpanMeta::default(),
+        }
+    }
+
+    fn non_selectable(ch: char) -> SnapshotCell {
+        SnapshotCell {
+            ch,
+            meta: SpanMeta {
+                selectable: false,
+                copy_as: None,
+            },
+        }
+    }
+
+    fn copy_as(ch: char, s: &str) -> SnapshotCell {
+        SnapshotCell {
+            ch,
+            meta: SpanMeta {
+                selectable: true,
+                copy_as: Some(s.to_string()),
+            },
+        }
+    }
+
+    fn make_snapshot(row_cells: Vec<Vec<SnapshotCell>>) -> TranscriptSnapshot {
+        let rows: Vec<String> = row_cells
+            .iter()
+            .map(|cells| cells.iter().map(|c| c.ch).collect())
+            .collect();
+        TranscriptSnapshot {
+            width: 80,
+            show_thinking: false,
+            rows,
+            row_cells,
+            block_of_row: Vec::new(),
+            row_of_block: HashMap::new(),
+            generation: 0,
+        }
+    }
+
+    #[test]
+    fn copy_range_basic() {
+        let snap = make_snapshot(vec![
+            vec![cell('h'), cell('e'), cell('l'), cell('l'), cell('o')],
+            vec![cell('w'), cell('o'), cell('r'), cell('l'), cell('d')],
+        ]);
+        assert_eq!(snap.copy_range(0, 0, 1, 5), "hello\nworld");
+        assert_eq!(snap.copy_range(0, 2, 0, 5), "llo");
+        assert_eq!(snap.copy_range(1, 0, 1, 3), "wor");
+    }
+
+    #[test]
+    fn copy_range_skips_non_selectable() {
+        let snap = make_snapshot(vec![vec![
+            non_selectable('│'),
+            non_selectable(' '),
+            cell('h'),
+            cell('i'),
+        ]]);
+        assert_eq!(snap.copy_range(0, 0, 0, 4), "hi");
+    }
+
+    #[test]
+    fn copy_range_applies_copy_as() {
+        let snap = make_snapshot(vec![vec![
+            copy_as('+', ""),
+            copy_as(' ', ""),
+            cell('a'),
+            cell('d'),
+            cell('d'),
+        ]]);
+        assert_eq!(snap.copy_range(0, 0, 0, 5), "add");
+    }
+
+    #[test]
+    fn snap_to_selectable_direct_hit() {
+        let snap = make_snapshot(vec![vec![
+            non_selectable('│'),
+            cell('a'),
+            cell('b'),
+        ]]);
+        assert_eq!(snap.snap_to_selectable(0, 1), Some((0, 1)));
+    }
+
+    #[test]
+    fn snap_to_selectable_forward() {
+        let snap = make_snapshot(vec![vec![
+            non_selectable('│'),
+            non_selectable(' '),
+            cell('a'),
+        ]]);
+        assert_eq!(snap.snap_to_selectable(0, 0), Some((0, 2)));
+    }
+
+    #[test]
+    fn snap_to_selectable_backward() {
+        let snap = make_snapshot(vec![vec![
+            cell('a'),
+            non_selectable(' '),
+            non_selectable('│'),
+        ]]);
+        assert_eq!(snap.snap_to_selectable(0, 2), Some((0, 0)));
+    }
+
+    #[test]
+    fn snap_to_selectable_none() {
+        let snap = make_snapshot(vec![vec![
+            non_selectable('│'),
+            non_selectable(' '),
+        ]]);
+        assert_eq!(snap.snap_to_selectable(0, 0), None);
     }
 }

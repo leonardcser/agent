@@ -24,7 +24,7 @@ pub use cmdline::CmdlineState;
 pub(crate) use layout::HitRegion;
 pub(crate) use region::{ScrollbarGeom, ViewportHit};
 pub use screen::{BtwBlock, ContentVisualKind, ContentVisualRange, Notification, Screen};
-pub use transcript::TranscriptSnapshot;
+pub use transcript::{SnapshotCell, TranscriptSnapshot};
 pub use viewport::ViewportGeom;
 
 pub use history::{

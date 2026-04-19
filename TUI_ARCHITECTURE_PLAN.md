@@ -2,7 +2,7 @@
 
 ## Goal
 
-Reshape the TUI into a familiar editor-style architecture modeled on neovim — **buffers** (content + cursor + selection + buffer-local keymaps) inside **windows** (viewports with window-local keymaps and a layout rect), every interaction routed through a stable **public API** (`smelt::api::{buf, win, block, cmd, transcript, keymap, ui}`) — and expose that API to user configuration via **Lua bindings** (`mlua` + `~/.config/smelt/init.lua`).
+Reshape the TUI into a familiar editor-style architecture modeled on neovim — **buffers** (content + cursor + selection + buffer-local keymaps) inside **windows** (viewports with window-local keymaps and a layout rect), every interaction routed through a stable **public API** (`smelt::api::{buf, win, block, cmd, transcript, keymap, ui, status}`) — and expose that API to user configuration via **Lua bindings** (`mlua` + `~/.config/smelt/init.lua`). The status line is a dedicated **one-row docked UI region** driven by structured status items, not a fake editable buffer window.
 
 The original code fought three problems at once: the content pane navigated a rendered projection instead of a model, coordinate systems / layout / freeze logic each lived in multiple places, and there was no shared vocabulary for "do this thing to that buffer/window." The nvim-style model + Lua FFI dissolves all three and yields an extensible platform.
 
@@ -13,6 +13,7 @@ The original code fought three problems at once: the content pane navigated a re
 - **Dialogs and completer are floating windows** — one primitive covers them all.
 - **Keymaps layer** (`block → buffer → window → global`) so a transcript can have vim motions without the prompt inheriting them.
 - **Public API** — internal code and Lua scripts share one surface. If the API expresses everything the app does, user Lua can extend anything the app can do.
+- **Status line = one-row docked UI region, not a normal editor window.** It participates in layout and hit-testing like a docked window, but it is driven by a structured status-item model rather than buffer/cursor/selection semantics.
 
 ## Guiding decisions
 
@@ -106,7 +107,7 @@ struct LayoutState {
     windows:         Vec<(WinId, Rect)>,           // z-ordered; floats on top
     transcript_rect: Rect,
     prompt_rect:     Rect,
-    status_rect:     Rect,
+    status_rect:     Rect,                         // exactly one row; top or bottom dock
 }
 ```
 
@@ -156,6 +157,12 @@ close_window(WinId)
 notify(msg) / notify_error(msg)
 set_mode(Mode)
 
+// smelt::api::status — one-row docked status region
+set_provider(StatusProvider)
+clear_provider()
+invalidate()
+default_items(StatusContext) -> Vec<StatusItem>
+
 // smelt::api::autocmd — events (Lua consumers)
 on(event, handler) -> AutocmdId
 off(AutocmdId)
@@ -202,6 +209,7 @@ What's done so far, cross-referenced with the phases below.
 - **Auto-pin when scrolled up**: transcript viewport pins on `scroll_offset > 0`, not just on selection/drag. Streaming rows grow below off-screen; visible content stays stable. Pin delta uses fresh `full_transcript_text.len()` each tick (no more stale `region.total_rows`).
 - **Bottom-anchor transcript**: `paint_viewport` + `viewport_text` prepend leading blank rows when `total < viewport_rows` so the last content row sits at the viewport bottom — matches the cursor math and the `scroll_offset == 0 = stuck to bottom` convention.
 - **Status bar consolidation**: buffer-agnostic `StatusPosition { line, col, scroll_pct }` pushed by `App::compute_status_position`; right-aligned via `align_right: bool` on `StatusSpan` + `cursor::MoveToColumn`; status bar carved out from click region (row `h-1` swallows mouse events).
+- **Status bar direction**: keep the status line exactly one row high; treat it as a docked UI region/role in layout, but keep width fitting, priority dropping, and truncation in Rust. Lua supplies structured status items (`text`, `priority`, `align`, `truncatable`, optional style/tag), not raw terminal drawing.
 - **Streaming-safe input routing**: `handle_event_idle` + `handle_event_running` share one `dispatch_common` preamble (mouse, pane chord, cmdline, content-focus routing, overlay keys). Dispatch priority documented inline. Focus switch, click, drag-select all work mid-stream.
 - **Nvim-style cmdline**: `:` opens a command line in the status bar from any window (normal mode only). `CmdlineState` in `render/cmdline.rs` owns editing + rendering. Enter executes via `run_command` (`:` → `/` normalization). Cmdline module is self-contained: state, key handling, and rendering in one file.
 - **`CursorOwner` consolidation**: single enum set per frame determines which component draws the soft cursor. Replaces scattered `cmdline.is_none()` / `focused && last_app_focus == X` guards at each draw site.
@@ -494,7 +502,19 @@ struct TranscriptSnapshot {
 - `smelt.api.version = "1"` constant. Future breaking changes bump it; Lua can branch.
 - One-page API reference generated from doc comments.
 
-**Phase C done when**: `Transcript` is unit-testable without `Screen`; `State` is unit-testable without a terminal; no coord-system conversion; every mutation goes through `api::*`; one selection rule, one cursor renderer, one scrollbar renderer; one-page API doc exists.
+### C11 — Status line as a docked region with provider-driven content
+
+- Keep the status line exactly **one row high**. It is a dedicated docked layout region, not a fake editable buffer window.
+- Add `api::status::{set_provider, clear_provider, invalidate, default_items}`.
+- Introduce `StatusContext` (mode, focus, task slug, working state, tokens/cost, cursor position, scroll pct, terminal width, etc.) and `StatusItem { text, priority, align, truncatable, style/tag }`.
+- Rust owns the responsive fitter: width measurement, priority-based dropping, truncation, and left/right packing remain in the existing status renderer path.
+- Lua providers return structured items or override/filter the default items; they do **not** draw terminal cells directly.
+- Cmdline keeps reusing the same row when active; status provider output is suspended while cmdline owns the status region.
+- Positioning is layout-level (`top` or `bottom` dock), not per-span absolute drawing.
+
+**Deletes**: hardcoded status assembly inside `Screen` as the only source of truth; the assumption that Lua customization requires raw drawing or a buffer-backed status window.
+
+**Phase C done when**: `Transcript` is unit-testable without `Screen`; `State` is unit-testable without a terminal; no coord-system conversion; every mutation goes through `api::*`; one selection rule, one cursor renderer, one scrollbar renderer; one-page API doc exists; the status line is a one-row docked region with provider-driven structured items and Rust-owned responsive fitting.
 
 ---
 
@@ -556,9 +576,17 @@ end)
 - Runtime errors in callbacks → logged to `~/.cache/smelt/lua.log` + notification. Handler is marked dead so it doesn't spam on repeat.
 - `:lua <expr>` command for live evaluation (debug helper).
 
-**Deletes**: nothing — this phase is purely additive.
+### D7 — Lua statusline providers
 
-**Phase D done when**: `init.lua` can register user commands, bind keys, subscribe to events, and drive mutations through the API. Errors don't crash.
+- `smelt.statusline(fn)` registers a provider for the one-row docked status region.
+- `fn(ctx)` receives a stable `StatusContext` snapshot and returns structured `StatusItem`s (or `{ left = {...}, right = {...} }`).
+- Providers can hide, reorder, replace, or augment the default status content, but width fitting still happens in Rust using item priority + truncation flags.
+- Providers are called on invalidation points (mode/focus/cursor/scroll/block/resize/session changes), not as unrestricted raw per-cell drawing hooks every frame.
+- A failing provider falls back to the default status items and surfaces an error notification.
+
+**Deletes**: the assumption that Lua status customization needs direct terminal drawing primitives.
+
+**Phase D done when**: `init.lua` can register user commands, bind keys, subscribe to events, drive mutations through the API, and provide structured statusline content. Errors don't crash.
 
 ---
 
@@ -583,6 +611,7 @@ Validate the API by porting existing features *through* it.
   - Vim-style custom leader keymap
   - Block summarizer (collapse long tool output by default)
   - Per-project config (load `smelt.lua` from `$PWD/.smelt/` if present)
+  - Custom statusline examples (minimal, verbose, per-project)
 
 **Phase E done when**: any existing user-visible feature is reimplementable as pure Lua. Gaps surfaced here close Phase C.
 
@@ -597,6 +626,7 @@ Validate the API by porting existing features *through* it.
 - **Async Lua.** v1 is sync-only; coroutines possible later.
 - **Deleting `draw_frame` entirely.** Headless mode still needs scrollback output.
 - **Forcing structural symmetry between windows.**
+- **Making the status line pretend to be a normal editable/selectable buffer window just to fit the editor model.** It is a docked UI region with its own structured content model.
 - **Moving freeze into the model.** Freeze is "don't repaint"; model is always current.
 
 ## Success criteria
@@ -606,6 +636,7 @@ Validate the API by porting existing features *through* it.
 - Adding a new command: `api::cmd::register(name, handler)` — reachable from keybinds, `:cmd`, and Lua.
 - Adding a non-selectable UI element (gutter, decoration, line number): `selectable: false` on the span. Nothing else changes.
 - Adding a Lua hook into any existing feature: one `smelt.on(event, fn)` call. No Rust changes.
+- Users can redefine the status line in Lua with structured items while Rust continues to own width fitting, priority dropping, and truncation.
 - No function converts between bottom-relative and top-relative coordinates.
 - No mutation bypasses `api::*`.
 - `Transcript`, `State`, every primitive is unit-testable without a terminal.
