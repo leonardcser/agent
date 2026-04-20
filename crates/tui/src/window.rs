@@ -634,7 +634,7 @@ mod tests {
         tw.set_vim_enabled(true);
         let rows = sample_rows(30);
         let viewport = 10;
-        tw.refocus(&rows, viewport);
+        tw.jump_to_line_col(&rows, 0, 0, viewport);
         assert_eq!(tw.cursor_line, 0);
         assert_eq!(tw.scroll_top, 0);
         tw.scroll_by_lines(1, &rows, viewport);
