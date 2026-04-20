@@ -81,7 +81,7 @@ fn apply_style(out: &mut RenderOut, style: &SpanStyle, theme: &Theme) {
 
 /// Resolve a `ColorValue` against the current theme.
 #[inline]
-pub(super) fn resolve(c: ColorValue, theme: &Theme, _is_bg: bool) -> Color {
+pub(crate) fn resolve(c: ColorValue, theme: &Theme, _is_bg: bool) -> Color {
     match c {
         ColorValue::Rgb(r, g, b) => Color::Rgb { r, g, b },
         ColorValue::Ansi(v) => Color::AnsiValue(v),

@@ -295,75 +295,86 @@ Cell grid, compositor, primitive components, and unified dialog:
   vim-style scroll keys, and action-based key results
   (`select:N`, `dismiss`, `submit:text`).
 
-## Phase 6: Wire compositor into tui render loop
+## Phase 6: Compositor takes over rendering
 
-**Goal:** Replace `RenderOut` direct-write path with grid compositor.
+**Goal:** Replace `RenderOut` + `Frame` with compositor as sole frame
+renderer. Every visible surface becomes a `Component` drawing into a
+`GridSlice`. No intermediate adapters or legacy bridges.
 
-The compositor must be wired in before dialogs can migrate, because
-the existing `Dialog` trait draws to `RenderOut` (escape sequences)
-while `FloatDialog` draws to a `Grid` (cells). Attempting to bridge
-these two rendering paths creates throwaway adapter code.
+### Architecture
 
-- Add `Compositor` to `App` (or `Ui`)
-- Create `LegacyBridge` component wrapping current `Screen` rendering:
-  - `draw()` calls existing block paint pipeline but writes to grid
-  - Temporary scaffolding — deleted when transcript/prompt migrate
-- `App::render_frame()` → `compositor.render(&mut writer)`
-- Synchronized update envelope around compositor output
-- Remove direct `RenderOut` usage from main render path
+```
+Compositor (full screen grid, owns the frame)
+├── TranscriptView    — split, renders DisplayLines → grid cells
+├── PromptView        — split, renders input + ghost text → grid cells
+├── StatusBar         — 1-row component (already built in ui crate)
+└── FloatDialog(s)    — float layers (already built in ui crate)
+```
 
-## Phase 7: Migrate dialogs to FloatDialog
+### Data flow
 
-**Goal:** Kill the `Dialog` trait. Each dialog becomes a FloatDialog config.
+Components don't hold references to app state — they hold snapshots.
+Before each frame, the app pushes fresh data into components:
 
+```
+app computes viewport → transcript_view.set_lines(visible_lines)
+app reads input state → prompt_view.set_input(text, cursor, ghost)
+app reads status data → status_bar.set_left/set_right(segments)
+                      → compositor.render(&mut stdout)
+```
+
+### Implementation steps
+
+**Step 1: `paint_line_to_grid`** — pure function, no behavior change.
+Converts a `DisplayLine` (spans + SpanStyle + ColorValue) into grid
+cells by resolving theme colors to `ui::Style` and writing chars to
+a `GridSlice` row. Lives in `tui` crate (bridges tui's DisplayLine
+with ui's GridSlice). Same logic as `paint_line` but targets cells
+instead of escape sequences.
+
+**Step 2: `TranscriptView` component** — lives in `tui`, implements
+`ui::Component`. Holds `Vec<DisplayLine>` + scrollbar state + cursor
+state. `draw()` calls `paint_line_to_grid` per visible line, paints
+scrollbar column, paints soft cursor if focused. The app does viewport
+calculation (which blocks, skip count, clamped scroll) and pushes
+visible lines before each frame.
+
+**Step 3: `PromptView` component** — lives in `tui`, implements
+`ui::Component`. Holds input text snapshot, cursor position, mode,
+ghost text, queued commands. `draw()` renders input lines + ghost
+text + prompt chrome into grid cells.
+
+**Step 4: Wire compositor into `App`** — add `Compositor` to `App`.
+`render_frame()` calls `compositor.render(&mut stdout)` instead of
+`Frame::begin()` + `RenderOut`. Compositor handles synchronized
+updates, grid diffing, cursor positioning. `Screen`'s draw methods
+are replaced by component draw methods.
+
+**Step 5: Migrate dialogs** — each of the 10 Dialog implementations
+becomes a `FloatDialog` configuration added as a compositor layer.
 Migration order (simplest first):
-1. **HelpDialog** → FloatDialog with keybindings in buffer, no footer
-2. **ExportDialog** → FloatDialog with 2-item ListSelect footer
-3. **RewindDialog** → FloatDialog with turn list in ListSelect
-4. **FloatDialog (Lua)** → FloatDialog with Lua content + optional footer
-5. **PermissionsDialog** → FloatDialog with section content + ListSelect
-6. **PsDialog** → FloatDialog with process list + ListSelect
-7. **ResumeDialog** → FloatDialog with session list + search TextInput
-8. **AgentsDialog** → Two FloatDialogs (list + detail)
-9. **QuestionDialog** → Sequential FloatDialogs (one per question)
-10. **ConfirmDialog** → FloatDialog with preview buffer + ListSelect + TextInput
+1. HelpDialog → FloatDialog with keybindings in buffer, no footer
+2. ExportDialog → FloatDialog with 2-item ListSelect footer
+3. RewindDialog → FloatDialog with turn list in ListSelect
+4. FloatDialog (Lua) → FloatDialog with Lua content + optional footer
+5. PermissionsDialog → FloatDialog with section content + ListSelect
+6. PsDialog → FloatDialog with process list + ListSelect
+7. ResumeDialog → FloatDialog with session list + search TextInput
+8. AgentsDialog → Two FloatDialogs (list + detail)
+9. QuestionDialog → Sequential FloatDialogs (one per question)
+10. ConfirmDialog → FloatDialog with preview buffer + ListSelect + TextInput
 
-For confirm dialog specifically:
-- `ConfirmPreview` variants (Diff, Notebook, FileContent, BashBody, Plan)
-  all render into a buffer with highlights using shared rendering code
-- The preview buffer is scrollable and interactive
-- Same diff rendering code used in transcript blocks
+Also migrate: BtwBlock, Notifications, Completions → float layers.
 
-Also migrate non-dialog surfaces:
-- **BtwBlock** → FloatDialog with question content
-- **Notifications** → Ephemeral float (auto-dismiss timer)
-- **Completions** → Float window anchored to cursor
-
-Delete after all migrations:
+**Step 6: Delete legacy rendering** —
 - `Dialog` trait, `DialogResult`, `ListState`, `TextArea`
+- `Frame`, `RenderOut`, `StyleState` (SGR/style stack machinery)
+- `paint_line` (replaced by `paint_line_to_grid`)
+- `Screen::draw_viewport_frame`, `draw_viewport_dialog_frame`
 - `active_dialog`, `open_dialog`, `finalize_dialog_close`
-- `FloatOp`, `pending_float_ops`, `drain_float_ops`
 - All individual dialog structs in `render/dialogs/`
 
-## Phase 8: Migrate prompt and transcript
-
-**Goal:** The two main panes become proper windows.
-
-- **Transcript window:**
-  - Split window with readonly buffer
-  - Block rendering pipeline projects content into buffer
-  - Scroll, selection, copy through the window
-  - Block cache stays in `tui`, output flows through buffer → grid
-- **Prompt window:**
-  - Split window with editable buffer
-  - Vim motions, undo, kill ring through the window
-  - Ghost text via virtual text on the buffer
-- **Status bar:**
-  - `StatusBar` component at bottom (not a window)
-  - Mode indicator, spinner, metrics, notifications
-- Delete: `InputState`, `TranscriptWindow`, `Screen`, `LegacyBridge`
-
-## Phase 9: Event dispatch
+## Phase 7: Event dispatch
 
 **Goal:** Input routing through component tree is framework-level.
 
@@ -373,7 +384,7 @@ Delete after all migrations:
 - Keymap system: buffer-local, window-local, global scopes
 - Vim integration: vim state on windows, framework-level handling
 
-## Phase 10: Lua bindings rewrite
+## Phase 8: Lua bindings rewrite
 
 **Goal:** Lua talks to `ui` directly. `smelt.api.buf/win` maps 1:1.
 
@@ -382,12 +393,10 @@ Delete after all migrations:
 - Remove `PendingOp::OpenFloat` / `UpdateFloat` / `CloseFloat`
 - Port `btw.lua`, `predict.lua`, `plan_mode.lua` to clean API
 
-## Phase 11: Cleanup and polish
+## Phase 9: Cleanup and polish
 
-**Goal:** Delete everything the framework replaces.
+**Goal:** Audit and finalize.
 
-- Delete: old `Screen`, `RenderOut` direct usage
-- Delete: `DisplayBlock` / `SpanCollector` / `paint_line`
 - Audit `pub` items in `ui` — hide internals
 - Documentation: `docs/lua-api.md`, plugin authoring guide
 - README update, full test suite pass
@@ -400,28 +409,19 @@ Delete after all migrations:
 Phase 0–2 (DONE: types, text primitives, layout)
     │
     ▼
-Phase 3–4 (DONE: grid, components, compositor, primitives)
+Phase 3–5 (DONE: grid, components, compositor, FloatDialog)
     │
     ▼
-Phase 5 (FloatDialog component)
+Phase 6 (compositor takes over: transcript + prompt + status + dialogs)
     │
     ▼
-Phase 6 (migrate all dialogs + btw + notifications + completions)
+Phase 7 (event dispatch)
     │
     ▼
-Phase 7 (wire compositor into tui render loop)
+Phase 8 (Lua bindings)
     │
     ▼
-Phase 8 (migrate prompt + transcript)
-    │
-    ▼
-Phase 9 (event dispatch)
-    │
-    ▼
-Phase 10 (Lua bindings)
-    │
-    ▼
-Phase 11 (cleanup)
+Phase 9 (cleanup)
 ```
 
 ---
