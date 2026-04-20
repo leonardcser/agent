@@ -14,6 +14,13 @@ use crossterm::QueueableCommand;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+#[allow(dead_code)]
+pub(crate) struct ViewportData {
+    pub lines: Vec<super::display::DisplayLine>,
+    pub clamped_scroll: u16,
+    pub total_rows: u16,
+}
+
 /// In-flight blocking agent — a thin handle to a streaming `Block::Agent`.
 /// The full state (slug, tool_calls, status, elapsed) lives in the block
 /// itself and is refreshed via `rewrite` as engine events arrive.
@@ -749,6 +756,102 @@ impl BlockHistory {
             total += self.ensure_rows(i, key) as u32;
         }
         total.min(u16::MAX as u32) as u16
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
+    pub(crate) fn collect_viewport(
+        &mut self,
+        width: usize,
+        show_thinking: bool,
+        viewport_rows: u16,
+        scroll_top: u16,
+        extra_lines: &[super::display::DisplayLine],
+    ) -> ViewportData {
+        if viewport_rows == 0 {
+            return ViewportData {
+                lines: Vec::new(),
+                clamped_scroll: 0,
+                total_rows: 0,
+            };
+        }
+        if width != self.cache_width {
+            self.invalidate_for_width(width);
+            self.cache_width = width;
+        }
+        let key = LayoutKey {
+            view_state: super::history::ViewState::Expanded,
+            width: width as u16,
+            show_thinking,
+            content_hash: 0,
+        };
+        let mut per_block: Vec<(u16, u16)> = Vec::with_capacity(self.order.len());
+        let mut total: u32 = 0;
+        for i in 0..self.order.len() {
+            let rows = self.ensure_rows(i, key);
+            let gap = if rows == 0 { 0 } else { self.block_gap(i) };
+            total += gap as u32 + rows as u32;
+            per_block.push((gap, rows));
+        }
+        total += extra_lines.len() as u32;
+        let total = total.min(u16::MAX as u32) as u16;
+
+        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_top);
+        let scroll = geom.clamped_scroll();
+        let skip = geom.skip_from_top();
+
+        let mut remaining_skip = skip as u32;
+        let mut lines = Vec::with_capacity(viewport_rows as usize);
+
+        'blocks: for (i, (gap, _rows)) in per_block.iter().enumerate() {
+            for _ in 0..*gap {
+                if remaining_skip > 0 {
+                    remaining_skip -= 1;
+                    continue;
+                }
+                if lines.len() as u16 >= viewport_rows {
+                    break 'blocks;
+                }
+                lines.push(super::display::DisplayLine::default());
+            }
+            let id = self.order[i];
+            let bkey = self.resolve_key(id, key);
+            let display = self.artifacts.get(&id).and_then(|a| a.get(bkey));
+            let Some(display) = display else { continue };
+            for line in &display.lines {
+                if remaining_skip > 0 {
+                    remaining_skip -= 1;
+                    continue;
+                }
+                if lines.len() as u16 >= viewport_rows {
+                    break 'blocks;
+                }
+                lines.push(line.clone());
+            }
+        }
+
+        for line in extra_lines {
+            if remaining_skip > 0 {
+                remaining_skip -= 1;
+                continue;
+            }
+            if lines.len() as u16 >= viewport_rows {
+                break;
+            }
+            lines.push(line.clone());
+        }
+
+        while (lines.len() as u16) < viewport_rows {
+            lines.push(super::display::DisplayLine::default());
+        }
+
+        self.flushed = self.order.len();
+
+        ViewportData {
+            lines,
+            clamped_scroll: scroll,
+            total_rows: total,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
