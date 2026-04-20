@@ -1401,7 +1401,12 @@ impl App {
     /// Drain and apply all pending Lua ops (notifications, errors,
     /// commands, engine mutations). Call after any Lua handler dispatch.
     pub(super) fn apply_lua_ops(&mut self) {
-        for op in self.lua.drain_ops() {
+        let ops = self.lua.drain_ops();
+        self.apply_ops(ops);
+    }
+
+    pub(super) fn apply_ops(&mut self, ops: Vec<crate::lua::PendingOp>) {
+        for op in ops {
             match op {
                 crate::lua::PendingOp::Notify(msg) => self.screen.notify(msg),
                 crate::lua::PendingOp::NotifyError(msg) => self.screen.notify_error(msg),
@@ -1448,6 +1453,27 @@ impl App {
                 }
                 crate::lua::PendingOp::SetPermissionOverrides(_overrides) => {
                     // TODO: store overrides and include in StartTurn
+                }
+                crate::lua::PendingOp::BackgroundAsk {
+                    id,
+                    system,
+                    messages,
+                    task,
+                } => {
+                    self.engine.send(UiCommand::BackgroundAsk {
+                        id,
+                        system,
+                        messages,
+                        task,
+                    });
+                }
+                crate::lua::PendingOp::SetGhostText(text) => {
+                    self.input_prediction = Some(text);
+                    self.screen.mark_dirty();
+                }
+                crate::lua::PendingOp::ClearGhostText => {
+                    self.input_prediction = None;
+                    self.screen.mark_dirty();
                 }
             }
         }

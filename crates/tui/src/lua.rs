@@ -183,6 +183,17 @@ pub enum PendingOp {
     SetPromptSection(String, String),
     RemovePromptSection(String),
     SetPermissionOverrides(protocol::PermissionOverrides),
+    /// Background LLM call from a Lua plugin.
+    BackgroundAsk {
+        id: u64,
+        system: String,
+        messages: Vec<protocol::Message>,
+        task: Option<String>,
+    },
+    /// Set ghost text (predicted input) on the prompt.
+    SetGhostText(String),
+    /// Clear ghost text from the prompt.
+    ClearGhostText,
 }
 
 /// Snapshot of engine-level state (model, mode, cost, tokens).
@@ -275,6 +286,10 @@ pub struct LuaRuntime {
     plugin_tools: SharedMap<String, LuaHandle>,
     /// Confirm specs for plugin tools that need user confirmation.
     plugin_confirm_specs: Arc<Mutex<HashMap<String, PluginConfirmSpec>>>,
+    /// Callbacks for `engine.ask()` responses, keyed by request ID.
+    ask_callbacks: SharedMap<u64, LuaHandle>,
+    /// Monotonic counter for background ask request IDs.
+    ask_next_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl LuaRuntime {
@@ -293,6 +308,8 @@ impl LuaRuntime {
         let plugin_tools: SharedMap<String, LuaHandle> = Arc::new(Mutex::new(HashMap::new()));
         let plugin_confirm_specs: Arc<Mutex<HashMap<String, PluginConfirmSpec>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let ask_callbacks: SharedMap<u64, LuaHandle> = Arc::new(Mutex::new(HashMap::new()));
+        let ask_next_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
 
         let load_error = Self::register_api(
             &lua,
@@ -304,6 +321,8 @@ impl LuaRuntime {
             statusline_provider.clone(),
             plugin_tools.clone(),
             plugin_confirm_specs.clone(),
+            ask_callbacks.clone(),
+            ask_next_id.clone(),
         )
         .err()
         .map(|e| e.to_string());
@@ -319,6 +338,8 @@ impl LuaRuntime {
             statusline_provider,
             plugin_tools,
             plugin_confirm_specs,
+            ask_callbacks,
+            ask_next_id,
         };
 
         if rt.load_error.is_none() {
@@ -351,6 +372,8 @@ impl LuaRuntime {
         statusline_provider: Arc<Mutex<Option<LuaHandle>>>,
         plugin_tools: SharedMap<String, LuaHandle>,
         plugin_confirm_specs: Arc<Mutex<HashMap<String, PluginConfirmSpec>>>,
+        ask_callbacks: SharedMap<u64, LuaHandle>,
+        ask_next_id: Arc<std::sync::atomic::AtomicU64>,
     ) -> LuaResult<()> {
         let smelt = lua.create_table()?;
 
@@ -510,7 +533,110 @@ impl LuaRuntime {
             })?,
         )?;
 
+        // smelt.api.engine.ask({ system, messages?, question?, task?, on_response })
+        {
+            let ops_clone = ops.clone();
+            let cb_clone = ask_callbacks.clone();
+            let id_counter = ask_next_id.clone();
+            engine_tbl.set(
+                "ask",
+                lua.create_function(move |lua, spec: mlua::Table| {
+                    let system: String = spec.get("system")?;
+                    let task: Option<String> = spec.get("task")?;
+                    let on_response: Option<mlua::Function> = spec.get("on_response")?;
+
+                    let mut messages = Vec::new();
+                    if let Ok(msgs) = spec.get::<mlua::Table>("messages") {
+                        for pair in msgs.sequence_values::<mlua::Table>().flatten() {
+                            let role: String = pair.get("role")?;
+                            let content: String = pair.get("content")?;
+                            let msg = match role.as_str() {
+                                "user" => protocol::Message::user(protocol::Content::text(&content)),
+                                "assistant" => protocol::Message::assistant(Some(content), None),
+                                _ => continue,
+                            };
+                            messages.push(msg);
+                        }
+                    }
+                    if let Ok(question) = spec.get::<String>("question") {
+                        messages.push(protocol::Message::user(protocol::Content::text(&question)));
+                    }
+
+                    let id = id_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    if let Some(func) = on_response {
+                        let key = lua.create_registry_value(func)?;
+                        if let Ok(mut cbs) = cb_clone.lock() {
+                            cbs.insert(id, LuaHandle { key, dead: false });
+                        }
+                    }
+
+                    if let Ok(mut o) = ops_clone.lock() {
+                        o.ops.push(PendingOp::BackgroundAsk {
+                            id,
+                            system,
+                            messages,
+                            task,
+                        });
+                    }
+                    Ok(id)
+                })?,
+            )?;
+        }
+
         api.set("engine", engine_tbl)?;
+
+        // smelt.api.ui — ghost text + notifications
+        let ui_tbl = lua.create_table()?;
+        {
+            let ops_clone = ops.clone();
+            ui_tbl.set(
+                "set_ghost_text",
+                lua.create_function(move |_, text: String| {
+                    if let Ok(mut o) = ops_clone.lock() {
+                        o.ops.push(PendingOp::SetGhostText(text));
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let ops_clone = ops.clone();
+            ui_tbl.set(
+                "clear_ghost_text",
+                lua.create_function(move |_, ()| {
+                    if let Ok(mut o) = ops_clone.lock() {
+                        o.ops.push(PendingOp::ClearGhostText);
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let ops_clone = ops.clone();
+            ui_tbl.set(
+                "notify",
+                lua.create_function(move |_, msg: String| {
+                    if let Ok(mut o) = ops_clone.lock() {
+                        o.ops.push(PendingOp::Notify(msg));
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let ops_clone = ops.clone();
+            ui_tbl.set(
+                "notify_error",
+                lua.create_function(move |_, msg: String| {
+                    if let Ok(mut o) = ops_clone.lock() {
+                        o.ops.push(PendingOp::NotifyError(msg));
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+        api.set("ui", ui_tbl)?;
 
         // smelt.api.prompt.set_section(name, content) / remove_section(name)
         let prompt_tbl = lua.create_table()?;
@@ -744,6 +870,30 @@ impl LuaRuntime {
             return Vec::new();
         };
         o.drain()
+    }
+
+    /// Fire the `on_response` callback for a completed `engine.ask()` call.
+    /// Returns any queued ops produced by the callback.
+    pub fn fire_ask_callback(&self, id: u64, content: &str) -> Vec<PendingOp> {
+        let handle = {
+            let Ok(mut cbs) = self.ask_callbacks.lock() else {
+                return vec![];
+            };
+            match cbs.remove(&id) {
+                Some(h) => h,
+                None => return vec![],
+            }
+        };
+        let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
+            return vec![];
+        };
+        if let Err(e) = func.call::<()>(content.to_string()) {
+            if let Ok(mut o) = self.ops.lock() {
+                o.ops
+                    .push(PendingOp::NotifyError(format!("ask callback: {e}")));
+            }
+        }
+        self.drain_ops()
     }
 
     /// Invoke a registered command by name. Returns `true` when the

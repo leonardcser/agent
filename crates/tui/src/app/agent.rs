@@ -629,6 +629,11 @@ impl App {
                 }
                 SessionControl::Continue
             }
+            EngineEvent::BackgroundAskResponse { id, content } => {
+                let ops = self.lua.fire_ask_callback(id, &content);
+                self.apply_ops(ops);
+                SessionControl::Continue
+            }
             EngineEvent::Messages {
                 turn_id: id,
                 messages,
@@ -767,6 +772,10 @@ impl App {
                 if generation == self.predict_generation =>
             {
                 self.handle_input_prediction(text);
+            }
+            EngineEvent::BackgroundAskResponse { id, content } => {
+                let ops = self.lua.fire_ask_callback(id, &content);
+                self.apply_ops(ops);
             }
             EngineEvent::ProcessCompleted { id, exit_code } => {
                 self.handle_process_completed(id, exit_code);

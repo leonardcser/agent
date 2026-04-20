@@ -114,6 +114,9 @@ pub enum EngineEvent {
     /// Predicted next user input (ghost text autocomplete).
     InputPrediction { text: String, generation: u64 },
 
+    /// Response to a `UiCommand::BackgroundAsk` request.
+    BackgroundAskResponse { id: u64, content: String },
+
     /// Snapshot of the engine's message list, sent after each significant step.
     Messages {
         turn_id: u64,
@@ -258,6 +261,17 @@ pub enum UiCommand {
     PredictInput {
         history: Vec<Message>,
         generation: u64,
+    },
+
+    /// Generic background LLM call from a Lua plugin. The engine spawns a
+    /// one-shot request and returns the response as `BackgroundAskResponse`.
+    BackgroundAsk {
+        id: u64,
+        system: String,
+        messages: Vec<Message>,
+        /// Auxiliary task for model routing. When `None`, uses the primary model.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        task: Option<String>,
     },
 
     /// Result of a plugin tool execution (response to `ExecutePluginTool`).

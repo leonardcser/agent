@@ -222,6 +222,16 @@ pub async fn engine_task(
                     } => {
                         spawn_predict_request(&config, &client, history, &event_tx, generation);
                     }
+                    UiCommand::BackgroundAsk {
+                        id,
+                        system,
+                        messages,
+                        task,
+                    } => {
+                        spawn_background_ask(
+                            &config, &client, id, system, messages, task, &event_tx,
+                        );
+                    }
                     UiCommand::SetModel { model, api_base, api_key, provider_type } => {
                         config.api.base = api_base;
                         config.api.key = api_key;
@@ -434,6 +444,51 @@ fn spawn_predict_request(
                 let _ = tx.send(EngineEvent::InputPrediction { text, generation });
             }
         }
+    });
+}
+
+fn spawn_background_ask(
+    config: &EngineConfig,
+    client: &reqwest::Client,
+    id: u64,
+    system: String,
+    mut messages: Vec<protocol::Message>,
+    task: Option<String>,
+    event_tx: &mpsc::UnboundedSender<EngineEvent>,
+) {
+    let aux_task = match task.as_deref() {
+        Some("prediction") => AuxiliaryTask::Prediction,
+        Some("btw") => AuxiliaryTask::Btw,
+        Some("compaction") => AuxiliaryTask::Compaction,
+        Some("title") => AuxiliaryTask::Title,
+        _ => AuxiliaryTask::Btw, // default to btw routing
+    };
+    let request = config.aux_or_primary(aux_task);
+    let provider = build_provider_from_api(&request.api, client);
+    let pricing = PricingContext::from_api(&request.api);
+    let model = request.model;
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        let cancel = crate::cancel::CancellationToken::new();
+        messages.insert(0, protocol::Message::system(&system));
+
+        let content = match provider
+            .chat(
+                &messages,
+                &[],
+                &model,
+                protocol::ReasoningEffort::default(),
+                &ChatOptions::new(&cancel),
+            )
+            .await
+        {
+            Ok(resp) => {
+                pricing.emit(&tx, &model, resp.usage);
+                resp.content.unwrap_or_default()
+            }
+            Err(e) => format!("error: {e}"),
+        };
+        let _ = tx.send(EngineEvent::BackgroundAskResponse { id, content });
     });
 }
 
@@ -753,6 +808,23 @@ impl<'a> Turn<'a> {
                     reasoning_effort,
                     question,
                     history,
+                    self.event_tx,
+                );
+                true
+            }
+            UiCommand::BackgroundAsk {
+                id,
+                system,
+                messages,
+                task,
+            } => {
+                spawn_background_ask(
+                    self.config,
+                    self.http_client,
+                    id,
+                    system,
+                    messages,
+                    task,
                     self.event_tx,
                 );
                 true
