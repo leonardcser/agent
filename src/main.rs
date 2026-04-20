@@ -354,6 +354,18 @@ async fn main() {
         Arc::new(std::sync::RwLock::new(rt))
     };
 
+    let skill_loader = {
+        let extra_paths: Vec<std::path::PathBuf> = cfg
+            .skills
+            .paths
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        Arc::new(engine::SkillLoader::load(&extra_paths))
+    };
+    let tui_skill_section = skill_loader.prompt_section().map(String::from);
+    let tui_instructions = instructions.clone();
+
     let engine_handle = engine::start(engine::EngineConfig {
         api: engine::ApiConfig {
             base: api_base,
@@ -382,16 +394,7 @@ async fn main() {
         },
         interactive: !args.headless && !args.subagent,
         mcp_servers: cfg.mcp.clone(),
-        skills: {
-            let extra_paths: Vec<std::path::PathBuf> = cfg
-                .skills
-                .paths
-                .iter()
-                .map(std::path::PathBuf::from)
-                .collect();
-            let loader = engine::SkillLoader::load(&extra_paths);
-            Some(Arc::new(loader))
-        },
+        skills: Some(skill_loader),
         auto_compact: settings.auto_compact,
         context_window: cfg.settings.context_window,
         redact_secrets: settings.redact_secrets,
@@ -450,6 +453,8 @@ async fn main() {
         startup_auth_error.take(),
     );
     app.model_config = (&model_config).into();
+    app.extra_instructions = tui_instructions;
+    app.skill_section = tui_skill_section;
     if let Some(mode) = mode_override {
         app.mode = mode;
     }

@@ -16,6 +16,7 @@ pub mod lua;
 pub mod metrics;
 pub mod perf;
 pub mod persist;
+pub mod prompt_sections;
 pub mod render;
 pub mod session;
 pub mod sleep_inhibit;
