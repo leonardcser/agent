@@ -11,7 +11,6 @@ pub struct BufferView {
     border: Border,
     title: Option<String>,
     title_style: Style,
-    dirty: bool,
 }
 
 impl BufferView {
@@ -23,7 +22,6 @@ impl BufferView {
             border: Border::None,
             title: None,
             title_style: Style::default(),
-            dirty: true,
         }
     }
 
@@ -45,13 +43,11 @@ impl BufferView {
     pub fn set_lines(&mut self, lines: Vec<String>) {
         self.lines = lines;
         self.highlights.clear();
-        self.dirty = true;
     }
 
     pub fn set_scroll(&mut self, offset: usize) {
         if self.scroll_offset != offset {
             self.scroll_offset = offset;
-            self.dirty = true;
         }
     }
 
@@ -61,12 +57,10 @@ impl BufferView {
 
     pub fn set_title(&mut self, title: Option<String>) {
         self.title = title;
-        self.dirty = true;
     }
 
     pub fn set_border(&mut self, border: Border) {
         self.border = border;
-        self.dirty = true;
     }
 
     pub fn line_count(&self) -> usize {
@@ -98,7 +92,6 @@ impl BufferView {
                 self.highlights.push(converted);
             }
         }
-        self.dirty = true;
     }
 
     pub fn add_highlight(&mut self, line: usize, col_start: u16, col_end: u16, style: Style) {
@@ -106,7 +99,6 @@ impl BufferView {
             self.highlights.push(Vec::new());
         }
         self.highlights[line].push((col_start, col_end, style));
-        self.dirty = true;
     }
 
     pub fn content_height(&self, area_height: u16) -> u16 {
@@ -235,18 +227,6 @@ impl Component for BufferView {
 
     fn handle_key(&mut self, _code: KeyCode, _mods: KeyModifiers) -> KeyResult {
         KeyResult::Ignored
-    }
-
-    fn is_dirty(&self) -> bool {
-        self.dirty
-    }
-
-    fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
-    fn mark_clean(&mut self) {
-        self.dirty = false;
     }
 }
 

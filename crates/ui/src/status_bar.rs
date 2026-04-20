@@ -28,7 +28,6 @@ pub struct StatusBar {
     left: Vec<StatusSegment>,
     right: Vec<StatusSegment>,
     bg: Style,
-    dirty: bool,
 }
 
 impl StatusBar {
@@ -37,7 +36,6 @@ impl StatusBar {
             left: Vec::new(),
             right: Vec::new(),
             bg: Style::default(),
-            dirty: true,
         }
     }
 
@@ -48,12 +46,10 @@ impl StatusBar {
 
     pub fn set_left(&mut self, segments: Vec<StatusSegment>) {
         self.left = segments;
-        self.dirty = true;
     }
 
     pub fn set_right(&mut self, segments: Vec<StatusSegment>) {
         self.right = segments;
-        self.dirty = true;
     }
 }
 
@@ -115,18 +111,6 @@ impl Component for StatusBar {
 
     fn handle_key(&mut self, _code: KeyCode, _mods: KeyModifiers) -> KeyResult {
         KeyResult::Ignored
-    }
-
-    fn is_dirty(&self) -> bool {
-        self.dirty
-    }
-
-    fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
-    fn mark_clean(&mut self) {
-        self.dirty = false;
     }
 }
 

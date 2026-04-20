@@ -21,7 +21,4 @@ pub trait Component {
     fn cursor(&self) -> Option<(u16, u16)> {
         None
     }
-    fn is_dirty(&self) -> bool;
-    fn mark_dirty(&mut self);
-    fn mark_clean(&mut self);
 }

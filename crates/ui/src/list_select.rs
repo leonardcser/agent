@@ -30,7 +30,6 @@ pub struct ListSelect {
     scroll_offset: usize,
     indicator: &'static str,
     selected_style: Style,
-    dirty: bool,
 }
 
 impl ListSelect {
@@ -44,7 +43,6 @@ impl ListSelect {
                 bold: true,
                 ..Style::default()
             },
-            dirty: true,
         }
     }
 
@@ -62,7 +60,6 @@ impl ListSelect {
         self.items = items;
         self.selected = 0;
         self.scroll_offset = 0;
-        self.dirty = true;
     }
 
     pub fn len(&self) -> usize {
@@ -84,21 +81,18 @@ impl ListSelect {
     pub fn select(&mut self, idx: usize) {
         if idx < self.items.len() {
             self.selected = idx;
-            self.dirty = true;
         }
     }
 
     pub fn move_up(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;
-            self.dirty = true;
         }
     }
 
     pub fn move_down(&mut self) {
         if self.selected + 1 < self.items.len() {
             self.selected += 1;
-            self.dirty = true;
         }
     }
 
@@ -187,18 +181,6 @@ impl Component for ListSelect {
             }
             _ => KeyResult::Ignored,
         }
-    }
-
-    fn is_dirty(&self) -> bool {
-        self.dirty
-    }
-
-    fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
-    fn mark_clean(&mut self) {
-        self.dirty = false;
     }
 }
 

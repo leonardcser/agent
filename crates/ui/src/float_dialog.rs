@@ -50,7 +50,6 @@ pub struct FloatDialog {
     input: Option<TextInput>,
     config: FloatDialogConfig,
     focus: Focus,
-    dirty: bool,
 }
 
 impl FloatDialog {
@@ -63,7 +62,6 @@ impl FloatDialog {
             input: None,
             focus: Focus::Content,
             config,
-            dirty: true,
         }
     }
 
@@ -84,23 +82,19 @@ impl FloatDialog {
     }
 
     pub fn content_mut(&mut self) -> &mut BufferView {
-        self.dirty = true;
         &mut self.content
     }
 
     pub fn footer_mut(&mut self) -> Option<&mut ListSelect> {
-        self.dirty = true;
         self.footer.as_mut()
     }
 
     pub fn input_mut(&mut self) -> Option<&mut TextInput> {
-        self.dirty = true;
         self.input.as_mut()
     }
 
     pub fn set_content_lines(&mut self, lines: Vec<String>) {
         self.content.set_lines(lines);
-        self.dirty = true;
     }
 
     pub fn set_footer_items(&mut self, items: Vec<ListItem>) {
@@ -112,12 +106,10 @@ impl FloatDialog {
                 self.focus = Focus::Footer;
             }
         }
-        self.dirty = true;
     }
 
     pub fn sync_content_from_buffer(&mut self, buf: &Buffer) {
         self.content.sync_from_buffer(buf);
-        self.dirty = true;
     }
 
     pub fn selected(&self) -> Option<usize> {
@@ -137,7 +129,6 @@ impl FloatDialog {
     }
 
     pub fn config_mut(&mut self) -> &mut FloatDialogConfig {
-        self.dirty = true;
         &mut self.config
     }
 
@@ -325,14 +316,12 @@ impl FloatDialog {
         let offset = self.content.scroll_offset();
         if offset > 0 {
             self.content.set_scroll(offset - 1);
-            self.dirty = true;
         }
     }
 
     fn scroll_content_down(&mut self) {
         let offset = self.content.scroll_offset();
         self.content.set_scroll(offset + 1);
-        self.dirty = true;
     }
 
     fn scroll_content_half_page(&mut self, up: bool, viewport_h: u16) {
@@ -343,7 +332,6 @@ impl FloatDialog {
         } else {
             self.content.set_scroll(offset + half);
         }
-        self.dirty = true;
     }
 }
 
@@ -426,7 +414,6 @@ impl Component for FloatDialog {
                             return KeyResult::Action("dismiss".into());
                         }
                         KeyResult::Consumed => {
-                            self.dirty = true;
                             return KeyResult::Consumed;
                         }
                         _ => {}
@@ -445,7 +432,6 @@ impl Component for FloatDialog {
                             return KeyResult::Action("dismiss".into());
                         }
                         KeyResult::Consumed => {
-                            self.dirty = true;
                             return KeyResult::Consumed;
                         }
                         _ => {}
@@ -480,7 +466,6 @@ impl Component for FloatDialog {
             (KeyCode::Home, _) | (KeyCode::Char('g'), KeyModifiers::NONE) => {
                 if matches!(self.focus, Focus::Content) {
                     self.content.set_scroll(0);
-                    self.dirty = true;
                     return KeyResult::Consumed;
                 }
             }
@@ -489,7 +474,6 @@ impl Component for FloatDialog {
                     let lines = self.content.line_count();
                     if lines > 0 {
                         self.content.set_scroll(lines.saturating_sub(1));
-                        self.dirty = true;
                     }
                     return KeyResult::Consumed;
                 }
@@ -515,35 +499,6 @@ impl Component for FloatDialog {
             None
         }
     }
-
-    fn is_dirty(&self) -> bool {
-        self.dirty
-            || self.content.is_dirty()
-            || self.footer.as_ref().is_some_and(|f| f.is_dirty())
-            || self.input.as_ref().is_some_and(|i| i.is_dirty())
-    }
-
-    fn mark_dirty(&mut self) {
-        self.dirty = true;
-        self.content.mark_dirty();
-        if let Some(ref mut f) = self.footer {
-            f.mark_dirty();
-        }
-        if let Some(ref mut i) = self.input {
-            i.mark_dirty();
-        }
-    }
-
-    fn mark_clean(&mut self) {
-        self.dirty = false;
-        self.content.mark_clean();
-        if let Some(ref mut f) = self.footer {
-            f.mark_clean();
-        }
-        if let Some(ref mut i) = self.input {
-            i.mark_clean();
-        }
-    }
 }
 
 impl FloatDialog {
@@ -567,7 +522,6 @@ impl FloatDialog {
             }
             Focus::Input => Focus::Content,
         };
-        self.dirty = true;
     }
 
     fn cycle_focus_backward(&mut self) {
@@ -590,7 +544,6 @@ impl FloatDialog {
                 }
             }
         };
-        self.dirty = true;
     }
 }
 
@@ -749,18 +702,6 @@ mod tests {
 
         dialog.handle_key(KeyCode::Tab, KeyModifiers::NONE);
         assert!(matches!(dialog.focus, Focus::Input));
-    }
-
-    #[test]
-    fn dirty_propagates() {
-        let mut dialog =
-            FloatDialog::new(FloatDialogConfig::default()).with_footer(vec![ListItem::plain("A")]);
-
-        dialog.mark_clean();
-        assert!(!dialog.is_dirty());
-
-        dialog.content_mut().set_lines(vec!["new".into()]);
-        assert!(dialog.is_dirty());
     }
 
     #[test]

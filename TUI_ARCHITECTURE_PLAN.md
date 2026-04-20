@@ -275,37 +275,44 @@ Core types, text primitives, layout engine:
 - Layout: `LayoutTree`, constraint solver, float resolution
 - Buffer highlights: `Span`, `SpanStyle`, per-line styled content
 
-## Phase 3–4: Grid + Components (DONE)
+## Phase 3–5: Grid + Components + FloatDialog (DONE)
 
-Cell grid, compositor, and primitive components:
+Cell grid, compositor, primitive components, and unified dialog:
 - `Grid`, `Cell`, `Style`, `GridSlice` — cell-level rendering surface
 - `flush_diff()` — SGR emission from grid diffs
-- `Component` trait — retained-mode contract
+- `Component` trait — `draw()`, `handle_key()`, `cursor()`
+  (no dirty flags — compositor always draws all layers, grid diff
+  handles change detection at the cell level)
 - `Compositor` — manages layers, orchestrates render, focus routing
 - `BufferView` — renders buffer content with highlights and borders
 - `ListSelect` — selectable list with indicators and navigation
 - `TextInput` — single-line text editor with cursor
 - `StatusBar` — left/right segmented status line
+- `FloatDialog` — unified dialog composing BufferView + optional
+  ListSelect footer + optional TextInput. All dialogs will be
+  configurations of this single component. Supports border/title
+  chrome, content/footer/input/hints layout, Tab focus cycling,
+  vim-style scroll keys, and action-based key results
+  (`select:N`, `dismiss`, `submit:text`).
 
-## Phase 5: FloatDialog component
+## Phase 6: Wire compositor into tui render loop
 
-**Goal:** Build the unified float dialog that replaces all 9 Dialog impls.
+**Goal:** Replace `RenderOut` direct-write path with grid compositor.
 
-- `FloatDialog` composes: border/title chrome + `BufferView` (content) +
-  optional `ListSelect` (footer) + optional `TextInput` (inline input)
-- `FloatDialogConfig`: title, border style, content scroll, footer items,
-  accent color, hint text, max_height constraint
-- `FloatDialog` implements `Component`:
-  - `draw()`: border → content area → footer → hints
-  - `handle_key()`: routes to footer ListSelect or content scroll
-  - Returns `KeyResult::Action("select:N")`, `Action("dismiss")`,
-    `Action("submit:text")` etc.
-- Content is a `BufferView` — dialog callers write styled lines into it
-- Footer is an optional `ListSelect` — callers set items
-- Inline input is an optional `TextInput` — for confirm message, search
-- Unit tests: render float dialog, verify grid output, test key routing
+The compositor must be wired in before dialogs can migrate, because
+the existing `Dialog` trait draws to `RenderOut` (escape sequences)
+while `FloatDialog` draws to a `Grid` (cells). Attempting to bridge
+these two rendering paths creates throwaway adapter code.
 
-## Phase 6: Migrate dialogs to FloatDialog
+- Add `Compositor` to `App` (or `Ui`)
+- Create `LegacyBridge` component wrapping current `Screen` rendering:
+  - `draw()` calls existing block paint pipeline but writes to grid
+  - Temporary scaffolding — deleted when transcript/prompt migrate
+- `App::render_frame()` → `compositor.render(&mut writer)`
+- Synchronized update envelope around compositor output
+- Remove direct `RenderOut` usage from main render path
+
+## Phase 7: Migrate dialogs to FloatDialog
 
 **Goal:** Kill the `Dialog` trait. Each dialog becomes a FloatDialog config.
 
@@ -337,18 +344,6 @@ Delete after all migrations:
 - `active_dialog`, `open_dialog`, `finalize_dialog_close`
 - `FloatOp`, `pending_float_ops`, `drain_float_ops`
 - All individual dialog structs in `render/dialogs/`
-
-## Phase 7: Wire compositor into tui render loop
-
-**Goal:** Replace `RenderOut` direct-write path with grid compositor.
-
-- Add `Compositor` to `App` (or `Ui`)
-- Create `LegacyBridge` component wrapping current `Screen` rendering:
-  - `draw()` calls existing block paint pipeline but writes to grid
-  - Temporary scaffolding — deleted when transcript/prompt migrate
-- `App::render_frame()` → `compositor.render(&mut writer)`
-- Synchronized update envelope around compositor output
-- Remove direct `RenderOut` usage from main render path
 
 ## Phase 8: Migrate prompt and transcript
 

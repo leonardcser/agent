@@ -10,7 +10,6 @@ pub struct TextInput {
     placeholder: Option<String>,
     placeholder_style: Style,
     text_style: Style,
-    dirty: bool,
 }
 
 impl TextInput {
@@ -25,7 +24,6 @@ impl TextInput {
                 ..Style::default()
             },
             text_style: Style::default(),
-            dirty: true,
         }
     }
 
@@ -46,14 +44,12 @@ impl TextInput {
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.cursor_col = self.text.chars().count();
-        self.dirty = true;
     }
 
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor_col = 0;
         self.scroll_offset = 0;
-        self.dirty = true;
     }
 
     pub fn cursor_col(&self) -> usize {
@@ -73,7 +69,6 @@ impl TextInput {
             .unwrap_or(self.text.len());
         self.text.insert(byte_pos, ch);
         self.cursor_col += 1;
-        self.dirty = true;
     }
 
     fn delete_back(&mut self) {
@@ -91,7 +86,6 @@ impl TextInput {
                 .map(|c| c.len_utf8())
                 .unwrap_or(0);
             self.text.drain(byte_pos..byte_pos + next);
-            self.dirty = true;
         }
     }
 
@@ -109,28 +103,24 @@ impl TextInput {
                 .map(|c| c.len_utf8())
                 .unwrap_or(0);
             self.text.drain(byte_pos..byte_pos + next);
-            self.dirty = true;
         }
     }
 
     fn move_left(&mut self) {
         if self.cursor_col > 0 {
             self.cursor_col -= 1;
-            self.dirty = true;
         }
     }
 
     fn move_right(&mut self) {
         if self.cursor_col < self.char_count() {
             self.cursor_col += 1;
-            self.dirty = true;
         }
     }
 
     fn move_home(&mut self) {
         if self.cursor_col != 0 {
             self.cursor_col = 0;
-            self.dirty = true;
         }
     }
 
@@ -138,7 +128,6 @@ impl TextInput {
         let count = self.char_count();
         if self.cursor_col != count {
             self.cursor_col = count;
-            self.dirty = true;
         }
     }
 
@@ -158,7 +147,6 @@ impl TextInput {
         let end_byte: usize = chars[..self.cursor_col].iter().map(|c| c.len_utf8()).sum();
         self.text.drain(start_byte..end_byte);
         self.cursor_col = pos;
-        self.dirty = true;
     }
 
     pub fn ensure_visible(&mut self, width: u16) {
@@ -249,18 +237,6 @@ impl Component for TextInput {
     fn cursor(&self) -> Option<(u16, u16)> {
         let visible_col = self.cursor_col.saturating_sub(self.scroll_offset);
         Some((visible_col as u16, 0))
-    }
-
-    fn is_dirty(&self) -> bool {
-        self.dirty
-    }
-
-    fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
-    fn mark_clean(&mut self) {
-        self.dirty = false;
     }
 }
 

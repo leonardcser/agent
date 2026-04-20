@@ -69,10 +69,7 @@ impl Compositor {
 
     pub fn set_rect(&mut self, id: &str, rect: Rect) {
         if let Some(layer) = self.layers.iter_mut().find(|l| l.id == id) {
-            if layer.rect != rect {
-                layer.rect = rect;
-                layer.component.mark_dirty();
-            }
+            layer.rect = rect;
         }
     }
 
@@ -115,9 +112,6 @@ impl Compositor {
         self.height = height;
         self.current.resize(width, height);
         self.previous.resize(width, height);
-        for layer in &mut self.layers {
-            layer.component.mark_dirty();
-        }
         self.force_redraw = true;
     }
 
@@ -126,17 +120,13 @@ impl Compositor {
 
         let focused_id = self.focused.clone();
         for layer in &self.layers {
-            if self.force_redraw || layer.component.is_dirty() {
-                let ctx = DrawContext {
-                    terminal_width: self.width,
-                    terminal_height: self.height,
-                    focused: focused_id.as_deref() == Some(&layer.id),
-                };
-                let mut slice = self.current.slice_mut(layer.rect);
-                layer.component.draw(layer.rect, &mut slice, &ctx);
-            } else {
-                copy_region(&self.previous, &mut self.current, layer.rect);
-            }
+            let ctx = DrawContext {
+                terminal_width: self.width,
+                terminal_height: self.height,
+                focused: focused_id.as_deref() == Some(&layer.id),
+            };
+            let mut slice = self.current.slice_mut(layer.rect);
+            layer.component.draw(layer.rect, &mut slice, &ctx);
         }
 
         w.queue(BeginSynchronizedUpdate)?;
@@ -165,9 +155,6 @@ impl Compositor {
         w.flush()?;
 
         self.current.swap_with(&mut self.previous);
-        for layer in &mut self.layers {
-            layer.component.mark_clean();
-        }
         self.force_redraw = false;
 
         Ok(())
@@ -195,15 +182,6 @@ impl Compositor {
 
     fn sort_layers(&mut self) {
         self.layers.sort_by_key(|l| l.zindex);
-    }
-}
-
-fn copy_region(src: &Grid, dst: &mut Grid, area: Rect) {
-    for y in area.top..area.bottom().min(src.height()).min(dst.height()) {
-        for x in area.left..area.right().min(src.width()).min(dst.width()) {
-            let cell = src.cell(x, y);
-            *dst.cell_mut(x, y) = cell.clone();
-        }
     }
 }
 
@@ -262,39 +240,23 @@ mod tests {
 
     struct TestComponent {
         text: String,
-        style: Style,
-        dirty: bool,
     }
 
     impl TestComponent {
         fn new(text: &str) -> Self {
             Self {
                 text: text.to_string(),
-                style: Style::default(),
-                dirty: true,
             }
         }
     }
 
     impl Component for TestComponent {
         fn draw(&self, _area: Rect, grid: &mut GridSlice<'_>, _ctx: &DrawContext) {
-            grid.put_str(0, 0, &self.text, self.style);
+            grid.put_str(0, 0, &self.text, Style::default());
         }
 
         fn handle_key(&mut self, _code: KeyCode, _mods: KeyModifiers) -> KeyResult {
             KeyResult::Ignored
-        }
-
-        fn is_dirty(&self) -> bool {
-            self.dirty
-        }
-
-        fn mark_dirty(&mut self) {
-            self.dirty = true;
-        }
-
-        fn mark_clean(&mut self) {
-            self.dirty = false;
         }
     }
 
@@ -354,31 +316,15 @@ mod tests {
     fn focus_routes_keys() {
         let mut comp = Compositor::new(20, 5);
 
-        struct ConsumeAll {
-            dirty: bool,
-        }
+        struct ConsumeAll;
         impl Component for ConsumeAll {
             fn draw(&self, _: Rect, _: &mut GridSlice<'_>, _: &DrawContext) {}
             fn handle_key(&mut self, _: KeyCode, _: KeyModifiers) -> KeyResult {
                 KeyResult::Consumed
             }
-            fn is_dirty(&self) -> bool {
-                self.dirty
-            }
-            fn mark_dirty(&mut self) {
-                self.dirty = true;
-            }
-            fn mark_clean(&mut self) {
-                self.dirty = false;
-            }
         }
 
-        comp.add(
-            "a",
-            Box::new(ConsumeAll { dirty: true }),
-            Rect::new(0, 0, 10, 1),
-            0,
-        );
+        comp.add("a", Box::new(ConsumeAll), Rect::new(0, 0, 10, 1), 0);
         assert_eq!(
             comp.handle_key(KeyCode::Char('x'), KeyModifiers::NONE),
             KeyResult::Ignored
@@ -391,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_marks_all_dirty() {
+    fn resize_triggers_force_redraw() {
         let mut comp = Compositor::new(20, 5);
         comp.add(
             "a",
@@ -401,35 +347,18 @@ mod tests {
         );
         let mut out = Vec::new();
         comp.render(&mut out).unwrap();
-        assert!(!comp.layers[0].component.is_dirty());
+        assert!(!comp.force_redraw);
         comp.resize(40, 10);
-        assert!(comp.layers[0].component.is_dirty());
+        assert!(comp.force_redraw);
     }
 
     #[test]
-    fn set_rect_marks_dirty() {
-        let mut comp = Compositor::new(20, 5);
-        comp.add(
-            "a",
-            Box::new(TestComponent::new("hi")),
-            Rect::new(0, 0, 10, 1),
-            0,
-        );
-        let mut out = Vec::new();
-        comp.render(&mut out).unwrap();
-        assert!(!comp.layers[0].component.is_dirty());
-        comp.set_rect("a", Rect::new(1, 0, 10, 1));
-        assert!(comp.layers[0].component.is_dirty());
-    }
-
-    #[test]
-    fn clean_components_not_redrawn() {
+    fn all_components_drawn_every_frame() {
         use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Arc;
 
         struct CountingComponent {
             draw_count: Arc<AtomicU32>,
-            dirty: bool,
         }
         impl Component for CountingComponent {
             fn draw(&self, _: Rect, _: &mut GridSlice<'_>, _: &DrawContext) {
@@ -437,15 +366,6 @@ mod tests {
             }
             fn handle_key(&mut self, _: KeyCode, _: KeyModifiers) -> KeyResult {
                 KeyResult::Ignored
-            }
-            fn is_dirty(&self) -> bool {
-                self.dirty
-            }
-            fn mark_dirty(&mut self) {
-                self.dirty = true;
-            }
-            fn mark_clean(&mut self) {
-                self.dirty = false;
             }
         }
 
@@ -455,7 +375,6 @@ mod tests {
             "a",
             Box::new(CountingComponent {
                 draw_count: count.clone(),
-                dirty: true,
             }),
             Rect::new(0, 0, 10, 1),
             0,
@@ -467,14 +386,12 @@ mod tests {
 
         let mut out = Vec::new();
         comp.render(&mut out).unwrap();
-        assert_eq!(count.load(Ordering::Relaxed), 1);
+        assert_eq!(count.load(Ordering::Relaxed), 2);
     }
 
     #[test]
     fn cursor_position_from_focused() {
-        struct CursorComp {
-            dirty: bool,
-        }
+        struct CursorComp;
         impl Component for CursorComp {
             fn draw(&self, _: Rect, _: &mut GridSlice<'_>, _: &DrawContext) {}
             fn handle_key(&mut self, _: KeyCode, _: KeyModifiers) -> KeyResult {
@@ -483,24 +400,10 @@ mod tests {
             fn cursor(&self) -> Option<(u16, u16)> {
                 Some((3, 1))
             }
-            fn is_dirty(&self) -> bool {
-                self.dirty
-            }
-            fn mark_dirty(&mut self) {
-                self.dirty = true;
-            }
-            fn mark_clean(&mut self) {
-                self.dirty = false;
-            }
         }
 
         let mut comp = Compositor::new(20, 10);
-        comp.add(
-            "edit",
-            Box::new(CursorComp { dirty: true }),
-            Rect::new(5, 10, 10, 3),
-            0,
-        );
+        comp.add("edit", Box::new(CursorComp), Rect::new(5, 10, 10, 3), 0);
         comp.focus("edit");
         let mut out = Vec::new();
         comp.render(&mut out).unwrap();
