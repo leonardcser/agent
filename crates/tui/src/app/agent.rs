@@ -630,7 +630,7 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::BackgroundAskResponse { id, content } => {
-                let ops = self.lua.fire_ask_callback(id, &content);
+                let ops = self.lua.fire_callback(id, &content);
                 self.apply_ops(ops);
                 SessionControl::Continue
             }
@@ -774,7 +774,7 @@ impl App {
                 self.handle_input_prediction(text);
             }
             EngineEvent::BackgroundAskResponse { id, content } => {
-                let ops = self.lua.fire_ask_callback(id, &content);
+                let ops = self.lua.fire_callback(id, &content);
                 self.apply_ops(ops);
             }
             EngineEvent::ProcessCompleted { id, exit_code } => {
