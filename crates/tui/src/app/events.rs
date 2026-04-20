@@ -752,7 +752,6 @@ impl App {
         self.last_height = h;
         self.ui.set_terminal_size(w, h);
         self.compositor.resize(w, h);
-        self.transcript_view.set_term_width(w);
         let _ = width_changed;
         self.screen.redraw();
     }
@@ -999,7 +998,7 @@ impl App {
         let prompt_height = prompt_rect.height;
 
         // ── Transcript ──
-        let tdata = self.screen.collect_transcript_data(
+        let tdata = self.screen.project_transcript_buffer(
             width,
             viewport_rows,
             self.transcript_window.scroll_top,
@@ -1016,8 +1015,12 @@ impl App {
         self.transcript_window.cursor_line = tcursor.clamped_line;
         self.transcript_window.cursor_col = tcursor.clamped_col;
 
-        // Push transcript data to TranscriptView.
-        self.transcript_view.set_lines(tdata.lines, tdata.pad_left);
+        // Sync TranscriptView from the projected buffer.
+        self.transcript_view.sync_from_buffer(
+            self.screen.transcript_projection.buf(),
+            tdata.clamped_scroll as usize,
+            tdata.pad_left,
+        );
         self.transcript_view.set_cursor(tcursor.soft_cursor);
         if tdata.has_scrollbar {
             self.transcript_view.set_scrollbar(

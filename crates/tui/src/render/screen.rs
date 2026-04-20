@@ -16,6 +16,7 @@ use super::history::{
     ViewState,
 };
 use super::transcript::Transcript;
+use super::transcript_buf::TranscriptProjection;
 
 #[allow(clippy::too_many_arguments)]
 fn paint_completer_float(
@@ -49,7 +50,6 @@ fn paint_completer_float(
 }
 
 pub(crate) struct TranscriptData {
-    pub lines: Vec<DisplayLine>,
     pub clamped_scroll: u16,
     pub total_rows: u16,
     pub pad_left: u16,
@@ -193,6 +193,8 @@ pub struct Screen {
     last_transcript_viewport: Option<super::region::Viewport>,
     /// Centralized layout state computed at the start of each frame.
     pub(crate) layout: super::layout::LayoutState,
+    /// Buffer-backed transcript projection — blocks projected at event time.
+    pub(crate) transcript_projection: TranscriptProjection,
     /// Ephemeral btw side-question state, rendered above the prompt.
     btw: Option<BtwBlock>,
     /// Ephemeral notification shown above the prompt, dismissed on any key.
@@ -286,6 +288,13 @@ impl Screen {
                 dialog_height: None,
                 constrain_dialog: false,
             }),
+            transcript_projection: TranscriptProjection::new(ui::buffer::Buffer::new(
+                ui::BufId(0),
+                ui::buffer::BufCreateOpts {
+                    modifiable: true,
+                    buftype: ui::buffer::BufType::Nofile,
+                },
+            )),
             btw: None,
             notification: None,
             task_label: None,
@@ -1841,10 +1850,9 @@ impl Screen {
         }
     }
 
-    /// Compute transcript viewport data for the compositor pipeline.
-    /// Returns the display lines, scroll clamping, total rows, viewport text
-    /// (for motions/yank), and viewport DisplayLines (for cursor mapping).
-    pub(crate) fn collect_transcript_data(
+    /// Project transcript blocks into a `ui::Buffer`. Gated by generation —
+    /// skips work when nothing changed since the last projection.
+    pub(crate) fn project_transcript_buffer(
         &mut self,
         width: usize,
         viewport_rows: u16,
@@ -1852,6 +1860,7 @@ impl Screen {
     ) -> TranscriptData {
         let gutters = self.transcript_gutters;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
+        let theme = crate::theme::snapshot();
 
         let ephemeral_lines: Vec<crate::render::display::DisplayLine> = if self.has_ephemeral() {
             let mut col = SpanCollector::new(tw as u16);
@@ -1861,64 +1870,45 @@ impl Screen {
             Vec::new()
         };
 
-        let vdata = self.transcript.history.collect_viewport(
-            tw,
+        self.transcript_projection.project(
+            &mut self.transcript.history,
+            tw as u16,
             self.show_thinking,
-            viewport_rows,
-            scroll_top,
+            &theme,
             &ephemeral_lines,
         );
 
-        let snapshot_total = self
-            .transcript
-            .snapshot(tw as u16, self.show_thinking)
-            .rows
-            .len() as u16;
-        let total_transcript_rows = snapshot_total.saturating_add(ephemeral_lines.len() as u16);
+        let total_rows = self.transcript_projection.total_lines() as u16;
+
+        let geom = super::viewport::ViewportGeom::new(total_rows, viewport_rows, scroll_top);
+        let clamped_scroll = geom.clamped_scroll();
 
         let scrollbar_col = match gutters.scrollbar {
             Some(crate::window::GutterSide::Left) => 0,
             _ => (width as u16).saturating_sub(1),
         };
 
-        let geom = super::viewport::ViewportGeom::new(
-            total_transcript_rows,
-            viewport_rows,
-            vdata.clamped_scroll,
-        );
+        // Update viewport text and display lines for vim motions/yank/selection.
+        let buf = self.transcript_projection.buf();
+        let start = clamped_scroll as usize;
+        let end = (start + viewport_rows as usize).min(buf.line_count());
+        self.last_viewport_text = buf.get_lines(start, end).to_vec();
+        self.last_viewport_lines = self
+            .transcript_projection
+            .viewport_display_lines(clamped_scroll, viewport_rows);
 
-        // Capture viewport text for content pane motions/yank.
-        let viewport_text = {
-            let snap = self.transcript.snapshot(tw as u16, self.show_thinking);
-            let mut vt = snap.viewport_rows(viewport_rows, vdata.clamped_scroll);
-            if !ephemeral_lines.is_empty() {
-                for line in &ephemeral_lines {
-                    let mut s = String::new();
-                    for span in &line.spans {
-                        s.push_str(&span.text);
-                    }
-                    vt.push(s);
-                }
-                vt.truncate(viewport_rows as usize);
-            }
-            vt
-        };
-
-        // Update side-effect state.
-        self.last_viewport_text = viewport_text.clone();
-        self.last_viewport_lines = vdata.lines.clone();
         self.last_transcript_viewport = Some(super::region::Viewport {
             top_row: 0,
             rows: viewport_rows,
             content_width: tw as u16,
-            total_rows: total_transcript_rows,
-            scroll_top: vdata.clamped_scroll,
+            total_rows,
+            scroll_top: clamped_scroll,
             scrollbar: if geom.max_scroll() > 0 {
                 Some(super::region::ScrollbarGeom {
                     col: scrollbar_col,
                     top_row: 0,
                     rows: viewport_rows,
-                    total_rows: total_transcript_rows,
+                    total_rows,
                 })
             } else {
                 None
@@ -1926,9 +1916,8 @@ impl Screen {
         });
 
         TranscriptData {
-            lines: vdata.lines,
-            clamped_scroll: vdata.clamped_scroll,
-            total_rows: total_transcript_rows,
+            clamped_scroll,
+            total_rows,
             pad_left: gutters.pad_left,
             scrollbar_col,
             has_scrollbar: geom.max_scroll() > 0,

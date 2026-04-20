@@ -1,9 +1,8 @@
-use super::display::DisplayLine;
-use super::paint_grid::{paint_line_to_grid, GridPaintContext};
 use super::scrollbar::Scrollbar;
 use crate::theme;
-use crate::theme::Theme;
 use crossterm::event::{KeyCode, KeyModifiers};
+use ui::buffer::Buffer;
+use ui::buffer_view::BufferView;
 use ui::component::{Component, DrawContext, KeyResult};
 use ui::grid::{GridSlice, Style};
 use ui::layout::Rect;
@@ -15,30 +14,27 @@ pub(crate) struct SoftCursor {
 }
 
 pub(crate) struct TranscriptView {
-    lines: Vec<DisplayLine>,
+    view: BufferView,
     pad_left: u16,
     scrollbar_col: u16,
     scrollbar: Option<Scrollbar>,
     cursor: Option<SoftCursor>,
-    theme: Theme,
-    term_width: u16,
 }
 
 impl TranscriptView {
-    pub fn new(term_width: u16) -> Self {
+    pub fn new(_term_width: u16) -> Self {
         Self {
-            lines: Vec::new(),
+            view: BufferView::new(),
             pad_left: 0,
             scrollbar_col: 0,
             scrollbar: None,
             cursor: None,
-            theme: theme::snapshot(),
-            term_width,
         }
     }
 
-    pub fn set_lines(&mut self, lines: Vec<DisplayLine>, pad_left: u16) {
-        self.lines = lines;
+    pub fn sync_from_buffer(&mut self, buf: &Buffer, scroll_offset: usize, pad_left: u16) {
+        self.view.sync_from_buffer(buf);
+        self.view.set_scroll(scroll_offset);
         self.pad_left = pad_left;
     }
 
@@ -60,30 +56,17 @@ impl TranscriptView {
     pub fn set_cursor(&mut self, cursor: Option<SoftCursor>) {
         self.cursor = cursor;
     }
-
-    pub fn set_term_width(&mut self, w: u16) {
-        self.term_width = w;
-    }
 }
 
 impl Component for TranscriptView {
-    fn draw(&self, _area: Rect, grid: &mut GridSlice<'_>, _ctx: &DrawContext) {
+    fn draw(&self, area: Rect, grid: &mut GridSlice<'_>, ctx: &DrawContext) {
         let h = grid.height();
         let w = grid.width();
         if h == 0 || w == 0 {
             return;
         }
 
-        let ctx = GridPaintContext {
-            theme: &self.theme,
-            term_width: self.term_width,
-        };
-
-        for row in 0..h {
-            if let Some(line) = self.lines.get(row as usize) {
-                paint_line_to_grid(grid, row, line, &ctx, self.pad_left);
-            }
-        }
+        self.view.draw(area, grid, ctx);
 
         if let Some(ref bar) = self.scrollbar {
             let thumb_bg = Style::bg(theme::scrollbar_thumb());
@@ -129,33 +112,22 @@ impl Component for TranscriptView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::display::{DisplaySpan, SpanStyle};
+    use crossterm::style::Color;
+    use ui::buffer::{BufCreateOpts, SpanStyle};
     use ui::grid::Grid;
+    use ui::BufId;
+
+    fn make_buf(lines: &[&str]) -> Buffer {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(lines.iter().map(|s| String::from(*s)).collect());
+        buf
+    }
 
     #[test]
-    fn renders_display_lines() {
+    fn renders_buffer_lines() {
+        let buf = make_buf(&["hello", "world"]);
         let mut view = TranscriptView::new(20);
-        view.set_lines(
-            vec![
-                DisplayLine {
-                    spans: vec![DisplaySpan {
-                        text: "hello".into(),
-                        style: SpanStyle::default(),
-                        meta: Default::default(),
-                    }],
-                    ..Default::default()
-                },
-                DisplayLine {
-                    spans: vec![DisplaySpan {
-                        text: "world".into(),
-                        style: SpanStyle::default(),
-                        meta: Default::default(),
-                    }],
-                    ..Default::default()
-                },
-            ],
-            0,
-        );
+        view.sync_from_buffer(&buf, 0, 0);
 
         let mut grid = Grid::new(20, 5);
         let ctx = DrawContext {
@@ -172,19 +144,29 @@ mod tests {
     }
 
     #[test]
-    fn renders_soft_cursor() {
+    fn renders_with_scroll_offset() {
+        let buf = make_buf(&["line0", "line1", "line2", "line3"]);
         let mut view = TranscriptView::new(20);
-        view.set_lines(
-            vec![DisplayLine {
-                spans: vec![DisplaySpan {
-                    text: "abc".into(),
-                    style: SpanStyle::default(),
-                    meta: Default::default(),
-                }],
-                ..Default::default()
-            }],
-            0,
-        );
+        view.sync_from_buffer(&buf, 2, 0);
+
+        let mut grid = Grid::new(20, 2);
+        let ctx = DrawContext {
+            terminal_width: 20,
+            terminal_height: 2,
+            focused: true,
+        };
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 2));
+        view.draw(Rect::new(0, 0, 20, 2), &mut slice, &ctx);
+
+        assert_eq!(grid.cell(4, 0).symbol, '2');
+        assert_eq!(grid.cell(4, 1).symbol, '3');
+    }
+
+    #[test]
+    fn renders_soft_cursor() {
+        let buf = make_buf(&["abc"]);
+        let mut view = TranscriptView::new(20);
+        view.sync_from_buffer(&buf, 0, 0);
         view.set_cursor(Some(SoftCursor {
             col: 1,
             row: 0,
@@ -206,7 +188,29 @@ mod tests {
     }
 
     #[test]
-    fn empty_lines_leave_blank() {
+    fn renders_highlighted_buffer() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["colored text".into()]);
+        buf.add_highlight(0, 0, 7, SpanStyle::fg(Color::Red));
+
+        let mut view = TranscriptView::new(20);
+        view.sync_from_buffer(&buf, 0, 0);
+
+        let mut grid = Grid::new(20, 1);
+        let ctx = DrawContext {
+            terminal_width: 20,
+            terminal_height: 1,
+            focused: true,
+        };
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 1));
+        view.draw(Rect::new(0, 0, 20, 1), &mut slice, &ctx);
+
+        assert_eq!(grid.cell(0, 0).style.fg, Some(Color::Red));
+        assert_eq!(grid.cell(7, 0).style.fg, None);
+    }
+
+    #[test]
+    fn empty_buffer_leaves_blank() {
         let view = TranscriptView::new(20);
         let mut grid = Grid::new(20, 3);
         let ctx = DrawContext {

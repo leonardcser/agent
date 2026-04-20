@@ -121,7 +121,7 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    pub(crate) fn new(id: BufId, opts: BufCreateOpts) -> Self {
+    pub fn new(id: BufId, opts: BufCreateOpts) -> Self {
         Self {
             id,
             lines: vec![String::new()],

@@ -1,5 +1,5 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct BufId(pub(crate) u64);
+pub struct BufId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct WinId(pub(crate) u64);
