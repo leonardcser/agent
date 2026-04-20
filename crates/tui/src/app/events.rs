@@ -321,18 +321,12 @@ impl App {
         // to the built-in keymap dispatcher.
         if let Event::Key(k) = *ev {
             if let Some(chord) = crate::lua::chord_string(k) {
-                let ctx = self.build_lua_context();
-                let vim_mode = ctx.vim_mode.clone();
-                self.lua.set_context(ctx);
+                let (vim_mode, focused_window) = self.snapshot_lua_context();
                 let handled = self.lua.run_keymap(&chord, vim_mode.as_deref());
                 self.lua.clear_context();
                 if handled {
-                    for msg in self.lua.drain_notifications() {
-                        self.screen.notify(msg);
-                    }
-                    for err in self.lua.drain_errors() {
-                        self.screen.notify_error(err);
-                    }
+                    let _ = focused_window;
+                    self.apply_lua_ops();
                     return Some(EventOutcome::Noop);
                 }
             }
@@ -1352,10 +1346,9 @@ impl App {
         }
     }
 
-    /// Current (total_transcript_rows, viewport_rows) — needed by the
-    /// pin math. Reads the width from the renderer and measures the
-    /// transcript against it.
-    pub(super) fn build_lua_context(&mut self) -> crate::lua::LuaContext {
+    /// Snapshot app state into the Lua ops context and return the
+    /// vim_mode + focused_window for callers that need them locally.
+    pub(super) fn snapshot_lua_context(&mut self) -> (Option<String>, String) {
         let transcript_text = self.screen.full_transcript_text().join("\n");
         let prompt_text = self.input.buffer.buf.clone();
         let focused_window = match self.app_focus {
@@ -1370,11 +1363,26 @@ impl App {
                 .map(|v| format!("{:?}", v.mode())),
             crate::app::AppFocus::Prompt => self.input.vim_mode().map(|m| format!("{m:?}")),
         };
-        crate::lua::LuaContext {
-            transcript_text: Some(transcript_text),
-            prompt_text: Some(prompt_text),
-            focused_window: Some(focused_window.to_string()),
-            vim_mode,
+        self.lua.set_context(
+            Some(transcript_text),
+            Some(prompt_text),
+            Some(focused_window.to_string()),
+            vim_mode.clone(),
+        );
+        (vim_mode, focused_window.to_string())
+    }
+
+    /// Drain and apply all pending Lua ops (notifications, errors,
+    /// commands). Call after any Lua handler dispatch.
+    pub(super) fn apply_lua_ops(&mut self) {
+        for op in self.lua.drain_ops() {
+            match op {
+                crate::lua::PendingOp::Notify(msg) => self.screen.notify(msg),
+                crate::lua::PendingOp::NotifyError(msg) => self.screen.notify_error(msg),
+                crate::lua::PendingOp::RunCommand(line) => {
+                    let _ = crate::api::cmd::run(self, &line);
+                }
+            }
         }
     }
 

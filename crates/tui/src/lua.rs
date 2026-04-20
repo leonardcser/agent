@@ -118,30 +118,68 @@ struct LuaHandle {
     dead: bool,
 }
 
-/// Snapshot of app state populated before dispatching a Lua callback.
-/// Lua functions can read from this to access transcript text, prompt
-/// text, etc. without holding borrows on `App`.
-type SharedContext = Arc<Mutex<LuaContext>>;
+/// Deferred mutation queued by a Lua handler. Applied by the app loop
+/// after the handler returns, avoiding nested borrows on `App`.
+pub enum PendingOp {
+    Notify(String),
+    NotifyError(String),
+    RunCommand(String),
+}
 
+/// Shared state between Lua closures and the app loop.
+///
+/// **Reads**: snapshot fields populated by `set_context()` before a
+/// handler runs. Lua reads these via `smelt.api.transcript.text()` etc.
+///
+/// **Writes**: `ops` collects deferred mutations (`PendingOp`) that the
+/// app drains and applies after the handler returns.
+///
+/// One `Arc<Mutex<LuaOps>>` replaces the old separate
+/// `LuaContext` + `pending_notifications` + `pending_commands` +
+/// `lua_errors`.
 #[derive(Default)]
-pub struct LuaContext {
+pub struct LuaOps {
+    // ── reads (snapshot) ────────────────────────────────────────────
     pub transcript_text: Option<String>,
     pub prompt_text: Option<String>,
     pub focused_window: Option<String>,
     pub vim_mode: Option<String>,
+    // ── writes (queued mutations) ───────────────────────────────────
+    pub ops: Vec<PendingOp>,
 }
+
+impl LuaOps {
+    pub fn set_context(
+        &mut self,
+        transcript_text: Option<String>,
+        prompt_text: Option<String>,
+        focused_window: Option<String>,
+        vim_mode: Option<String>,
+    ) {
+        self.transcript_text = transcript_text;
+        self.prompt_text = prompt_text;
+        self.focused_window = focused_window;
+        self.vim_mode = vim_mode;
+    }
+
+    pub fn clear_context(&mut self) {
+        self.transcript_text = None;
+        self.prompt_text = None;
+        self.focused_window = None;
+        self.vim_mode = None;
+    }
+
+    pub fn drain(&mut self) -> Vec<PendingOp> {
+        std::mem::take(&mut self.ops)
+    }
+}
+
+type SharedOps = Arc<Mutex<LuaOps>>;
 
 /// User-scoped Lua state + any recorded startup error.
 pub struct LuaRuntime {
     pub lua: Lua,
     pub load_error: Option<String>,
-    /// Notifications queued by `smelt.notify` calls. Polled by the
-    /// app each tick and forwarded to the Screen's notification band.
-    pub pending_notifications: SharedVec<String>,
-    /// Errors raised by any Lua callback. The app surfaces the first
-    /// one per tick as a notification; subsequent errors accumulate for
-    /// `~/.cache/smelt/lua.log` persistence.
-    pub lua_errors: SharedVec<String>,
     /// Commands registered from Lua, keyed by command name.
     commands: SharedMap<String, LuaHandle>,
     /// Key chord → handler mapping, keyed by `(mode, chord)`.
@@ -152,13 +190,8 @@ pub struct LuaRuntime {
     /// `smelt.defer(ms, fn)` timers. `Instant` is the due time; the
     /// tick loop fires handlers whose due time has passed.
     pending_timers: SharedVec<(Instant, LuaHandle)>,
-    /// Command lines queued by `smelt.api.cmd.run` from inside Lua
-    /// callbacks. Drained by the app loop and dispatched through
-    /// `commands::run_command` — the re-entrancy queue that lets
-    /// a Lua handler trigger a built-in without nesting borrows.
-    pub pending_commands: SharedVec<String>,
-    /// Shared context populated by the app before dispatching callbacks.
-    context: SharedContext,
+    /// Unified read/write bridge between Lua handlers and the app loop.
+    ops: SharedOps,
     /// Lua function registered via `smelt.statusline(fn)`. Called each
     /// tick to produce custom status items.
     statusline_provider: Arc<Mutex<Option<LuaHandle>>>,
@@ -170,28 +203,22 @@ impl LuaRuntime {
     /// errors; syntax / runtime errors are captured on `load_error`.
     pub fn new() -> Self {
         let lua = Lua::new();
-        let pending: SharedVec<String> = Arc::new(Mutex::new(Vec::new()));
-        let errors: SharedVec<String> = Arc::new(Mutex::new(Vec::new()));
         let commands: SharedMap<String, LuaHandle> = Arc::new(Mutex::new(HashMap::new()));
         let keymaps: SharedMap<(String, String), LuaHandle> = Arc::new(Mutex::new(HashMap::new()));
         let autocmds: SharedMap<AutocmdEvent, Vec<LuaHandle>> =
             Arc::new(Mutex::new(HashMap::new()));
         let pending_timers: SharedVec<(Instant, LuaHandle)> = Arc::new(Mutex::new(Vec::new()));
-        let pending_commands: SharedVec<String> = Arc::new(Mutex::new(Vec::new()));
+        let ops: SharedOps = Arc::new(Mutex::new(LuaOps::default()));
         let statusline_provider: Arc<Mutex<Option<LuaHandle>>> = Arc::new(Mutex::new(None));
-
-        let context: SharedContext = Arc::new(Mutex::new(LuaContext::default()));
 
         let load_error = Self::register_api(
             &lua,
-            pending.clone(),
             commands.clone(),
             keymaps.clone(),
             autocmds.clone(),
             pending_timers.clone(),
-            pending_commands.clone(),
+            ops.clone(),
             statusline_provider.clone(),
-            context.clone(),
         )
         .err()
         .map(|e| e.to_string());
@@ -199,14 +226,11 @@ impl LuaRuntime {
         let mut rt = Self {
             lua,
             load_error,
-            pending_notifications: pending,
-            lua_errors: errors,
             commands,
             keymaps,
             autocmds,
             pending_timers,
-            pending_commands,
-            context,
+            ops,
             statusline_provider,
         };
 
@@ -223,63 +247,60 @@ impl LuaRuntime {
         rt
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn register_api(
         lua: &Lua,
-        pending: SharedVec<String>,
         commands: SharedMap<String, LuaHandle>,
         keymaps: SharedMap<(String, String), LuaHandle>,
         autocmds: SharedMap<AutocmdEvent, Vec<LuaHandle>>,
         pending_timers: SharedVec<(Instant, LuaHandle)>,
-        pending_commands: SharedVec<String>,
+        ops: SharedOps,
         statusline_provider: Arc<Mutex<Option<LuaHandle>>>,
-        context: SharedContext,
     ) -> LuaResult<()> {
         let smelt = lua.create_table()?;
 
         let api = lua.create_table()?;
         api.set("version", crate::api::VERSION)?;
 
-        // smelt.api.transcript.text() — read the full transcript text.
+        // smelt.api.transcript.text()
         let transcript_tbl = lua.create_table()?;
-        let ctx_clone = context.clone();
+        let ops_clone = ops.clone();
         let transcript_text = lua.create_function(move |_, ()| {
-            let ctx = ctx_clone
+            let o = ops_clone
                 .lock()
                 .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
-            Ok(ctx.transcript_text.clone().unwrap_or_default())
+            Ok(o.transcript_text.clone().unwrap_or_default())
         })?;
         transcript_tbl.set("text", transcript_text)?;
         api.set("transcript", transcript_tbl)?;
 
-        // smelt.api.buf.text() — read the prompt buffer text.
+        // smelt.api.buf.text()
         let buf_tbl = lua.create_table()?;
-        let ctx_clone = context.clone();
+        let ops_clone = ops.clone();
         let buf_text = lua.create_function(move |_, ()| {
-            let ctx = ctx_clone
+            let o = ops_clone
                 .lock()
                 .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
-            Ok(ctx.prompt_text.clone().unwrap_or_default())
+            Ok(o.prompt_text.clone().unwrap_or_default())
         })?;
         buf_tbl.set("text", buf_text)?;
         api.set("buf", buf_tbl)?;
 
         // smelt.api.win.focus() / smelt.api.win.mode()
         let win_tbl = lua.create_table()?;
-        let ctx_clone = context.clone();
+        let ops_clone = ops.clone();
         let win_focus = lua.create_function(move |_, ()| {
-            let ctx = ctx_clone
+            let o = ops_clone
                 .lock()
                 .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
-            Ok(ctx.focused_window.clone().unwrap_or_default())
+            Ok(o.focused_window.clone().unwrap_or_default())
         })?;
         win_tbl.set("focus", win_focus)?;
-        let ctx_clone = context.clone();
+        let ops_clone = ops.clone();
         let win_mode = lua.create_function(move |_, ()| {
-            let ctx = ctx_clone
+            let o = ops_clone
                 .lock()
                 .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
-            Ok(ctx.vim_mode.clone().unwrap_or_default())
+            Ok(o.vim_mode.clone().unwrap_or_default())
         })?;
         win_tbl.set("mode", win_mode)?;
         api.set("win", win_tbl)?;
@@ -297,19 +318,17 @@ impl LuaRuntime {
             })?;
         cmd_tbl.set("register", cmd_register)?;
 
-        // smelt.api.cmd.run(line) — queue a command line for the app
-        // loop to dispatch. Running it inline would nest App borrows;
-        // the queue drains on the next tick.
-        let pending_commands_clone = pending_commands.clone();
+        // smelt.api.cmd.run(line)
+        let ops_clone = ops.clone();
         let cmd_run = lua.create_function(move |_, line: String| {
-            if let Ok(mut q) = pending_commands_clone.lock() {
-                q.push(line);
+            if let Ok(mut o) = ops_clone.lock() {
+                o.ops.push(PendingOp::RunCommand(line));
             }
             Ok(())
         })?;
         cmd_tbl.set("run", cmd_run)?;
 
-        // smelt.api.cmd.list() — return names of Lua-registered commands.
+        // smelt.api.cmd.list()
         let commands_list = commands.clone();
         let cmd_list = lua.create_function(move |lua, ()| {
             let names: Vec<String> = commands_list
@@ -328,11 +347,11 @@ impl LuaRuntime {
 
         smelt.set("api", api)?;
 
-        // smelt.notify(msg) — queue a user-visible notification.
-        let pending_clone = pending.clone();
+        // smelt.notify(msg)
+        let ops_clone = ops.clone();
         let notify = lua.create_function(move |_, msg: String| {
-            if let Ok(mut q) = pending_clone.lock() {
-                q.push(msg);
+            if let Ok(mut o) = ops_clone.lock() {
+                o.ops.push(PendingOp::Notify(msg));
             }
             Ok(())
         })?;
@@ -409,46 +428,32 @@ impl LuaRuntime {
         self.lua.load(&src).set_name("init.lua").exec()
     }
 
-    /// Populate the shared context before dispatching a Lua callback.
-    /// The app calls this to make transcript/prompt text available to
-    /// Lua functions like `smelt.api.transcript.text()`.
-    pub fn set_context(&self, ctx: LuaContext) {
-        if let Ok(mut c) = self.context.lock() {
-            *c = ctx;
+    /// Populate the snapshot fields before dispatching a Lua callback.
+    pub fn set_context(
+        &self,
+        transcript_text: Option<String>,
+        prompt_text: Option<String>,
+        focused_window: Option<String>,
+        vim_mode: Option<String>,
+    ) {
+        if let Ok(mut o) = self.ops.lock() {
+            o.set_context(transcript_text, prompt_text, focused_window, vim_mode);
         }
     }
 
-    /// Clear the shared context after dispatching.
+    /// Clear the snapshot fields after dispatching.
     pub fn clear_context(&self) {
-        if let Ok(mut c) = self.context.lock() {
-            *c = LuaContext::default();
+        if let Ok(mut o) = self.ops.lock() {
+            o.clear_context();
         }
     }
 
-    /// Drain any pending notifications queued from Lua callbacks.
-    pub fn drain_notifications(&self) -> Vec<String> {
-        let Ok(mut q) = self.pending_notifications.lock() else {
+    /// Drain all pending ops queued by Lua handlers.
+    pub fn drain_ops(&self) -> Vec<PendingOp> {
+        let Ok(mut o) = self.ops.lock() else {
             return Vec::new();
         };
-        std::mem::take(&mut *q)
-    }
-
-    /// Drain command lines queued by `smelt.api.cmd.run`. The app loop
-    /// dispatches each line through `commands::run_command` after the
-    /// current handler returns, avoiding nested `&mut App` borrows.
-    pub fn drain_pending_commands(&self) -> Vec<String> {
-        let Ok(mut q) = self.pending_commands.lock() else {
-            return Vec::new();
-        };
-        std::mem::take(&mut *q)
-    }
-
-    /// Drain any errors recorded while dispatching Lua callbacks.
-    pub fn drain_errors(&self) -> Vec<String> {
-        let Ok(mut q) = self.lua_errors.lock() else {
-            return Vec::new();
-        };
-        std::mem::take(&mut *q)
+        o.drain()
     }
 
     /// Invoke a registered command by name. Returns `true` when the
@@ -608,8 +613,8 @@ impl LuaRuntime {
     }
 
     fn record_error(&self, msg: String) {
-        if let Ok(mut q) = self.lua_errors.lock() {
-            q.push(msg);
+        if let Ok(mut o) = self.ops.lock() {
+            o.ops.push(PendingOp::NotifyError(msg));
         }
     }
 
@@ -653,6 +658,36 @@ fn init_lua_path() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    fn drain_notifications(rt: &LuaRuntime) -> Vec<String> {
+        rt.drain_ops()
+            .into_iter()
+            .filter_map(|op| match op {
+                PendingOp::Notify(msg) => Some(msg),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn drain_errors(rt: &LuaRuntime) -> Vec<String> {
+        rt.drain_ops()
+            .into_iter()
+            .filter_map(|op| match op {
+                PendingOp::NotifyError(msg) => Some(msg),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn drain_commands(rt: &LuaRuntime) -> Vec<String> {
+        rt.drain_ops()
+            .into_iter()
+            .filter_map(|op| match op {
+                PendingOp::RunCommand(line) => Some(line),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn runtime_exposes_api_version() {
         let rt = LuaRuntime::new();
@@ -672,9 +707,9 @@ mod tests {
             .load("smelt.notify('hello from lua')")
             .exec()
             .expect("exec");
-        let msgs = rt.drain_notifications();
+        let msgs = drain_notifications(&rt);
         assert_eq!(msgs, vec!["hello from lua".to_string()]);
-        assert!(rt.drain_notifications().is_empty());
+        assert!(drain_notifications(&rt).is_empty());
     }
 
     #[test]
@@ -701,7 +736,7 @@ mod tests {
             .expect("exec");
         assert!(rt.has_command("hello"));
         assert!(rt.run_command("hello", None));
-        assert_eq!(rt.drain_notifications(), vec!["hello world".to_string()]);
+        assert_eq!(drain_notifications(&rt), vec!["hello world".to_string()]);
         assert!(!rt.run_command("unknown", None));
     }
 
@@ -718,12 +753,9 @@ mod tests {
             )
             .exec()
             .expect("exec");
-        // Mode "n" matches Normal
         assert!(rt.run_keymap("<C-g>", Some("Normal")));
-        assert_eq!(rt.drain_notifications(), vec!["ctrl-g".to_string()]);
-        // Wrong mode doesn't match
+        assert_eq!(drain_notifications(&rt), vec!["ctrl-g".to_string()]);
         assert!(!rt.run_keymap("<C-g>", Some("Insert")));
-        // Unregistered chord
         assert!(!rt.run_keymap("<C-x>", Some("Normal")));
     }
 
@@ -741,7 +773,7 @@ mod tests {
             .exec()
             .expect("exec");
         assert!(rt.run_keymap("<C-h>", Some("Normal")));
-        assert_eq!(rt.drain_notifications(), vec!["any-mode".to_string()]);
+        assert_eq!(drain_notifications(&rt), vec!["any-mode".to_string()]);
         assert!(rt.run_keymap("<C-h>", Some("Insert")));
         assert!(rt.run_keymap("<C-h>", None));
     }
@@ -761,7 +793,7 @@ mod tests {
             .expect("exec");
         rt.emit(AutocmdEvent::BlockDone);
         assert_eq!(
-            rt.drain_notifications(),
+            drain_notifications(&rt),
             vec!["fired: block_done".to_string()]
         );
     }
@@ -779,11 +811,10 @@ mod tests {
             )
             .exec()
             .expect("exec");
-        // Even with 0ms, the handler hasn't run yet — tick_timers triggers it.
-        assert!(rt.drain_notifications().is_empty());
+        assert!(drain_notifications(&rt).is_empty());
         std::thread::sleep(std::time::Duration::from_millis(2));
         rt.tick_timers();
-        assert_eq!(rt.drain_notifications(), vec!["deferred".to_string()]);
+        assert_eq!(drain_notifications(&rt), vec!["deferred".to_string()]);
     }
 
     #[test]
@@ -793,9 +824,9 @@ mod tests {
             .load(r#"smelt.api.cmd.run("/compact")"#)
             .exec()
             .expect("exec");
-        let queued = rt.drain_pending_commands();
+        let queued = drain_commands(&rt);
         assert_eq!(queued, vec!["/compact".to_string()]);
-        assert!(rt.drain_pending_commands().is_empty());
+        assert!(drain_commands(&rt).is_empty());
     }
 
     #[test]
@@ -838,7 +869,7 @@ mod tests {
             .exec()
             .expect("exec");
         assert!(rt.run_command("broken", None));
-        let errs = rt.drain_errors();
+        let errs = drain_errors(&rt);
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("broken"), "err: {}", errs[0]);
     }
@@ -846,10 +877,7 @@ mod tests {
     #[test]
     fn transcript_text_reads_context() {
         let rt = LuaRuntime::new();
-        rt.set_context(LuaContext {
-            transcript_text: Some("hello world".to_string()),
-            ..Default::default()
-        });
+        rt.set_context(Some("hello world".into()), None, None, None);
         let text: String = rt
             .lua
             .load("return smelt.api.transcript.text()")
@@ -868,10 +896,7 @@ mod tests {
     #[test]
     fn buf_text_reads_context() {
         let rt = LuaRuntime::new();
-        rt.set_context(LuaContext {
-            prompt_text: Some("prompt content".to_string()),
-            ..Default::default()
-        });
+        rt.set_context(None, Some("prompt content".into()), None, None);
         let text: String = rt
             .lua
             .load("return smelt.api.buf.text()")

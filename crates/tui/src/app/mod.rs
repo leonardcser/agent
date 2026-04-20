@@ -618,9 +618,7 @@ impl App {
         if let Some(err) = self.lua.load_error.take() {
             self.screen.notify_error(format!("lua init: {err}"));
         }
-        for msg in self.lua.drain_notifications() {
-            self.screen.notify(msg);
-        }
+        self.apply_lua_ops();
 
         let mut term_events = EventStream::new();
         let mut agent: Option<TurnState> = None;
@@ -665,26 +663,12 @@ impl App {
 
         'main: loop {
             // ── Lua timer + notification pump ────────────────────────────
-            // Fire any `smelt.defer` timers that came due, then drain any
-            // notifications / errors Lua callbacks queued. Keeps the Lua
-            // runtime observable even when the user isn't interacting.
             self.lua.tick_timers();
             self.screen.set_custom_status(self.lua.tick_statusline());
             for _id in self.screen.drain_finished_blocks() {
                 self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
             }
-            // Lua callbacks can queue command lines via
-            // `smelt.api.cmd.run`; dispatch them here so they don't
-            // nest inside the handler's borrow of `App`.
-            for line in self.lua.drain_pending_commands() {
-                let _ = crate::api::cmd::run(self, &line);
-            }
-            for msg in self.lua.drain_notifications() {
-                self.screen.notify(msg);
-            }
-            for err in self.lua.drain_errors() {
-                self.screen.notify_error(err);
-            }
+            self.apply_lua_ops();
 
             // ── Background polls ─────────────────────────────────────────
             if let Some(ref mut rx) = ctx_rx {

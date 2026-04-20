@@ -36,8 +36,7 @@ pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
         ),
         None => (name_arg, None),
     };
-    let ctx = app.build_lua_context();
-    app.lua.set_context(ctx);
+    app.snapshot_lua_context();
     app.lua.emit(crate::lua::AutocmdEvent::CmdPre);
     let outcome = if !name.is_empty() && app.lua.has_command(name) {
         app.lua.run_command(name, arg);
@@ -47,13 +46,7 @@ pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
     };
     app.lua.emit(crate::lua::AutocmdEvent::CmdPost);
     app.lua.clear_context();
-    // Drain and surface any notifications / errors queued during dispatch.
-    for msg in app.lua.drain_notifications() {
-        app.screen.notify(msg);
-    }
-    for err in app.lua.drain_errors() {
-        app.screen.notify_error(err);
-    }
+    app.apply_lua_ops();
     outcome
 }
 

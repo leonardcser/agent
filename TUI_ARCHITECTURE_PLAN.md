@@ -522,7 +522,18 @@ State lives in Rust. Lua talks through the API. Internal Rust code also routes t
 - Handler returns → app drains the mutation queue and applies changes
 - Already implemented for `pending_commands` and `pending_notifications`; generalize to all mutations
 
-## Full API surface
+## API surface (living draft)
+
+> **This is a starting point, not a spec.** The API will evolve as we implement
+> plugins and discover what's missing, awkward, or wrong. When implementation
+> reveals a better shape — different naming, merged/split functions, new
+> parameters — update this section to match. The goal is that this document
+> always reflects the *current* intended API, not the original plan.
+>
+> Known simplifications below: e.g. `engine.model()` elides the
+> provider→model relationship, `engine.set_tools()` doesn't account for
+> MCP-sourced tools, event payloads are sketched not finalized. These will
+> be resolved during implementation.
 
 ### Reads (snapshot — no borrow issues)
 
@@ -580,9 +591,9 @@ smelt.on("session_shutdown", fn)    -- graceful shutdown
 
 ## Phases
 
-### L1. Design the full API surface
+### L1. Design the full API surface ✅ (living draft)
 
-Write the complete `smelt.api.*` spec (above is the starting point). Finalize naming, argument shapes, return types. Decide which reads go into the snapshot vs. which are live queries. This is the contract — everything gets designed before code.
+The API surface above is the starting point. It is intentionally incomplete — the real design happens during implementation. As each phase (L2–L9) builds against the API, update the draft to reflect what actually works. The API section in this document should always match the current intended shape, not the original sketch.
 
 ### L2. Generalize the snapshot/queue pattern
 
