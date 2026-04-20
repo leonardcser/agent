@@ -1,14 +1,14 @@
--- Override a built-in command and remap a keybind.
+-- Register a custom command and remap a keybind.
 -- Drop this into ~/.config/smelt/init.lua to try.
 
--- Override /compact to show a confirmation first.
-smelt.api.cmd.register("compact", function(arg)
-  smelt.notify("compacting conversation...")
-  smelt.api.cmd.run("/compact " .. (arg or ""))
+-- /hello — greet with a notification.
+smelt.api.cmd.register("hello", function(arg)
+  local name = arg or "world"
+  smelt.notify("hello, " .. name .. "!")
 end)
 
 -- Remap Ctrl-S in normal mode to run /fork.
 smelt.keymap("n", "<C-s>", function()
-  smelt.api.cmd.run("/fork")
+  smelt.api.cmd.run("fork")
   smelt.notify("session forked")
 end)

@@ -1085,22 +1085,20 @@ impl Screen {
                 if is_interior || is_line_mode {
                     let col0 = self.transcript_gutters.pad_left;
                     out.move_to(col0, line_idx as u16);
-                    out.push_style(StyleState {
+                    out.set_state(StyleState {
                         bg: Some(sel_bg),
                         ..StyleState::default()
                     });
-                    out.print(" ");
-                    out.pop_style();
+                    for _ in 0..width {
+                        out.print(" ");
+                    }
                 }
                 continue;
             }
             if sel_end <= sel_start {
                 continue;
             }
-            // Walk DisplayLine spans to re-emit selected text with
-            // original styles preserved, only overriding the background.
-            // Non-selectable spans (gutters, padding) are skipped so
-            // their original appearance is preserved.
+            let is_line_mode = matches!(range.kind, ContentVisualKind::Line);
             if let Some(dline) = self.last_viewport_lines.get(line_idx) {
                 let pad = self.transcript_gutters.pad_left;
                 let mut col: usize = 0;
@@ -1111,7 +1109,7 @@ impl Screen {
                         col = span_end;
                         continue;
                     }
-                    if !span.meta.selectable {
+                    if !span.meta.selectable && !is_line_mode {
                         col = span_end;
                         continue;
                     }
@@ -1137,6 +1135,17 @@ impl Screen {
                     out.print(sub);
                     col = span_end;
                 }
+                if is_line_mode {
+                    out.set_state(StyleState {
+                        bg: Some(sel_bg),
+                        ..StyleState::default()
+                    });
+                    let remaining = width.saturating_sub(col as u16);
+                    out.move_to(col as u16 + pad, line_idx as u16);
+                    for _ in 0..remaining {
+                        out.print(" ");
+                    }
+                }
             } else {
                 let byte_start = crate::text_utils::cell_to_byte(line, sel_start);
                 let byte_end = crate::text_utils::cell_to_byte(line, sel_end);
@@ -1147,16 +1156,15 @@ impl Screen {
                 });
                 out.print(sub);
                 out.pop_style();
-            }
-            if matches!(range.kind, ContentVisualKind::Line) {
-                out.set_state(StyleState {
-                    bg: Some(sel_bg),
-                    ..StyleState::default()
-                });
-                let used = sel_end.saturating_sub(sel_start) as u16;
-                let remaining = width.saturating_sub(sel_start as u16 + used);
-                for _ in 0..remaining {
-                    out.print(" ");
+                if is_line_mode {
+                    out.set_state(StyleState {
+                        bg: Some(sel_bg),
+                        ..StyleState::default()
+                    });
+                    let remaining = width.saturating_sub(sel_end as u16);
+                    for _ in 0..remaining {
+                        out.print(" ");
+                    }
                 }
             }
         }

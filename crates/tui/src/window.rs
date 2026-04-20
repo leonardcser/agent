@@ -111,6 +111,11 @@ pub struct TranscriptWindow {
     /// mutations during streaming because it's in row/col coordinates
     /// rather than byte offsets.
     pub selection_anchor: Option<(usize, usize)>,
+    /// True once the user has explicitly positioned the cursor in the
+    /// content pane (any key/mouse movement). When false, `refocus`
+    /// places the cursor at the bottom of the viewport since the
+    /// transcript always shows the tail.
+    cursor_positioned: bool,
 }
 
 impl TranscriptWindow {
@@ -126,6 +131,7 @@ impl TranscriptWindow {
             cursor_col: 0,
             pinned_last_total: None,
             selection_anchor: None,
+            cursor_positioned: false,
         }
     }
 
@@ -221,6 +227,7 @@ impl TranscriptWindow {
             self.cpos = 0;
             self.cursor_line = 0;
             self.cursor_col = 0;
+            self.cursor_positioned = false;
             return;
         }
         if let Some(vim) = self.vim.as_mut() {
@@ -228,8 +235,18 @@ impl TranscriptWindow {
                 vim.set_mode(crate::vim::ViMode::Normal);
             }
         }
-        let offsets = self.mount(rows);
-        self.sync_from_cpos(rows, &offsets, viewport_rows);
+        if !self.cursor_positioned {
+            let total = rows.len();
+            let last_line = total.saturating_sub(1);
+            let offsets = Self::line_start_offsets(rows);
+            self.buffer.buf = rows.join("\n");
+            self.cpos = offsets[last_line];
+            self.sync_from_cpos(rows, &offsets, viewport_rows);
+            self.cursor_positioned = true;
+        } else {
+            let offsets = self.mount(rows);
+            self.sync_from_cpos(rows, &offsets, viewport_rows);
+        }
         if self.cursor.curswant().is_none() {
             self.cursor.set_curswant(Some(self.cursor_col as usize));
         }
