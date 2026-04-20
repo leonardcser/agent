@@ -1,4 +1,51 @@
 use crate::BufId;
+use crossterm::style::Color;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub col_start: u16,
+    pub col_end: u16,
+    pub style: SpanStyle,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpanStyle {
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
+    pub bold: bool,
+    pub dim: bool,
+    pub italic: bool,
+}
+
+impl SpanStyle {
+    pub fn fg(color: Color) -> Self {
+        Self {
+            fg: Some(color),
+            ..Default::default()
+        }
+    }
+
+    pub fn dim() -> Self {
+        Self {
+            dim: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn bold() -> Self {
+        Self {
+            bold: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn bg(color: Color) -> Self {
+        Self {
+            bg: Some(color),
+            ..Default::default()
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BufType {
@@ -39,6 +86,7 @@ impl Default for BufCreateOpts {
 pub struct Buffer {
     pub(crate) id: BufId,
     lines: Vec<String>,
+    highlights: Vec<Vec<Span>>,
     modifiable: bool,
     buftype: BufType,
     virtual_text: Vec<VirtualText>,
@@ -51,6 +99,7 @@ impl Buffer {
         Self {
             id,
             lines: vec![String::new()],
+            highlights: vec![Vec::new()],
             modifiable: opts.modifiable,
             buftype: opts.buftype,
             virtual_text: Vec::new(),
@@ -83,9 +132,15 @@ impl Buffer {
         }
         let end = end.min(self.lines.len());
         let start = start.min(end);
+        let new_count = replacement.len();
         self.lines.splice(start..end, replacement);
+        let empty_spans: Vec<Vec<Span>> = vec![Vec::new(); new_count];
+        let hl_end = end.min(self.highlights.len());
+        let hl_start = start.min(hl_end);
+        self.highlights.splice(hl_start..hl_end, empty_spans);
         if self.lines.is_empty() {
             self.lines.push(String::new());
+            self.highlights = vec![Vec::new()];
         }
         self.changedtick += 1;
     }
@@ -94,11 +149,13 @@ impl Buffer {
         if !self.modifiable {
             return;
         }
+        let count = lines.len().max(1);
         self.lines = if lines.is_empty() {
             vec![String::new()]
         } else {
             lines
         };
+        self.highlights = vec![Vec::new(); count];
         self.changedtick += 1;
     }
 
@@ -107,6 +164,7 @@ impl Buffer {
             return;
         }
         self.lines.push(line);
+        self.highlights.push(Vec::new());
         self.changedtick += 1;
     }
 
@@ -166,6 +224,28 @@ impl Buffer {
 
     pub fn delete_mark(&mut self, name: &str) {
         self.marks.remove(name);
+    }
+
+    pub fn add_highlight(&mut self, line: usize, col_start: u16, col_end: u16, style: SpanStyle) {
+        if line >= self.highlights.len() {
+            self.highlights.resize_with(line + 1, Vec::new);
+        }
+        self.highlights[line].push(Span {
+            col_start,
+            col_end,
+            style,
+        });
+    }
+
+    pub fn clear_highlights(&mut self, start_line: usize, end_line: usize) {
+        let end = end_line.min(self.highlights.len());
+        for line in start_line..end {
+            self.highlights[line].clear();
+        }
+    }
+
+    pub fn highlights_at(&self, line: usize) -> &[Span] {
+        self.highlights.get(line).map_or(&[], |v| v.as_slice())
     }
 }
 

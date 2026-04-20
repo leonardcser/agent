@@ -1,6 +1,7 @@
 pub mod buffer;
 pub mod cursor;
 pub mod edit_buffer;
+pub mod float_render;
 pub mod kill_ring;
 pub mod layout;
 pub mod style;
@@ -14,7 +15,7 @@ mod id;
 
 pub type AttachmentId = u64;
 
-pub use buffer::{BufType, Buffer};
+pub use buffer::{BufType, Buffer, Span, SpanStyle};
 pub use cursor::Cursor;
 pub use edit_buffer::EditBuffer;
 pub use id::{BufId, WinId};
@@ -190,6 +191,32 @@ impl Ui {
                 Some((id, resolve_float_rect(fc, tw, th)))
             })
             .collect()
+    }
+
+    pub fn render_floats<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        for (win_id, rect) in self.resolve_float_rects() {
+            let win = match self.wins.get(&win_id) {
+                Some(w) => w,
+                None => continue,
+            };
+            let buf = match self.bufs.get(&win.buf) {
+                Some(b) => b,
+                None => continue,
+            };
+            let (border, title_style) = match &win.config {
+                WinConfig::Float(fc) => (fc.border, buffer::SpanStyle::default()),
+                _ => continue,
+            };
+            let frame = float_render::FloatFrame {
+                rect,
+                border,
+                title: win.title().map(String::from),
+                title_style,
+                scroll_offset: win.scroll.top_row as usize,
+            };
+            float_render::render_float(w, buf, &frame)?;
+        }
+        Ok(())
     }
 }
 
