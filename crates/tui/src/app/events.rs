@@ -918,7 +918,7 @@ impl App {
                 if total_lines == 0 {
                     return None;
                 }
-                let line_idx = self.transcript_window.cursor_abs_row(total_lines);
+                let line_idx = self.transcript_window.cursor_abs_row();
                 let pct = if total_lines <= 1 {
                     100
                 } else {
@@ -1223,7 +1223,7 @@ impl App {
         let viewport = self.viewport_rows_estimate();
         self.transcript_window.resync(&rows, viewport);
         let ctx = KeyContext {
-            buf_empty: self.transcript_window.buffer.buf.is_empty(),
+            buf_empty: self.transcript_window.edit_buf.buf.is_empty(),
             vim_non_insert: false,
             vim_enabled: false,
             agent_running: false,
@@ -1253,7 +1253,7 @@ impl App {
                     self.transcript_window.selection_anchor = None;
                 }
                 _ if extending && self.transcript_window.selection_anchor.is_none() => {
-                    let row = self.transcript_window.cursor_abs_row(0);
+                    let row = self.transcript_window.cursor_abs_row();
                     let col = self.transcript_window.cursor_col as usize;
                     self.transcript_window.selection_anchor = Some((row, col));
                 }
@@ -1269,7 +1269,7 @@ impl App {
                 self.sync_transcript_pin();
                 return EventOutcome::Redraw;
             }
-            let buf = self.transcript_window.buffer.buf.clone();
+            let buf = self.transcript_window.edit_buf.buf.clone();
             let mv: Option<usize> = match action {
                 KeyAction::MoveLeft | KeyAction::SelectLeft => Some(
                     crate::text_utils::prev_char_boundary(&buf, self.transcript_window.cpos),
@@ -1455,7 +1455,7 @@ impl App {
             has_selection || in_vim_visual || self.mouse_drag_active || cursor_off_bottom;
         if want_pin {
             if !self.transcript_window.is_pinned() {
-                self.transcript_window.pin(total, viewport);
+                self.transcript_window.pin(total);
             }
         } else {
             self.transcript_window.unpin();
@@ -1845,7 +1845,7 @@ impl App {
                 if let Some(vim) = self.transcript_window.vim.as_mut() {
                     vim.begin_visual(crate::vim::ViMode::Visual, anchor);
                 } else {
-                    let row = self.transcript_window.cursor_abs_row(0);
+                    let row = self.transcript_window.cursor_abs_row();
                     let col = self.transcript_window.cursor_col as usize;
                     self.transcript_window.selection_anchor = Some((row, col));
                 }
@@ -2056,7 +2056,7 @@ impl App {
         let rows = self.screen.full_transcript_nav_text();
         let cpos = self.transcript_window.compute_cpos(&rows);
         if let Some((s, e)) = self.transcript_window.select_word_at(&rows, cpos) {
-            let text = self.transcript_window.buffer.buf[s..e].to_string();
+            let text = self.transcript_window.edit_buf.buf[s..e].to_string();
             let _ = crate::app::commands::copy_to_clipboard(&text);
         }
         self.sync_transcript_pin();
@@ -2283,7 +2283,7 @@ impl App {
         if snap.rows.is_empty() {
             return None;
         }
-        let row = self.transcript_window.cursor_abs_row(snap.rows.len());
+        let row = self.transcript_window.cursor_abs_row();
         snap.block_of_row.get(row).copied().flatten()
     }
 

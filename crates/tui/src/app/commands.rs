@@ -235,8 +235,7 @@ impl App {
                 CommandAction::Continue
             }
             "/yank-block" => {
-                let rows = self.screen.full_transcript_nav_text();
-                let abs_row = self.transcript_window.cursor_abs_row(rows.len());
+                let abs_row = self.transcript_window.cursor_abs_row();
                 if let Some(text) = self.screen.block_text_at_row(abs_row) {
                     let _ = copy_to_clipboard(&text);
                     self.screen.notify("block copied".into());

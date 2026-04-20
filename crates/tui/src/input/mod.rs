@@ -86,42 +86,6 @@ impl std::ops::Deref for InputState {
     }
 }
 
-impl crate::window::Window for InputState {
-    fn text(&self) -> &crate::buffer::Buffer {
-        &self.buffer
-    }
-    fn text_mut(&mut self) -> &mut crate::buffer::Buffer {
-        &mut self.buffer
-    }
-    fn cursor(&self) -> usize {
-        self.cpos
-    }
-    fn set_cursor(&mut self, pos: usize) {
-        self.cpos = pos.min(self.buffer.buf.len());
-    }
-    fn selection(&self) -> Option<(usize, usize)> {
-        self.selection_range()
-    }
-    fn clear_selection(&mut self) {
-        self.cursor.clear_anchor();
-        if let Some(vim) = self.vim.as_mut() {
-            if matches!(
-                vim.mode(),
-                crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine
-            ) {
-                vim.set_mode(crate::vim::ViMode::Normal);
-            }
-        }
-    }
-    fn scroll_top(&self) -> u16 {
-        // Prompt's internal scroll lives on Screen; this wrapper will
-        // grow to forward in a later stage. No per-InputState scroll
-        // state today.
-        0
-    }
-    fn set_scroll_top(&mut self, _row: u16) {}
-}
-
 /// What the caller should do after `handle_event`.
 pub enum Action {
     Redraw,

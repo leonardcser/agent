@@ -157,7 +157,7 @@ pub struct App {
     /// Readonly pane showing the transcript. Owns its `Buffer`
     /// (vim + kill ring + undo) and the viewport scroll / cursor
     /// position.
-    pub transcript_window: crate::window::TranscriptWindow,
+    pub transcript_window: ui::Window,
     /// Last primary-mouse-Down time and cell. Used to detect
     /// double-clicks (two rapid clicks on the same cell → word-select).
     pub last_click: Option<(Instant, u16, u16)>,
@@ -586,9 +586,16 @@ impl App {
             startup_auth_error,
             app_focus: AppFocus::Prompt,
             transcript_window: {
-                let mut p = crate::window::TranscriptWindow::new();
-                p.set_vim_enabled(vim_enabled);
-                p
+                let mut w = ui::Window::new(
+                    ui::WinId(0),
+                    ui::BufId(0),
+                    ui::WinConfig::Split(ui::SplitConfig {
+                        region: "transcript".into(),
+                        gutters: ui::Gutters::default(),
+                    }),
+                );
+                w.set_vim_enabled(vim_enabled);
+                w
             },
             last_click: None,
             mouse_drag_active: false,

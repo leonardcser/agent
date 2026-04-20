@@ -2,7 +2,6 @@ pub mod buffer;
 pub mod buffer_view;
 pub mod component;
 pub mod compositor;
-pub mod cursor;
 pub mod edit_buffer;
 pub mod float_dialog;
 pub mod float_render;
@@ -28,7 +27,6 @@ pub use buffer::{BufType, Buffer, Span, SpanStyle};
 pub use buffer_view::BufferView;
 pub use component::{Component, DrawContext, KeyResult};
 pub use compositor::Compositor;
-pub use cursor::Cursor;
 pub use edit_buffer::EditBuffer;
 pub use float_dialog::{FloatDialog, FloatDialogConfig};
 pub use flush::flush_diff;
@@ -230,7 +228,7 @@ impl Ui {
                 border,
                 title: win.title().map(String::from),
                 title_style,
-                scroll_offset: win.scroll.top_row as usize,
+                scroll_offset: win.scroll_top as usize,
             };
             float_render::render_float(w, buf, &frame)?;
         }

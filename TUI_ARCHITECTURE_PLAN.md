@@ -570,7 +570,7 @@ Also migrate: Notifications, Completions → float layers.
 
 ### Current progress
 
-Steps 1–3 complete:
+Steps 1–4 complete:
 - Step 1: Dead code cleanup, `tick_*` → `render_*` rename ✅
 - Step 2: `ui::Buffer` enriched with `LineDecoration` and `SpanMeta` ✅
 - Step 3: Transcript buffer ✅ — `TranscriptProjection` projects
@@ -579,9 +579,16 @@ Steps 1–3 complete:
   Deleted: `collect_viewport`, `collect_transcript_data`,
   `paint_grid.rs`.
 - `BufId` and `Buffer::new` made public for cross-crate use ✅
+- Step 4: Transcript window ✅ — merged `tui::TranscriptWindow` state
+  and behavior into `ui::Window`. `ui::Window` now holds all
+  interaction state (vim, kill_ring, win_cursor, selection, pin,
+  scroll, cursor position). Deleted: `tui::window::Window` trait,
+  `tui::window::TranscriptWindow`, `api::win` module,
+  `impl Window for InputState`, `ui::cursor` module (absorbed).
+  `WinId` constructor made public.
 
-Next: Step 4 — transcript window (merge tui::TranscriptWindow into
-ui::Window, make it read from the projected buffer directly).
+Next: Step 5 — prompt window (make the prompt a real `ui::Window`
+with an editable buffer).
 
 ## Phase 7: Event dispatch
 

@@ -2,7 +2,7 @@
 pub struct BufId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct WinId(pub(crate) u64);
+pub struct WinId(pub u64);
 
 impl BufId {
     pub fn raw(self) -> u64 {
