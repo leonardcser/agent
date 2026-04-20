@@ -69,6 +69,28 @@ the same `ui` API.
 
 ## Design principles
 
+### Two primitives: Buffer and Window
+
+The entire UI model rests on two concepts, same as Neovim:
+
+**Buffer** = content + metadata. Lines, highlights, decorations, marks,
+virtual text, modifiable flag. Buffers know nothing about display —
+they're just data. A buffer can be editable (prompt) or read-only
+(transcript). Both use the same type.
+
+**Window** = viewport into a buffer. Cursor, scroll, selection, vim
+state, keybindings, mouse handling. Everything about how you interact
+with content lives on the window — not the buffer, not the app, not
+a separate navigation layer.
+
+The transcript window and the prompt window get the same vim motions,
+selection, yank, mouse handling, scroll — because that's all window
+behavior. The only difference is the buffer's `modifiable` flag (which
+gates insert mode and text mutations).
+
+No separate "transcript navigation state" or "prompt surface state."
+Just windows looking at buffers.
+
 ### Everything is a window (except the status bar)
 
 Every interactive surface in the UI is a **window** backed by a **buffer**:
@@ -76,7 +98,7 @@ Every interactive surface in the UI is a **window** backed by a **buffer**:
 - **Transcript** — split window, readonly buffer, block content projected in
 - **Prompt** — split window, editable buffer with vim motions
 - **All dialogs** — float windows (help, confirm, resume, rewind, etc.)
-- **BtwBlock** — float window (not a custom overlay)
+- **BtwBlock** — float window (plugin-owned, not part of prompt)
 - **Notifications** — ephemeral float window with auto-dismiss
 - **Completions** — float window anchored to cursor position
 - **Lua floats** — float windows created by plugins
@@ -100,7 +122,9 @@ All dialogs follow the same visual structure:
 ```
 
 Each dialog is a **configuration** of a single `FloatDialog` component, not
-a separate implementation. The differences between dialogs are:
+a separate implementation. The visual chrome and layout are unified. Dialog-
+specific behavior (confirm previews, question flow, agent detail) stays in
+the app/domain layer — `FloatDialog` does not absorb all dialog semantics.
 
 | Dialog      | Content                        | Footer              |
 |-------------|--------------------------------|----------------------|
@@ -180,17 +204,12 @@ Retained rendering unit. Each UI surface implements `Component`:
 Manages the component tree, orchestrates rendering, diffs frames.
 Each frame: resolve layout → draw components → diff grids → emit SGR.
 
-### Buffer (content model)
+### Buffer
 
-Lines + highlights + marks + virtual text + per-line decoration. Buffers
-are the data model — windows read buffers and write cells to the grid.
-Buffers are updated at event time (keystrokes, engine events, streaming),
-not at render time.
-
-Both editable and read-only buffers use the same type. The transcript is
-a read-only buffer (`modifiable: false`) — it has the same keybindings
-as a normal buffer (normal, visual, visual line, yank, scroll) except
-insert mode. The prompt is an editable buffer.
+Lines + highlights + marks + virtual text + per-line decoration +
+modifiable flag. Buffers are the content model — windows read from
+them during `draw()`. Buffers are updated at event time (keystrokes,
+engine events, streaming), not at render time.
 
 Per-line decoration (`LineDecoration`) supports gutter backgrounds, fill
 backgrounds, and soft-wrap markers. This is optional metadata — most
@@ -199,12 +218,22 @@ spans carry optional `SpanMeta` for selection/copy behavior.
 
 ### Window
 
-Viewport into a buffer with cursor, scroll, visual state. Windows are
-components that read from their buffer during `draw()`. The app updates
-buffers in response to events; windows pull from buffers when rendering.
+Viewport into a buffer. Owns all interaction state:
+- **Cursor** — position, curswant (for vertical motion memory)
+- **Scroll** — top_row, pinned flag
+- **Selection** — anchor position, visual mode
+- **Vim state** — mode (normal/visual/visual-line), operator pending
+- **Kill ring** — yank history (per-window)
+- **Keybindings** — handled via the window, not the buffer
 
-This is the Neovim model adapted for Rust: events mutate buffers, buffers
-mark their windows dirty, the compositor renders dirty windows.
+Windows are components. During `draw()`, a window reads its buffer's
+content and renders into its grid slice. The app never pushes display
+data into windows — windows pull from their buffers.
+
+Both transcript and prompt are windows. The transcript window has a
+read-only buffer (`modifiable: false`): same vim motions, visual
+selection, yank, scroll, mouse — just no insert mode. The prompt
+window has an editable buffer.
 
 ### Naming conventions
 
@@ -232,6 +261,65 @@ Region tree that positions split windows. Floats layer on top via z-index.
 
 Focus chain: focused component → parent → global keymap → fallback.
 Mouse events hit-test the layout tree.
+
+---
+
+## Canonical ownership
+
+Every piece of state has exactly one owner. No duplication.
+
+| Concern | Owner | Notes |
+|---|---|---|
+| Transcript content | `ui::Buffer` | Projected from blocks at event time |
+| Transcript cursor/scroll/selection/vim | `ui::Window` | All interaction state on window |
+| Prompt editable text | `ui::Buffer` | Editable buffer, same type as transcript |
+| Prompt cursor/scroll/selection/vim | `ui::Window` | Same window behavior as transcript |
+| Prompt chrome (notification bar, top/bottom bars) | App layout | Not buffer content — layout around the window |
+| Status bar segments | `StatusBar` component | Set at event time, not recomputed per frame |
+| Dialog content | `ui::Buffer` per dialog | Written when dialog opens or content changes |
+| Dialog semantic state | App/domain layer | Confirm choices, question answers, etc. |
+| Dialog rendering/layout | `FloatDialog` component | Chrome is framework, behavior is app |
+| Btw | Float/dialog | Plugin-owned surface, not part of prompt |
+| Notifications | Ephemeral float or app state | Not part of prompt |
+| Block history + layout cache | `tui::BlockHistory` | Projects into transcript buffer |
+
+### What `Screen` currently owns vs. where it moves
+
+`Screen` is the main piece of legacy architecture to hollow out. Its
+current responsibilities and their final owners:
+
+| Screen field | Final owner |
+|---|---|
+| `transcript` (BlockHistory) | Stays in tui, projects into `ui::Buffer` |
+| `parser` (StreamParser) | Stays in tui app layer |
+| `prompt` (PromptState) | `ui::Buffer` (editable) + app chrome state |
+| `working` state | App layer |
+| `notification` | Ephemeral float or app state |
+| `btw` | Float/dialog (plugin-owned) |
+| `last_viewport_text` | Read directly from buffer lines |
+| `last_viewport_lines` | Read from buffer highlights/meta |
+| `transcript_gutters` | Window config |
+| `layout` | Compositor / layout tree |
+| `cmdline` | StatusBar or dedicated component |
+| Dialog flags | Compositor layer management |
+| Status metadata (tokens, cost, model) | App state, pushed to StatusBar at event time |
+
+Screen dies when all its fields have moved to their final owners.
+
+### Deletion criteria for transitional modules
+
+| Module | Dies when |
+|---|---|
+| `prompt_data.rs` | Prompt chrome set at event time, not computed per frame |
+| `status_data.rs` | Status segments set at event time |
+| `TranscriptView` | Transcript window reads buffer directly in draw() |
+| `PromptView` | Prompt window is a real `ui::Window` |
+| Old `Dialog` trait | All dialogs migrated to `FloatDialog` |
+| `render/dialogs/*` | All dialog structs replaced |
+| `render_normal` / `render_dialog` split | Dialogs are compositor layers |
+| `Screen` | All state moved to buffers/windows/app |
+| `tui::window::TranscriptWindow` | Merged into `ui::Window` |
+| `tui::buffer::Buffer` (nav buffer) | Transcript buffer IS the nav buffer |
 
 ---
 
@@ -289,7 +377,7 @@ ui.handle_mouse(event) -> bool
 
 | Current (tui crate)           | New (ui crate)                                |
 |-------------------------------|-----------------------------------------------|
-| `Screen`                      | `Compositor` + `Grid`                         |
+| `Screen`                      | Dies — state moves to buffers/windows/app     |
 | `RenderOut` / `Frame`         | `Grid` + diff engine in `Compositor`          |
 | `Dialog` trait (9 impls)      | `FloatDialog` component (one impl, N configs) |
 | `FloatDialog` (Lua)           | `FloatDialog` component                       |
@@ -297,11 +385,12 @@ ui.handle_mouse(event) -> bool
 | `HelpDialog`                  | `FloatDialog` with keybindings buffer         |
 | `QuestionDialog` (tabs)       | Sequential `FloatDialog` per question         |
 | `AgentsDialog` (2-mode)       | List `FloatDialog` + Detail `FloatDialog`     |
-| `BtwBlock` (custom overlay)   | `FloatDialog` with question content           |
+| `BtwBlock` (custom overlay)   | Float/dialog (plugin-owned)                   |
 | `Notification`                | Ephemeral float window                        |
 | `Completer` (custom popup)    | Float window anchored to cursor               |
-| `InputState`                  | Prompt split window                           |
-| `TranscriptWindow`            | Transcript split window                       |
+| `InputState`                  | `ui::Window` (editable buffer)                |
+| `TranscriptWindow`            | `ui::Window` (readonly buffer)                |
+| `tui::buffer::Buffer`         | Merged into `ui::Buffer`                      |
 | `CmdlineState` / status line  | `StatusBar` component                         |
 | `LayoutState`                 | `Layout` tree + compositor                    |
 | `StyleState`                  | `Style` on cells + diff engine                |
@@ -310,19 +399,21 @@ ui.handle_mouse(event) -> bool
 | `TextArea` (shared helper)    | `TextInput` component                         |
 | `BlockHistory`                | Managed by tui, projected into transcript buf |
 | `ConfirmPreview` (5 variants) | Diff/code rendered into buffer with highlights|
-| `Vim`                         | `Vim` (already in ui crate)                   |
+| `Vim` (tui)                   | Lives on `ui::Window`                         |
 
 ## What stays in `tui`
 
 - `App` struct, event loop, agent management
 - Engine communication (`EngineHandle`, `UiCommand`, `EngineEvent`)
 - `BlockHistory` + `StreamParser` + block rendering pipeline
+- `TranscriptProjection` (blocks → buffer, generation-gated)
 - Session persistence
 - Lua runtime + API bindings (calls through `ui::*`)
 - Permission system
 - Commands (slash commands are app-level, not framework-level)
 - Terminal setup/teardown (raw mode, alternate screen, etc.)
-- Dialog-specific logic (what content to show, what actions mean)
+- Dialog-specific behavior (what content to show, what actions mean)
+- Prompt chrome layout (notification bar, top/bottom bars around window)
 
 The `tui` crate calls `ui.render(&mut writer)` each frame. The block
 rendering pipeline writes output into ui buffers. Dialog opening creates
@@ -376,17 +467,17 @@ buffer/window model.
 event (key, engine, timer)
     │
     ▼
-App updates buffer content + marks window dirty
+App updates buffer content
     │
     ▼
 render tick
     │
     ▼
 Compositor
-├── TranscriptWindow  — reads from transcript buffer, draws into grid
-├── PromptWindow      — reads from prompt buffer, draws into grid
-├── StatusBar         — 1-row component (segments set at event time)
-└── FloatDialog(s)    — float layers reading from their buffers
+├── Transcript Window  — reads from readonly buffer, draws into grid
+├── Prompt Window      — reads from editable buffer, draws into grid
+├── StatusBar          — 1-row component (segments set at event time)
+└── FloatDialog(s)     — float layers reading from their buffers
     │
     ▼
 Grid diff → terminal
@@ -410,41 +501,48 @@ redraws automatically on the next frame.
 
 ### Transition from current state
 
-The current code has a transitional `render_normal` function that
-extracts data from `Screen`, pushes it into dumb view components,
-then calls `compositor.render_with()`. This needs to be replaced:
-
 **Step 1: Clean up current state** ✅ — fix dead code, remove
 `#[allow(dead_code)]`, get everything compiling clean. Rename
 `tick_*` methods to `render_*`.
 
-**Step 2: Enrich `ui::Buffer` with line decoration** — add
+**Step 2: Enrich `ui::Buffer` with line decoration** ✅ — add
 `LineDecoration` (gutter_bg, fill_bg, fill_right_margin, soft_wrapped)
-and `SpanMeta` (selectable, copy_as) to the buffer model. This makes
-Buffer rich enough for both the transcript (read-only, decorated) and
-the prompt (editable, plain). Update `BufferView` to render decorations.
+and `SpanMeta` (selectable, copy_as) to the buffer model. Update
+`BufferView` to render decorations.
 
-**Step 3: Transcript buffer** — create a `ui::Buffer`-backed transcript.
-The block rendering pipeline (`layout_block` → `DisplayBlock`) writes
-into the buffer via `buf.set_lines()` + `buf.add_highlight()` +
-`buf.set_line_decoration()` at event time (when blocks arrive, when
-streaming appends). `TranscriptWindow` reads from this buffer in
-`draw()`. App no longer extracts + pushes transcript lines each frame.
+**Step 3: Transcript buffer** ✅ — `TranscriptProjection` projects
+blocks into a `ui::Buffer` (generation-gated). `TranscriptView`
+reads from the buffer via `BufferView.sync_from_buffer()`.
+Deleted: `collect_viewport`, `collect_transcript_data`, `paint_grid.rs`.
 
-**Step 4: Prompt buffer** — move input state into a `ui::Buffer`.
-`PromptWindow` reads from it in `draw()`. Keystrokes update the buffer
-directly. The prompt chrome (notification bar, queued messages, bar info)
-becomes virtual text or additional buffer content set at event time.
+**Step 4: Transcript window** — make the transcript a real `ui::Window`.
+Merge `tui::TranscriptWindow` state (cursor, scroll, selection, vim,
+kill_ring) into `ui::Window`. The window reads from the projected
+`ui::Buffer` during `draw()`. Delete `TranscriptView` (the window IS
+the view). Delete `tui::buffer::Buffer` (the `ui::Buffer` IS the
+nav buffer — vim motions operate on it directly). Delete
+`last_viewport_text`, `last_viewport_lines` from Screen (read from
+buffer instead).
 
-**Step 5: Status bar event-driven** — status bar segments are updated
+**Step 5: Prompt window** — make the prompt a real `ui::Window` with
+an editable buffer. `InputState`'s edit buffer becomes a `ui::Buffer`.
+The prompt window handles key input, vim motions, cursor rendering.
+Prompt chrome (notification bar, top/bottom bars) is app-level layout
+around the window — not buffer content.
+
+**Step 6: Btw as float** — move btw out of prompt composition into a
+float/dialog. It becomes a `FloatDialog` opened by the app (and later
+by a Lua plugin). Remove btw from Screen and prompt_data.
+
+**Step 7: Status bar event-driven** — status bar segments are updated
 when the underlying data changes (mode switch, new tokens, cost update),
-not recomputed every frame.
+not recomputed every frame. Delete `status_data.rs`.
 
-**Step 6: Hollow out Screen** — as each piece moves into buffers,
-`Screen` shrinks. Data that was in Screen moves to the buffer it
-belongs to. Screen's draw methods are deleted as windows take over.
+**Step 8: Hollow out Screen** — as each piece moves to its final owner,
+Screen shrinks. Data that was in Screen moves to buffers, windows, or
+app state. Delete Screen when empty.
 
-**Step 7: Migrate dialogs** — each of the 10 Dialog implementations
+**Step 9: Migrate dialogs** — each of the 10 Dialog implementations
 becomes a `FloatDialog` configuration added as a compositor layer.
 Migration order (simplest first):
 1. HelpDialog → FloatDialog with keybindings in buffer, no footer
@@ -458,16 +556,16 @@ Migration order (simplest first):
 9. QuestionDialog → Sequential FloatDialogs (one per question)
 10. ConfirmDialog → FloatDialog with preview buffer + ListSelect + TextInput
 
-Also migrate: BtwBlock, Notifications, Completions → float layers.
+Also migrate: Notifications, Completions → float layers.
 
-**Step 8: Delete legacy rendering** —
+**Step 10: Delete legacy rendering** —
 - `Dialog` trait, `DialogResult`, `ListState`, `TextArea`
 - `Frame`, `RenderOut`, `StyleState` (SGR/style stack machinery)
 - `paint_line` (legacy SGR paint path)
 - `Screen::draw_viewport_frame`, `draw_viewport_dialog_frame`
 - `active_dialog`, `open_dialog`, `finalize_dialog_close`
 - All individual dialog structs in `render/dialogs/`
-- `prompt_data.rs`, `status_data.rs` (transitional compute modules)
+- `prompt_data.rs` (transitional compute module)
 - `render_dialog`, `render_normal` (transitional dispatch methods)
 
 ### Current progress
@@ -475,24 +573,15 @@ Also migrate: BtwBlock, Notifications, Completions → float layers.
 Steps 1–3 complete:
 - Step 1: Dead code cleanup, `tick_*` → `render_*` rename ✅
 - Step 2: `ui::Buffer` enriched with `LineDecoration` and `SpanMeta` ✅
-  BufferView renders gutter_bg, fill_bg, and decoration metadata.
 - Step 3: Transcript buffer ✅ — `TranscriptProjection` projects
   blocks into a `ui::Buffer` (generation-gated). `TranscriptView`
   reads from the buffer via `BufferView.sync_from_buffer()`.
   Deleted: `collect_viewport`, `collect_transcript_data`,
-  `paint_grid.rs`. `last_viewport_lines` still populated from
-  projection for selection/cursor compat (to be removed when
-  selection reads from buffer highlights directly).
-- `PromptView` — component that paints pushed PromptRows ✅
-  (needs to become a window reading from a buffer)
-- `prompt_data.rs` — computes prompt data from Screen state ✅
-  (transitional — will be replaced by event-driven buffer updates)
-- `status_data.rs` — computes status segments from Screen state ✅
-  (transitional — will be replaced by event-driven updates)
-- Compositor wired into App, non-dialog frames render via grid diff ✅
-- `BufId` and `Buffer::new` made public for cross-crate buffer creation ✅
+  `paint_grid.rs`.
+- `BufId` and `Buffer::new` made public for cross-crate use ✅
 
-Next: Step 4 — prompt buffer.
+Next: Step 4 — transcript window (merge tui::TranscriptWindow into
+ui::Window, make it read from the projected buffer directly).
 
 ## Phase 7: Event dispatch
 
@@ -512,6 +601,7 @@ Next: Step 4 — prompt buffer.
 - Lua creates buffers, opens float windows, sets content, adds highlights
 - Remove `PendingOp::OpenFloat` / `UpdateFloat` / `CloseFloat`
 - Port `btw.lua`, `predict.lua`, `plan_mode.lua` to clean API
+- Btw becomes a pure plugin (not engine-tied)
 
 ## Phase 9: Cleanup and polish
 
