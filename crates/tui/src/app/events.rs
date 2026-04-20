@@ -1437,6 +1437,15 @@ impl App {
                 crate::lua::PendingOp::Submit(text) => {
                     self.queued_messages.push(text);
                 }
+                crate::lua::PendingOp::SetPromptSection(name, content) => {
+                    self.prompt_sections.set(&name, content);
+                }
+                crate::lua::PendingOp::RemovePromptSection(name) => {
+                    self.prompt_sections.remove(&name);
+                }
+                crate::lua::PendingOp::SetPermissionOverrides(_overrides) => {
+                    // TODO: store overrides and include in StartTurn
+                }
             }
         }
     }

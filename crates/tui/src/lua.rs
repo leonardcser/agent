@@ -148,6 +148,26 @@ struct LuaHandle {
     dead: bool,
 }
 
+/// Confirm dialog spec for a plugin tool, declared during registration.
+#[derive(Debug)]
+pub struct PluginConfirmSpec {
+    pub message: String,
+    pub action_label: String,
+    pub preview_field: Option<String>,
+    pub accent_color: Option<crossterm::style::Color>,
+    pub options: Vec<PluginConfirmOption>,
+}
+
+#[derive(Debug)]
+pub struct PluginConfirmOption {
+    pub label: String,
+    /// "approve" or "deny". Determines whether the tool executes.
+    pub action: String,
+    /// Lua callback name stored in registry, called after the option is
+    /// selected (e.g. to switch mode). None means no side effect.
+    pub on_select_key: Option<mlua::RegistryKey>,
+}
+
 /// Deferred mutation queued by a Lua handler. Applied by the app loop
 /// after the handler returns, avoiding nested borrows on `App`.
 pub enum PendingOp {
@@ -160,6 +180,9 @@ pub enum PendingOp {
     Cancel,
     Compact(Option<String>),
     Submit(String),
+    SetPromptSection(String, String),
+    RemovePromptSection(String),
+    SetPermissionOverrides(protocol::PermissionOverrides),
 }
 
 /// Snapshot of engine-level state (model, mode, cost, tokens).
@@ -246,6 +269,10 @@ pub struct LuaRuntime {
     /// Lua function registered via `smelt.statusline(fn)`. Called each
     /// tick to produce custom status items.
     statusline_provider: Arc<Mutex<Option<LuaHandle>>>,
+    /// Plugin tool handlers, keyed by tool name.
+    plugin_tools: SharedMap<String, LuaHandle>,
+    /// Confirm specs for plugin tools that need user confirmation.
+    plugin_confirm_specs: Arc<Mutex<HashMap<String, PluginConfirmSpec>>>,
 }
 
 impl LuaRuntime {
@@ -261,6 +288,9 @@ impl LuaRuntime {
         let pending_timers: SharedVec<(Instant, LuaHandle)> = Arc::new(Mutex::new(Vec::new()));
         let ops: SharedOps = Arc::new(Mutex::new(LuaOps::default()));
         let statusline_provider: Arc<Mutex<Option<LuaHandle>>> = Arc::new(Mutex::new(None));
+        let plugin_tools: SharedMap<String, LuaHandle> = Arc::new(Mutex::new(HashMap::new()));
+        let plugin_confirm_specs: Arc<Mutex<HashMap<String, PluginConfirmSpec>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         let load_error = Self::register_api(
             &lua,
@@ -270,6 +300,8 @@ impl LuaRuntime {
             pending_timers.clone(),
             ops.clone(),
             statusline_provider.clone(),
+            plugin_tools.clone(),
+            plugin_confirm_specs.clone(),
         )
         .err()
         .map(|e| e.to_string());
@@ -283,6 +315,8 @@ impl LuaRuntime {
             pending_timers,
             ops,
             statusline_provider,
+            plugin_tools,
+            plugin_confirm_specs,
         };
 
         if rt.load_error.is_none() {
@@ -298,6 +332,7 @@ impl LuaRuntime {
         rt
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn register_api(
         lua: &Lua,
         commands: SharedMap<String, LuaHandle>,
@@ -306,6 +341,8 @@ impl LuaRuntime {
         pending_timers: SharedVec<(Instant, LuaHandle)>,
         ops: SharedOps,
         statusline_provider: Arc<Mutex<Option<LuaHandle>>>,
+        plugin_tools: SharedMap<String, LuaHandle>,
+        plugin_confirm_specs: Arc<Mutex<HashMap<String, PluginConfirmSpec>>>,
     ) -> LuaResult<()> {
         let smelt = lua.create_table()?;
 
@@ -464,6 +501,121 @@ impl LuaRuntime {
         )?;
 
         api.set("engine", engine_tbl)?;
+
+        // smelt.api.prompt.set_section(name, content) / remove_section(name)
+        let prompt_tbl = lua.create_table()?;
+        let ops_clone = ops.clone();
+        let set_section = lua.create_function(move |_, (name, content): (String, String)| {
+            if let Ok(mut o) = ops_clone.lock() {
+                o.ops.push(PendingOp::SetPromptSection(name, content));
+            }
+            Ok(())
+        })?;
+        prompt_tbl.set("set_section", set_section)?;
+        let ops_clone = ops.clone();
+        let remove_section = lua.create_function(move |_, name: String| {
+            if let Ok(mut o) = ops_clone.lock() {
+                o.ops.push(PendingOp::RemovePromptSection(name));
+            }
+            Ok(())
+        })?;
+        prompt_tbl.set("remove_section", remove_section)?;
+        api.set("prompt", prompt_tbl)?;
+
+        // smelt.api.tools.register(def) / unregister(name)
+        let tools_tbl = lua.create_table()?;
+        let pt_clone = plugin_tools.clone();
+        let pcs_clone = plugin_confirm_specs.clone();
+        let tools_register = lua.create_function(move |lua, def: mlua::Table| {
+            let name: String = def.get("name")?;
+            let handler: mlua::Function = def.get("execute")?;
+            let key = lua.create_registry_value(handler)?;
+
+            // Store metadata for plugin_tool_defs() lookups.
+            let meta = lua.create_table()?;
+            let desc: String = def.get("description").unwrap_or_default();
+            meta.set("description", desc)?;
+            if let Ok(params) = def.get::<mlua::Table>("parameters") {
+                if let Ok(json_str) = serde_json::to_string(&lua_table_to_json(lua, &params)) {
+                    meta.set("parameters_json", json_str)?;
+                }
+            }
+            if let Ok(modes) = def.get::<mlua::Table>("modes") {
+                meta.set("modes", modes)?;
+            }
+            lua.set_named_registry_value(&format!("__pt_meta_{name}"), meta)?;
+
+            // Parse optional confirm spec.
+            if let Ok(confirm_tbl) = def.get::<mlua::Table>("confirm") {
+                let display_name: String = confirm_tbl.get("display_name").unwrap_or(name.clone());
+                let action_label: String =
+                    confirm_tbl.get("action_label").unwrap_or("Allow?".into());
+                let preview_field: Option<String> = confirm_tbl.get("preview_field").ok();
+                let accent_color = confirm_tbl
+                    .get::<mlua::Table>("accent_color")
+                    .ok()
+                    .and_then(|t| ansi_color_from_lua(&t, "ansi"));
+
+                let mut options = Vec::new();
+                if let Ok(opts_tbl) = confirm_tbl.get::<mlua::Table>("options") {
+                    for opt in opts_tbl.sequence_values::<mlua::Table>().flatten() {
+                        let label: String = opt.get("label").unwrap_or_default();
+                        let action: String = opt.get("action").unwrap_or("approve".into());
+                        let on_select: Option<mlua::RegistryKey> = opt
+                            .get::<mlua::Function>("on_select")
+                            .ok()
+                            .and_then(|f| lua.create_registry_value(f).ok());
+                        options.push(PluginConfirmOption {
+                            label,
+                            action,
+                            on_select_key: on_select,
+                        });
+                    }
+                }
+                if options.is_empty() {
+                    options.push(PluginConfirmOption {
+                        label: "yes".into(),
+                        action: "approve".into(),
+                        on_select_key: None,
+                    });
+                    options.push(PluginConfirmOption {
+                        label: "no".into(),
+                        action: "deny".into(),
+                        on_select_key: None,
+                    });
+                }
+
+                let spec = PluginConfirmSpec {
+                    message: display_name.clone(),
+                    action_label,
+                    preview_field,
+                    accent_color,
+                    options,
+                };
+                if let Ok(mut map) = pcs_clone.lock() {
+                    map.insert(name.clone(), spec);
+                }
+            }
+
+            if let Ok(mut map) = pt_clone.lock() {
+                map.insert(name, LuaHandle { key, dead: false });
+            }
+            Ok(())
+        })?;
+        tools_tbl.set("register", tools_register)?;
+        let pt_clone = plugin_tools.clone();
+        let pcs_clone2 = plugin_confirm_specs.clone();
+        let tools_unregister = lua.create_function(move |_, name: String| {
+            if let Ok(mut map) = pt_clone.lock() {
+                map.remove(&name);
+            }
+            if let Ok(mut map) = pcs_clone2.lock() {
+                map.remove(&name);
+            }
+            Ok(())
+        })?;
+        tools_tbl.set("unregister", tools_unregister)?;
+        api.set("tools", tools_tbl)?;
 
         smelt.set("api", api)?;
 
@@ -788,6 +940,123 @@ impl LuaRuntime {
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default()
     }
+
+    /// Return protocol-level plugin tool definitions for registered tools.
+    /// The TUI sends these with `StartTurn` so the engine includes them in
+    /// LLM tool definitions.
+    pub fn plugin_tool_defs(&self, _mode: protocol::Mode) -> Vec<protocol::PluginToolDef> {
+        let handlers = self.plugin_tools.lock().unwrap_or_else(|e| e.into_inner());
+        let mut defs = Vec::new();
+        for name in handlers.keys() {
+            // Tool metadata (description, parameters, modes) is stored on a
+            // separate Lua table registered alongside the handler. Look it up.
+            if let Ok(meta_table) = self
+                .lua
+                .named_registry_value::<mlua::Table>(&format!("__pt_meta_{name}"))
+            {
+                let description: String = meta_table.get("description").unwrap_or_default();
+                let parameters: serde_json::Value = meta_table
+                    .get::<mlua::String>("parameters_json")
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s.to_string_lossy()).ok())
+                    .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
+                let modes: Option<Vec<protocol::Mode>> =
+                    meta_table.get::<mlua::Table>("modes").ok().map(|t| {
+                        t.sequence_values::<String>()
+                            .filter_map(|r| r.ok())
+                            .filter_map(|s| protocol::Mode::parse(&s))
+                            .collect()
+                    });
+                defs.push(protocol::PluginToolDef {
+                    name: name.clone(),
+                    description,
+                    parameters,
+                    modes,
+                });
+            }
+        }
+        defs
+    }
+
+    /// Execute a plugin tool by calling the registered Lua handler.
+    /// Returns `(content, is_error)`.
+    pub fn execute_plugin_tool(
+        &self,
+        tool_name: &str,
+        args: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> (String, bool) {
+        let handlers = self.plugin_tools.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(handle) = handlers.get(tool_name) {
+            if let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) {
+                let args_table = self.lua.create_table().unwrap();
+                for (k, v) in args {
+                    if let Ok(lua_val) = json_to_lua(&self.lua, v) {
+                        let _ = args_table.set(k.as_str(), lua_val);
+                    }
+                }
+                match func.call::<mlua::Value>(args_table) {
+                    Ok(mlua::Value::String(s)) => (s.to_string_lossy().to_string(), false),
+                    Ok(mlua::Value::Table(t)) => {
+                        let content: String = t.get("content").unwrap_or_default();
+                        let is_error: bool = t.get("is_error").unwrap_or(false);
+                        (content, is_error)
+                    }
+                    Ok(_) => ("plugin tool returned non-string value".to_string(), true),
+                    Err(e) => (format!("plugin tool error: {e}"), true),
+                }
+            } else {
+                (format!("plugin tool handler not found: {tool_name}"), true)
+            }
+        } else {
+            (format!("no plugin tool registered: {tool_name}"), true)
+        }
+    }
+
+    /// Build a `PluginConfirmMeta` for the given tool (if it has a confirm spec).
+    pub fn get_confirm_meta(&self, tool_name: &str) -> Option<crate::render::PluginConfirmMeta> {
+        let specs = self
+            .plugin_confirm_specs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let spec = specs.get(tool_name)?;
+        Some(crate::render::PluginConfirmMeta {
+            display_name: spec.message.clone(),
+            action_label: spec.action_label.clone(),
+            preview_field: spec.preview_field.clone(),
+            accent_color: spec.accent_color,
+            options: spec
+                .options
+                .iter()
+                .map(|o| crate::render::PluginOptionMeta {
+                    label: o.label.clone(),
+                    approves: o.action == "approve",
+                })
+                .collect(),
+        })
+    }
+
+    /// Invoke the on_select callback for the given plugin tool confirm option.
+    pub fn invoke_confirm_callback(&self, tool_name: &str, option_index: usize) {
+        let specs = self
+            .plugin_confirm_specs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(spec) = specs.get(tool_name) {
+            if let Some(opt) = spec.options.get(option_index) {
+                if let Some(ref key) = opt.on_select_key {
+                    if let Ok(func) = self.lua.registry_value::<mlua::Function>(key) {
+                        if let Err(e) = func.call::<()>(()) {
+                            if let Ok(mut o) = self.ops.lock() {
+                                o.ops.push(PendingOp::NotifyError(format!(
+                                    "confirm callback error: {e}"
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn ansi_color_from_lua(table: &mlua::Table, key: &str) -> Option<crossterm::style::Color> {
@@ -822,6 +1091,34 @@ pub fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {
             }
             Ok(mlua::Value::Table(t))
         }
+    }
+}
+
+/// Convert a Lua table to a `serde_json::Value`.
+fn lua_table_to_json(lua: &Lua, table: &mlua::Table) -> serde_json::Value {
+    let _ = lua;
+    let mut map = serde_json::Map::new();
+    for pair in table.pairs::<mlua::Value, mlua::Value>() {
+        let Ok((key, val)) = pair else { continue };
+        let key_str = match &key {
+            mlua::Value::String(s) => s.to_string_lossy().to_string(),
+            mlua::Value::Integer(i) => i.to_string(),
+            _ => continue,
+        };
+        map.insert(key_str, lua_value_to_json(lua, &val));
+    }
+    serde_json::Value::Object(map)
+}
+
+fn lua_value_to_json(lua: &Lua, val: &mlua::Value) -> serde_json::Value {
+    match val {
+        mlua::Value::Nil => serde_json::Value::Null,
+        mlua::Value::Boolean(b) => serde_json::Value::Bool(*b),
+        mlua::Value::Integer(i) => serde_json::json!(*i),
+        mlua::Value::Number(n) => serde_json::json!(*n),
+        mlua::Value::String(s) => serde_json::Value::String(s.to_string_lossy().to_string()),
+        mlua::Value::Table(t) => lua_table_to_json(lua, t),
+        _ => serde_json::Value::Null,
     }
 }
 
