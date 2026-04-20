@@ -145,4 +145,8 @@ impl super::Dialog for PsDialog {
         out.pop_style();
         end_dialog_draw(out);
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

@@ -141,7 +141,7 @@ impl AutocmdEvent {
 /// A Lua callable registered via `smelt.cmd.register` / `smelt.keymap` /
 /// `smelt.on`. Stored as a mlua `RegistryKey` so references survive
 /// across GC cycles and can be invoked from Rust handlers.
-struct LuaHandle {
+pub(crate) struct LuaHandle {
     key: mlua::RegistryKey,
     dead: bool,
 }
@@ -192,6 +192,33 @@ pub enum PendingOp {
     SetGhostText(String),
     /// Clear ghost text from the prompt.
     ClearGhostText,
+    /// Open or update a named float.
+    OpenFloat {
+        id: u64,
+        title: String,
+        lines: Vec<String>,
+        loading: bool,
+        footer_items: Vec<String>,
+        accent: Option<crossterm::style::Color>,
+    },
+    /// Update the content of an existing float.
+    UpdateFloat {
+        id: u64,
+        title: Option<String>,
+        lines: Option<Vec<String>>,
+        loading: Option<bool>,
+    },
+    /// Close a named float.
+    CloseFloat {
+        id: u64,
+    },
+    /// Send a deferred plugin tool result.
+    ResolveToolResult {
+        request_id: u64,
+        call_id: String,
+        content: String,
+        is_error: bool,
+    },
 }
 
 /// Snapshot of engine-level state (model, mode, cost, tokens).
@@ -261,17 +288,18 @@ impl LuaOps {
 
 /// All shared state between Lua closures and the app loop.
 /// One `Arc<LuaShared>` replaces N separate `Arc<Mutex<…>>` fields.
-pub struct LuaShared {
-    pub ops: Mutex<LuaOps>,
-    pub commands: Mutex<HashMap<String, LuaHandle>>,
-    pub keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
-    pub autocmds: Mutex<HashMap<AutocmdEvent, Vec<LuaHandle>>>,
-    pub timers: Mutex<Vec<(Instant, LuaHandle)>>,
-    pub statusline: Mutex<Option<LuaHandle>>,
-    pub plugin_tools: Mutex<HashMap<String, LuaHandle>>,
-    pub confirm_specs: Mutex<HashMap<String, PluginConfirmSpec>>,
-    pub callbacks: Mutex<HashMap<u64, LuaHandle>>,
-    pub next_id: AtomicU64,
+pub(crate) struct LuaShared {
+    pub(crate) ops: Mutex<LuaOps>,
+    pub(crate) commands: Mutex<HashMap<String, LuaHandle>>,
+    pub(crate) keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
+    pub(crate) autocmds: Mutex<HashMap<AutocmdEvent, Vec<LuaHandle>>>,
+    pub(crate) timers: Mutex<Vec<(Instant, LuaHandle)>>,
+    pub(crate) statusline: Mutex<Option<LuaHandle>>,
+    pub(crate) plugin_tools: Mutex<HashMap<String, LuaHandle>>,
+    pub(crate) confirm_specs: Mutex<HashMap<String, PluginConfirmSpec>>,
+    pub(crate) callbacks: Mutex<HashMap<u64, LuaHandle>>,
+    pub(crate) next_id: AtomicU64,
+    pub(crate) history: Mutex<Arc<Vec<protocol::Message>>>,
 }
 
 impl Default for LuaShared {
@@ -287,8 +315,47 @@ impl Default for LuaShared {
             confirm_specs: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            history: Mutex::new(Arc::new(Vec::new())),
         }
     }
+}
+
+/// Convert a slice of protocol messages to a Lua table array.
+pub fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResult<mlua::Table> {
+    let tbl = lua.create_table()?;
+    for (i, msg) in msgs.iter().enumerate() {
+        let entry = lua.create_table()?;
+        let role = match msg.role {
+            protocol::Role::System => "system",
+            protocol::Role::User => "user",
+            protocol::Role::Assistant => "assistant",
+            protocol::Role::Tool => "tool",
+            protocol::Role::Agent => "agent",
+        };
+        entry.set("role", role)?;
+        if let Some(ref c) = msg.content {
+            entry.set("content", c.text_content())?;
+        }
+        if let Some(ref tc) = msg.tool_calls {
+            let calls = lua.create_table()?;
+            for (j, call) in tc.iter().enumerate() {
+                let ct = lua.create_table()?;
+                ct.set("id", call.id.as_str())?;
+                ct.set("name", call.function.name.as_str())?;
+                ct.set("arguments", call.function.arguments.as_str())?;
+                calls.set(j + 1, ct)?;
+            }
+            entry.set("tool_calls", calls)?;
+        }
+        if let Some(ref id) = msg.tool_call_id {
+            entry.set("tool_call_id", id.as_str())?;
+        }
+        if msg.is_error {
+            entry.set("is_error", true)?;
+        }
+        tbl.set(i + 1, entry)?;
+    }
+    Ok(tbl)
 }
 
 /// User-scoped Lua state + any recorded startup error.
@@ -359,30 +426,14 @@ impl LuaRuntime {
         let transcript_tbl = lua.create_table()?;
         transcript_tbl.set(
             "text",
-            snap_read!(lua, shared, |o| o.transcript_text.clone().unwrap_or_default()),
+            snap_read!(lua, shared, |o| o
+                .transcript_text
+                .clone()
+                .unwrap_or_default()),
         )?;
         api.set("transcript", transcript_tbl)?;
 
-        // smelt.api.buf.text()
-        let buf_tbl = lua.create_table()?;
-        buf_tbl.set(
-            "text",
-            snap_read!(lua, shared, |o| o.prompt_text.clone().unwrap_or_default()),
-        )?;
-        api.set("buf", buf_tbl)?;
-
         // smelt.api.win.focus() / smelt.api.win.mode()
-        let win_tbl = lua.create_table()?;
-        win_tbl.set(
-            "focus",
-            snap_read!(lua, shared, |o| o.focused_window.clone().unwrap_or_default()),
-        )?;
-        win_tbl.set(
-            "mode",
-            snap_read!(lua, shared, |o| o.vim_mode.clone().unwrap_or_default()),
-        )?;
-        api.set("win", win_tbl)?;
-
         // Helper macro: lock shared.ops and push a PendingOp.
         macro_rules! push_op {
             ($lua:expr, $s:expr, |$val:ident : $ty:ty| $op:expr) => {{
@@ -454,10 +505,7 @@ impl LuaRuntime {
             snap_read!(lua, shared, |o| o.engine.reasoning_effort.clone()),
         )?;
         engine_tbl.set("is_busy", snap_read!(lua, shared, |o| o.engine.is_busy))?;
-        engine_tbl.set(
-            "cost",
-            snap_read!(lua, shared, |o| o.engine.session_cost),
-        )?;
+        engine_tbl.set("cost", snap_read!(lua, shared, |o| o.engine.session_cost))?;
         engine_tbl.set(
             "context_tokens",
             snap_read!(lua, shared, |o| o.engine.context_tokens),
@@ -524,22 +572,21 @@ impl LuaRuntime {
                                 "user" => {
                                     protocol::Message::user(protocol::Content::text(&content))
                                 }
-                                "assistant" => {
-                                    protocol::Message::assistant(Some(content), None)
-                                }
+                                "assistant" => protocol::Message::assistant(
+                                    Some(protocol::Content::text(&content)),
+                                    None,
+                                    None,
+                                ),
                                 _ => continue,
                             };
                             messages.push(msg);
                         }
                     }
                     if let Ok(question) = spec.get::<String>("question") {
-                        messages
-                            .push(protocol::Message::user(protocol::Content::text(&question)));
+                        messages.push(protocol::Message::user(protocol::Content::text(&question)));
                     }
 
-                    let id = s
-                        .next_id
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                     if let Some(func) = on_response {
                         let key = lua.create_registry_value(func)?;
@@ -557,6 +604,22 @@ impl LuaRuntime {
                         });
                     }
                     Ok(id)
+                })?,
+            )?;
+        }
+
+        // smelt.api.engine.history() → [{role, content, tool_calls?, tool_call_id?}]
+        {
+            let s = shared.clone();
+            engine_tbl.set(
+                "history",
+                lua.create_function(move |lua, ()| {
+                    let Ok(guard) = s.history.lock() else {
+                        return lua.create_table();
+                    };
+                    let history = Arc::clone(&*guard);
+                    drop(guard);
+                    messages_to_lua(lua, &history)
                 })?,
             )?;
         }
@@ -582,6 +645,172 @@ impl LuaRuntime {
             push_op!(lua, shared, |msg: String| PendingOp::NotifyError(msg)),
         )?;
         api.set("ui", ui_tbl)?;
+
+        // smelt.api.buf
+        let buf_tbl = lua.create_table()?;
+        buf_tbl.set(
+            "text",
+            snap_read!(lua, shared, |o| o.prompt_text.clone().unwrap_or_default()),
+        )?;
+        // smelt.api.buf.create() → buf_id
+        {
+            let s = shared.clone();
+            buf_tbl.set(
+                "create",
+                lua.create_function(move |_, ()| {
+                    Ok(s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                })?,
+            )?;
+        }
+        // smelt.api.buf.set_lines(buf_id, lines)
+        {
+            let s = shared.clone();
+            buf_tbl.set(
+                "set_lines",
+                lua.create_function(move |_, (id, lines): (u64, mlua::Table)| {
+                    let lines: Vec<String> = lines
+                        .sequence_values::<String>()
+                        .filter_map(|v| v.ok())
+                        .collect();
+                    if let Ok(mut o) = s.ops.lock() {
+                        o.ops.push(PendingOp::UpdateFloat {
+                            id,
+                            title: None,
+                            lines: Some(lines),
+                            loading: None,
+                        });
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+        api.set("buf", buf_tbl)?;
+
+        // smelt.api.win
+        let win_tbl = lua.create_table()?;
+        win_tbl.set(
+            "focus",
+            snap_read!(lua, shared, |o| o
+                .focused_window
+                .clone()
+                .unwrap_or_default()),
+        )?;
+        win_tbl.set(
+            "mode",
+            snap_read!(lua, shared, |o| o.vim_mode.clone().unwrap_or_default()),
+        )?;
+        // smelt.api.win.open_float(buf_id, opts) → win_id (same as buf_id for now)
+        {
+            let s = shared.clone();
+            win_tbl.set(
+                "open_float",
+                lua.create_function(move |lua, (buf_id, opts): (u64, mlua::Table)| {
+                    let title: String = opts.get("title").unwrap_or_default();
+                    let loading: bool = opts.get("loading").unwrap_or(false);
+                    let accent: Option<crossterm::style::Color> =
+                        opts.get::<mlua::Table>("accent").ok().and_then(|t| {
+                            t.get::<u8>("ansi")
+                                .ok()
+                                .map(crossterm::style::Color::AnsiValue)
+                        });
+
+                    let mut footer_items = Vec::new();
+                    let mut on_select_handle = None;
+                    let mut on_dismiss_handle = None;
+                    if let Ok(footer) = opts.get::<mlua::Table>("footer") {
+                        if let Ok(items) = footer.get::<mlua::Table>("items") {
+                            footer_items = items
+                                .sequence_values::<String>()
+                                .filter_map(|v| v.ok())
+                                .collect();
+                        }
+                        if let Ok(func) = footer.get::<mlua::Function>("on_select") {
+                            let key = lua.create_registry_value(func)?;
+                            on_select_handle = Some(key);
+                        }
+                    }
+                    if let Ok(func) = opts.get::<mlua::Function>("on_dismiss") {
+                        let key = lua.create_registry_value(func)?;
+                        on_dismiss_handle = Some(key);
+                    }
+
+                    // Store callbacks
+                    if let Some(key) = on_select_handle {
+                        if let Ok(mut cbs) = s.callbacks.lock() {
+                            cbs.insert(buf_id, LuaHandle { key, dead: false });
+                        }
+                    }
+                    if let Some(key) = on_dismiss_handle {
+                        let dismiss_id = buf_id | (1 << 63); // high bit = dismiss callback
+                        if let Ok(mut cbs) = s.callbacks.lock() {
+                            cbs.insert(dismiss_id, LuaHandle { key, dead: false });
+                        }
+                    }
+
+                    if let Ok(mut o) = s.ops.lock() {
+                        o.ops.push(PendingOp::OpenFloat {
+                            id: buf_id,
+                            title,
+                            lines: Vec::new(),
+                            loading,
+                            footer_items,
+                            accent,
+                        });
+                    }
+                    Ok(buf_id)
+                })?,
+            )?;
+        }
+        // smelt.api.win.close(win_id)
+        {
+            let s = shared.clone();
+            win_tbl.set(
+                "close",
+                lua.create_function(move |_, id: u64| {
+                    if let Ok(mut o) = s.ops.lock() {
+                        o.ops.push(PendingOp::CloseFloat { id });
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+        // smelt.api.win.set_title(win_id, title)
+        {
+            let s = shared.clone();
+            win_tbl.set(
+                "set_title",
+                lua.create_function(move |_, (id, title): (u64, String)| {
+                    if let Ok(mut o) = s.ops.lock() {
+                        o.ops.push(PendingOp::UpdateFloat {
+                            id,
+                            title: Some(title),
+                            lines: None,
+                            loading: None,
+                        });
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+        // smelt.api.win.set_loading(win_id, loading)
+        {
+            let s = shared.clone();
+            win_tbl.set(
+                "set_loading",
+                lua.create_function(move |_, (id, loading): (u64, bool)| {
+                    if let Ok(mut o) = s.ops.lock() {
+                        o.ops.push(PendingOp::UpdateFloat {
+                            id,
+                            title: None,
+                            lines: None,
+                            loading: Some(loading),
+                        });
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+        api.set("win", win_tbl)?;
 
         // smelt.api.prompt.set_section(name, content) / remove_section(name)
         let prompt_tbl = lua.create_table()?;
@@ -707,6 +936,28 @@ impl LuaRuntime {
                 })?,
             )?;
         }
+        // smelt.api.tools.resolve(request_id, call_id, result)
+        {
+            let s = shared.clone();
+            tools_tbl.set(
+                "resolve",
+                lua.create_function(
+                    move |_, (request_id, call_id, result): (u64, String, mlua::Table)| {
+                        let content: String = result.get("content").unwrap_or_default();
+                        let is_error: bool = result.get("is_error").unwrap_or(false);
+                        if let Ok(mut o) = s.ops.lock() {
+                            o.ops.push(PendingOp::ResolveToolResult {
+                                request_id,
+                                call_id,
+                                content,
+                                is_error,
+                            });
+                        }
+                        Ok(())
+                    },
+                )?,
+            )?;
+        }
         api.set("tools", tools_tbl)?;
 
         smelt.set("api", api)?;
@@ -719,8 +970,7 @@ impl LuaRuntime {
         smelt.set(
             "clipboard",
             lua.create_function(|_, text: String| {
-                crate::app::commands::copy_to_clipboard(&text)
-                    .map_err(LuaError::RuntimeError)?;
+                crate::app::commands::copy_to_clipboard(&text).map_err(LuaError::RuntimeError)?;
                 Ok(())
             })?,
         )?;
@@ -745,22 +995,18 @@ impl LuaRuntime {
             let s = shared.clone();
             smelt.set(
                 "on",
-                lua.create_function(
-                    move |lua, (event, handler): (String, mlua::Function)| {
-                        let Some(kind) = AutocmdEvent::from_lua_name(&event) else {
-                            return Err(LuaError::RuntimeError(format!(
-                                "unknown event: {event}"
-                            )));
-                        };
-                        let key = lua.create_registry_value(handler)?;
-                        if let Ok(mut map) = s.autocmds.lock() {
-                            map.entry(kind)
-                                .or_default()
-                                .push(LuaHandle { key, dead: false });
-                        }
-                        Ok(())
-                    },
-                )?,
+                lua.create_function(move |lua, (event, handler): (String, mlua::Function)| {
+                    let Some(kind) = AutocmdEvent::from_lua_name(&event) else {
+                        return Err(LuaError::RuntimeError(format!("unknown event: {event}")));
+                    };
+                    let key = lua.create_registry_value(handler)?;
+                    if let Ok(mut map) = s.autocmds.lock() {
+                        map.entry(kind)
+                            .or_default()
+                            .push(LuaHandle { key, dead: false });
+                    }
+                    Ok(())
+                })?,
             )?;
         }
 
@@ -826,6 +1072,13 @@ impl LuaRuntime {
         }
     }
 
+    /// Update the history snapshot. Called from `snapshot_engine_context`.
+    pub fn set_history(&self, history: Vec<protocol::Message>) {
+        if let Ok(mut h) = self.shared.history.lock() {
+            *h = Arc::new(history);
+        }
+    }
+
     /// Clear the snapshot fields after dispatching.
     pub fn clear_context(&self) {
         if let Ok(mut o) = self.shared.ops.lock() {
@@ -863,6 +1116,12 @@ impl LuaRuntime {
             }
         }
         self.drain_ops()
+    }
+
+    pub fn remove_callback(&self, id: u64) {
+        if let Ok(mut cbs) = self.shared.callbacks.lock() {
+            cbs.remove(&id);
+        }
     }
 
     /// Invoke a registered command by name. Returns `true` when the
@@ -1056,7 +1315,8 @@ impl LuaRuntime {
 
     /// Whether a command with `name` is registered via Lua.
     pub fn has_command(&self, name: &str) -> bool {
-        self.commands
+        self.shared
+            .commands
             .lock()
             .map(|m| m.contains_key(name))
             .unwrap_or(false)
@@ -1064,7 +1324,8 @@ impl LuaRuntime {
 
     /// Names of all Lua-registered commands (for completion).
     pub fn command_names(&self) -> Vec<String> {
-        self.commands
+        self.shared
+            .commands
             .lock()
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default()
@@ -1074,7 +1335,11 @@ impl LuaRuntime {
     /// The TUI sends these with `StartTurn` so the engine includes them in
     /// LLM tool definitions.
     pub fn plugin_tool_defs(&self, _mode: protocol::Mode) -> Vec<protocol::PluginToolDef> {
-        let handlers = self.shared.plugin_tools.lock().unwrap_or_else(|e| e.into_inner());
+        let handlers = self
+            .shared
+            .plugin_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut defs = Vec::new();
         for name in handlers.keys() {
             // Tool metadata (description, parameters, modes) is stored on a
@@ -1114,7 +1379,11 @@ impl LuaRuntime {
         tool_name: &str,
         args: &std::collections::HashMap<String, serde_json::Value>,
     ) -> (String, bool) {
-        let handlers = self.shared.plugin_tools.lock().unwrap_or_else(|e| e.into_inner());
+        let handlers = self
+            .shared
+            .plugin_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(handle) = handlers.get(tool_name) {
             if let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) {
                 let args_table = self.lua.create_table().unwrap();
@@ -1144,7 +1413,8 @@ impl LuaRuntime {
     /// Build a `PluginConfirmMeta` for the given tool (if it has a confirm spec).
     pub fn get_confirm_meta(&self, tool_name: &str) -> Option<crate::render::PluginConfirmMeta> {
         let specs = self
-            .shared.confirm_specs
+            .shared
+            .confirm_specs
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let spec = specs.get(tool_name)?;
@@ -1167,7 +1437,8 @@ impl LuaRuntime {
     /// Invoke the on_select callback for the given plugin tool confirm option.
     pub fn invoke_confirm_callback(&self, tool_name: &str, option_index: usize) {
         let specs = self
-            .shared.confirm_specs
+            .shared
+            .confirm_specs
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if let Some(spec) = specs.get(tool_name) {
@@ -1258,10 +1529,20 @@ impl Default for LuaRuntime {
 }
 
 /// Modules embedded in the binary, available via `require("smelt.plugins.X")`.
-const EMBEDDED_MODULES: &[(&str, &str)] = &[(
-    "smelt.plugins.plan_mode",
-    include_str!("../../../runtime/lua/smelt/plugins/plan_mode.lua"),
-)];
+const EMBEDDED_MODULES: &[(&str, &str)] = &[
+    (
+        "smelt.plugins.plan_mode",
+        include_str!("../../../runtime/lua/smelt/plugins/plan_mode.lua"),
+    ),
+    (
+        "smelt.plugins.btw",
+        include_str!("../../../runtime/lua/smelt/plugins/btw.lua"),
+    ),
+    (
+        "smelt.plugins.predict",
+        include_str!("../../../runtime/lua/smelt/plugins/predict.lua"),
+    ),
+];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`
 /// from modules embedded in the binary. Falls back to the default searchers
@@ -1271,16 +1552,13 @@ fn register_embedded_searcher(lua: &Lua) -> LuaResult<()> {
     let searcher = lua.create_function(|lua, module: String| {
         for &(name, source) in EMBEDDED_MODULES {
             if name == module {
-                let loader = lua
-                    .load(source)
-                    .set_name(name)
-                    .into_function()?;
+                let loader = lua.load(source).set_name(name).into_function()?;
                 return Ok(mlua::Value::Function(loader));
             }
         }
-        Ok(mlua::Value::String(
-            lua.create_string(format!("\n\tno embedded module '{module}'"))?,
-        ))
+        Ok(mlua::Value::String(lua.create_string(format!(
+            "\n\tno embedded module '{module}'"
+        ))?))
     })?;
 
     let package: mlua::Table = lua.globals().get("package")?;

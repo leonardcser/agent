@@ -284,10 +284,12 @@ impl App {
         }
         self.snapshot_engine_context(false);
         let was_cancelled = cancelled;
+        let history = self.history.clone();
         self.lua
             .emit_data(crate::lua::AutocmdEvent::TurnEnd, |lua| {
                 let t = lua.create_table()?;
                 t.set("cancelled", was_cancelled)?;
+                t.set("messages", crate::lua::messages_to_lua(lua, &history)?)?;
                 Ok(t)
             });
         self.apply_lua_ops();
@@ -320,38 +322,7 @@ impl App {
             }
         } else {
             self.screen.set_throbber(render::Throbber::Done);
-            // Fire async prediction for the user's next input.
-            // Skip predictions on subagent tabs — they're independent.
             self.input_prediction = None;
-            if self.settings.show_prediction {
-                // Collect last 3 user messages + last assistant message for
-                // richer prediction context.
-                let mut context: Vec<protocol::Message> = self
-                    .history
-                    .iter()
-                    .rev()
-                    .filter(|m| m.role == protocol::Role::User)
-                    .take(3)
-                    .cloned()
-                    .collect();
-                context.reverse();
-                if let Some(msg) = self
-                    .history
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == protocol::Role::Assistant)
-                    .cloned()
-                {
-                    context.push(msg);
-                }
-                if !context.is_empty() {
-                    self.predict_generation += 1;
-                    self.engine.send(UiCommand::PredictInput {
-                        history: context,
-                        generation: self.predict_generation,
-                    });
-                }
-            }
         }
         let meta = self
             .pending_turn_meta
@@ -1222,6 +1193,17 @@ impl App {
                 self.refresh_agent_counts();
             }
             render::DialogResult::PsClosed | render::DialogResult::Dismissed => {}
+            render::DialogResult::FloatSelect { id, index } => {
+                let ops = self.lua.fire_callback(id, &index.to_string());
+                self.apply_ops(ops);
+            }
+            render::DialogResult::FloatDismiss { id } => {
+                let dismiss_id = id | (1 << 63);
+                let ops = self.lua.fire_callback(dismiss_id, "");
+                self.apply_ops(ops);
+                self.lua.remove_callback(id);
+                self.lua.remove_callback(dismiss_id);
+            }
         }
     }
 

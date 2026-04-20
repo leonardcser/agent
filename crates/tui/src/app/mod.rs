@@ -188,6 +188,27 @@ pub struct App {
     pub agent_prompt_config: Option<engine::AgentPromptConfig>,
     /// Prompt sections built from app state. Rebuilt on mode changes.
     pub prompt_sections: crate::prompt_sections::PromptSections,
+    pub pending_float_ops: Vec<FloatOp>,
+}
+
+pub enum FloatOp {
+    Open {
+        id: u64,
+        title: String,
+        lines: Vec<String>,
+        loading: bool,
+        footer_items: Vec<String>,
+        accent: Option<crossterm::style::Color>,
+    },
+    Update {
+        id: u64,
+        title: Option<String>,
+        lines: Option<Vec<String>>,
+        loading: Option<bool>,
+    },
+    Close {
+        id: u64,
+    },
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -572,6 +593,7 @@ impl App {
             skill_section: None,
             agent_prompt_config: None,
             prompt_sections: crate::prompt_sections::PromptSections::default(),
+            pending_float_ops: Vec::new(),
         }
     }
 
@@ -700,6 +722,7 @@ impl App {
                 self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
             }
             self.apply_lua_ops();
+            self.drain_float_ops(&mut active_dialog);
 
             // ── Background polls ─────────────────────────────────────────
             if let Some(ref mut rx) = ctx_rx {

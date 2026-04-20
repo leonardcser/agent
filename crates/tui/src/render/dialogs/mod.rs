@@ -1,6 +1,7 @@
 mod agents;
 mod confirm;
 mod export;
+pub mod float;
 mod help;
 mod permissions;
 mod ps;
@@ -11,6 +12,7 @@ mod rewind;
 pub use agents::{AgentSnapshot, AgentsDialog, SharedSnapshots};
 pub use confirm::ConfirmDialog;
 pub use export::{ExportDialog, ExportTarget};
+pub use float::FloatDialog;
 pub use help::HelpDialog;
 pub use permissions::{PermissionEntry, PermissionsDialog};
 pub use ps::PsDialog;
@@ -51,6 +53,13 @@ pub enum DialogResult {
         workspace_remaining: Vec<crate::workspace_permissions::Rule>,
     },
     AgentsClosed,
+    FloatSelect {
+        id: u64,
+        index: usize,
+    },
+    FloatDismiss {
+        id: u64,
+    },
 }
 
 pub trait Dialog {
@@ -79,6 +88,8 @@ pub trait Dialog {
     fn kill_ring(&self) -> Option<&str> {
         None
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 pub(crate) struct ListState {

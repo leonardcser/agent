@@ -323,6 +323,10 @@ impl super::Dialog for ResumeDialog {
         out.pop_style();
         end_dialog_draw(out);
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 fn is_junk_title(s: &str) -> bool {

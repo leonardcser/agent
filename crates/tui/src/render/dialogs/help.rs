@@ -161,6 +161,10 @@ impl super::Dialog for HelpDialog {
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
         end_dialog_draw(out);
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]

@@ -230,8 +230,6 @@ impl App {
                         self.screen.erase_prompt();
                         self.screen.mark_dirty();
                     }
-                } else if self.try_btw_submit(&content, &display) {
-                    // handled
                 } else {
                     let text = content.text_content();
                     let has_images = content.image_count() > 0;
@@ -615,10 +613,6 @@ impl App {
             } => {
                 // Ingress: scrub secrets before queueing or running commands.
                 self.redact_user_submission(&mut content, &mut display);
-                if self.try_btw_submit(&content, &display) {
-                    self.screen.mark_dirty();
-                    return EventOutcome::Noop;
-                }
                 let text = content.text_content();
                 if let Some(outcome) = self.try_command_while_running(text.trim()) {
                     return outcome;
@@ -823,28 +817,6 @@ impl App {
         }
 
         None
-    }
-
-    /// Try to handle a submitted input as a `/btw` command.
-    /// Returns `true` if it was handled.
-    fn try_btw_submit(&mut self, content: &Content, display: &str) -> bool {
-        let text = content.text_content();
-        let trimmed = text.trim();
-        if !trimmed.starts_with("/btw ") {
-            return false;
-        }
-        let question_full = trimmed[5..].trim().to_string();
-        if question_full.is_empty() {
-            return true; // handled (as no-op)
-        }
-        let display_q = display
-            .strip_prefix("/btw ")
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| question_full.clone());
-        let labels = content.image_labels();
-        self.input_history.push(text);
-        self.start_btw(question_full, display_q, labels);
-        true
     }
 
     // ── Input processing (commands, settings, rewind, shell) ─────────────
@@ -1396,6 +1368,7 @@ impl App {
             session_dir: session_dir.display().to_string(),
             session_id: self.session.id.clone(),
         });
+        self.lua.set_history(self.history.clone());
     }
 
     /// Drain and apply all pending Lua ops (notifications, errors,
@@ -1474,6 +1447,112 @@ impl App {
                 crate::lua::PendingOp::ClearGhostText => {
                     self.input_prediction = None;
                     self.screen.mark_dirty();
+                }
+                crate::lua::PendingOp::OpenFloat {
+                    id,
+                    title,
+                    lines,
+                    loading,
+                    footer_items,
+                    accent,
+                } => {
+                    self.pending_float_ops.push(FloatOp::Open {
+                        id,
+                        title,
+                        lines,
+                        loading,
+                        footer_items,
+                        accent,
+                    });
+                }
+                crate::lua::PendingOp::UpdateFloat {
+                    id,
+                    title,
+                    lines,
+                    loading,
+                } => {
+                    self.pending_float_ops.push(FloatOp::Update {
+                        id,
+                        title,
+                        lines,
+                        loading,
+                    });
+                }
+                crate::lua::PendingOp::CloseFloat { id } => {
+                    self.pending_float_ops.push(FloatOp::Close { id });
+                }
+                crate::lua::PendingOp::ResolveToolResult {
+                    request_id,
+                    call_id,
+                    content,
+                    is_error,
+                } => {
+                    self.engine.send(protocol::UiCommand::PluginToolResult {
+                        request_id,
+                        call_id,
+                        content,
+                        is_error,
+                    });
+                }
+            }
+        }
+    }
+
+    pub(super) fn drain_float_ops(&mut self, active_dialog: &mut Option<Box<dyn render::Dialog>>) {
+        let ops = std::mem::take(&mut self.pending_float_ops);
+        for op in ops {
+            match op {
+                FloatOp::Open {
+                    id,
+                    title,
+                    lines,
+                    loading,
+                    footer_items,
+                    accent,
+                } => {
+                    let vim_enabled = self.settings.vim;
+                    let dlg = render::FloatDialog::new(
+                        id,
+                        title,
+                        lines,
+                        loading,
+                        footer_items,
+                        accent,
+                        vim_enabled,
+                    );
+                    self.open_dialog(Box::new(dlg), active_dialog);
+                }
+                FloatOp::Update {
+                    id,
+                    title,
+                    lines,
+                    loading,
+                } => {
+                    if let Some(d) = active_dialog.as_mut() {
+                        if let Some(fd) = d.as_any_mut().downcast_mut::<render::FloatDialog>() {
+                            if fd.id == id {
+                                if let Some(t) = title {
+                                    fd.set_title(t);
+                                }
+                                if let Some(l) = lines {
+                                    fd.set_lines(l);
+                                }
+                                if let Some(b) = loading {
+                                    fd.set_loading(b);
+                                }
+                            }
+                        }
+                    }
+                }
+                FloatOp::Close { id } => {
+                    if let Some(d) = active_dialog.as_mut() {
+                        if let Some(fd) = d.as_any_mut().downcast_mut::<render::FloatDialog>() {
+                            if fd.id == id {
+                                active_dialog.take();
+                                self.finalize_dialog_close();
+                            }
+                        }
+                    }
                 }
             }
         }

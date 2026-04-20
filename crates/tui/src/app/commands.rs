@@ -245,15 +245,6 @@ impl App {
                 }
                 CommandAction::Continue
             }
-            _ if input.starts_with("/btw ") => {
-                let question = input.strip_prefix("/btw ").unwrap().trim().to_string();
-                if question.is_empty() {
-                    self.screen.notify_error("usage: /btw <question>".into());
-                } else {
-                    self.start_btw(question.clone(), question, vec![]);
-                }
-                CommandAction::Continue
-            }
             _ if input.starts_with('!') && !self.input.skip_shell_escape() => {
                 if let Some((rx, kill)) = self.start_shell_escape(input.strip_prefix('!').unwrap())
                 {
@@ -461,20 +452,6 @@ impl App {
                     Ok(t)
                 });
         }
-    }
-
-    pub(super) fn start_btw(
-        &mut self,
-        question: String,
-        display_question: String,
-        image_labels: Vec<String>,
-    ) {
-        self.screen.set_btw(display_question, image_labels);
-        self.engine.send(UiCommand::Btw {
-            question,
-            history: self.history.clone(),
-            reasoning_effort: self.reasoning_effort,
-        });
     }
 
     /// Mutate resolved settings in place, then persist + propagate to

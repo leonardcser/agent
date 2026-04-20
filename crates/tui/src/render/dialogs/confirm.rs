@@ -1011,4 +1011,8 @@ impl super::Dialog for ConfirmDialog {
 
         finish_dialog_frame(out, cursor_pos, self.editing);
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
