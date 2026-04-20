@@ -1,5 +1,50 @@
 # TUI Architecture — UI Framework Rewrite
 
+## Implementation instructions
+
+These directives govern how this plan is executed. They override defaults.
+
+### Process
+
+- **Stop at friction.** When something is unclear, when abstractions don't
+  fit, when you're unsure which direction to take — stop and talk to the
+  user. Present options, explain trade-offs, ask for a decision. Don't
+  push through ambiguity. The cost of pausing is low; the cost of building
+  the wrong abstraction is high.
+
+- **The plan evolves.** This document is a living roadmap, not a contract.
+  As implementation proceeds, new insights will surface — things we didn't
+  anticipate when writing the plan. That's expected and good. Don't force
+  the code to match the plan when the plan is wrong. Update the plan to
+  match reality, then keep going.
+
+- **Correct abstractions matter most.** The goal is not "get it done" but
+  "get the abstractions right." Take inspiration from Neovim's architecture
+  (buffers, windows, compositor, event dispatch) but adapt to Rust's
+  ownership model. When in doubt, study how Neovim solves the problem and
+  translate the concept, not the implementation.
+
+- **No dead code annotations.** Never add `#[allow(dead_code)]`. Either
+  use the code, remove it, or leave the compiler warning visible as a
+  tracking marker for future work. Pre-existing `#[allow(dead_code)]` from
+  earlier phases should be removed too.
+
+- **Format, lint, test, commit as you go.** After each coherent change:
+  `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`.
+  Then update this plan (mark progress, record decisions), then commit.
+  Don't batch — small, clean commits that each pass CI.
+
+- **No throwaway work.** Don't build intermediate abstractions that will
+  be discarded in a later phase. If the final architecture needs X, build
+  toward X directly, even if incrementally. Every step should be a subset
+  of the final state, not a detour.
+
+- **Present multiple approaches.** When solving a problem, present options
+  with pros/cons. Include the bold option (what would a clean rewrite look
+  like?). Let the user choose the direction.
+
+---
+
 ## Vision
 
 Build a **retained-mode TUI rendering framework** (`crates/ui/`) inspired by
@@ -128,23 +173,27 @@ Components never emit escape sequences — they write cells to a grid region.
 Retained rendering unit. Each UI surface implements `Component`:
 - `draw()` — writes cells into its grid slice
 - `handle_key()` — returns Consumed, Ignored, or Action(string)
-- `is_dirty()` / `mark_dirty()` / `mark_clean()` — dirty tracking
 - `cursor()` — cursor position if focused
 
 ### Compositor
 
 Manages the component tree, orchestrates rendering, diffs frames.
-Each frame: resolve layout → draw dirty components → diff grids → emit SGR.
+Each frame: resolve layout → draw components → diff grids → emit SGR.
 
 ### Buffer (content model)
 
 Lines + highlights + marks + virtual text. Buffers are the data model —
-components read buffers and write cells to the grid.
+windows read buffers and write cells to the grid. Buffers are updated at
+event time (keystrokes, engine events, streaming), not at render time.
 
 ### Window
 
 Viewport into a buffer with cursor, scroll, visual state. Windows are
-components that render their buffer content into the grid.
+components that read from their buffer during `draw()`. The app updates
+buffers in response to events; windows pull from buffers when rendering.
+
+This is the Neovim model adapted for Rust: events mutate buffers, buffers
+mark their windows dirty, the compositor renders dirty windows.
 
 ### FloatDialog
 
@@ -295,62 +344,81 @@ Cell grid, compositor, primitive components, and unified dialog:
   vim-style scroll keys, and action-based key results
   (`select:N`, `dismiss`, `submit:text`).
 
-## Phase 6: Compositor takes over rendering
+## Phase 6: Buffer/window rendering model (IN PROGRESS)
 
-**Goal:** Replace `RenderOut` + `Frame` with compositor as sole frame
-renderer. Every visible surface becomes a `Component` drawing into a
-`GridSlice`. No intermediate adapters or legacy bridges.
+**Goal:** Windows pull from buffers. App updates buffers at event time.
+The render loop is just `compositor.render()`. Replace `RenderOut` +
+`Frame` + the push-based data extraction pipeline with the Neovim-style
+buffer/window model.
 
 ### Architecture
 
 ```
-Compositor (full screen grid, owns the frame)
-├── TranscriptView    — split, renders DisplayLines → grid cells
-├── PromptView        — split, renders input + ghost text → grid cells
-├── StatusBar         — 1-row component (already built in ui crate)
-└── FloatDialog(s)    — float layers (already built in ui crate)
+event (key, engine, timer)
+    │
+    ▼
+App updates buffer content + marks window dirty
+    │
+    ▼
+render tick
+    │
+    ▼
+Compositor
+├── TranscriptWindow  — reads from transcript buffer, draws into grid
+├── PromptWindow      — reads from prompt buffer, draws into grid
+├── StatusBar         — 1-row component (segments set at event time)
+└── FloatDialog(s)    — float layers reading from their buffers
+    │
+    ▼
+Grid diff → terminal
 ```
 
-### Data flow
+### Data flow (pull model)
 
-Components don't hold references to app state — they hold snapshots.
-Before each frame, the app pushes fresh data into components:
+Events update buffers. Windows read from buffers during draw.
+The app's render function is minimal:
 
+```rust
+fn render(&mut self) {
+    self.compositor.render(&mut stdout);
+}
 ```
-app computes viewport → transcript_view.set_lines(visible_lines)
-app reads input state → prompt_view.set_input(text, cursor, ghost)
-app reads status data → status_bar.set_left/set_right(segments)
-                      → compositor.render(&mut stdout)
-```
 
-### Implementation steps
+No data extraction step. No pushing snapshots into views. Buffers hold
+the truth; windows render from it. This is the model that makes Lua
+plugins natural — `buf_set_lines()` updates a buffer, the window
+redraws automatically on the next frame.
 
-**Step 1: `paint_line_to_grid`** — pure function, no behavior change.
-Converts a `DisplayLine` (spans + SpanStyle + ColorValue) into grid
-cells by resolving theme colors to `ui::Style` and writing chars to
-a `GridSlice` row. Lives in `tui` crate (bridges tui's DisplayLine
-with ui's GridSlice). Same logic as `paint_line` but targets cells
-instead of escape sequences.
+### Transition from current state
 
-**Step 2: `TranscriptView` component** — lives in `tui`, implements
-`ui::Component`. Holds `Vec<DisplayLine>` + scrollbar state + cursor
-state. `draw()` calls `paint_line_to_grid` per visible line, paints
-scrollbar column, paints soft cursor if focused. The app does viewport
-calculation (which blocks, skip count, clamped scroll) and pushes
-visible lines before each frame.
+The current code has a transitional `tick_prompt_compositor` function
+that extracts data from `Screen`, pushes it into dumb view components,
+then calls `compositor.render_with()`. This needs to be replaced:
 
-**Step 3: `PromptView` component** — lives in `tui`, implements
-`ui::Component`. Holds input text snapshot, cursor position, mode,
-ghost text, queued commands. `draw()` renders input lines + ghost
-text + prompt chrome into grid cells.
+**Step 1: Clean up current state** — fix dead code, remove
+`#[allow(dead_code)]`, get everything compiling clean. Rename
+`tick_prompt_compositor` → `render` as a short-term cleanup.
 
-**Step 4: Wire compositor into `App`** — add `Compositor` to `App`.
-`render_frame()` calls `compositor.render(&mut stdout)` instead of
-`Frame::begin()` + `RenderOut`. Compositor handles synchronized
-updates, grid diffing, cursor positioning. `Screen`'s draw methods
-are replaced by component draw methods.
+**Step 2: Transcript buffer** — create a `ui::Buffer`-backed transcript.
+Move `collect_transcript_data` logic so the buffer is updated when
+engine events arrive (new blocks, streaming text), not at render time.
+`TranscriptWindow` reads from this buffer in `draw()`. App no longer
+extracts + pushes transcript lines each frame.
 
-**Step 5: Migrate dialogs** — each of the 10 Dialog implementations
+**Step 3: Prompt buffer** — move input state into a `ui::Buffer`.
+`PromptWindow` reads from it in `draw()`. Keystrokes update the buffer
+directly. The prompt chrome (notification bar, queued messages, bar info)
+becomes virtual text or additional buffer content set at event time.
+
+**Step 4: Status bar event-driven** — status bar segments are updated
+when the underlying data changes (mode switch, new tokens, cost update),
+not recomputed every frame.
+
+**Step 5: Hollow out Screen** — as each piece moves into buffers,
+`Screen` shrinks. Data that was in Screen moves to the buffer it
+belongs to. Screen's draw methods are deleted as windows take over.
+
+**Step 6: Migrate dialogs** — each of the 10 Dialog implementations
 becomes a `FloatDialog` configuration added as a compositor layer.
 Migration order (simplest first):
 1. HelpDialog → FloatDialog with keybindings in buffer, no footer
@@ -366,13 +434,29 @@ Migration order (simplest first):
 
 Also migrate: BtwBlock, Notifications, Completions → float layers.
 
-**Step 6: Delete legacy rendering** —
+**Step 7: Delete legacy rendering** —
 - `Dialog` trait, `DialogResult`, `ListState`, `TextArea`
 - `Frame`, `RenderOut`, `StyleState` (SGR/style stack machinery)
 - `paint_line` (replaced by `paint_line_to_grid`)
 - `Screen::draw_viewport_frame`, `draw_viewport_dialog_frame`
 - `active_dialog`, `open_dialog`, `finalize_dialog_close`
 - All individual dialog structs in `render/dialogs/`
+- `prompt_data.rs`, `status_data.rs` (transitional compute modules)
+- `tick_dialog`, any remaining `tick_*` methods
+
+### Current progress
+
+Transitional scaffolding built (to be replaced by buffer/window model):
+- `paint_line_to_grid` — pure function, converts DisplayLine → grid cells ✅
+- `TranscriptView` — component that paints pushed DisplayLines ✅
+  (needs to become a window reading from a buffer)
+- `PromptView` — component that paints pushed PromptRows ✅
+  (needs to become a window reading from a buffer)
+- `prompt_data.rs` — computes prompt data from Screen state ✅
+  (transitional — will be replaced by event-driven buffer updates)
+- `status_data.rs` — computes status segments from Screen state ✅
+  (transitional — will be replaced by event-driven updates)
+- Compositor wired into App, non-dialog frames render via grid diff ✅
 
 ## Phase 7: Event dispatch
 
@@ -412,7 +496,7 @@ Phase 0–2 (DONE: types, text primitives, layout)
 Phase 3–5 (DONE: grid, components, compositor, FloatDialog)
     │
     ▼
-Phase 6 (compositor takes over: transcript + prompt + status + dialogs)
+Phase 6 (buffer/window model: transcript + prompt + status + dialogs)
     │
     ▼
 Phase 7 (event dispatch)

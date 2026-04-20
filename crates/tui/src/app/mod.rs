@@ -7,7 +7,7 @@ mod history;
 use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, MenuResult};
 use crate::render::{
     tool_arg_summary, ApprovalScope, Block, ConfirmChoice, ConfirmDialog, ConfirmRequest,
-    FramePrompt, QuestionDialog, ResumeEntry, Screen, ToolOutput, ToolStatus,
+    QuestionDialog, ResumeEntry, Screen, ToolOutput, ToolStatus,
 };
 use crate::session::Session;
 use crate::{render, session, state, vim};
@@ -190,6 +190,11 @@ pub struct App {
     pub prompt_sections: crate::prompt_sections::PromptSections,
     pub pending_float_ops: Vec<FloatOp>,
     pub ui: ui::Ui,
+    /// Compositor-based rendering pipeline.
+    compositor: ui::Compositor,
+    transcript_view: crate::render::transcript_view::TranscriptView,
+    prompt_view: crate::render::prompt_view::PromptView,
+    status_bar: ui::StatusBar,
 }
 
 pub enum FloatOp {
@@ -614,6 +619,16 @@ impl App {
                 });
                 ui
             },
+            compositor: {
+                let (w, h) = terminal::size().unwrap_or((80, 24));
+                ui::Compositor::new(w, h)
+            },
+            transcript_view: {
+                let (w, _) = terminal::size().unwrap_or((80, 24));
+                crate::render::transcript_view::TranscriptView::new(w)
+            },
+            prompt_view: crate::render::prompt_view::PromptView::new(),
+            status_bar: ui::StatusBar::new(),
         }
     }
 
@@ -1599,7 +1614,7 @@ impl App {
     /// Render a complete frame. When a dialog is active, content + dialog +
     /// status line are all painted inside a single `Frame` (one atomic
     /// synchronized update). Without a dialog, content + prompt are rendered
-    /// in their own frame.
+    /// via the compositor pipeline.
     fn render_frame(
         &mut self,
         agent_running: bool,
@@ -1618,12 +1633,10 @@ impl App {
                 let w = self.screen.size().0;
                 d.draw(&mut frame, p.row, w, p.granted_rows);
             }
-            // Global gap + cleanup: blank line between dialog and
-            // status bar, then clear any stale rows below.
             self.screen.queue_dialog_gap(&mut frame);
             self.screen.queue_status_line(&mut frame);
         } else {
-            self.tick_prompt(agent_running);
+            self.tick_prompt_compositor(agent_running);
         }
     }
 

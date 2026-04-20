@@ -14,11 +14,9 @@ use crossterm::QueueableCommand;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-#[allow(dead_code)]
 pub(crate) struct ViewportData {
     pub lines: Vec<super::display::DisplayLine>,
     pub clamped_scroll: u16,
-    pub total_rows: u16,
 }
 
 /// In-flight blocking agent — a thin handle to a streaming `Block::Agent`.
@@ -759,7 +757,6 @@ impl BlockHistory {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)]
     pub(crate) fn collect_viewport(
         &mut self,
         width: usize,
@@ -772,7 +769,6 @@ impl BlockHistory {
             return ViewportData {
                 lines: Vec::new(),
                 clamped_scroll: 0,
-                total_rows: 0,
             };
         }
         if width != self.cache_width {
@@ -850,7 +846,6 @@ impl BlockHistory {
         ViewportData {
             lines,
             clamped_scroll: scroll,
-            total_rows: total,
         }
     }
 

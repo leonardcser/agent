@@ -1,0 +1,1212 @@
+use super::prompt_view::{PromptRow, StyledSegment};
+use super::selection::{
+    build_char_kinds, build_display_spans, compute_visual_line_offsets, map_cursor,
+    spans_to_string, wrap_and_locate_cursor, wrap_line, SpanKind,
+};
+use super::status::BarSpan;
+use crate::input::InputState;
+use crate::theme;
+use ui::grid::Style;
+
+use crossterm::style::Color;
+
+pub(crate) struct PromptInput<'a> {
+    pub notification: Option<&'a super::screen::Notification>,
+    pub queued: &'a [String],
+    pub stash: &'a Option<crate::input::InputSnapshot>,
+    pub btw: Option<&'a mut super::screen::BtwBlock>,
+    pub input: &'a InputState,
+    pub prediction: Option<&'a str>,
+    pub width: u16,
+    pub height: u16,
+    pub has_prompt_cursor: bool,
+    pub prev_input_scroll: usize,
+    pub bar_info: BarInfo,
+    pub vim_enabled: bool,
+    pub term_height: u16,
+}
+
+pub(crate) struct BarInfo {
+    pub model_label: Option<String>,
+    pub reasoning_effort: protocol::ReasoningEffort,
+    pub show_tokens: bool,
+    pub context_tokens: Option<u32>,
+    pub context_window: Option<u32>,
+    pub show_cost: bool,
+    pub session_cost_usd: f64,
+}
+
+pub(crate) struct PromptOutput {
+    pub rows: Vec<PromptRow>,
+    pub cursor: Option<(u16, u16)>,
+    pub cursor_style: Option<(Style, char)>,
+    pub input_scroll: usize,
+    pub soft_cursor: Option<(u16, u16)>,
+    pub input_viewport: Option<InputViewport>,
+}
+
+pub(crate) struct InputViewport {
+    pub top_row: u16,
+    pub rows: u16,
+    pub content_width: u16,
+    pub total_rows: u16,
+    pub scroll_top: u16,
+}
+
+fn cursor_style() -> (Color, Color) {
+    if theme::is_light() {
+        (Color::White, Color::Black)
+    } else {
+        (Color::Black, Color::White)
+    }
+}
+
+pub(crate) fn compute_prompt(input: &mut PromptInput<'_>) -> PromptOutput {
+    let width = input.width as usize;
+    let usable = width.saturating_sub(2);
+    let mut rows: Vec<PromptRow> = Vec::new();
+    let mut row_offset: u16 = 0;
+
+    // ── Notification ──
+    if let Some(notif) = input.notification {
+        rows.push(notification_row(notif, usable));
+        row_offset += 1;
+    }
+
+    // ── Queued messages ──
+    let queued_rows = queued_message_rows(input.queued, usable);
+    row_offset += queued_rows.len() as u16;
+    rows.extend(queued_rows);
+
+    // ── Stash indicator ──
+    if input.stash.is_some() {
+        rows.push(stash_row(usable));
+        row_offset += 1;
+    }
+
+    // ── BTW block ──
+    if let Some(ref mut btw) = input.btw {
+        let term_h = input.term_height as usize;
+        let btw_rows = btw_block_rows(btw, usable, term_h, input.vim_enabled);
+        row_offset += btw_rows.len() as u16;
+        rows.extend(btw_rows);
+    }
+
+    // ── Top bar ──
+    let top_bar_right = build_top_bar_right(&input.bar_info);
+    rows.push(bar_row(
+        width,
+        None,
+        if top_bar_right.is_empty() {
+            None
+        } else {
+            Some(&top_bar_right)
+        },
+    ));
+    row_offset += 1;
+
+    // ── Input area ──
+    let input_area_start = row_offset;
+    let (input_rows, cursor_info, scroll_info) = compute_input_area(input, usable, row_offset);
+    let input_row_count = input_rows.len() as u16;
+    row_offset += input_row_count;
+    rows.extend(input_rows);
+
+    // ── Bottom bar ──
+    rows.push(bar_row(width, None, None));
+    row_offset += 1;
+
+    // ── Status line ──
+    // Status line is rendered as a separate component (StatusBar), not as a PromptRow.
+    // The caller handles it separately.
+    let _ = row_offset;
+
+    PromptOutput {
+        rows,
+        cursor: cursor_info.cursor_pos,
+        cursor_style: cursor_info.cursor_style,
+        input_scroll: scroll_info.scroll_offset,
+        soft_cursor: cursor_info.soft_cursor,
+        input_viewport: if input_row_count > 0 {
+            Some(InputViewport {
+                top_row: input_area_start,
+                rows: input_row_count,
+                content_width: usable as u16,
+                total_rows: scroll_info.total_content_rows as u16,
+                scroll_top: scroll_info.scroll_offset as u16,
+            })
+        } else {
+            None
+        },
+    }
+}
+
+// ── Notification ──
+
+fn notification_row(notif: &super::screen::Notification, _usable: usize) -> PromptRow {
+    let label = if notif.is_error { "error" } else { "info" };
+    let label_style = Style {
+        fg: if notif.is_error {
+            Some(theme::ERROR)
+        } else {
+            None
+        },
+        bold: true,
+        ..Style::default()
+    };
+
+    let max_msg = _usable.saturating_sub(label.len() + 3);
+    let msg: String = notif.message.chars().take(max_msg).collect();
+
+    PromptRow::styled(vec![
+        StyledSegment {
+            text: " ".into(),
+            style: Style::default(),
+        },
+        StyledSegment {
+            text: label.into(),
+            style: label_style,
+        },
+        StyledSegment {
+            text: "  ".into(),
+            style: Style::default(),
+        },
+        StyledSegment {
+            text: msg,
+            style: Style {
+                dim: true,
+                ..Style::default()
+            },
+        },
+    ])
+}
+
+// ── Queued messages ──
+
+fn queued_message_rows(queued: &[String], usable: usize) -> Vec<PromptRow> {
+    let indent = 1usize;
+    let text_w = usable.saturating_sub(indent + 1).max(1);
+    let mut rows = Vec::new();
+    let user_bg = theme::user_bg();
+
+    for msg in queued {
+        let is_command = crate::completer::Completer::is_command(msg.trim());
+        let geom = super::blocks::UserBlockGeometry::new(msg, text_w);
+        for line in &geom.lines {
+            if line.is_empty() {
+                let fill_w = if geom.block_w > 0 {
+                    geom.block_w + 1
+                } else {
+                    2
+                };
+                let mut segs = vec![StyledSegment {
+                    text: " ".repeat(indent),
+                    style: Style::default(),
+                }];
+                segs.push(StyledSegment {
+                    text: " ".repeat(fill_w),
+                    style: Style::bg(user_bg),
+                });
+                rows.push(PromptRow::styled(segs));
+                continue;
+            }
+            let chunks = wrap_line(line, text_w);
+            for chunk in &chunks {
+                let chunk_w = super::layout_out::display_width(chunk);
+                let trailing = if geom.block_w > 0 {
+                    geom.block_w.saturating_sub(chunk_w)
+                } else {
+                    1
+                };
+                let bg_style = Style {
+                    bg: Some(user_bg),
+                    bold: true,
+                    ..Style::default()
+                };
+
+                let mut segs = vec![StyledSegment {
+                    text: " ".repeat(indent),
+                    style: Style::default(),
+                }];
+                segs.push(StyledSegment {
+                    text: " ".into(),
+                    style: bg_style,
+                });
+
+                // Build styled segments for the chunk content
+                let chunk_segs = user_highlight_segments(chunk, is_command, bg_style);
+                segs.extend(chunk_segs);
+
+                segs.push(StyledSegment {
+                    text: " ".repeat(trailing),
+                    style: bg_style,
+                });
+                rows.push(PromptRow::styled(segs));
+            }
+        }
+    }
+    rows
+}
+
+fn user_highlight_segments(text: &str, is_command: bool, base_style: Style) -> Vec<StyledSegment> {
+    if is_command {
+        return vec![StyledSegment {
+            text: text.into(),
+            style: Style {
+                fg: Some(theme::accent()),
+                ..base_style
+            },
+        }];
+    }
+
+    // Simple path: no @ref highlighting for now — just plain text with base style.
+    // The full `print_user_highlights` does @path detection + image labels,
+    // but for queued messages the simple path covers the common case.
+    vec![StyledSegment {
+        text: text.into(),
+        style: base_style,
+    }]
+}
+
+// ── Stash ──
+
+fn stash_row(_usable: usize) -> PromptRow {
+    let text = "› Stashed (ctrl+s to unstash)";
+    let display: String = text.chars().take(_usable).collect();
+    PromptRow::styled(vec![
+        StyledSegment {
+            text: "  ".into(),
+            style: Style::default(),
+        },
+        StyledSegment {
+            text: display,
+            style: Style {
+                fg: Some(theme::muted()),
+                dim: true,
+                ..Style::default()
+            },
+        },
+    ])
+}
+
+// ── BTW block ──
+
+const BTW_CHROME_ROWS: usize = 4;
+
+fn btw_max_body_rows(term_h: usize) -> usize {
+    (term_h / 2).saturating_sub(BTW_CHROME_ROWS).max(1)
+}
+
+fn btw_block_rows(
+    btw: &mut super::screen::BtwBlock,
+    usable: usize,
+    term_h: usize,
+    vim_enabled: bool,
+) -> Vec<PromptRow> {
+    let max_lines = btw_max_body_rows(term_h).max(1);
+    let mut rows = Vec::new();
+
+    // Header: "/btw question"
+    let max_q = usable.saturating_sub(6);
+    let q: String = btw.question.chars().take(max_q).collect();
+    rows.push(PromptRow::styled(vec![
+        StyledSegment {
+            text: " ".into(),
+            style: Style::default(),
+        },
+        StyledSegment {
+            text: "/btw".into(),
+            style: Style::fg(theme::accent()),
+        },
+        StyledSegment {
+            text: " ".into(),
+            style: Style::default(),
+        },
+        StyledSegment {
+            text: q,
+            style: Style::default(),
+        },
+    ]));
+
+    match btw.response {
+        Some(ref text) => {
+            let render_w = usable;
+
+            if btw.wrapped.is_empty() || btw.wrap_width != render_w {
+                btw.wrapped.clear();
+                let mut buf = super::RenderOut::buffer();
+                super::blocks::render_markdown_inner(&mut buf, text, render_w, "   ", false, None);
+                let _ = std::io::Write::flush(&mut buf);
+                let bytes = buf.into_bytes();
+                let rendered = String::from_utf8_lossy(&bytes);
+                for line in rendered.split("\r\n") {
+                    btw.wrapped.push(line.to_string());
+                }
+                if btw.wrapped.last().is_some_and(|l| l.is_empty()) {
+                    btw.wrapped.pop();
+                }
+                if btw.wrapped.is_empty() {
+                    btw.wrapped.push(String::new());
+                }
+                btw.wrap_width = render_w;
+                let max = btw.wrapped.len().saturating_sub(max_lines);
+                btw.scroll_offset = btw.scroll_offset.min(max);
+            }
+
+            let total = btw.wrapped.len();
+            let visible = total.min(max_lines);
+            let can_scroll = total > max_lines;
+
+            for line in btw.wrapped.iter().skip(btw.scroll_offset).take(visible) {
+                // BTW wrapped lines contain escape sequences from markdown rendering.
+                // For now, render them as plain text (stripping ANSI codes).
+                let plain = strip_ansi(line);
+                rows.push(PromptRow::plain(&plain));
+            }
+
+            // Blank line
+            rows.push(PromptRow::plain(""));
+
+            // Hint
+            let hint = if can_scroll {
+                let end = (btw.scroll_offset + visible).min(total);
+                format!(
+                    "   [{end}/{total}]  {}  {}  esc: close",
+                    crate::keymap::hints::nav(vim_enabled),
+                    crate::keymap::hints::scroll(vim_enabled),
+                )
+            } else {
+                "   esc: close".into()
+            };
+            rows.push(PromptRow::styled(vec![StyledSegment {
+                text: hint,
+                style: Style::fg(theme::muted()),
+            }]));
+        }
+        None => {
+            let frame = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                / 150) as usize
+                % super::SPINNER_FRAMES.len();
+            rows.push(PromptRow::styled(vec![StyledSegment {
+                text: format!("   {} thinking", super::SPINNER_FRAMES[frame]),
+                style: Style::fg(theme::muted()),
+            }]));
+        }
+    }
+
+    // Separator line
+    rows.push(PromptRow::plain(""));
+
+    rows
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_esc = false;
+    for ch in s.chars() {
+        if in_esc {
+            if ch.is_ascii_alphabetic() {
+                in_esc = false;
+            }
+            continue;
+        }
+        if ch == '\x1b' {
+            in_esc = true;
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+// ── Bar (horizontal rule with optional spans) ──
+
+fn bar_row(width: usize, left: Option<&[BarSpan]>, right: Option<&[BarSpan]>) -> PromptRow {
+    let dash = "\u{2500}";
+    let bar_color = theme::bar();
+    let min_dashes = 4;
+
+    let max_priority = left
+        .into_iter()
+        .chain(right)
+        .flat_map(|spans| spans.iter().map(|s| s.priority))
+        .max()
+        .unwrap_or(0);
+
+    let mut drop_above = max_priority + 1;
+    loop {
+        let left_chars: usize = left
+            .map(|spans| {
+                let inner: usize = spans
+                    .iter()
+                    .filter(|s| s.priority < drop_above)
+                    .map(|s| super::layout_out::display_width(&s.text))
+                    .sum();
+                if inner > 0 {
+                    inner + 1
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0);
+        let right_chars: usize = right
+            .map(|spans| {
+                let inner: usize = spans
+                    .iter()
+                    .filter(|s| s.priority < drop_above)
+                    .map(|s| super::layout_out::display_width(&s.text))
+                    .sum();
+                if inner > 0 {
+                    inner + 2
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0);
+        let total = left_chars + min_dashes + right_chars;
+        if total <= width || drop_above == 1 {
+            break;
+        }
+        drop_above -= 1;
+    }
+
+    let left_filtered: Vec<&BarSpan> = left
+        .map(|spans| spans.iter().filter(|s| s.priority < drop_above).collect())
+        .unwrap_or_default();
+    let right_filtered: Vec<&BarSpan> = right
+        .map(|spans| spans.iter().filter(|s| s.priority < drop_above).collect())
+        .unwrap_or_default();
+
+    let left_len: usize = if left_filtered.is_empty() {
+        0
+    } else {
+        left_filtered
+            .iter()
+            .map(|s| super::layout_out::display_width(&s.text))
+            .sum::<usize>()
+            + 1
+    };
+    let right_len: usize = if right_filtered.is_empty() {
+        0
+    } else {
+        right_filtered
+            .iter()
+            .map(|s| super::layout_out::display_width(&s.text))
+            .sum::<usize>()
+            + 2
+    };
+    let bar_len = width.saturating_sub(left_len + right_len);
+
+    let mut segs: Vec<StyledSegment> = Vec::new();
+
+    for span in &left_filtered {
+        segs.push(StyledSegment {
+            text: span.text.clone(),
+            style: Style {
+                fg: Some(span.color),
+                bg: span.bg,
+                bold: span.bold,
+                dim: span.dim,
+                ..Style::default()
+            },
+        });
+    }
+    if !left_filtered.is_empty() {
+        segs.push(StyledSegment {
+            text: " ".into(),
+            style: Style::default(),
+        });
+    }
+
+    segs.push(StyledSegment {
+        text: dash.repeat(bar_len),
+        style: Style::fg(bar_color),
+    });
+
+    if !right_filtered.is_empty() {
+        for span in &right_filtered {
+            segs.push(StyledSegment {
+                text: span.text.clone(),
+                style: Style {
+                    fg: Some(span.color),
+                    bg: span.bg,
+                    bold: span.bold,
+                    dim: span.dim,
+                    ..Style::default()
+                },
+            });
+        }
+        segs.push(StyledSegment {
+            text: " ".into(),
+            style: Style::default(),
+        });
+        segs.push(StyledSegment {
+            text: dash.into(),
+            style: Style::fg(bar_color),
+        });
+    }
+
+    PromptRow::styled(segs)
+}
+
+fn build_top_bar_right(info: &BarInfo) -> Vec<BarSpan> {
+    let mut spans = Vec::new();
+    if let Some(ref model) = info.model_label {
+        spans.push(BarSpan {
+            text: format!(" {}", model),
+            color: theme::muted(),
+            bg: None,
+            bold: false,
+            dim: false,
+            priority: 2,
+        });
+        if info.reasoning_effort != protocol::ReasoningEffort::Off {
+            let effort = info.reasoning_effort;
+            spans.push(BarSpan {
+                text: format!(" {}", effort.label()),
+                color: super::reasoning_color(effort),
+                bg: None,
+                bold: false,
+                dim: false,
+                priority: 2,
+            });
+        }
+    }
+    if info.show_tokens {
+        if let Some(tokens) = info.context_tokens {
+            if !spans.is_empty() {
+                spans.push(BarSpan {
+                    text: " ·".into(),
+                    color: theme::bar(),
+                    bg: None,
+                    bold: false,
+                    dim: false,
+                    priority: 2,
+                });
+            }
+            let token_text = if let Some(window) = info.context_window {
+                if window > 0 {
+                    let pct = (tokens as f64 / window as f64 * 100.0) as u32;
+                    format!(" {} ({}%)", super::format_tokens(tokens), pct)
+                } else {
+                    format!(" {}", super::format_tokens(tokens))
+                }
+            } else {
+                format!(" {}", super::format_tokens(tokens))
+            };
+            spans.push(BarSpan {
+                text: token_text,
+                color: theme::muted(),
+                bg: None,
+                bold: false,
+                dim: false,
+                priority: 1,
+            });
+        }
+    }
+    if info.show_cost && info.session_cost_usd > 0.0 {
+        if !spans.is_empty() {
+            spans.push(BarSpan {
+                text: " ·".into(),
+                color: theme::bar(),
+                bg: None,
+                bold: false,
+                dim: false,
+                priority: 2,
+            });
+        }
+        spans.push(BarSpan {
+            text: format!(" {}", crate::metrics::format_cost(info.session_cost_usd)),
+            color: theme::muted(),
+            bg: None,
+            bold: false,
+            dim: false,
+            priority: 1,
+        });
+    }
+    spans
+}
+
+// ── Input area ──
+
+struct CursorInfo {
+    cursor_pos: Option<(u16, u16)>,
+    cursor_style: Option<(Style, char)>,
+    soft_cursor: Option<(u16, u16)>,
+}
+
+struct ScrollInfo {
+    scroll_offset: usize,
+    total_content_rows: usize,
+}
+
+fn compute_input_area(
+    input: &PromptInput<'_>,
+    usable: usize,
+    row_offset: u16,
+) -> (Vec<PromptRow>, CursorInfo, ScrollInfo) {
+    let width = input.width as usize;
+    let height = input.height as usize;
+    let state = input.input;
+    let prediction = input.prediction;
+
+    let spans = build_display_spans(&state.buf, &state.attachment_ids, &state.store);
+    let display_buf = spans_to_string(&spans);
+    let char_kinds = build_char_kinds(&spans);
+    let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
+    let display_selection = state.selection_range().map(|(start, end)| {
+        let raw_start_char = crate::input::char_pos(&state.buf, start);
+        let raw_end_char = crate::input::char_pos(&state.buf, end);
+        let ds = map_cursor(raw_start_char, &state.buf, &spans);
+        let de = map_cursor(raw_end_char, &state.buf, &spans);
+        (ds, de)
+    });
+    let (visual_lines, cursor_line, _, cursor_char_in_line) =
+        wrap_and_locate_cursor(&display_buf, &char_kinds, display_cursor, usable);
+    let cmd_hint =
+        crate::completer::Completer::command_hint(&state.buf, &state.command_arg_sources);
+    let has_arg_space = cmd_hint.is_some()
+        && state.buf.len() > cmd_hint.as_ref().unwrap().0.len()
+        && state.buf.as_bytes()[cmd_hint.as_ref().unwrap().0.len()] == b' ';
+    let is_command =
+        cmd_hint.is_some() || crate::completer::Completer::is_command(state.buf.trim());
+    let is_exec = matches!(state.buf.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
+    let is_exec_invalid = state.buf == "!";
+    let total_content_rows = visual_lines.len();
+
+    // Fixed rows in the prompt area: bars + notification + stash + queued + btw + status
+    let fixed = row_offset as usize + 2 + 1; // 2 bars (bottom + top already counted via row_offset) + status
+    let max_content_rows = height.saturating_sub(fixed).max(1);
+    let content_rows = total_content_rows.min(max_content_rows);
+
+    let scroll_offset = if total_content_rows > content_rows {
+        let mut off = input.prev_input_scroll;
+        if off == usize::MAX {
+            off = cursor_line.saturating_sub(content_rows / 2);
+        }
+        if cursor_line >= off + content_rows {
+            off = cursor_line + 1 - content_rows;
+        }
+        if cursor_line < off {
+            off = cursor_line;
+        }
+        let max_off = total_content_rows.saturating_sub(content_rows);
+        off.min(max_off)
+    } else {
+        0
+    };
+
+    let show_prediction = prediction.is_some() && state.buf.is_empty();
+
+    let mut rows = Vec::new();
+    let mut cursor_info = CursorInfo {
+        cursor_pos: None,
+        cursor_style: None,
+        soft_cursor: None,
+    };
+
+    if show_prediction {
+        let pred = prediction.unwrap();
+        let first_line = pred.lines().next().unwrap_or(pred);
+        let max_chars = usable.saturating_sub(1);
+        let mut chars_iter = first_line.chars().take(max_chars);
+
+        if let Some(first) = chars_iter.next() {
+            let rest: String = chars_iter.collect();
+            if input.has_prompt_cursor {
+                let (fg, bg) = cursor_style();
+                let cursor_char_style = Style {
+                    fg: Some(fg),
+                    bg: Some(bg),
+                    ..Style::default()
+                };
+                cursor_info.cursor_pos = Some((1, row_offset));
+                cursor_info.cursor_style = Some((cursor_char_style, first));
+                rows.push(PromptRow::styled(vec![
+                    StyledSegment {
+                        text: " ".into(),
+                        style: Style::default(),
+                    },
+                    StyledSegment {
+                        text: first.to_string(),
+                        style: cursor_char_style,
+                    },
+                    StyledSegment {
+                        text: rest,
+                        style: Style {
+                            dim: true,
+                            ..Style::default()
+                        },
+                    },
+                ]));
+            } else {
+                rows.push(PromptRow::styled(vec![
+                    StyledSegment {
+                        text: " ".into(),
+                        style: Style::default(),
+                    },
+                    StyledSegment {
+                        text: format!("{}{}", first, rest),
+                        style: Style {
+                            dim: true,
+                            ..Style::default()
+                        },
+                    },
+                ]));
+            }
+        } else if input.has_prompt_cursor {
+            let (fg, bg) = cursor_style();
+            cursor_info.cursor_pos = Some((1, row_offset));
+            cursor_info.cursor_style = Some((
+                Style {
+                    fg: Some(fg),
+                    bg: Some(bg),
+                    ..Style::default()
+                },
+                ' ',
+            ));
+            rows.push(PromptRow::styled(vec![StyledSegment {
+                text: " ".into(),
+                style: Style::default(),
+            }]));
+        }
+
+        return (
+            rows,
+            cursor_info,
+            ScrollInfo {
+                scroll_offset: 0,
+                total_content_rows: 0,
+            },
+        );
+    }
+
+    // Compute line char offsets for selection mapping
+    let line_char_offsets = compute_visual_line_offsets(&display_buf, &visual_lines);
+
+    let scrollbar = if total_content_rows > content_rows {
+        Some(super::scrollbar::Scrollbar::new(
+            total_content_rows,
+            content_rows,
+            scroll_offset,
+        ))
+    } else {
+        None
+    };
+
+    for (li, (line, kinds)) in visual_lines
+        .iter()
+        .skip(scroll_offset)
+        .take(content_rows)
+        .enumerate()
+    {
+        let abs_idx = scroll_offset + li;
+        let current_row = row_offset + li as u16;
+
+        // Per-line selection
+        let line_sel = display_selection.and_then(|(sel_start, sel_end)| {
+            let line_start = line_char_offsets[abs_idx];
+            let line_len = line.chars().count();
+            let line_end = line_start + line_len;
+            if line_len == 0 && sel_start <= line_start && sel_end > line_start {
+                Some((0, 1))
+            } else if sel_end <= line_start || sel_start >= line_end {
+                None
+            } else {
+                let s = sel_start.saturating_sub(line_start);
+                let e = sel_end.min(line_end) - line_start;
+                Some((s, e))
+            }
+        });
+
+        let line_cursor = if abs_idx == cursor_line && input.has_prompt_cursor {
+            Some(cursor_char_in_line)
+        } else {
+            None
+        };
+
+        let mut segs = vec![StyledSegment {
+            text: " ".into(),
+            style: Style::default(),
+        }];
+
+        if has_arg_space && abs_idx == 0 {
+            let (prefix, hint) = cmd_hint.as_ref().unwrap();
+            let prefix_len = prefix.chars().count();
+            let line_chars = line.chars().count();
+            let mut cmd_kinds = vec![SpanKind::AtRef; prefix_len.min(line_chars)];
+            cmd_kinds.resize(line_chars, SpanKind::Plain);
+            segs.extend(styled_char_segments(
+                line,
+                &cmd_kinds,
+                line_sel,
+                line_cursor,
+            ));
+            if line_chars >= prefix_len && state.buf == format!("{prefix} ") {
+                let max = usable.saturating_sub(prefix_len + 2);
+                let truncated: String = if hint.chars().count() > max {
+                    let mut s: String = hint.chars().take(max.saturating_sub(1)).collect();
+                    s.push('…');
+                    s
+                } else {
+                    hint.clone()
+                };
+                segs.push(StyledSegment {
+                    text: truncated,
+                    style: Style {
+                        dim: true,
+                        ..Style::default()
+                    },
+                });
+            }
+        } else if has_arg_space {
+            segs.extend(styled_char_segments(line, kinds, line_sel, line_cursor));
+        } else if is_command {
+            let accent_kinds = vec![SpanKind::AtRef; line.chars().count()];
+            segs.extend(styled_char_segments(
+                line,
+                &accent_kinds,
+                line_sel,
+                line_cursor,
+            ));
+        } else if (is_exec || is_exec_invalid) && abs_idx == 0 && line.starts_with('!') {
+            segs.extend(exec_bang_segments(line, kinds, line_sel, line_cursor));
+        } else {
+            segs.extend(styled_char_segments(line, kinds, line_sel, line_cursor));
+        }
+
+        // Scrollbar indicator on the rightmost column
+        if let Some(ref sb) = scrollbar {
+            let bar_col = (width as u16).saturating_sub(1);
+            let thumb_style = Style::bg(theme::scrollbar_thumb());
+            let track_style = Style::bg(theme::scrollbar_track());
+            let sb_style = if sb.is_thumb(li) {
+                thumb_style
+            } else {
+                track_style
+            };
+            // We'll mark the row with a scrollbar indicator
+            // The scrollbar char needs to be at the far right column
+            rows.push(PromptRow::styled_with_scrollbar(segs, bar_col, sb_style));
+        } else {
+            rows.push(PromptRow::styled(segs));
+        }
+
+        if line_cursor.is_some() {
+            let cursor_col = 1 + cursor_char_in_line as u16;
+            cursor_info.cursor_pos = Some((cursor_col, current_row));
+            cursor_info.soft_cursor = Some((cursor_col, current_row));
+        }
+    }
+
+    // End-of-input cursor (past all content)
+    if cursor_line >= total_content_rows && input.has_prompt_cursor && !show_prediction {
+        let (fg, bg) = cursor_style();
+        cursor_info.cursor_pos = Some((1, row_offset + content_rows.saturating_sub(1) as u16));
+        cursor_info.cursor_style = Some((
+            Style {
+                fg: Some(fg),
+                bg: Some(bg),
+                ..Style::default()
+            },
+            ' ',
+        ));
+    }
+
+    (
+        rows,
+        cursor_info,
+        ScrollInfo {
+            scroll_offset,
+            total_content_rows,
+        },
+    )
+}
+
+/// Convert a styled line into StyledSegments, applying cursor and selection highlighting.
+/// This replaces `render_styled_chars` from the old escape-sequence-based renderer.
+fn styled_char_segments(
+    line: &str,
+    kinds: &[SpanKind],
+    selection: Option<(usize, usize)>,
+    cursor_pos: Option<usize>,
+) -> Vec<StyledSegment> {
+    let mut segments: Vec<StyledSegment> = Vec::new();
+    let mut current_text = String::new();
+    let mut current_style = Style::default();
+    let char_count = line.chars().count();
+
+    let (cursor_fg, cursor_bg) = cursor_style();
+    let selection_bg = theme::selection_bg();
+
+    for (i, ch) in line.chars().enumerate() {
+        let kind = kinds.get(i).copied().unwrap_or(SpanKind::Plain);
+        let want_sel = selection.is_some_and(|(s, e)| i >= s && i < e);
+        let want_cursor = cursor_pos == Some(i);
+
+        let style = if want_cursor {
+            Style {
+                fg: Some(cursor_fg),
+                bg: Some(cursor_bg),
+                ..Style::default()
+            }
+        } else {
+            let fg = match kind {
+                SpanKind::AtRef | SpanKind::Attachment => Some(theme::accent()),
+                SpanKind::Plain => None,
+            };
+            let bg = if want_sel { Some(selection_bg) } else { None };
+            Style {
+                fg,
+                bg,
+                ..Style::default()
+            }
+        };
+
+        if style != current_style && !current_text.is_empty() {
+            segments.push(StyledSegment {
+                text: std::mem::take(&mut current_text),
+                style: current_style,
+            });
+        }
+        current_style = style;
+        current_text.push(ch);
+    }
+
+    // Flush remaining text
+    if !current_text.is_empty() {
+        segments.push(StyledSegment {
+            text: current_text,
+            style: current_style,
+        });
+    }
+
+    // Cursor past end of line
+    if cursor_pos == Some(char_count) {
+        segments.push(StyledSegment {
+            text: " ".into(),
+            style: Style {
+                fg: Some(cursor_fg),
+                bg: Some(cursor_bg),
+                ..Style::default()
+            },
+        });
+    } else if let Some((s, e)) = selection {
+        if e > char_count && s <= char_count {
+            segments.push(StyledSegment {
+                text: " ".into(),
+                style: Style::bg(selection_bg),
+            });
+        }
+    }
+
+    segments
+}
+
+/// Handle the exec `!` prefix with special styling.
+fn exec_bang_segments(
+    line: &str,
+    kinds: &[SpanKind],
+    selection: Option<(usize, usize)>,
+    cursor_pos: Option<usize>,
+) -> Vec<StyledSegment> {
+    let mut segs = Vec::new();
+
+    let bang_cursor = cursor_pos == Some(0);
+    let bang_selected = selection.is_some_and(|(s, _)| s == 0);
+
+    if bang_cursor {
+        let (fg, bg) = cursor_style();
+        segs.push(StyledSegment {
+            text: "!".into(),
+            style: Style {
+                fg: Some(fg),
+                bg: Some(bg),
+                ..Style::default()
+            },
+        });
+    } else {
+        segs.push(StyledSegment {
+            text: "!".into(),
+            style: Style {
+                fg: Some(Color::Red),
+                bg: if bang_selected {
+                    Some(theme::selection_bg())
+                } else {
+                    None
+                },
+                bold: true,
+                ..Style::default()
+            },
+        });
+    }
+
+    // Shift selection/cursor for remainder
+    let rest_sel = selection.and_then(|(s, e)| {
+        let s2 = if s == 0 { 0 } else { s - 1 };
+        let e2 = e.saturating_sub(1);
+        if s2 < e2 {
+            Some((s2, e2))
+        } else {
+            None
+        }
+    });
+    let rest_cursor = cursor_pos.and_then(|c| c.checked_sub(1));
+
+    if line.len() > 1 {
+        segs.extend(styled_char_segments(
+            &line[1..],
+            if kinds.len() > 1 { &kinds[1..] } else { &[] },
+            rest_sel,
+            rest_cursor,
+        ));
+    }
+
+    segs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notification_row_produces_correct_segments() {
+        let notif = super::super::screen::Notification {
+            message: "test message".into(),
+            is_error: false,
+        };
+        let row = notification_row(&notif, 40);
+        assert_eq!(row.segments.len(), 4);
+        assert_eq!(row.segments[1].text, "info");
+        assert!(row.segments[1].style.bold);
+        assert_eq!(row.segments[3].text, "test message");
+    }
+
+    #[test]
+    fn notification_row_error_style() {
+        let notif = super::super::screen::Notification {
+            message: "oops".into(),
+            is_error: true,
+        };
+        let row = notification_row(&notif, 40);
+        assert_eq!(row.segments[1].text, "error");
+        assert_eq!(row.segments[1].style.fg, Some(theme::ERROR));
+    }
+
+    #[test]
+    fn stash_row_has_muted_style() {
+        let row = stash_row(40);
+        assert!(row.segments[1].style.dim);
+    }
+
+    #[test]
+    fn bar_row_fills_with_dashes() {
+        let row = bar_row(20, None, None);
+        let text: String = row.segments.iter().map(|s| s.text.as_str()).collect();
+        assert!(text.contains("────"));
+    }
+
+    #[test]
+    fn bar_row_with_right_spans() {
+        let right = vec![BarSpan {
+            text: " model".into(),
+            color: crossterm::style::Color::White,
+            bg: None,
+            bold: false,
+            dim: false,
+            priority: 0,
+        }];
+        let row = bar_row(30, None, Some(&right));
+        let text: String = row.segments.iter().map(|s| s.text.as_str()).collect();
+        assert!(text.contains(" model"));
+        assert!(text.contains("────"));
+    }
+
+    #[test]
+    fn styled_char_segments_plain() {
+        let segs = styled_char_segments("hello", &[SpanKind::Plain; 5], None, None);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text, "hello");
+    }
+
+    #[test]
+    fn styled_char_segments_with_cursor() {
+        let segs = styled_char_segments("hello", &[SpanKind::Plain; 5], None, Some(2));
+        // Before cursor, cursor char, after cursor
+        assert!(segs.len() >= 3);
+        // The cursor char should have inverted colors
+        let cursor_seg = &segs[1];
+        assert_eq!(cursor_seg.text, "l");
+        assert!(cursor_seg.style.bg.is_some());
+    }
+
+    #[test]
+    fn styled_char_segments_cursor_at_end() {
+        let segs = styled_char_segments("hi", &[SpanKind::Plain; 2], None, Some(2));
+        let last = segs.last().unwrap();
+        assert_eq!(last.text, " ");
+        assert!(last.style.bg.is_some());
+    }
+
+    #[test]
+    fn styled_char_segments_with_selection() {
+        let segs = styled_char_segments("hello", &[SpanKind::Plain; 5], Some((1, 4)), None);
+        // Should have: unselected "h", selected "ell", unselected "o"
+        assert!(segs.len() >= 3);
+        assert_eq!(segs[0].text, "h");
+        assert!(segs[0].style.bg.is_none());
+        assert!(segs[1].style.bg.is_some()); // selected
+    }
+
+    #[test]
+    fn exec_bang_segments_highlights_bang() {
+        let kinds = vec![SpanKind::Plain; 4];
+        let segs = exec_bang_segments("!ls", &kinds, None, None);
+        assert_eq!(segs[0].text, "!");
+        assert_eq!(segs[0].style.fg, Some(crossterm::style::Color::Red));
+        assert!(segs[0].style.bold);
+    }
+
+    #[test]
+    fn strip_ansi_removes_escape_sequences() {
+        assert_eq!(strip_ansi("hello \x1b[31mworld\x1b[0m"), "hello world");
+        assert_eq!(strip_ansi("no escapes"), "no escapes");
+    }
+
+    #[test]
+    fn compute_prompt_produces_bars_and_status() {
+        let input_state = InputState::default();
+        let mut prompt_input = PromptInput {
+            notification: None,
+            queued: &[],
+            stash: &None,
+            btw: None,
+            input: &input_state,
+
+            prediction: None,
+            width: 80,
+            height: 10,
+            has_prompt_cursor: true,
+            prev_input_scroll: 0,
+            bar_info: BarInfo {
+                model_label: None,
+                reasoning_effort: protocol::ReasoningEffort::Off,
+                show_tokens: false,
+                context_tokens: None,
+                context_window: None,
+                show_cost: false,
+                session_cost_usd: 0.0,
+            },
+            vim_enabled: false,
+            term_height: 24,
+        };
+        let output = compute_prompt(&mut prompt_input);
+        // Should have at least: top bar + input area + bottom bar
+        assert!(output.rows.len() >= 3);
+        // Cursor should be in the input area
+        assert!(output.cursor.is_some());
+    }
+}

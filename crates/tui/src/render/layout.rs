@@ -1,10 +1,8 @@
 pub use ui::Rect;
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct LayoutState {
     pub term_width: u16,
-    pub term_height: u16,
     pub transcript: Rect,
     pub gap: u16,
     pub prompt: Rect,
@@ -13,7 +11,6 @@ pub struct LayoutState {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct FloatEntry {
     pub rect: Rect,
     pub z: u8,
@@ -82,7 +79,6 @@ impl LayoutState {
 
         LayoutState {
             term_width,
-            term_height,
             transcript,
             gap: 1,
             prompt,
@@ -124,7 +120,6 @@ impl LayoutState {
 
         LayoutState {
             term_width,
-            term_height,
             transcript,
             gap: 0,
             prompt: Rect::default(),
@@ -133,7 +128,6 @@ impl LayoutState {
         }
     }
 
-    #[allow(dead_code)]
     pub fn push_float(&mut self, rect: Rect, z: u8, region: HitRegion) {
         self.floats.push(FloatEntry { rect, z, region });
         self.floats.sort_by_key(|f| f.z);

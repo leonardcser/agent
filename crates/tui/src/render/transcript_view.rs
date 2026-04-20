@@ -24,7 +24,6 @@ pub(crate) struct TranscriptView {
     term_width: u16,
 }
 
-#[allow(dead_code)]
 impl TranscriptView {
     pub fn new(term_width: u16) -> Self {
         Self {
@@ -60,10 +59,6 @@ impl TranscriptView {
 
     pub fn set_cursor(&mut self, cursor: Option<SoftCursor>) {
         self.cursor = cursor;
-    }
-
-    pub fn set_theme(&mut self, theme: Theme) {
-        self.theme = theme;
     }
 
     pub fn set_term_width(&mut self, w: u16) {

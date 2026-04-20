@@ -4,13 +4,11 @@ use crate::theme::Theme;
 use ui::grid::{GridSlice, Style};
 use unicode_width::UnicodeWidthChar;
 
-#[allow(dead_code)]
 pub(crate) struct GridPaintContext<'a> {
     pub theme: &'a Theme,
     pub term_width: u16,
 }
 
-#[allow(dead_code)]
 pub(crate) fn paint_line_to_grid(
     grid: &mut GridSlice<'_>,
     row: u16,
@@ -74,7 +72,6 @@ pub(crate) fn paint_line_to_grid(
     }
 }
 
-#[allow(dead_code)]
 fn resolve_span_style(span: &SpanStyle, theme: &Theme) -> Style {
     Style {
         fg: span.fg.map(|c| resolve(c, theme, false)),

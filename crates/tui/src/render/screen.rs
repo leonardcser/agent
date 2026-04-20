@@ -48,6 +48,21 @@ fn paint_completer_float(
     }
 }
 
+pub(crate) struct TranscriptData {
+    pub lines: Vec<DisplayLine>,
+    pub clamped_scroll: u16,
+    pub total_rows: u16,
+    pub pad_left: u16,
+    pub scrollbar_col: u16,
+    pub has_scrollbar: bool,
+}
+
+pub(crate) struct TranscriptCursor {
+    pub clamped_line: u16,
+    pub clamped_col: u16,
+    pub soft_cursor: Option<super::transcript_view::SoftCursor>,
+}
+
 /// Visual selection in the content pane, captured from vim state.
 /// Line indices are 0-based from the top of the full transcript; cols
 /// count chars on that line.
@@ -70,7 +85,7 @@ pub enum ContentVisualKind {
 /// paint so individual draw sites just check `cursor_owner` instead of
 /// testing mode flags independently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CursorOwner {
+pub(crate) enum CursorOwner {
     Prompt,
     Transcript,
     Cmdline,
@@ -200,6 +215,7 @@ pub struct Screen {
 }
 
 /// A short ephemeral notification rendered above the prompt bar.
+#[derive(Clone)]
 pub struct Notification {
     pub message: String,
     pub is_error: bool,
@@ -210,11 +226,9 @@ pub struct BtwBlock {
     pub question: String,
     pub image_labels: Vec<String>,
     pub response: Option<String>,
-    /// Cached wrapped lines for scrolling.
-    wrapped: Vec<String>,
-    scroll_offset: usize,
-    /// Terminal width when lines were last wrapped.
-    wrap_width: usize,
+    pub(crate) wrapped: Vec<String>,
+    pub(crate) scroll_offset: usize,
+    pub(crate) wrap_width: usize,
 }
 
 impl Default for Screen {
@@ -1018,6 +1032,131 @@ impl Screen {
         };
     }
 
+    pub(crate) fn cursor_owner(&self) -> CursorOwner {
+        self.cursor_owner
+    }
+
+    pub(crate) fn notification(&self) -> Option<&Notification> {
+        self.notification.as_ref()
+    }
+
+    pub(crate) fn btw_mut(&mut self) -> Option<&mut BtwBlock> {
+        self.btw.as_mut()
+    }
+
+    pub(crate) fn prompt_input_scroll(&self) -> usize {
+        self.prompt.input_scroll
+    }
+
+    pub(crate) fn set_prompt_input_scroll(&mut self, scroll: usize) {
+        self.prompt.input_scroll = scroll;
+    }
+
+    pub(crate) fn set_prompt_soft_cursor(&mut self, pos: Option<(u16, u16)>) {
+        self.prompt.soft_cursor = pos;
+    }
+
+    pub(crate) fn set_prompt_viewport(&mut self, vp: Option<super::region::Viewport>) {
+        self.prompt.viewport = vp;
+    }
+
+    pub(crate) fn model_label(&self) -> Option<&str> {
+        self.model_label.as_deref()
+    }
+
+    pub(crate) fn reasoning_effort(&self) -> protocol::ReasoningEffort {
+        self.reasoning_effort
+    }
+
+    pub(crate) fn show_tokens(&self) -> bool {
+        self.show_tokens
+    }
+
+    pub(crate) fn context_window(&self) -> Option<u32> {
+        self.context_window
+    }
+
+    pub(crate) fn show_cost(&self) -> bool {
+        self.show_cost
+    }
+
+    pub(crate) fn session_cost_usd(&self) -> f64 {
+        self.session_cost_usd
+    }
+
+    pub(crate) fn working_snapshot(&self) -> super::status_data::WorkingSnapshot {
+        super::status_data::WorkingSnapshot {
+            spinner_char: self.working.spinner_char().map(|s| s.to_string()),
+            is_compacting: self.working.throbber == Some(super::history::Throbber::Compacting),
+            task_label: self.task_label.clone(),
+            throbber_spans: self.working.throbber_spans(self.show_tps),
+            is_active: matches!(
+                self.working.throbber,
+                Some(super::history::Throbber::Working)
+                    | Some(super::history::Throbber::Compacting)
+                    | Some(super::history::Throbber::Retrying { .. })
+            ),
+        }
+    }
+
+    pub(crate) fn pending_dialog(&self) -> bool {
+        self.pending_dialog
+    }
+
+    pub(crate) fn dialog_open(&self) -> bool {
+        self.dialog_open
+    }
+
+    pub(crate) fn running_procs(&self) -> usize {
+        self.running_procs
+    }
+
+    pub(crate) fn running_agents(&self) -> usize {
+        self.running_agents
+    }
+
+    pub(crate) fn custom_status_items(&self) -> Option<&Vec<super::StatusItem>> {
+        self.custom_status_items.as_ref()
+    }
+
+    pub(crate) fn show_slug(&self) -> bool {
+        self.show_slug
+    }
+
+    pub(crate) fn last_vim_enabled(&self) -> bool {
+        self.last_vim_enabled
+    }
+
+    pub(crate) fn last_vim_mode(&self) -> Option<crate::vim::ViMode> {
+        self.last_vim_mode
+    }
+
+    pub(crate) fn last_mode(&self) -> protocol::Mode {
+        self.last_mode
+    }
+
+    pub(crate) fn last_status_position(&self) -> Option<super::status::StatusPosition> {
+        self.last_status_position
+    }
+
+    pub(crate) fn mark_clean(&mut self) {
+        self.dirty = false;
+    }
+
+    pub(crate) fn refresh_cursor_owner_pub(&mut self) {
+        self.refresh_cursor_owner();
+    }
+
+    pub(crate) fn measure_prompt_height_pub(
+        &self,
+        state: &crate::input::InputState,
+        width: usize,
+        queued: &[String],
+        prediction: Option<&str>,
+    ) -> u16 {
+        self.measure_prompt_height(state, width, queued, prediction)
+    }
+
     pub(crate) fn transcript_viewport(&self) -> Option<super::region::Viewport> {
         self.last_transcript_viewport
     }
@@ -1699,6 +1838,154 @@ impl Screen {
             has_new_blocks || (self.has_ephemeral() && self.dirty)
         } else {
             has_new_blocks || self.dirty
+        }
+    }
+
+    /// Compute transcript viewport data for the compositor pipeline.
+    /// Returns the display lines, scroll clamping, total rows, viewport text
+    /// (for motions/yank), and viewport DisplayLines (for cursor mapping).
+    pub(crate) fn collect_transcript_data(
+        &mut self,
+        width: usize,
+        viewport_rows: u16,
+        scroll_top: u16,
+    ) -> TranscriptData {
+        let gutters = self.transcript_gutters;
+        let tw = (gutters.content_width(width as u16) as usize).max(1);
+
+        let ephemeral_lines: Vec<crate::render::display::DisplayLine> = if self.has_ephemeral() {
+            let mut col = SpanCollector::new(tw as u16);
+            self.render_ephemeral_into(&mut col, tw);
+            col.finish().lines
+        } else {
+            Vec::new()
+        };
+
+        let vdata = self.transcript.history.collect_viewport(
+            tw,
+            self.show_thinking,
+            viewport_rows,
+            scroll_top,
+            &ephemeral_lines,
+        );
+
+        let snapshot_total = self
+            .transcript
+            .snapshot(tw as u16, self.show_thinking)
+            .rows
+            .len() as u16;
+        let total_transcript_rows = snapshot_total.saturating_add(ephemeral_lines.len() as u16);
+
+        let scrollbar_col = match gutters.scrollbar {
+            Some(crate::window::GutterSide::Left) => 0,
+            _ => (width as u16).saturating_sub(1),
+        };
+
+        let geom = super::viewport::ViewportGeom::new(
+            total_transcript_rows,
+            viewport_rows,
+            vdata.clamped_scroll,
+        );
+
+        // Capture viewport text for content pane motions/yank.
+        let viewport_text = {
+            let snap = self.transcript.snapshot(tw as u16, self.show_thinking);
+            let mut vt = snap.viewport_rows(viewport_rows, vdata.clamped_scroll);
+            if !ephemeral_lines.is_empty() {
+                for line in &ephemeral_lines {
+                    let mut s = String::new();
+                    for span in &line.spans {
+                        s.push_str(&span.text);
+                    }
+                    vt.push(s);
+                }
+                vt.truncate(viewport_rows as usize);
+            }
+            vt
+        };
+
+        // Update side-effect state.
+        self.last_viewport_text = viewport_text.clone();
+        self.last_viewport_lines = vdata.lines.clone();
+        self.last_transcript_viewport = Some(super::region::Viewport {
+            top_row: 0,
+            rows: viewport_rows,
+            content_width: tw as u16,
+            total_rows: total_transcript_rows,
+            scroll_top: vdata.clamped_scroll,
+            scrollbar: if geom.max_scroll() > 0 {
+                Some(super::region::ScrollbarGeom {
+                    col: scrollbar_col,
+                    top_row: 0,
+                    rows: viewport_rows,
+                    total_rows: total_transcript_rows,
+                })
+            } else {
+                None
+            },
+        });
+
+        TranscriptData {
+            lines: vdata.lines,
+            clamped_scroll: vdata.clamped_scroll,
+            total_rows: total_transcript_rows,
+            pad_left: gutters.pad_left,
+            scrollbar_col,
+            has_scrollbar: geom.max_scroll() > 0,
+        }
+    }
+
+    /// Compute transcript cursor position for the compositor pipeline.
+    pub(crate) fn compute_transcript_cursor(
+        &self,
+        width: usize,
+        viewport_rows: u16,
+        history_cursor_line: u16,
+        history_cursor_col: u16,
+    ) -> TranscriptCursor {
+        let gutters = self.transcript_gutters;
+        let tw = (gutters.content_width(width as u16) as usize).max(1);
+
+        if self.cursor_owner != CursorOwner::Transcript || viewport_rows == 0 {
+            return TranscriptCursor {
+                clamped_line: history_cursor_line,
+                clamped_col: history_cursor_col,
+                soft_cursor: None,
+            };
+        }
+
+        let visible = self
+            .last_transcript_viewport
+            .as_ref()
+            .map(|v| v.total_rows.min(viewport_rows))
+            .unwrap_or(viewport_rows);
+        let max_line = visible.saturating_sub(1);
+        let line = history_cursor_line.min(max_line);
+        let display_col = self
+            .last_viewport_lines
+            .get(line as usize)
+            .map(|dline| nav_col_to_display_col(dline, history_cursor_col as usize))
+            .unwrap_or(history_cursor_col as usize);
+        let max_col = (tw as u16).saturating_sub(1);
+        let col = (display_col as u16).min(max_col);
+        let under: char = self
+            .last_viewport_text
+            .get(line as usize)
+            .map(|row| {
+                let byte = crate::text_utils::cell_to_byte(row, col as usize);
+                row[byte..].chars().next()
+            })
+            .and_then(|c| c)
+            .unwrap_or(' ');
+
+        TranscriptCursor {
+            clamped_line: line,
+            clamped_col: history_cursor_col,
+            soft_cursor: Some(super::transcript_view::SoftCursor {
+                col: col + gutters.pad_left,
+                row: line,
+                glyph: under,
+            }),
         }
     }
 

@@ -52,7 +52,6 @@ impl ScrollbarGeom {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
 pub(crate) struct Viewport {
     pub top_row: u16,
     pub rows: u16,
@@ -63,9 +62,8 @@ pub(crate) struct Viewport {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
 pub(crate) enum ViewportHit {
-    Scrollbar { row: u16 },
+    Scrollbar,
     Content { row: u16, col: u16 },
 }
 
@@ -80,9 +78,7 @@ impl Viewport {
         }
         if let Some(bar) = self.scrollbar {
             if col == bar.col {
-                return Some(ViewportHit::Scrollbar {
-                    row: row.saturating_sub(bar.top_row),
-                });
+                return Some(ViewportHit::Scrollbar);
             }
         }
         let rel_row = row - self.top_row;
@@ -161,10 +157,7 @@ mod tests {
             vp.hit(5, 0),
             Some(ViewportHit::Content { row: 0, .. })
         ));
-        assert!(matches!(
-            vp.hit(5, 79),
-            Some(ViewportHit::Scrollbar { row: 0 })
-        ));
+        assert!(matches!(vp.hit(5, 79), Some(ViewportHit::Scrollbar)));
     }
 
     #[test]

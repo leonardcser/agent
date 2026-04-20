@@ -11,9 +11,10 @@ pub(crate) struct StyledSegment {
 pub(crate) struct PromptRow {
     pub segments: Vec<StyledSegment>,
     pub fill: Option<Style>,
+    /// Optional scrollbar indicator at a specific column.
+    pub scrollbar: Option<(u16, Style)>,
 }
 
-#[allow(dead_code)]
 impl PromptRow {
     pub fn plain(text: impl Into<String>) -> Self {
         Self {
@@ -22,6 +23,7 @@ impl PromptRow {
                 style: Style::default(),
             }],
             fill: None,
+            scrollbar: None,
         }
     }
 
@@ -29,13 +31,15 @@ impl PromptRow {
         Self {
             segments,
             fill: None,
+            scrollbar: None,
         }
     }
 
-    pub fn bar(segments: Vec<StyledSegment>, bg: Style) -> Self {
+    pub fn styled_with_scrollbar(segments: Vec<StyledSegment>, col: u16, style: Style) -> Self {
         Self {
             segments,
-            fill: Some(bg),
+            fill: None,
+            scrollbar: Some((col, style)),
         }
     }
 }
@@ -46,7 +50,6 @@ pub(crate) struct PromptView {
     cursor_style: Option<(Style, char)>,
 }
 
-#[allow(dead_code)]
 impl PromptView {
     pub fn new() -> Self {
         Self {
@@ -63,12 +66,6 @@ impl PromptView {
     pub fn set_cursor(&mut self, pos: Option<(u16, u16)>, style: Option<(Style, char)>) {
         self.cursor = pos;
         self.cursor_style = style;
-    }
-
-    pub fn clear(&mut self) {
-        self.rows.clear();
-        self.cursor = None;
-        self.cursor_style = None;
     }
 }
 
@@ -113,6 +110,12 @@ impl Component for PromptView {
                     col += 1;
                 }
             }
+
+            if let Some((sb_col, sb_style)) = row.scrollbar {
+                if sb_col < w {
+                    grid.set(sb_col, y, ' ', sb_style);
+                }
+            }
         }
 
         if let Some((cx, cy)) = self.cursor {
@@ -142,10 +145,7 @@ mod tests {
     #[test]
     fn renders_plain_rows() {
         let mut view = PromptView::new();
-        view.set_rows(vec![
-            PromptRow::plain("hello"),
-            PromptRow::plain("world"),
-        ]);
+        view.set_rows(vec![PromptRow::plain("hello"), PromptRow::plain("world")]);
 
         let mut grid = Grid::new(20, 5);
         let ctx = DrawContext {
@@ -158,33 +158,6 @@ mod tests {
 
         assert_eq!(grid.cell(0, 0).symbol, 'h');
         assert_eq!(grid.cell(0, 1).symbol, 'w');
-    }
-
-    #[test]
-    fn renders_bar_with_fill() {
-        let bg = Style::bg(Color::AnsiValue(233));
-        let mut view = PromptView::new();
-        view.set_rows(vec![PromptRow::bar(
-            vec![StyledSegment {
-                text: "test".into(),
-                style: Style::fg(Color::Green),
-            }],
-            bg,
-        )]);
-
-        let mut grid = Grid::new(10, 1);
-        let ctx = DrawContext {
-            terminal_width: 10,
-            terminal_height: 1,
-            focused: true,
-        };
-        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
-        view.draw(Rect::new(0, 0, 10, 1), &mut slice, &ctx);
-
-        assert_eq!(grid.cell(0, 0).symbol, 't');
-        assert_eq!(grid.cell(0, 0).style.fg, Some(Color::Green));
-        assert_eq!(grid.cell(0, 0).style.bg, Some(Color::AnsiValue(233)));
-        assert_eq!(grid.cell(9, 0).style.bg, Some(Color::AnsiValue(233)));
     }
 
     #[test]

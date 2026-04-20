@@ -25,7 +25,6 @@ pub(crate) fn display_width(s: &str) -> usize {
 /// of required methods, and all per-attribute `set_*` / `push_*` helpers
 /// are default-implemented on top of `snapshot_style` + `apply_style` /
 /// `push_style`.
-#[allow(dead_code)]
 pub(crate) trait LayoutSink {
     // ── Required ─────────────────────────────────────────────────────
     fn print(&mut self, text: &str);
@@ -54,11 +53,6 @@ pub(crate) trait LayoutSink {
     /// `render_markdown_inner` so `copy_range` can emit raw markdown
     /// instead of display text for fully-selected rows.
     fn set_source_text(&mut self, _text: &str) {}
-
-    /// Number of visible columns printed on the current row since the
-    /// last `newline()`. Used by helpers that need to compute padding
-    /// against the row width.
-    fn cur_line_cols(&self) -> u16;
 
     /// Snapshot the current style by value. Default helpers use this to
     /// derive a mutated style before `apply_style` / `push_style`.
@@ -121,11 +115,6 @@ pub(crate) trait LayoutSink {
         s.dim = true;
         self.apply_style(s);
     }
-    fn set_italic(&mut self) {
-        let mut s = self.snapshot_style();
-        s.italic = true;
-        self.apply_style(s);
-    }
     fn set_dim_italic(&mut self) {
         let mut s = self.snapshot_style();
         s.dim = true;
@@ -136,11 +125,6 @@ pub(crate) trait LayoutSink {
     fn push_fg(&mut self, c: ColorValue) {
         let mut s = self.snapshot_style();
         s.fg = Some(c);
-        self.push_style(s);
-    }
-    fn push_bg(&mut self, c: ColorValue) {
-        let mut s = self.snapshot_style();
-        s.bg = Some(c);
         self.push_style(s);
     }
     fn push_bold(&mut self) {
@@ -287,10 +271,6 @@ impl LayoutSink for SpanCollector {
         self.cur_line.source_text = Some(text.to_string());
     }
 
-    fn cur_line_cols(&self) -> u16 {
-        self.cur_visible_cols
-    }
-
     fn snapshot_style(&self) -> SpanStyle {
         self.cur_style.clone()
     }
@@ -372,10 +352,6 @@ impl LayoutSink for RenderOut {
             RenderOut::set_bg(self, c);
             self.print(&" ".repeat(pad as usize));
         }
-    }
-
-    fn cur_line_cols(&self) -> u16 {
-        self.line_cols
     }
 
     fn snapshot_style(&self) -> SpanStyle {

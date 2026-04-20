@@ -751,13 +751,10 @@ impl App {
         self.last_width = w;
         self.last_height = h;
         self.ui.set_terminal_size(w, h);
-        if width_changed {
-            self.screen.redraw();
-        } else {
-            // Height-only: block layouts are still valid at this width.
-            // Soft redraw skips Clear::Purge and reuses cached layouts.
-            self.screen.redraw();
-        }
+        self.compositor.resize(w, h);
+        self.transcript_view.set_term_width(w);
+        let _ = width_changed;
+        self.screen.redraw();
     }
 
     /// Handle overlay keys (notification dismiss + btw scroll/dismiss).
@@ -937,26 +934,28 @@ impl App {
         }
     }
 
-    /// Render a full-mode frame (content + prompt) in its own sync frame.
-    pub(super) fn tick_prompt(&mut self, agent_running: bool) {
-        let _perf = crate::perf::begin("app:tick");
+    /// Render a full-mode frame using the compositor pipeline.
+    pub(super) fn tick_prompt_compositor(&mut self, agent_running: bool) {
+        let _perf = crate::perf::begin("app:tick_compositor");
         self.screen.update_spinner();
         if !self.screen.needs_draw(false) {
             return;
         }
-        let w = render::term_width();
+
+        let (term_w, term_h) = self.screen.size();
+        let width = term_w as usize;
         let show_queued = agent_running || self.is_compacting();
         self.screen.set_dialog_open(false);
+        self.screen.set_app_focus(self.app_focus);
 
         self.sync_transcript_pin();
         if self.transcript_window.is_pinned() {
             let (total, viewport) = self.transcript_dims();
             self.transcript_window.apply_pin(total, viewport);
         }
-        let visual = self.content_visual_range();
-        // Status bar shows the *focused* window's vim mode. Without
-        // this, the status bar caches the prompt's mode even when the
-        // transcript window has focus.
+        let _visual = self.content_visual_range();
+
+        // Update status bar state.
         let (status_vim_enabled, status_vim_mode) = match self.app_focus {
             crate::app::AppFocus::Content => (
                 self.transcript_window.vim.is_some(),
@@ -974,29 +973,161 @@ impl App {
             .set_status_vim(status_vim_enabled, status_vim_mode);
         let status_position = self.compute_status_position();
         self.screen.set_status_position(status_position);
+
         let (queued, prediction): (&[String], Option<&str>) = if show_queued {
             (&self.queued_messages, None)
         } else {
             (&[], self.input_prediction.as_deref())
         };
-        let mut frame = render::Frame::begin(self.screen.backend());
-        let (clamped_scroll, clamped_line, clamped_col) = self.screen.draw_viewport_frame(
-            &mut frame,
-            w,
-            FramePrompt {
-                state: &self.input,
-                mode: self.mode,
-                queued,
-                prediction,
-            },
+
+        // Refresh cursor ownership.
+        self.screen.refresh_cursor_owner_pub();
+
+        // ── Compute layout ──
+        let natural_prompt_height =
+            self.screen
+                .measure_prompt_height_pub(&self.input, width, queued, prediction);
+        let layout = render::layout::LayoutState::compute(&render::layout::LayoutInput {
+            term_width: term_w,
+            term_height: term_h,
+            prompt_height: natural_prompt_height,
+            dialog_height: None,
+            constrain_dialog: false,
+        });
+        let viewport_rows = layout.viewport_rows();
+        let prompt_rect = layout.prompt;
+        let prompt_height = prompt_rect.height;
+
+        // ── Transcript ──
+        let tdata = self.screen.collect_transcript_data(
+            width,
+            viewport_rows,
             self.transcript_window.scroll_top,
+        );
+        self.transcript_window.scroll_top = tdata.clamped_scroll;
+
+        // Compute transcript cursor.
+        let tcursor = self.screen.compute_transcript_cursor(
+            width,
+            viewport_rows,
             self.transcript_window.cursor_line,
             self.transcript_window.cursor_col,
-            visual,
         );
-        self.transcript_window.scroll_top = clamped_scroll;
-        self.transcript_window.cursor_line = clamped_line;
-        self.transcript_window.cursor_col = clamped_col;
+        self.transcript_window.cursor_line = tcursor.clamped_line;
+        self.transcript_window.cursor_col = tcursor.clamped_col;
+
+        // Push transcript data to TranscriptView.
+        self.transcript_view.set_lines(tdata.lines, tdata.pad_left);
+        self.transcript_view.set_cursor(tcursor.soft_cursor);
+        if tdata.has_scrollbar {
+            self.transcript_view.set_scrollbar(
+                tdata.total_rows as usize,
+                viewport_rows as usize,
+                tdata.clamped_scroll as usize,
+                tdata.scrollbar_col,
+            );
+        }
+
+        // ── Prompt ──
+        // Extract all immutable data first, then take the mutable btw borrow.
+        let has_prompt_cursor = self.screen.cursor_owner() == render::screen::CursorOwner::Prompt;
+        let prev_input_scroll = self.screen.prompt_input_scroll();
+        let notification = self.screen.notification().cloned();
+        let vim_enabled = self.input.vim_enabled();
+        let bar_info = render::prompt_data::BarInfo {
+            model_label: self.screen.model_label().map(|s| s.to_string()),
+            reasoning_effort: self.screen.reasoning_effort(),
+            show_tokens: self.screen.show_tokens(),
+            context_tokens: self.screen.context_tokens(),
+            context_window: self.screen.context_window(),
+            show_cost: self.screen.show_cost(),
+            session_cost_usd: self.screen.session_cost_usd(),
+        };
+
+        let prompt_output = {
+            let mut prompt_input = render::prompt_data::PromptInput {
+                notification: notification.as_ref(),
+                queued,
+                stash: &self.input.stash,
+                btw: self.screen.btw_mut(),
+                input: &self.input,
+                prediction,
+                width: term_w,
+                height: prompt_height,
+                has_prompt_cursor,
+                prev_input_scroll,
+                bar_info,
+                vim_enabled,
+                term_height: term_h,
+            };
+            render::prompt_data::compute_prompt(&mut prompt_input)
+        };
+
+        // Update side-effect state from prompt computation.
+        self.screen
+            .set_prompt_input_scroll(prompt_output.input_scroll);
+        self.screen
+            .set_prompt_soft_cursor(prompt_output.soft_cursor);
+        if let Some(ref ivp) = prompt_output.input_viewport {
+            self.screen
+                .set_prompt_viewport(Some(render::region::Viewport {
+                    top_row: prompt_rect.top + ivp.top_row,
+                    rows: ivp.rows,
+                    content_width: ivp.content_width,
+                    total_rows: ivp.total_rows,
+                    scroll_top: ivp.scroll_top,
+                    scrollbar: None,
+                }));
+        } else {
+            self.screen.set_prompt_viewport(None);
+        }
+
+        // Push prompt data to PromptView.
+        self.prompt_view.set_rows(prompt_output.rows);
+        let prompt_cursor = prompt_output
+            .cursor
+            .map(|(cx, cy)| (cx, prompt_rect.top + cy));
+        self.prompt_view
+            .set_cursor(prompt_cursor, prompt_output.cursor_style);
+
+        // ── Status bar ──
+        let status_output =
+            render::status_data::compute_status(&render::status_data::StatusInput {
+                width: term_w,
+                working: self.screen.working_snapshot(),
+                vim_enabled: self.screen.last_vim_enabled(),
+                vim_mode: self.screen.last_vim_mode(),
+                mode: self.screen.last_mode(),
+                pending_dialog: self.screen.pending_dialog(),
+                dialog_open: self.screen.dialog_open(),
+                running_procs: self.screen.running_procs(),
+                running_agents: self.screen.running_agents(),
+                position: self.screen.last_status_position(),
+                custom_items: self.screen.custom_status_items().cloned(),
+                show_slug: self.screen.show_slug(),
+            });
+        self.status_bar = ui::StatusBar::new().with_bg(status_output.bg);
+        self.status_bar.set_left(status_output.left);
+        self.status_bar.set_right(status_output.right);
+
+        // ── Render via compositor ──
+        let transcript_rect = ui::Rect::new(0, 0, term_w, viewport_rows);
+        let status_rect = ui::Rect::new(term_h - 1, 0, term_w, 1);
+
+        let base: Vec<(&dyn ui::Component, ui::Rect)> = vec![
+            (&self.transcript_view as &dyn ui::Component, transcript_rect),
+            (&self.prompt_view as &dyn ui::Component, prompt_rect),
+            (&self.status_bar as &dyn ui::Component, status_rect),
+        ];
+
+        let cursor_override = prompt_cursor;
+        let mut stdout = std::io::stdout();
+        let _ = self
+            .compositor
+            .render_with(&base, cursor_override, &mut stdout);
+
+        // Clean up state.
+        self.screen.mark_clean();
     }
 
     // ── Content pane key handler — drives `Vim` over a readonly
@@ -1688,7 +1819,7 @@ impl App {
                     .transcript_viewport()
                     .and_then(|r| r.hit(me.row, me.column))
                 {
-                    Some(render::ViewportHit::Scrollbar { .. }) => {
+                    Some(render::ViewportHit::Scrollbar) => {
                         // Unreachable: begin_scrollbar_drag_if_hit above
                         // handles Scrollbar hits. Kept for exhaustiveness.
                     }
