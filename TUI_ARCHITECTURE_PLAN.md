@@ -204,7 +204,14 @@ Retained rendering unit. Each UI surface implements `Component`:
 Internal to `Ui`. Manages the component tree, orchestrates rendering,
 diffs frames. Each frame: resolve layout → draw components → diff
 grids → emit SGR. The tui crate never touches the compositor directly
-— it calls `ui.render()`, `ui.handle_key()`, `ui.win_open_float()`.
+— it calls `ui.render()`, `ui.handle_key()`, `ui.handle_mouse()`,
+`ui.win_open_float()`.
+
+**Event routing is z-ordered.** `handle_key` walks focused → parent
+→ global keymap. `handle_mouse` hit-tests top-down against layer
+rects: the topmost layer whose rect contains the event consumes it.
+Clicks, drags, and wheel all go through the same routing — wheel over
+a float scrolls the float, not the window beneath.
 
 ### Buffer
 
@@ -223,10 +230,20 @@ spans carry optional `SpanMeta` for selection/copy behavior.
 Viewport into a buffer. Owns all interaction state:
 - **Cursor** — position, curswant (for vertical motion memory)
 - **Scroll** — top_row, pinned flag
-- **Selection** — anchor position, visual mode
+- **Selection** — anchor position, visual mode. Rendered generically
+  by the window's own draw path (reverse-video overlay on the grid
+  slice), not by per-surface code.
 - **Vim state** — mode (normal/visual/visual-line), operator pending
 - **Kill ring** — yank history (per-window)
 - **Keybindings** — handled via the window, not the buffer
+- **Tail follow** — `tail_follow: bool`. When true and the buffer
+  grows, scroll advances so the last row stays visible. Any cursor
+  motion off the last row clears the flag; motion back (or `G`) sets
+  it. Default false; transcript windows set it to true. Generic —
+  not transcript-specific.
+- **Modifiable** — mirrors `buffer.modifiable`; surfaced on the window
+  so the keymap layer can gate insert mode without reaching into the
+  buffer.
 
 Windows are components. During `draw()`, a window reads its buffer's
 content and renders into its grid slice. The app never pushes display
@@ -250,10 +267,19 @@ surface they handle but will be deleted once all surfaces are components.
 Reusable component that composes BufferView + optional ListSelect + optional
 TextInput. All dialogs are configurations of this component. Handles:
 - Border + title chrome
+- Solid background fill across the dialog rect (no transcript bleed-through)
 - Scrollable content area (buffer view)
 - Optional selectable footer (list select)
 - Optional inline text input
 - Common keys: scroll, dismiss (Esc), confirm (Enter)
+
+**Placement is a config parameter, not hard-coded.** Dialogs pick a
+`Placement` variant: `Centered`, `DockBottom { above_status,
+full_width }`, `AnchorCursor`, or `AnchorRect`. Built-in dialogs dock
+at the bottom above the status bar and span full terminal width;
+completer anchors to the prompt cursor; Lua floats default to
+centered. Position and sizing live in the config so new dialog types
+don't fork layout code.
 
 ### Layout
 
@@ -274,15 +300,21 @@ Every piece of state has exactly one owner. No duplication.
 |---|---|---|
 | Transcript content | `ui::Buffer` | Projected from blocks at event time |
 | Transcript cursor/scroll/selection/vim | `ui::Window` | All interaction state on window |
+| Transcript tail-follow | `ui::Window::tail_follow` | Generic property; transcript sets true by default |
 | Prompt editable text | `ui::Buffer` | Editable buffer, same type as transcript |
 | Prompt cursor/scroll/selection/vim | `ui::Window` | Same window behavior as transcript |
-| Prompt chrome (notification bar, top/bottom bars) | App layout | Not buffer content — layout around the window |
+| Prompt chrome (notification bar, top/bottom bars, queued rows) | Separate compositor float layers | Each is a window with a buffer, stacked above the prompt input window |
+| Buffer modifiability | `ui::Buffer::modifiable` + mirrored on `ui::Window` | Gates insert mode uniformly |
+| Selection rendering | `ui::Window` / `WindowView::draw` | Reverse-video overlay painted by window, not per-surface |
 | Status bar segments | `StatusBar` component | Set at event time, not recomputed per frame |
 | Dialog content | `ui::Buffer` per dialog | Written when dialog opens or content changes |
-| Dialog semantic state | App/domain layer | Confirm choices, question answers, etc. |
-| Dialog rendering/layout | `FloatDialog` component | Chrome is framework, behavior is app |
-| Btw | Float/dialog | Plugin-owned surface, not part of prompt |
-| Notifications | Ephemeral float or app state | Not part of prompt |
+| Dialog semantic state | App/domain layer (`BuiltinFloat` enum) | Confirm choices, question answers, etc. |
+| Dialog rendering/layout | `FloatDialog` component + `Placement` config | Chrome and placement are framework; behavior is app |
+| Dialog background | `FloatDialog::draw` | Solid fill across dialog rect |
+| Mouse z-order | `Compositor::handle_mouse` | Topmost layer at hit point consumes event |
+| Completer | Compositor float layer (`AnchorCursor`) | Same path as any other float |
+| Cmdline | Compositor float layer | Anchored at bottom |
+| Notifications | Ephemeral compositor float layer | Not part of prompt |
 | Block history + layout cache | `tui::BlockHistory` | Projects into transcript buffer |
 
 ### What `Screen` currently owns vs. where it moves
@@ -595,41 +627,116 @@ Moving them out adds indirection until those methods are deleted. This step
 is folded into Steps 9–10: as each dialog migrates, its legacy render
 dependencies are removed, and Screen fields can move to App.
 
-**Step 9: Migrate dialogs** — each of the 10 Dialog implementations
-becomes a `ui::FloatDialog` configuration added as a compositor layer.
-Migration order (simplest first):
-1. ✅ HelpDialog → FloatDialog with keybindings in buffer, no footer
-2. ✅ ExportDialog → FloatDialog with 2-item ListSelect footer
-3. ✅ RewindDialog → FloatDialog with turn list in ListSelect
-4. ✅ PermissionsDialog → FloatDialog with ListSelect + dd-chord intercept
-5. ✅ PsDialog → FloatDialog with ListSelect + backspace-kill intercept
-6. ✅ ResumeDialog → FloatDialog with ListSelect + search intercept
-7. AgentsDialog → Two FloatDialogs (list + detail)
-8. QuestionDialog → Sequential FloatDialogs (one per question)
-9. ConfirmDialog → FloatDialog with preview buffer + ListSelect + TextInput
+**Step 9: Seam elimination — one render path, one input path**
 
-**Key intercept design** (decided after evaluating trait objects vs
-state-in-enum): Approach A — state-in-enum with App-level key intercept.
-`BuiltinFloat` enum variants carry per-dialog state (e.g.
-`Permissions { pending_d }`, `Resume { query, entries, ... }`).
-`intercept_float_key()` runs before `ui.handle_key()` for builtin
-floats needing custom key handling (dd-chord, backspace-kill, search).
-Unhandled keys fall through to FloatDialog's standard handle_key.
-This aligns with the plan's principle: "each dialog is a configuration
-of a single FloatDialog, not a separate implementation" and
-"dialog-specific behavior stays in the app/domain layer."
+This step merges the previous Steps 9 and 10. Splitting "migrate
+dialogs" from "delete legacy" left the codebase with two render engines
+running side-by-side — the compositor for normal frames and six
+migrated floats; the legacy `Frame` / `RenderOut` / `Screen::
+draw_viewport_dialog_frame` path for the last three dialogs, the
+completer, the cmdline, the notification overlay, and the status bar
+during dialog mode. Every live bug on this branch (transcript
+selection gone, click off-by-one, prompt shifts on newline, completer
+invisible, wheel-over-dialog scrolls transcript underneath, dialog bg
+transparent, dialogs top-anchored) lives on that seam. Deleting the
+seam is a prerequisite for the bug fixes, not a cleanup that follows
+them.
 
-Also migrate: Notifications, Completions → float layers.
+This step ends when `App::run` calls exactly one thing per tick:
+`self.ui.render()`. No `active_dialog`, no `render_dialog`/
+`render_normal` fork, no `Frame`, no `RenderOut`.
 
-**Step 10: Delete legacy rendering** —
-- `Dialog` trait, `DialogResult`, `ListState`, `TextArea`
-- `Frame`, `RenderOut`, `StyleState` (SGR/style stack machinery)
-- `paint_line` (legacy SGR paint path)
-- `Screen::draw_viewport_frame`, `draw_viewport_dialog_frame`
+**Step 9.1 — Migrate the final three dialogs to `FloatDialog`.**
+Order: Confirm (heaviest, ~985 lines, preview buffer + ListSelect +
+TextInput), Question (sequential `FloatDialog` per question — kill
+the tab/`visited`/`answered`/`multi_toggles` state machine), Agents
+(two separate `FloatDialog`s — list, then detail; no mode switch).
+Built-in dialog state lives in `BuiltinFloat` enum variants;
+`intercept_float_key()` handles any per-dialog keys (e.g. dd-chord,
+search) before falling through to `FloatDialog::handle_key`.
+
+**Step 9.2 — Migrate overlays to compositor float layers.**
+Completer (anchored to prompt cursor), cmdline (anchored to bottom),
+notification (ephemeral float above prompt). Each is a `ui::Window`
+with a `ui::Buffer`, opened via `ui.win_open_float()` — same path as
+any dialog. Deletes `paint_completer_float`, `draw_prompt_sections`
+completer/cmdline branches, `Screen::cmdline` overlay drawing.
+
+**Step 9.3 — Add mouse routing.** `Compositor::handle_mouse(event)`
+hit-tests layers top-down; the topmost layer whose rect contains the
+point consumes the event (click, drag, wheel). Background windows
+only receive the event if no float covers the point. Fixes
+"wheel-over-dialog scrolls transcript" and "click in Resume list
+doesn't select". `app/events.rs` stops hand-routing mouse events to
+`Content`/`Prompt`.
+
+**Step 9.4 — Add `Placement` to `FloatDialog` config.**
+```rust
+pub enum Placement {
+    Centered,
+    DockBottom { above_status: bool, full_width: bool },
+    AnchorCursor,       // completer
+    AnchorRect(Rect),   // explicit position
+}
+```
+Default: `Centered`. Built-in dialogs (Resume, Permissions, Ps, etc.)
+use `DockBottom { above_status: true, full_width: true }`. Completer
+uses `AnchorCursor`. `FloatDialog::draw` fills its rect with a solid
+background style before drawing components (fixes transparent
+dialogs).
+
+**Step 9.5 — Delete legacy rendering.** After 9.1–9.4 land, the
+following have no callers and get deleted in a single pass:
+- `trait Dialog`, `DialogResult`, `ListState`, `TextArea`
+- `Frame`, `RenderOut`, `StyleState`, `paint_line`
+- `Screen::draw_viewport_frame`, `draw_viewport_dialog_frame`,
+  `draw_prompt_sections`, `draw_prompt`, `queue_status_line`,
+  `queue_dialog_gap`, `paint_completer_float`
 - `active_dialog`, `open_dialog`, `finalize_dialog_close`
-- All individual dialog structs in `render/dialogs/`
-- `prompt_data.rs` (transitional compute module)
-- `render_dialog`, `render_normal` (transitional dispatch methods)
+- `render_dialog` / `render_normal` split
+- All files in `render/dialogs/*.rs`
+- `prompt_data.rs` (its layout role moves to a generic stacked-
+  layout helper on the prompt window chain — not a prompt-specific
+  struct)
+
+**Step 9.6 — Bug fixes on the unified path.** Each collapses to a
+small, localized change once the seam is gone:
+- **Selection** — `WindowView::draw` reads `window.selection_range()`
+  and paints a generic reverse-video overlay into its grid slice.
+  Dead `paint_visual_range`/`paint_transcript_cursor` in `screen.rs`
+  go away with `Screen`. The `_visual` discard at `events.rs:1171`
+  disappears (the range no longer needs to be threaded by hand).
+- **Prompt shift on newline** — prompt window's layer rect is
+  bottom-anchored; height = `clamp(content_rows, 1..=max)`. Chrome
+  (notification, queued, top/bottom bars) stacks as separate layers
+  above it. Adding a line grows the prompt upward, doesn't shift it.
+- **Click off-by-one** — `Viewport::hit` is the single authoritative
+  coord translator. Every other `pad_left` subtraction goes away.
+- **Scrollbar center-on-click** — `apply_scrollbar_drag` subtracts
+  `thumb_size / 2` on a click outside the current thumb; drags
+  inside the thumb preserve their grab offset.
+
+**Step 9.7 — `tail_follow` as a `ui::Window` property.**
+```rust
+pub struct Window {
+    // ...
+    pub tail_follow: bool,
+    pub modifiable: bool,   // buffer-level, surfaced on window
+    // ...
+}
+```
+Transcript defaults to `tail_follow = true`. Any cursor motion that
+moves off the last row clears the flag; motion back to the last row
+(or explicit `G`) sets it. `TranscriptProjection` consults the flag
+when new streaming content arrives: if set, advance scroll so the
+last row stays visible; otherwise leave scroll alone. Fresh-session
+resume initializes the transcript cursor on the last row, so
+`tail_follow` is true until the user scrolls.
+
+**Step 9.8 — Delete `Screen`.** With the legacy render path gone,
+Screen's remaining fields (`transcript`, `parser`, `prompt`,
+`working`, `notification`, `cmdline`, metadata) move to `App` or to
+the buffer projection that owns their display. No more `Screen` type.
 
 ### Current progress
 
@@ -740,7 +847,28 @@ StyledSegment, most of prompt_data.rs, PromptView.
 surfaces render through BufferView + optional scrollbar. Delete
 TranscriptView. One component type for all buffer-backed surfaces.
 
-Next: Step 6e — rewrite btw.lua as pure Lua plugin.
+### Seam check (2026-04-21)
+
+Re-audit after Step 6h/6i/6j landed. The compositor path handles the
+"normal" frame and six migrated floats. A parallel legacy path
+(`Frame`, `RenderOut`, `StyleState`, `Screen::draw_viewport_dialog_frame`,
+`draw_prompt_sections`, `paint_completer_float`, `queue_status_line`)
+is still live for:
+- Three unmigrated dialogs (Confirm, Question, Agents) via
+  `trait Dialog` + `active_dialog`.
+- Completer popup (only drawn from `draw_prompt_sections`, which is
+  only reached from the legacy prompt path).
+- Cmdline, notification overlays.
+- Status bar queueing during dialog-active frames (dual-write with
+  the new `StatusBar` component).
+
+Both engines drift: transcript selection, completer visibility,
+click coord offset, prompt shift on newline, wheel-over-dialog
+scrolling the transcript, transparent dialog bg, top-anchored
+dialogs — all regressions land on this seam. Step 9 below is the
+dedicated seam-elimination phase.
+
+Next: Step 9 (seam elimination).
 
 ## Phase 7: Event dispatch
 
@@ -753,7 +881,10 @@ Next: Step 6e — rewrite btw.lua as pure Lua plugin.
 - Vim integration: vim state on windows, framework-level handling
 
 Note: basic compositor key dispatch for floats lands in Step 6c.
-Phase 7 generalizes it to all components (splits, global keymaps).
+`handle_mouse` with z-order hit-testing lands in Step 9.3 (required
+to fix "wheel-over-dialog scrolls transcript"). Phase 7 generalizes
+the remaining event plumbing (keymap scopes, mouse event types
+beyond click/drag/wheel, vim operator-pending state machine).
 
 ## Phase 8: Lua bindings — remaining operations
 
@@ -788,7 +919,13 @@ Phase 3–5 (DONE: grid, components, compositor, FloatDialog)
 Phase 6 (buffer/window model + Lua float bridge + btw plugin)
     │
     ▼
-Phase 7 (event dispatch — generalize to all components)
+Step 9 (seam elimination — one render path, one input path,
+        final dialog migrations, legacy deletion, bug fixes
+        on the unified path)
+    │
+    ▼
+Phase 7 (event dispatch — generalize keymap + vim operator
+         state beyond what Step 9.3 lands)
     │
     ▼
 Phase 8 (Lua bindings — remaining buf/win operations)
