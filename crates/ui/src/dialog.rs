@@ -276,6 +276,17 @@ impl Dialog {
         &mut self.config
     }
 
+    /// Downcast the widget in `panel_idx` to a concrete widget type
+    /// `T`. Returns `None` if the panel is buffer-backed or the widget
+    /// is not of type `T`.
+    pub fn panel_widget_mut<T: PanelWidget + 'static>(&mut self, panel_idx: usize) -> Option<&mut T> {
+        let panel = self.panels.get_mut(panel_idx)?;
+        let DialogPanelContent::Widget(widget) = &mut panel.content else {
+            return None;
+        };
+        widget.as_any_mut().downcast_mut::<T>()
+    }
+
     /// Copy each panel's buffer content into its internal BufferView.
     /// Called once per frame by `Ui::render` before compositor draw.
     pub(crate) fn sync_from_bufs<'a, F>(&mut self, resolve: F)

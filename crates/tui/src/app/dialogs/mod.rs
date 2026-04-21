@@ -12,11 +12,25 @@ pub mod export;
 pub mod help;
 pub mod permissions;
 pub mod ps;
+pub mod question;
 pub mod resume;
 pub mod rewind;
 
 use super::{App, TurnState};
 use crossterm::event::{KeyCode, KeyModifiers};
+
+/// Outcome of `DialogState::on_action` for a custom widget action
+/// (anything other than `dismiss` / `select:N`).
+#[allow(dead_code)] // `Keep` is used by Confirm's Always-menu expansion (next step).
+pub enum ActionResult {
+    /// Action not handled by this state; fall through to the built-in
+    /// `select:N` / `dismiss` dispatch (default).
+    Pass,
+    /// Action handled; close the float.
+    Close,
+    /// Action handled; keep the float open (e.g. a sub-menu toggle).
+    Keep,
+}
 
 pub trait DialogState {
     /// Whether this dialog pauses the engine-event drain while open.
@@ -37,6 +51,20 @@ pub trait DialogState {
         _mods: KeyModifiers,
     ) -> Option<ui::KeyResult> {
         None
+    }
+
+    /// Called for every `KeyResult::Action(_)` produced by the dialog
+    /// or its widgets, before the built-in `select:N` / `dismiss`
+    /// dispatch. Return [`ActionResult::Pass`] (default) to fall
+    /// through, `Close` / `Keep` to handle it here.
+    fn on_action(
+        &mut self,
+        _app: &mut App,
+        _win: ui::WinId,
+        _action: &str,
+        _agent: &mut Option<TurnState>,
+    ) -> ActionResult {
+        ActionResult::Pass
     }
 
     /// Called when the default handler produces `Action("select:N")`.

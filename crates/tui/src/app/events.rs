@@ -1773,34 +1773,56 @@ impl App {
     }
 
     fn handle_float_action(&mut self, result: ui::KeyResult, agent: &mut Option<TurnState>) {
-        match result {
-            ui::KeyResult::Action(ref action) if action == "dismiss" => {
-                if let Some(win_id) = self.ui.focused_float() {
-                    if let Some(mut state) = self.float_states.remove(&win_id) {
-                        state.on_dismiss(self, win_id);
-                    }
+        let ui::KeyResult::Action(action) = result else {
+            return;
+        };
+        let Some(win_id) = self.ui.focused_float() else {
+            return;
+        };
+
+        // First, give the DialogState a chance to handle arbitrary
+        // custom actions (submit, shortcut:X, etc.).
+        use crate::app::dialogs::ActionResult;
+        if let Some(mut state) = self.float_states.remove(&win_id) {
+            let disposition = state.on_action(self, win_id, &action, agent);
+            match disposition {
+                ActionResult::Close => {
                     self.close_float(win_id);
+                    return;
                 }
-            }
-            ui::KeyResult::Action(ref action) if action.starts_with("select:") => {
-                if let Some(win_id) = self.ui.focused_float() {
-                    let idx_str = &action["select:".len()..];
-
-                    // Dispatch to Lua callbacks (no-op for builtin floats).
-                    let id = win_id.0;
-                    let ops = self.lua.fire_callback(id, idx_str);
-                    self.apply_ops(ops);
-
-                    // Dispatch to the builtin DialogState handler.
-                    if let Some(mut state) = self.float_states.remove(&win_id) {
-                        if let Ok(idx) = idx_str.parse::<usize>() {
-                            state.on_select(self, win_id, idx, agent);
-                        }
-                        self.close_float(win_id);
+                ActionResult::Keep => {
+                    if self.ui.dialog_mut(win_id).is_some() {
+                        self.float_states.insert(win_id, state);
+                    }
+                    return;
+                }
+                ActionResult::Pass => {
+                    if self.ui.dialog_mut(win_id).is_some() {
+                        self.float_states.insert(win_id, state);
                     }
                 }
             }
-            _ => {}
+        }
+
+        // Fall through to built-in dispatch.
+        if action == "dismiss" {
+            if let Some(mut state) = self.float_states.remove(&win_id) {
+                state.on_dismiss(self, win_id);
+            }
+            self.close_float(win_id);
+        } else if let Some(idx_str) = action.strip_prefix("select:") {
+            // Dispatch to Lua callbacks (no-op for builtin floats).
+            let id = win_id.0;
+            let ops = self.lua.fire_callback(id, idx_str);
+            self.apply_ops(ops);
+
+            // Dispatch to the builtin DialogState handler.
+            if let Some(mut state) = self.float_states.remove(&win_id) {
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    state.on_select(self, win_id, idx, agent);
+                }
+                self.close_float(win_id);
+            }
         }
     }
 

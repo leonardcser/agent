@@ -1499,8 +1499,8 @@ impl App {
                 // use empty string (it targets the last active tool via fallback).
                 self.screen.set_active_status("", ToolStatus::Confirm);
                 let questions = render::parse_questions(&args);
-                let dialog = Box::new(QuestionDialog::new(questions, request_id));
-                self.open_dialog(dialog, active_dialog);
+                crate::app::dialogs::question::open(self, questions, request_id);
+                let _ = active_dialog;
                 LoopAction::Continue
             }
         }
