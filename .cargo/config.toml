@@ -1,0 +1,14 @@
+[build]
+# sccache caches rustc outputs across builds. On a warm cache this
+# cuts incremental rebuild times dramatically (most objects skip
+# codegen entirely). First-time builds are unaffected.
+#
+# Install: `brew install sccache`.
+# Stats:   `sccache --show-stats`.
+rustc-wrapper = "sccache"
+
+# LLD on mach-o (`ld64.lld`) is intentionally not wired here: Apple's
+# `ld_prime` (Xcode 15+) is already fast enough, and ld64.lld has
+# edge-case incompatibilities with mach-o stripping / symbol
+# resolution that cause flaky binaries. sccache alone handles 80% of
+# the speedup.
