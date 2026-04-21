@@ -357,7 +357,6 @@ fn parallel_tools_all_visible_during_dialog() {
         outside_dir: None,
         summary: Some("MARKER_BBB".into()),
         request_id: 2,
-        plugin_confirm: None,
     };
     let mut dialog = tui::render::ConfirmDialog::new(&req, false);
     dialog.set_term_size(80, height);

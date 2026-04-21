@@ -122,21 +122,32 @@ local function activate()
       },
       required = { "plan_summary" },
     },
-    confirm = {
-      display_name = "plan",
-      action_label = "Implement?",
-      preview_field = "plan_summary",
-      accent_color = { ansi = 79 },
-      options = {
-        { label = "yes, and auto-apply", action = "approve", on_select = function()
-          smelt.api.engine.set_mode("apply")
-        end },
-        { label = "yes", action = "approve" },
-        { label = "no", action = "deny" },
-      },
-    },
     execute = function(args)
       local summary = args.plan_summary or ""
+
+      -- Open the confirm dialog and wait for the user's answer.
+      -- `dialog.open` yields the task coroutine; `result` is
+      -- `{ action, option_index, inputs }`.
+      local result = smelt.api.dialog.open({
+        title  = "plan",
+        panels = {
+          { kind = "markdown", text = summary },
+          { kind = "options", items = {
+            {
+              label = "yes, and auto-apply",
+              action = "approve",
+              on_select = function() smelt.api.engine.set_mode("apply") end,
+            },
+            { label = "yes", action = "approve" },
+            { label = "no",  action = "deny"    },
+          }},
+        },
+      })
+
+      if result.action ~= "approve" then
+        return { content = "Plan not approved.\n\n" .. summary, is_error = true }
+      end
+
       local path, err = save_plan(summary)
       if path then
         return "Plan saved to " .. path .. "\n\n" .. summary

@@ -889,7 +889,6 @@ impl App {
                     outside_dir: None,
                     summary,
                     request_id,
-                    plugin_confirm: None,
                 }));
                 let pending = agent.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
                 let action = self.dispatch_control(

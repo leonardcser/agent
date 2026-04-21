@@ -562,7 +562,6 @@ impl App {
                 outside_dir: None,
                 summary,
                 request_id,
-                plugin_confirm: None,
             })),
             EngineEvent::RequestAnswer { request_id, args } => {
                 SessionControl::NeedsAskQuestion { args, request_id }
@@ -672,22 +671,11 @@ impl App {
                 tool_name,
                 args,
             } => {
-                if let Some(meta) = self.lua.get_confirm_meta(&tool_name) {
-                    SessionControl::NeedsConfirm(Box::new(ConfirmRequest {
-                        call_id,
-                        desc: meta.display_name.clone(),
-                        tool_name,
-                        args,
-                        approval_patterns: vec![],
-                        outside_dir: None,
-                        summary: None,
-                        request_id,
-                        plugin_confirm: Some(meta),
-                    }))
-                } else {
-                    self.handle_plugin_tool(request_id, call_id, tool_name, args);
-                    SessionControl::Continue
-                }
+                // Plugins open their own confirm dialogs via
+                // `smelt.api.dialog.open` from inside `execute`. The
+                // core no longer special-cases plugin tools here.
+                self.handle_plugin_tool(request_id, call_id, tool_name, args);
+                SessionControl::Continue
             }
         }
     }
@@ -1113,47 +1101,13 @@ impl App {
                 let ctx = self.confirm_context.take();
                 let call_id = ctx.as_ref().map(|c| c.call_id.clone()).unwrap_or_default();
 
-                let should_cancel = match &choice {
-                    ConfirmChoice::PluginApprove(option_index) => {
-                        let args = ctx.as_ref().map(|c| c.args.clone()).unwrap_or_default();
-                        match self
-                            .lua
-                            .execute_plugin_tool(&tool_name, &args, request_id, &call_id)
-                        {
-                            crate::lua::ToolExecResult::Immediate { content, is_error } => {
-                                self.engine.send(protocol::UiCommand::PluginToolResult {
-                                    request_id,
-                                    call_id: call_id.clone(),
-                                    content,
-                                    is_error,
-                                });
-                            }
-                            crate::lua::ToolExecResult::Pending => {}
-                        }
-                        self.lua.invoke_confirm_callback(&tool_name, *option_index);
-                        self.apply_lua_ops();
-                        self.screen.set_active_status(&call_id, ToolStatus::Pending);
-                        false
-                    }
-                    ConfirmChoice::PluginDeny => {
-                        self.engine.send(protocol::UiCommand::PluginToolResult {
-                            request_id,
-                            call_id: call_id.clone(),
-                            content: message.clone().unwrap_or_else(|| "denied by user".into()),
-                            is_error: true,
-                        });
-                        self.screen
-                            .finish_tool(&call_id, ToolStatus::Denied, None, None);
-                        false
-                    }
-                    _ => self.resolve_confirm(
-                        (choice, message),
-                        &call_id,
-                        request_id,
-                        &tool_name,
-                        agent,
-                    ),
-                };
+                let should_cancel = self.resolve_confirm(
+                    (choice, message),
+                    &call_id,
+                    request_id,
+                    &tool_name,
+                    agent,
+                );
                 if should_cancel && agent.is_some() {
                     self.finish_turn(true);
                     *agent = None;
@@ -1253,8 +1207,7 @@ impl App {
                 pats.first().map(|s| s.as_str()).unwrap_or("pattern")
             }
             ConfirmChoice::AlwaysDir(dir, _) => dir.as_str(),
-            ConfirmChoice::No | ConfirmChoice::PluginDeny => "denied",
-            ConfirmChoice::PluginApprove(_) => "approved",
+            ConfirmChoice::No => "denied",
         };
         if let Some(ref msg) = message {
             self.screen
@@ -1324,9 +1277,6 @@ impl App {
                 self.screen.set_active_status(call_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
                 false
-            }
-            ConfirmChoice::PluginApprove(_) | ConfirmChoice::PluginDeny => {
-                unreachable!("plugin confirm handled in handle_dialog_result")
             }
             ConfirmChoice::No => {
                 let has_message = message.is_some();

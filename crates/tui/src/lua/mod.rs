@@ -161,26 +161,6 @@ pub(crate) struct LuaHandle {
     dead: bool,
 }
 
-/// Confirm dialog spec for a plugin tool, declared during registration.
-#[derive(Debug)]
-pub struct PluginConfirmSpec {
-    pub message: String,
-    pub action_label: String,
-    pub preview_field: Option<String>,
-    pub accent_color: Option<crossterm::style::Color>,
-    pub options: Vec<PluginConfirmOption>,
-}
-
-#[derive(Debug)]
-pub struct PluginConfirmOption {
-    pub label: String,
-    /// "approve" or "deny". Determines whether the tool executes.
-    pub action: String,
-    /// Lua callback name stored in registry, called after the option is
-    /// selected (e.g. to switch mode). None means no side effect.
-    pub on_select_key: Option<mlua::RegistryKey>,
-}
-
 /// Deferred mutation queued by a Lua handler. Applied by the app loop
 /// after the handler returns, avoiding nested borrows on `App`.
 pub enum PendingOp {
@@ -311,7 +291,6 @@ pub(crate) struct LuaShared {
     pub(crate) timers: Mutex<Vec<(Instant, LuaHandle)>>,
     pub(crate) statusline: Mutex<Option<LuaHandle>>,
     pub(crate) plugin_tools: Mutex<HashMap<String, LuaHandle>>,
-    pub(crate) confirm_specs: Mutex<HashMap<String, PluginConfirmSpec>>,
     pub(crate) callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub(crate) next_id: AtomicU64,
     pub(crate) history: Mutex<Arc<Vec<protocol::Message>>>,
@@ -328,7 +307,6 @@ impl Default for LuaShared {
             timers: Mutex::new(Vec::new()),
             statusline: Mutex::new(None),
             plugin_tools: Mutex::new(HashMap::new()),
-            confirm_specs: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             history: Mutex::new(Arc::new(Vec::new())),
@@ -878,7 +856,6 @@ impl LuaRuntime {
         let tools_tbl = lua.create_table()?;
         let s = shared.clone();
         let tools_register = lua.create_function(move |lua, def: mlua::Table| {
-            let (pt_clone, pcs_clone) = (&s.plugin_tools, &s.confirm_specs);
             let name: String = def.get("name")?;
             let handler: mlua::Function = def.get("execute")?;
             let key = lua.create_registry_value(handler)?;
@@ -897,59 +874,7 @@ impl LuaRuntime {
             }
             lua.set_named_registry_value(&format!("__pt_meta_{name}"), meta)?;
 
-            // Parse optional confirm spec.
-            if let Ok(confirm_tbl) = def.get::<mlua::Table>("confirm") {
-                let display_name: String = confirm_tbl.get("display_name").unwrap_or(name.clone());
-                let action_label: String =
-                    confirm_tbl.get("action_label").unwrap_or("Allow?".into());
-                let preview_field: Option<String> = confirm_tbl.get("preview_field").ok();
-                let accent_color = confirm_tbl
-                    .get::<mlua::Table>("accent_color")
-                    .ok()
-                    .and_then(|t| ansi_color_from_lua(&t, "ansi"));
-
-                let mut options = Vec::new();
-                if let Ok(opts_tbl) = confirm_tbl.get::<mlua::Table>("options") {
-                    for opt in opts_tbl.sequence_values::<mlua::Table>().flatten() {
-                        let label: String = opt.get("label").unwrap_or_default();
-                        let action: String = opt.get("action").unwrap_or("approve".into());
-                        let on_select: Option<mlua::RegistryKey> = opt
-                            .get::<mlua::Function>("on_select")
-                            .ok()
-                            .and_then(|f| lua.create_registry_value(f).ok());
-                        options.push(PluginConfirmOption {
-                            label,
-                            action,
-                            on_select_key: on_select,
-                        });
-                    }
-                }
-                if options.is_empty() {
-                    options.push(PluginConfirmOption {
-                        label: "yes".into(),
-                        action: "approve".into(),
-                        on_select_key: None,
-                    });
-                    options.push(PluginConfirmOption {
-                        label: "no".into(),
-                        action: "deny".into(),
-                        on_select_key: None,
-                    });
-                }
-
-                let spec = PluginConfirmSpec {
-                    message: display_name.clone(),
-                    action_label,
-                    preview_field,
-                    accent_color,
-                    options,
-                };
-                if let Ok(mut map) = pcs_clone.lock() {
-                    map.insert(name.clone(), spec);
-                }
-            }
-
-            if let Ok(mut map) = pt_clone.lock() {
+            if let Ok(mut map) = s.plugin_tools.lock() {
                 map.insert(name, LuaHandle { key, dead: false });
             }
             Ok(())
@@ -961,9 +886,6 @@ impl LuaRuntime {
                 "unregister",
                 lua.create_function(move |_, name: String| {
                     if let Ok(mut map) = s.plugin_tools.lock() {
-                        map.remove(&name);
-                    }
-                    if let Ok(mut map) = s.confirm_specs.lock() {
                         map.remove(&name);
                     }
                     Ok(())
@@ -1593,54 +1515,6 @@ impl LuaRuntime {
                 // Orphaned completion (unmatched id) — swallow.
             }
             TaskDriveOutput::Error(msg) => self.record_error(msg),
-        }
-    }
-
-    /// Build a `PluginConfirmMeta` for the given tool (if it has a confirm spec).
-    pub fn get_confirm_meta(&self, tool_name: &str) -> Option<crate::render::PluginConfirmMeta> {
-        let specs = self
-            .shared
-            .confirm_specs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let spec = specs.get(tool_name)?;
-        Some(crate::render::PluginConfirmMeta {
-            display_name: spec.message.clone(),
-            action_label: spec.action_label.clone(),
-            preview_field: spec.preview_field.clone(),
-            accent_color: spec.accent_color,
-            options: spec
-                .options
-                .iter()
-                .map(|o| crate::render::PluginOptionMeta {
-                    label: o.label.clone(),
-                    approves: o.action == "approve",
-                })
-                .collect(),
-        })
-    }
-
-    /// Invoke the on_select callback for the given plugin tool confirm option.
-    pub fn invoke_confirm_callback(&self, tool_name: &str, option_index: usize) {
-        let specs = self
-            .shared
-            .confirm_specs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(spec) = specs.get(tool_name) {
-            if let Some(opt) = spec.options.get(option_index) {
-                if let Some(ref key) = opt.on_select_key {
-                    if let Ok(func) = self.lua.registry_value::<mlua::Function>(key) {
-                        if let Err(e) = func.call::<()>(()) {
-                            if let Ok(mut o) = self.shared.ops.lock() {
-                                o.ops.push(PendingOp::NotifyError(format!(
-                                    "confirm callback error: {e}"
-                                )));
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 }

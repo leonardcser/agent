@@ -35,8 +35,8 @@ pub use viewport::ViewportGeom;
 
 pub use history::{
     ActiveAgent, ActiveTool, AgentBlockStatus, ApprovalScope, Block, BlockArtifact, BlockId,
-    ConfirmChoice, ConfirmRequest, LayoutKey, PermissionEntry, PluginConfirmMeta, PluginOptionMeta,
-    ResumeEntry, Status, Throbber, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
+    ConfirmChoice, ConfirmRequest, LayoutKey, PermissionEntry, ResumeEntry, Status, Throbber,
+    ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
 
 pub(crate) use selection::{scan_at_token, truncate_str, try_at_ref, wrap_line};

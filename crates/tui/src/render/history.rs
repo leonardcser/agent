@@ -53,22 +53,6 @@ impl ActiveTool {
 /// All data needed to show a confirm dialog. Flows unchanged from
 /// `EngineEvent::RequestPermission` through `SessionControl`, `DeferredDialog`,
 /// `ConfirmContext`, and `ConfirmDialog::new`.
-/// Metadata for a plugin tool's confirm dialog, attached to `ConfirmRequest`.
-#[derive(Clone, Debug)]
-pub struct PluginConfirmMeta {
-    pub display_name: String,
-    pub action_label: String,
-    pub preview_field: Option<String>,
-    pub accent_color: Option<crossterm::style::Color>,
-    pub options: Vec<PluginOptionMeta>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PluginOptionMeta {
-    pub label: String,
-    pub approves: bool,
-}
-
 pub struct ConfirmRequest {
     pub call_id: String,
     pub tool_name: String,
@@ -79,7 +63,6 @@ pub struct ConfirmRequest {
     pub outside_dir: Option<std::path::PathBuf>,
     pub summary: Option<String>,
     pub request_id: u64,
-    pub plugin_confirm: Option<PluginConfirmMeta>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -246,9 +229,6 @@ pub enum ConfirmChoice {
     Always(ApprovalScope),
     AlwaysPatterns(Vec<String>, ApprovalScope),
     AlwaysDir(String, ApprovalScope),
-    /// Plugin tool approved — carries the selected option index for callback dispatch.
-    PluginApprove(usize),
-    PluginDeny,
 }
 
 #[derive(Clone, Copy, PartialEq)]

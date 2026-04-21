@@ -13,7 +13,6 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{cursor, terminal, QueueableCommand};
 use engine::tools::NotebookRenderData;
 use std::collections::HashMap;
-use std::io::Write;
 
 /// Tool-specific scrollable preview content for the confirm dialog.
 pub(crate) enum ConfirmPreview {
@@ -34,8 +33,6 @@ pub(crate) enum ConfirmPreview {
         /// The full command — first line is rendered in the title, rest here.
         full_command: String,
     },
-    /// Plugin tool preview — a field value rendered as markdown.
-    PluginMarkdown { content: String },
 }
 
 impl ConfirmPreview {
@@ -43,19 +40,7 @@ impl ConfirmPreview {
         tool_name: &str,
         desc: &str,
         args: &HashMap<String, serde_json::Value>,
-        plugin_confirm: Option<&crate::render::PluginConfirmMeta>,
     ) -> Self {
-        if let Some(meta) = plugin_confirm {
-            if let Some(ref field) = meta.preview_field {
-                let content = args
-                    .get(field.as_str())
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                return ConfirmPreview::PluginMarkdown { content };
-            }
-            return ConfirmPreview::None;
-        }
         match tool_name {
             "edit_file" => {
                 let old = args
@@ -96,23 +81,13 @@ impl ConfirmPreview {
         }
     }
 
-    pub(crate) fn total_rows(&self, width: usize) -> u16 {
+    pub(crate) fn total_rows(&self, _width: usize) -> u16 {
         match self {
             ConfirmPreview::None => 0,
             ConfirmPreview::Diff { old, new, path } => count_inline_diff_rows(old, new, path, old),
             ConfirmPreview::Notebook(data) => notebook_preview_rows(data),
             ConfirmPreview::FileContent { content, .. } => content.lines().count() as u16,
             ConfirmPreview::BashBody { full_command } => (full_command.lines().count() - 1) as u16,
-            ConfirmPreview::PluginMarkdown { content } => {
-                let mut buf = RenderOut::buffer();
-                crate::render::blocks::render_markdown_inner(
-                    &mut buf, content, width, " ", false, None,
-                );
-                let _ = buf.flush();
-                let bytes = buf.into_bytes();
-                let rendered = String::from_utf8_lossy(&bytes);
-                rendered.split("\r\n").count().saturating_sub(1) as u16
-            }
         }
     }
 
@@ -138,7 +113,6 @@ impl ConfirmPreview {
         width: u16,
         theme: &crate::theme::Theme,
     ) {
-        use crate::render::blocks::render_markdown_inner;
         use crate::render::to_buffer::render_into_buffer;
         render_into_buffer(buf, width, theme, |sink| match self {
             ConfirmPreview::None => {}
@@ -163,13 +137,10 @@ impl ConfirmPreview {
                     sink.newline();
                 }
             }
-            ConfirmPreview::PluginMarkdown { content } => {
-                render_markdown_inner(sink, content, width as usize, " ", false, None);
-            }
         });
     }
 
-    fn render(&self, out: &mut RenderOut, skip: u16, viewport: u16, width: usize) {
+    fn render(&self, out: &mut RenderOut, skip: u16, viewport: u16, _width: usize) {
         match self {
             ConfirmPreview::None => {}
             ConfirmPreview::Diff { old, new, path } => {
@@ -200,31 +171,6 @@ impl ConfirmPreview {
                     }
                     out.print(" ");
                     bh.print_line(out, line);
-                    out.newline();
-                    emitted += 1;
-                }
-            }
-            ConfirmPreview::PluginMarkdown { content } => {
-                let mut buf = RenderOut::buffer();
-                crate::render::blocks::render_markdown_inner(
-                    &mut buf, content, width, " ", false, None,
-                );
-                let _ = buf.flush();
-                let bytes: Vec<u8> = buf.into_bytes();
-                let rendered = String::from_utf8_lossy(&bytes);
-                let lines: Vec<&str> = rendered.split("\r\n").collect();
-                let mut emitted = 0u16;
-                for (i, line) in lines.iter().enumerate() {
-                    if line.is_empty() && i == lines.len() - 1 {
-                        break; // skip trailing empty from split
-                    }
-                    if (i as u16) < skip {
-                        continue;
-                    }
-                    if emitted >= viewport {
-                        break;
-                    }
-                    out.print(line);
                     out.newline();
                     emitted += 1;
                 }
@@ -458,108 +404,71 @@ pub struct ConfirmDialog {
     vim_enabled: bool,
     /// Cached terminal size, updated each draw().
     term_size: (u16, u16),
-    /// Plugin-specific accent color for the title bar.
-    accent_color: Option<crossterm::style::Color>,
-    /// Plugin-specific action prompt (e.g. "Implement?" instead of "Allow?").
-    action_label: String,
 }
 
 impl ConfirmDialog {
     pub fn new(req: &crate::render::ConfirmRequest, vim_enabled: bool) -> Self {
-        let is_plugin = req.plugin_confirm.is_some();
+        let mut options: Vec<(String, ConfirmChoice)> = vec![
+            ("yes".into(), ConfirmChoice::Yes),
+            ("no".into(), ConfirmChoice::No),
+        ];
+        let display_name = req.tool_name.clone();
 
-        let (mut options, display_name): (Vec<(String, ConfirmChoice)>, String) =
-            if let Some(ref meta) = req.plugin_confirm {
-                let opts = meta
-                    .options
-                    .iter()
-                    .enumerate()
-                    .map(|(i, o)| {
-                        let choice = if o.approves {
-                            ConfirmChoice::PluginApprove(i)
-                        } else {
-                            ConfirmChoice::PluginDeny
-                        };
-                        (o.label.clone(), choice)
-                    })
-                    .collect();
-                (opts, meta.display_name.clone())
-            } else {
-                let opts = vec![
-                    ("yes".into(), ConfirmChoice::Yes),
-                    ("no".into(), ConfirmChoice::No),
-                ];
-                (opts, req.tool_name.clone())
-            };
+        use crate::render::ApprovalScope::{Session, Workspace};
 
-        if !is_plugin {
-            use crate::render::ApprovalScope::{Session, Workspace};
+        let cwd_label = std::env::current_dir()
+            .ok()
+            .and_then(|p| {
+                let home = engine::home_dir();
+                if let Ok(rel) = p.strip_prefix(&home) {
+                    return Some(format!("~/{}", rel.display()));
+                }
+                p.to_str().map(String::from)
+            })
+            .unwrap_or_default();
 
-            let cwd_label = std::env::current_dir()
-                .ok()
-                .and_then(|p| {
-                    let home = engine::home_dir();
-                    if let Ok(rel) = p.strip_prefix(&home) {
-                        return Some(format!("~/{}", rel.display()));
-                    }
-                    p.to_str().map(String::from)
+        let has_dir = req.outside_dir.is_some();
+        let has_patterns = !req.approval_patterns.is_empty();
+
+        if let Some(ref dir) = req.outside_dir {
+            let dir_str = dir.to_string_lossy().into_owned();
+            options.push((
+                format!("allow {dir_str}"),
+                ConfirmChoice::AlwaysDir(dir_str.clone(), Session),
+            ));
+            options.push((
+                format!("allow {dir_str} in {cwd_label}"),
+                ConfirmChoice::AlwaysDir(dir_str, Workspace),
+            ));
+        }
+        if has_patterns {
+            let display: Vec<&str> = req
+                .approval_patterns
+                .iter()
+                .map(|p| {
+                    let d = p.strip_suffix("/*").unwrap_or(p);
+                    d.split("://").nth(1).unwrap_or(d)
                 })
-                .unwrap_or_default();
-
-            let has_dir = req.outside_dir.is_some();
-            let has_patterns = !req.approval_patterns.is_empty();
-
-            if let Some(ref dir) = req.outside_dir {
-                let dir_str = dir.to_string_lossy().into_owned();
-                options.push((
-                    format!("allow {dir_str}"),
-                    ConfirmChoice::AlwaysDir(dir_str.clone(), Session),
-                ));
-                options.push((
-                    format!("allow {dir_str} in {cwd_label}"),
-                    ConfirmChoice::AlwaysDir(dir_str, Workspace),
-                ));
-            }
-            if has_patterns {
-                let display: Vec<&str> = req
-                    .approval_patterns
-                    .iter()
-                    .map(|p| {
-                        let d = p.strip_suffix("/*").unwrap_or(p);
-                        d.split("://").nth(1).unwrap_or(d)
-                    })
-                    .collect();
-                let display_str = display.join(", ");
-                options.push((
-                    format!("allow {display_str}"),
-                    ConfirmChoice::AlwaysPatterns(req.approval_patterns.clone(), Session),
-                ));
-                options.push((
-                    format!("allow {display_str} in {cwd_label}"),
-                    ConfirmChoice::AlwaysPatterns(req.approval_patterns.clone(), Workspace),
-                ));
-            }
-            if !has_dir && !has_patterns {
-                options.push(("always allow".into(), ConfirmChoice::Always(Session)));
-                options.push((
-                    format!("always allow in {cwd_label}"),
-                    ConfirmChoice::Always(Workspace),
-                ));
-            }
+                .collect();
+            let display_str = display.join(", ");
+            options.push((
+                format!("allow {display_str}"),
+                ConfirmChoice::AlwaysPatterns(req.approval_patterns.clone(), Session),
+            ));
+            options.push((
+                format!("allow {display_str} in {cwd_label}"),
+                ConfirmChoice::AlwaysPatterns(req.approval_patterns.clone(), Workspace),
+            ));
+        }
+        if !has_dir && !has_patterns {
+            options.push(("always allow".into(), ConfirmChoice::Always(Session)));
+            options.push((
+                format!("always allow in {cwd_label}"),
+                ConfirmChoice::Always(Workspace),
+            ));
         }
 
-        let preview = ConfirmPreview::from_tool(
-            &req.tool_name,
-            &req.desc,
-            &req.args,
-            req.plugin_confirm.as_ref(),
-        );
-
-        let action_label = req
-            .plugin_confirm
-            .as_ref()
-            .map(|m| format!(" {}", m.action_label))
-            .unwrap_or_else(|| " Allow?".to_string());
+        let preview = ConfirmPreview::from_tool(&req.tool_name, &req.desc, &req.args);
 
         Self {
             tool_name: req.tool_name.clone(),
@@ -578,8 +487,6 @@ impl ConfirmDialog {
             request_id: req.request_id,
             vim_enabled,
             term_size: terminal::size().unwrap_or((80, 24)),
-            accent_color: req.plugin_confirm.as_ref().and_then(|m| m.accent_color),
-            action_label,
         }
     }
 }
@@ -854,7 +761,7 @@ impl super::Dialog for ConfirmDialog {
         } else {
             row = bar_row;
 
-            let title_color = self.accent_color.unwrap_or_else(theme::accent);
+            let title_color = theme::accent();
             draw_bar(out, w, None, None, title_color);
             out.newline();
             row += 1;
@@ -947,9 +854,8 @@ impl super::Dialog for ConfirmDialog {
                 row += 1;
             }
             // Action prompt
-            let prompt_text = &self.action_label;
             out.push_dim();
-            out.print(prompt_text);
+            out.print(" Allow?");
             out.pop_style();
             out.newline();
             row += 1;
