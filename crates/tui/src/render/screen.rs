@@ -52,7 +52,6 @@ fn paint_completer_float(
 pub(crate) struct TranscriptData {
     pub clamped_scroll: u16,
     pub total_rows: u16,
-    pub pad_left: u16,
     pub scrollbar_col: u16,
     pub has_scrollbar: bool,
 }
@@ -244,7 +243,6 @@ impl Screen {
             last_viewport_lines: Vec::new(),
             transcript_gutters: crate::window::WindowGutters {
                 pad_left: 1,
-                pad_right: 1,
                 scrollbar: Some(crate::window::GutterSide::Right),
             },
             last_transcript_viewport: None,
@@ -1825,9 +1823,10 @@ impl Screen {
         let geom = super::viewport::ViewportGeom::new(total_rows, viewport_rows, scroll_top);
         let clamped_scroll = geom.clamped_scroll();
 
+        let layer_w = gutters.layer_width(width as u16);
         let scrollbar_col = match gutters.scrollbar {
             Some(crate::window::GutterSide::Left) => 0,
-            _ => (width as u16).saturating_sub(1),
+            _ => layer_w.saturating_sub(1),
         };
 
         // Update viewport text and display lines for vim motions/yank/selection.
@@ -1860,7 +1859,6 @@ impl Screen {
         TranscriptData {
             clamped_scroll,
             total_rows,
-            pad_left: gutters.pad_left,
             scrollbar_col,
             has_scrollbar: geom.max_scroll() > 0,
         }
@@ -1908,7 +1906,7 @@ impl Screen {
             clamped_line: line,
             clamped_col: history_cursor_col,
             soft_cursor: Some(super::transcript_view::SoftCursor {
-                col: col + gutters.pad_left,
+                col,
                 row: line,
                 glyph: under,
             }),
@@ -1989,9 +1987,10 @@ impl Screen {
             &mut self.last_viewport_lines,
         );
 
+        let layer_w = gutters.layer_width(width as u16);
         let scrollbar_col = match gutters.scrollbar {
             Some(crate::window::GutterSide::Left) => 0,
-            _ => (width as u16).saturating_sub(1),
+            _ => layer_w.saturating_sub(1),
         };
         let geom =
             super::viewport::ViewportGeom::new(total_transcript_rows, viewport_rows, clamped);

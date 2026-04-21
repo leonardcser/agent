@@ -1220,7 +1220,6 @@ impl App {
             tv.sync_from_buffer(
                 self.screen.transcript_projection.buf(),
                 tdata.clamped_scroll as usize,
-                tdata.pad_left,
             );
             tv.set_cursor(tcursor.soft_cursor);
             if tdata.has_scrollbar {
@@ -1296,7 +1295,8 @@ impl App {
         self.refresh_status_bar();
 
         // ── Update layer rects and focus ──
-        let transcript_rect = ui::Rect::new(0, 0, term_w, viewport_rows);
+        let t_pad = self.screen.transcript_gutters().pad_left;
+        let transcript_rect = ui::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
         let status_rect = ui::Rect::new(term_h - 1, 0, term_w, 1);
         self.ui.set_layer_rect("transcript", transcript_rect);
         self.ui.set_layer_rect("prompt", prompt_rect);
@@ -3112,8 +3112,7 @@ impl App {
         let Some(region) = self.screen.transcript_viewport() else {
             return;
         };
-        let pad_left = self.screen.transcript_gutters().pad_left;
-        let display_col = col.saturating_sub(pad_left) as usize;
+        let display_col = col as usize;
         let viewport_rows = region.rows;
         let total = rows.len().min(u16::MAX as usize) as u16;
         let geom =

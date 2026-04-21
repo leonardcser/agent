@@ -687,29 +687,15 @@ Steps 1–4 complete:
   Removed manual cursor painting from TranscriptView and PromptView
   `draw()`. Deleted SoftCursor → CursorInfo conversion in `set_cursor`.
 
-**Step 6h: Eliminate nav text** — The transcript currently maintains
-two text representations: "display text" (full rendered lines) and
-"nav text" (selectable characters only). All Window state
-(`cpos`, `cursor_col`, `selection_anchor`) stores nav-text
-coordinates, requiring constant conversion via
-`nav_col_to_display_col` / `display_col_to_nav_col`. This causes
-cursor positioning bugs and architectural complexity.
-
-Migration:
-1. Change Window coordinates to display-text space (cursor_col
-   is a display column, cpos is a byte offset in display text).
-2. Replace `full_transcript_nav_text()` with display text (Buffer
-   lines) everywhere — vim motions, selection, copy, click, scroll.
-3. Post-motion snapping: after every cursor motion, call
-   `snap_to_selectable()` to skip non-selectable cells. This is
-   analogous to how editors skip folded lines.
-4. Copy operations use `SpanMeta.copy_as` / `SpanMeta.selectable`
-   to extract only selectable content from display-text byte ranges.
-5. Delete all nav↔display conversion functions from
-   TranscriptSnapshot: `nav_rows`, `nav_col_to_display_col`,
-   `display_col_to_nav_col`, `nav_byte_to_row_col`,
-   `copy_nav_byte_range`. Delete `full_transcript_nav_text` from
-   Screen.
+**Step 6h: Eliminate nav text** ✅ — Switched all Window coordinates
+to display-text space. Replaced `full_transcript_nav_text()` with
+`full_transcript_display_text()` everywhere (vim motions, selection,
+copy, click, scroll). Added `snap_transcript_cursor()` helper that
+calls `snap_cpos_to_selectable()` after every motion. Copy operations
+use `copy_display_range()` which delegates to `copy_byte_range()`.
+Removed `nav_col_to_display_col` from screen.rs. Nav-text functions
+still exist in transcript.rs but have no callers from events.rs —
+will be deleted once prompt migration (6i) is complete.
 
 **Step 6i: Prompt rendering through Buffer** — Replace the
 PromptRow/StyledSegment pipeline with Buffer + BufferView rendering.

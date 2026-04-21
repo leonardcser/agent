@@ -15,7 +15,6 @@ pub(crate) struct SoftCursor {
 
 pub(crate) struct TranscriptView {
     view: BufferView,
-    pad_left: u16,
     scrollbar_col: u16,
     scrollbar: Option<Scrollbar>,
     cursor_info: Option<CursorInfo>,
@@ -25,17 +24,15 @@ impl TranscriptView {
     pub fn new(_term_width: u16) -> Self {
         Self {
             view: BufferView::new(),
-            pad_left: 0,
             scrollbar_col: 0,
             scrollbar: None,
             cursor_info: None,
         }
     }
 
-    pub fn sync_from_buffer(&mut self, buf: &Buffer, scroll_offset: usize, pad_left: u16) {
+    pub fn sync_from_buffer(&mut self, buf: &Buffer, scroll_offset: usize) {
         self.view.sync_from_buffer(buf);
         self.view.set_scroll(scroll_offset);
-        self.pad_left = pad_left;
     }
 
     pub fn set_scrollbar(
@@ -139,7 +136,7 @@ mod tests {
     fn renders_buffer_lines() {
         let buf = make_buf(&["hello", "world"]);
         let mut view = TranscriptView::new(20);
-        view.sync_from_buffer(&buf, 0, 0);
+        view.sync_from_buffer(&buf, 0);
 
         let mut grid = Grid::new(20, 5);
         let ctx = DrawContext {
@@ -159,7 +156,7 @@ mod tests {
     fn renders_with_scroll_offset() {
         let buf = make_buf(&["line0", "line1", "line2", "line3"]);
         let mut view = TranscriptView::new(20);
-        view.sync_from_buffer(&buf, 2, 0);
+        view.sync_from_buffer(&buf, 2);
 
         let mut grid = Grid::new(20, 2);
         let ctx = DrawContext {
@@ -178,7 +175,7 @@ mod tests {
     fn cursor_info_from_soft_cursor() {
         let buf = make_buf(&["abc"]);
         let mut view = TranscriptView::new(20);
-        view.sync_from_buffer(&buf, 0, 0);
+        view.sync_from_buffer(&buf, 0);
         view.set_cursor(Some(SoftCursor {
             col: 1,
             row: 0,
@@ -200,7 +197,7 @@ mod tests {
         buf.add_highlight(0, 0, 7, SpanStyle::fg(Color::Red));
 
         let mut view = TranscriptView::new(20);
-        view.sync_from_buffer(&buf, 0, 0);
+        view.sync_from_buffer(&buf, 0);
 
         let mut grid = Grid::new(20, 1);
         let ctx = DrawContext {
