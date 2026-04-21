@@ -42,7 +42,7 @@ impl Style {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub symbol: char,
     pub style: Style,
@@ -199,6 +199,26 @@ impl<'a> GridSlice<'a> {
         if x < self.area.width && y < self.area.height {
             self.grid
                 .set(self.area.left + x, self.area.top + y, symbol, style);
+        }
+    }
+
+    /// Read a cell from the underlying grid at slice-local coords.
+    /// Returns the default `Cell` when out of bounds.
+    pub fn cell(&self, x: u16, y: u16) -> Cell {
+        if x < self.area.width && y < self.area.height {
+            *self.grid.cell(self.area.left + x, self.area.top + y)
+        } else {
+            Cell::default()
+        }
+    }
+
+    /// Change the style of a cell in place, preserving its symbol.
+    /// Used to overlay effects (selection highlight, cursor tint).
+    pub fn set_style(&mut self, x: u16, y: u16, style: Style) {
+        if x < self.area.width && y < self.area.height {
+            let abs_x = self.area.left + x;
+            let abs_y = self.area.top + y;
+            self.grid.cell_mut(abs_x, abs_y).style = style;
         }
     }
 

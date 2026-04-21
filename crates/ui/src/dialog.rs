@@ -16,7 +16,7 @@
 
 use crate::buffer::{Buffer, LineDecoration};
 use crate::buffer_view::BufferView;
-use crate::component::{Component, CursorInfo, CursorStyle, DrawContext, KeyResult};
+use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
 use crate::status_bar::StatusBar;
@@ -64,9 +64,6 @@ pub struct PanelSpec {
     pub separator_above: Option<SeparatorStyle>,
     /// Left content padding inside the panel's rect.
     pub pad_left: u16,
-    /// Row-selection highlight for List panels (fill_bg). If `None`,
-    /// the selected row is drawn with the default background.
-    pub selection_fill: Option<crossterm::style::Color>,
     /// Whether this panel participates in focus cycling. Title/summary
     /// panels usually don't.
     pub focusable: bool,
@@ -82,7 +79,6 @@ impl PanelSpec {
             height,
             separator_above: None,
             pad_left: 1,
-            selection_fill: None,
             focusable: false,
             collapse_when_empty: false,
         }
@@ -95,7 +91,6 @@ impl PanelSpec {
             height,
             separator_above: None,
             pad_left: 2,
-            selection_fill: None,
             focusable: true,
             collapse_when_empty: false,
         }
@@ -108,7 +103,6 @@ impl PanelSpec {
             height,
             separator_above: None,
             pad_left: 1,
-            selection_fill: None,
             focusable: true,
             collapse_when_empty: false,
         }
@@ -121,11 +115,6 @@ impl PanelSpec {
 
     pub fn with_pad_left(mut self, pad: u16) -> Self {
         self.pad_left = pad;
-        self
-    }
-
-    pub fn with_selection_fill(mut self, color: crossterm::style::Color) -> Self {
-        self.selection_fill = Some(color);
         self
     }
 
@@ -162,7 +151,6 @@ pub(crate) struct DialogPanel {
     pub height: PanelHeight,
     pub separator_above: Option<SeparatorStyle>,
     pub pad_left: u16,
-    pub selection_fill: Option<crossterm::style::Color>,
     pub focusable: bool,
     pub collapse_when_empty: bool,
     pub win: Window,
@@ -230,9 +218,9 @@ impl Dialog {
 
     /// Solve panel rects inside `area` using Fixed / Fit / Fill.
     fn resolve_panel_rects(&mut self, area: Rect) {
-        // Reserve top rule row + optional hints row.
+        // Reserve top rule row + optional hints block (1 blank + 1 hints).
         let top_rule_rows = 1u16;
-        let hints_rows = if self.config.hints.is_some() { 1 } else { 0 };
+        let hints_rows = if self.config.hints.is_some() { 2 } else { 0 };
         let content_top = area.top + top_rule_rows;
         let content_h = area
             .height
@@ -404,7 +392,8 @@ impl Dialog {
             );
             panel.view.draw(content_rect, &mut content_slice, ctx);
 
-            // List selection highlight on the cursor line.
+            // List selection: retint the cursor row's fg to accent.
+            // Preserves symbols and the dialog bg; no layout shift.
             if let PanelKind::List { .. } = panel.kind {
                 self.paint_list_selection(panel, &mut content_slice);
             }
@@ -426,17 +415,15 @@ impl Dialog {
         if cursor_line >= viewport.rect.height {
             return;
         }
-        let Some(fill) = panel.selection_fill else {
-            return;
-        };
+        let accent_fg = self.config.accent_style.fg;
         let w = slice.width();
         for col in 0..w {
-            let cell = slice_cell(slice, col, cursor_line);
+            let cell = slice.cell(col, cursor_line);
             let style = Style {
-                bg: Some(fill),
+                fg: accent_fg.or(cell.style.fg),
                 ..cell.style
             };
-            slice.set(col, cursor_line, cell.symbol, style);
+            slice.set_style(col, cursor_line, style);
         }
     }
 
@@ -551,19 +538,6 @@ impl Dialog {
     }
 }
 
-fn slice_cell(_slice: &GridSlice<'_>, _col: u16, _row: u16) -> crate::grid::Cell {
-    // GridSlice doesn't expose a read API; callers that need the
-    // underlying symbol before styling should sample via the grid.
-    // For the first pass we treat the selected row as space-filled
-    // with the selection bg — existing symbols will be overwritten,
-    // which matches the legacy behavior where a selected row is a
-    // reverse-video strip.
-    crate::grid::Cell {
-        symbol: ' ',
-        style: Style::default(),
-    }
-}
-
 impl Component for Dialog {
     fn prepare(&mut self, area: Rect, _ctx: &DrawContext) {
         self.resolve_panel_rects(area);
@@ -611,6 +585,10 @@ impl Component for Dialog {
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult {
         if matches!(code, KeyCode::Esc) && mods == KeyModifiers::NONE {
+            return KeyResult::Action("dismiss".into());
+        }
+        // Ctrl+C always dismisses a dialog (matches legacy behavior).
+        if matches!(code, KeyCode::Char('c')) && mods == KeyModifiers::CONTROL {
             return KeyResult::Action("dismiss".into());
         }
         if self
@@ -709,25 +687,11 @@ impl Component for Dialog {
     }
 
     fn cursor(&self) -> Option<CursorInfo> {
-        let panel = self.panels.get(self.focused)?;
-        // Content panels: no cursor (readonly). List panels: cursor
-        // shown as a block on the selected line. Input: hardware cursor
-        // at edit position.
-        match panel.kind {
-            PanelKind::List { .. } => {
-                let _ = panel.rect;
-                // Block cursor at column 0 of the selected row.
-                Some(CursorInfo {
-                    col: panel.rect.left,
-                    row: panel.rect.top + panel.win.cursor_line,
-                    style: Some(CursorStyle {
-                        glyph: '▸',
-                        style: self.config.accent_style,
-                    }),
-                })
-            }
-            _ => None,
-        }
+        // List panels show selection as fg-accent tint on the cursor
+        // row (painted inside `draw_panel`), not via a terminal
+        // cursor glyph. Input panels will expose a hardware cursor
+        // once EditBuffer is wired.
+        None
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -768,7 +732,6 @@ pub(crate) fn build_panels(
                 height: spec.height,
                 separator_above: spec.separator_above,
                 pad_left: spec.pad_left,
-                selection_fill: spec.selection_fill,
                 focusable: spec.focusable,
                 collapse_when_empty: spec.collapse_when_empty,
                 win,

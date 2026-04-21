@@ -1909,8 +1909,7 @@ impl App {
             dialog_config,
             vec![
                 ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
-                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fit)
-                    .with_selection_fill(crate::theme::selection_bg()),
+                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fit),
             ],
         );
 
@@ -1961,8 +1960,7 @@ impl App {
             dialog_config,
             vec![
                 ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
-                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fit)
-                    .with_selection_fill(crate::theme::selection_bg()),
+                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fit),
             ],
         );
 
@@ -2115,8 +2113,7 @@ impl App {
             dialog_config,
             vec![
                 ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
-                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill)
-                    .with_selection_fill(crate::theme::selection_bg()),
+                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill),
             ],
         );
 
@@ -2184,8 +2181,7 @@ impl App {
             dialog_config,
             vec![
                 ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
-                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill)
-                    .with_selection_fill(crate::theme::selection_bg()),
+                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill),
             ],
         );
 
@@ -2252,8 +2248,7 @@ impl App {
             dialog_config,
             vec![
                 ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
-                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill)
-                    .with_selection_fill(crate::theme::selection_bg()),
+                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill),
             ],
         );
 

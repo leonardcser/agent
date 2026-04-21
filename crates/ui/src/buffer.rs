@@ -155,9 +155,6 @@ impl Buffer {
     }
 
     pub fn set_lines(&mut self, start: usize, end: usize, replacement: Vec<String>) {
-        if !self.modifiable {
-            return;
-        }
         let end = end.min(self.lines.len());
         let start = start.min(end);
         let new_count = replacement.len();
@@ -181,9 +178,6 @@ impl Buffer {
     }
 
     pub fn set_all_lines(&mut self, lines: Vec<String>) {
-        if !self.modifiable {
-            return;
-        }
         let count = lines.len().max(1);
         self.lines = if lines.is_empty() {
             vec![String::new()]
@@ -196,9 +190,6 @@ impl Buffer {
     }
 
     pub fn append_line(&mut self, line: String) {
-        if !self.modifiable {
-            return;
-        }
         self.lines.push(line);
         self.highlights.push(Vec::new());
         self.decorations.push(LineDecoration::default());
@@ -361,7 +352,10 @@ mod tests {
     }
 
     #[test]
-    fn readonly_buffer_rejects_mutations() {
+    fn nonmodifiable_buffer_still_accepts_api_writes() {
+        // `modifiable` guards user edits via windows, not framework
+        // API calls. Dialog buffers are created with modifiable=false
+        // but still need to be populated by `set_all_lines`.
         let mut buf = Buffer::new(
             BufId(1),
             BufCreateOpts {
@@ -369,9 +363,9 @@ mod tests {
                 buftype: BufType::Nofile,
             },
         );
-        buf.set_all_lines(vec!["should not change".into()]);
-        assert_eq!(buf.line_count(), 1);
-        assert_eq!(buf.get_line(0), Some(""));
+        buf.set_all_lines(vec!["hello".into(), "world".into()]);
+        assert_eq!(buf.line_count(), 2);
+        assert_eq!(buf.get_line(0), Some("hello"));
     }
 
     #[test]
