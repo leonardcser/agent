@@ -485,6 +485,198 @@ Two legacy patterns die as part of migrating to the widget model:
   (`d17ba9b`). Selecting an agent closes the list dialog and opens
   a detail dialog.
 
+### LuaTask runtime — one suspend mechanism
+
+Before looking at dialogs specifically: every "imperative-wants-to-wait"
+Lua API in this codebase has the same root need — suspend the
+plugin, drive Rust-side work, resume with a result. Today we have
+three parallel half-solutions (`PendingOp::ResolveToolResult`,
+`callbacks: HashMap<u64, LuaHandle>`, declarative `confirm = {...}`
+specs) because there is no real suspend primitive. We replace all
+three with one.
+
+**Design: coroutine-driven tasks via `mlua::Thread`.** Any handler
+that needs to wait runs inside a `mlua::Thread`. A yielding API
+yields a typed request, Rust handles it, Rust resumes the thread
+with the answer. Plugin code reads as synchronous.
+
+```rust
+// crates/tui/src/lua/task.rs (new)
+pub enum LuaYield {
+    OpenDialog(DialogSpec),     // resumed with { action, option_index, inputs }
+    EngineAsk(AskRequest),      // resumed with response string
+    Sleep(Duration),            // resumed with ()
+    // future: Input, Confirm, FileSelect, Pick, ...
+}
+
+pub struct LuaTask {
+    thread: mlua::Thread,
+    on_complete: Option<Box<dyn FnOnce(mlua::Value)>>,
+}
+
+pub struct LuaTaskRuntime {
+    active: Vec<LuaTask>,
+    // keyed waits: dialog_id → task_index, ask_id → task_index, etc.
+}
+```
+
+`LuaTaskRuntime::drive` runs each frame: resumes any task whose
+wait was just satisfied, collects the new yield (if any), dispatches
+it (compositor push / engine.ask enqueue / timer register) and
+re-parks the task. When a task `return`s from its top-level function
+the result is handed to `on_complete` (for tool execute, that's
+"deliver result to engine").
+
+**Lua side: one yielding primitive per concern, plus `smelt.task()`.**
+
+```lua
+-- Yielding primitives (only callable from inside a task):
+local r         = smelt.api.dialog.open({...})
+local response  = smelt.api.engine.ask_sync({...})
+smelt.api.sleep(200)
+
+-- Kickoff from a sync context (keymap / on_select / event hook):
+smelt.task(function()
+  local ok = smelt.api.dialog.open({...})
+  if ok.action == "approve" then ... end
+end)
+```
+
+**Which handlers become tasks:**
+
+| Handler                                | Runs as task | Can yield |
+|----------------------------------------|:------------:|:---------:|
+| `tool.execute`                         | always       | yes       |
+| `engine.ask(..., on_response)`         | internally   | yes       |
+| `smelt.task(fn)` kickoff               | always       | yes       |
+| `smelt.defer(ms, fn)` / `sleep`        | internally   | yes       |
+| keymap / cmd handler                   | no           | no*       |
+| `on_select`, `on_dismiss`              | no           | no*       |
+| `mode_change`, `model_change`, `input_submit` | no    | no*       |
+| `statusline`                           | no (hot path)| no        |
+| `tool_start`, `tool_end`               | no           | no*       |
+
+\* Sync handlers can spawn work with `smelt.task(fn)` — they don't
+yield themselves, but they can fire-and-forget a task that does.
+
+Yielding from a non-task context is a Lua error with a clear
+message (`"smelt.api.dialog.open: call from inside smelt.task(fn) or tool.execute"`).
+
+**What collapses:**
+
+1. `PendingOp::ResolveToolResult`, the `callbacks: HashMap<u64, LuaHandle>`
+   registry, and `smelt.api.tools.resolve(request_id, call_id, result)`
+   → **deleted.** Tool `execute` returns naturally; if it needs to
+   wait mid-flight it yields.
+2. `smelt.api.engine.ask({..., on_response = fn})` — callback form
+   kept as a thin wrapper (`smelt.task(function() fn(ask_sync(req)) end)`),
+   but the ID-plumbing disappears internally.
+3. `smelt.defer(ms, fn)` — callback form kept, `sleep(ms)` is the
+   new primitive. `timers: Vec<(Instant, LuaHandle)>` reused as the
+   internal wait queue for sleeping tasks.
+4. Declarative `confirm = {...}` block — deleted; plugin calls
+   `smelt.api.dialog.open` from its `execute` (which is already a
+   task).
+
+**Cross-cutting benefits:** every future interactive API (input
+prompt, picker, confirm-with-reason, multi-step wizard, git log
+browser, diff picker) becomes **one new `LuaYield` variant** — no
+new callback registry, no new declarative spec. The architecture
+doesn't grow per feature.
+
+**Scope for 11a:** land the runtime with exactly two yield variants
+— `OpenDialog` and `Sleep` — plus `smelt.task()` and the sync-side
+`smelt.api.dialog.open`. `EngineAsk` and the follow-up consolidation
+of `callbacks` / `ResolveToolResult` / declarative `confirm` come
+in Phase 8 against the same runtime, no further architecture
+needed. Migrate `plan_mode.lua` off `confirm = {...}` in 11a as
+the end-to-end proof.
+
+### Lua-driven dialogs
+
+`smelt.api.dialog.open` is the first `LuaYield` variant. It mirrors
+the Rust `ui::Dialog` primitives 1:1:
+
+```lua
+-- Yields inside a task; returns when the user resolves the dialog.
+local result = smelt.api.dialog.open({
+  title    = "plan · Implement?",
+  accent   = smelt.api.theme.accent(),     -- not hardcoded ansi 79
+  panels   = {
+    { kind = "markdown", text = args.plan_summary },
+    { kind = "options", items = {
+      { label = "yes, and auto-apply", action = "approve",
+        on_select = function() smelt.api.engine.set_mode("apply") end },
+      { label = "yes", action = "approve" },
+      { label = "no",  action = "deny" },
+    }},
+  },
+})
+-- result = { action = "approve" | "deny" | "dismiss",
+--            option_index = N, inputs = { [name] = "text", ... } }
+```
+
+Mapping onto the existing framework:
+
+| Lua `kind`  | Rust panel                                     |
+|-------------|------------------------------------------------|
+| `content`   | `PanelContent::Buffer` with plain text         |
+| `markdown`  | `PanelContent::Buffer` filled via `render_into_buffer(..render_markdown_inner..)` |
+| `diff`      | `PanelContent::Buffer` filled via `print_inline_diff` |
+| `code`      | `PanelContent::Buffer` filled via `print_syntax_file` |
+| `options`   | `PanelContent::Widget(OptionList)`             |
+| `input`     | `PanelContent::Widget(TextInput)` — value returned in `result.inputs[name]` |
+
+Callback-style `on_select` on an option remains available for
+side effects (e.g. mode switch *before* the dialog closes); the
+main flow value comes back through the task resume.
+
+`plan_mode.lua` becomes a clean end-to-end example: tool `execute`
+is auto-run as a task, it calls `smelt.api.dialog.open`, awaits the
+answer, saves the plan on approve, and returns the result string to
+the engine — no special-case bridge between Lua config and Rust
+rendering. The `confirm = {...}` block, `PluginConfirmMeta`,
+`PluginConfirmSpec`, `ConfirmPreview::PluginMarkdown`,
+`preview_field`, and plugin-branch `accent_color` plumbing all go
+away. The core Confirm dialog handles only built-in tool approvals
+(edit_file, bash, etc.).
+
+### Theme access from Lua
+
+Plugins must not hardcode ansi values. The theme API exposes both
+**read** and **write** access to every theme role:
+
+```lua
+-- Read the live accent color (honors light/dark terminal).
+local c = smelt.api.theme.accent()      -- { ansi = 208 } or { rgb = {r,g,b} }
+
+-- Read any named role: "accent" | "slug" | "user_bg" | "code_block_bg"
+--                   | "bar" | "tool_pending" | "reason_off" | "muted"
+local m = smelt.api.theme.get("muted")
+
+-- Snapshot all roles at once (matches `theme::Theme`).
+local t = smelt.api.theme.snapshot()
+
+-- Set a role. Accepts ansi (0..255), rgb triple, or preset name.
+smelt.api.theme.set("accent", { ansi = 79 })
+smelt.api.theme.set("accent", { preset = "sage" })
+
+-- Terminal brightness detection.
+local light = smelt.api.theme.is_light()
+```
+
+Implementation sits on top of `crates/tui/src/theme.rs` (already
+atomic, already snapshotable). Setters update the atomic; a theme
+snapshot is taken once per paint pass so a single frame stays
+consistent. Any existing `theme::set_*` helper that isn't yet
+exposed gets a Lua wrapper; roles with no setter (e.g. derived
+backgrounds) stay read-only.
+
+Plugins receive theme colors as table literals (`{ ansi = u8 }`
+or `{ rgb = {r, g, b} }`), the same shape Lua already uses for
+`accent_color` in the old tool-confirm spec. Rust converts to
+`ColorValue` at the API boundary, not in plugin code.
+
 ## Why not ratatui
 
 We evaluated ratatui and decided against it:
@@ -1318,14 +1510,67 @@ independently reversible.
    selected)]`. `impl DialogState for Question`. `blocks_agent()
    = true`. Emits answer via `App::resolve_question`.
 
-10. **Migrate Confirm previews** — port each `ConfirmPreview`
-    variant to `fn build_preview_buffer(variant, width, theme,
-    ui_bufs) -> BufId` via the step-4 helper. **No changes** to
-    `print_inline_diff`, `render_notebook_preview`,
-    `print_syntax_file`, `BashHighlighter`, or
-    `render_markdown_inner`: SpanCollector already captures
-    their output. Test: render an `edit_file` diff preview and
-    verify the buffer's Spans match the expected colors.
+10. **Migrate Confirm previews** — port the **built-in** `ConfirmPreview`
+    variants (`Diff`, `Notebook`, `FileContent`, `BashBody`) to
+    `fn build_preview_buffer(variant, width, theme, ui_bufs) -> BufId`
+    via the step-4 helper. **No changes** to `print_inline_diff`,
+    `render_notebook_preview`, `print_syntax_file`, or
+    `BashHighlighter`: SpanCollector already captures their output.
+    `PluginMarkdown` is **not** ported — it's deleted in item 11a
+    before the Confirm dialog migration. Test: render an `edit_file`
+    diff preview and verify the buffer's Spans match the expected
+    colors.
+
+11a. **LuaTask runtime + dialog/theme APIs + drop plugin_confirm.**
+    Five small commits, landing in order:
+
+    **(i) LuaTask runtime.** New module `crates/tui/src/lua/task.rs`
+    with `LuaTask`, `LuaYield::{OpenDialog, Sleep}`, and
+    `LuaTaskRuntime::drive(&mut self, ctx)`. Driver resumes tasks
+    whose waits are satisfied, collects next yield, dispatches
+    (dialog → compositor, sleep → timer queue), reparks. Panic /
+    error handling: task errors produce a `NotifyError` op; session
+    shutdown drops all tasks. Add `smelt.task(fn)` Lua function that
+    spawns a task from a sync context. Tests: spawn task, yield
+    `Sleep`, resume after N ms; spawn task that errors; spawn task
+    that returns a value into `on_complete`.
+
+    **(ii) Theme API.** Add `smelt.api.theme.{accent,get,set,snapshot,is_light}`
+    on top of `crates/tui/src/theme.rs`. Color shape is
+    `{ ansi = u8 } | { rgb = {r,g,b} } | { preset = "sage" }`.
+    Pure sync API — no task needed. Tests: read each role, set
+    accent by ansi / preset / rgb, verify snapshot consistency.
+
+    **(iii) Tool execute as task.** Wrap `execute_plugin_tool` so
+    the Lua handler runs inside a `LuaTask`. Return value flows to
+    `on_complete` which resolves the tool call. Back-compat: if the
+    handler never yields, behavior is identical to today. Tests:
+    existing `plan_mode` sync path still works.
+
+    **(iv) `smelt.api.dialog.open`.** First `LuaYield::OpenDialog`
+    wired end-to-end. Yielding from outside a task raises
+    `"smelt.api.dialog.open: call from inside smelt.task(fn) or tool.execute"`.
+    Build `DialogSpec` on the Rust side from the Lua table, push as
+    a compositor dialog, resume task with
+    `{ action, option_index, inputs }` when the user resolves.
+    Tests: open dialog from task, verify resume with each action;
+    open with `input` panel, verify `inputs[name]` round-trip.
+
+    **(v) Delete plugin_confirm plumbing + migrate plan_mode.**
+    Delete `PluginConfirmMeta`, `PluginConfirmSpec`,
+    `PluginConfirmOption`, `ConfirmPreview::PluginMarkdown`,
+    `preview_field` extraction, `plugin_confirm` on `ConfirmRequest`,
+    `is_plugin` / plugin-branch `accent_color` in legacy Confirm
+    renderer, `confirm = {...}` parsing in `crates/tui/src/lua.rs`,
+    `get_confirm_meta`, `invoke_confirm_callback`. Rewrite
+    `runtime/lua/smelt/plugins/plan_mode.lua` to open the dialog
+    imperatively from inside `execute`. Update
+    `plan_mode_shows_confirm` integration test.
+
+    Lands **before** item 11 so the new `app/dialogs/confirm.rs`
+    never inherits plugin branches. Phase 8 later extends the
+    runtime with `EngineAsk` and collapses `callbacks` /
+    `ResolveToolResult`.
 
 11. **Migrate Confirm dialog** → `crates/tui/src/app/dialogs/confirm.rs`.
     Panels: `[Title(Content), Summary(Content, optional),
@@ -1333,7 +1578,9 @@ independently reversible.
     Reason(TextInput widget, shown when Always menu expanded)]`.
     State tracks Always-menu expansion + reason-editing mode.
     `blocks_agent() = true`. Deferred-open via `pending_dialogs`
-    queue (App-level, unchanged).
+    queue (App-level, unchanged). Handles **only built-in tool
+    approvals** — plugin tools use `smelt.api.dialog.open` from
+    their `execute` function.
 
 **Cleanup:**
 
@@ -1589,10 +1836,11 @@ beyond click/drag/wheel, vim operator-pending state machine).
 **Goal:** Complete the `smelt.api.buf/win` surface beyond floats.
 
 Step 6b lands the core bridge (buf.create, win.open_float,
-buf.set_lines). This phase adds the remaining operations:
+buf.set_lines). Step 9.5b item 11a lands `smelt.api.dialog.*` and
+`smelt.api.theme.*`. This phase adds the remaining operations:
 - `buf.set_highlights`, `buf.add_virtual_text`, `buf.set_mark`
 - `win.set_cursor`, `win.get_cursor`, `win.set_scroll`
-- Port `predict.lua`, `plan_mode.lua` to clean API
+- Port `predict.lua` (plan_mode.lua already migrated in 11a)
 - Any remaining Lua plugins that bypass the `Ui` registry
 
 ## Phase 9: Cleanup and polish
