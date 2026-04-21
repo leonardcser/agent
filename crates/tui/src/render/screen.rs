@@ -1017,21 +1017,6 @@ impl Screen {
         self.session_cost_usd
     }
 
-    pub(crate) fn working_snapshot(&self) -> super::status_data::WorkingSnapshot {
-        super::status_data::WorkingSnapshot {
-            spinner_char: self.working.spinner_char().map(|s| s.to_string()),
-            is_compacting: self.working.throbber == Some(super::history::Throbber::Compacting),
-            task_label: self.task_label.clone(),
-            throbber_spans: self.working.throbber_spans(self.show_tps),
-            is_active: matches!(
-                self.working.throbber,
-                Some(super::history::Throbber::Working)
-                    | Some(super::history::Throbber::Compacting)
-                    | Some(super::history::Throbber::Retrying { .. })
-            ),
-        }
-    }
-
     pub(crate) fn pending_dialog(&self) -> bool {
         self.pending_dialog
     }
@@ -1048,6 +1033,18 @@ impl Screen {
         self.running_agents
     }
 
+    pub(crate) fn spinner_char(&self) -> Option<&'static str> {
+        self.working.spinner_char()
+    }
+
+    pub(crate) fn throbber_spans(&self) -> Vec<super::status::BarSpan> {
+        self.working.throbber_spans(self.show_tps)
+    }
+
+    pub(crate) fn task_label(&self) -> Option<&str> {
+        self.task_label.as_deref()
+    }
+
     pub(crate) fn custom_status_items(&self) -> Option<&Vec<super::StatusItem>> {
         self.custom_status_items.as_ref()
     }
@@ -1056,20 +1053,8 @@ impl Screen {
         self.show_slug
     }
 
-    pub(crate) fn last_vim_enabled(&self) -> bool {
-        self.last_vim_enabled
-    }
-
-    pub(crate) fn last_vim_mode(&self) -> Option<crate::vim::ViMode> {
-        self.last_vim_mode
-    }
-
     pub(crate) fn last_mode(&self) -> protocol::Mode {
         self.last_mode
-    }
-
-    pub(crate) fn last_status_position(&self) -> Option<super::status::StatusPosition> {
-        self.last_status_position
     }
 
     pub(crate) fn mark_clean(&mut self) {

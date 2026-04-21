@@ -900,6 +900,249 @@ impl App {
         }
     }
 
+    fn refresh_status_bar(&mut self) {
+        use crossterm::style::Color;
+        use render::status::{spans_to_segments, StatusSpan};
+        use ui::grid::Style;
+
+        let (term_w, _) = self.screen.size();
+        let width = term_w as usize;
+        let status_bg = Color::AnsiValue(233);
+
+        // Custom status items (from Lua plugins) override everything.
+        if let Some(items) = self.screen.custom_status_items() {
+            let mut spans: Vec<StatusSpan> = items.iter().map(|i| i.to_span(status_bg)).collect();
+            let (left, right) = spans_to_segments(&mut spans, width, status_bg);
+            self.status_bar = ui::StatusBar::new().with_bg(Style::bg(status_bg));
+            self.status_bar.set_left(left);
+            self.status_bar.set_right(right);
+            return;
+        }
+
+        let mut spans: Vec<StatusSpan> = Vec::with_capacity(16);
+
+        // Slug pill: spinner + label.
+        let is_compacting = self.screen.working_throbber() == Some(render::Throbber::Compacting);
+        let pill_bg = if is_compacting {
+            Color::White
+        } else {
+            crate::theme::slug_color()
+        };
+        let pill_style = render::StyleState {
+            fg: Some(Color::Black),
+            bg: Some(pill_bg),
+            ..render::StyleState::default()
+        };
+
+        let spinner_char = self.screen.spinner_char();
+        if let Some(sp) = spinner_char {
+            spans.push(StatusSpan {
+                text: format!(" {sp} "),
+                style: pill_style.clone(),
+                priority: 0,
+                ..StatusSpan::default()
+            });
+            let label = if is_compacting {
+                "compacting ".into()
+            } else if self.screen.show_slug() {
+                self.screen
+                    .task_label()
+                    .map(|l| format!("{l} "))
+                    .unwrap_or_else(|| "working ".into())
+            } else {
+                "working ".into()
+            };
+            spans.push(StatusSpan {
+                text: label,
+                style: pill_style,
+                priority: 5,
+                truncatable: true,
+                ..StatusSpan::default()
+            });
+        } else if self.screen.show_slug() {
+            if let Some(label) = self.screen.task_label() {
+                spans.push(StatusSpan {
+                    text: format!(" {label} "),
+                    style: pill_style,
+                    priority: 5,
+                    truncatable: true,
+                    ..StatusSpan::default()
+                });
+            }
+        }
+
+        // Vim mode.
+        let (vim_enabled, vim_mode) = match self.app_focus {
+            crate::app::AppFocus::Content => (
+                self.transcript_window.vim.is_some(),
+                self.transcript_window.vim.as_ref().map(|v| v.mode()),
+            ),
+            crate::app::AppFocus::Prompt => {
+                let mut mode = self.input.vim_mode();
+                if self.mouse_drag_active {
+                    mode = Some(crate::vim::ViMode::Visual);
+                }
+                (self.input.vim_enabled() || self.mouse_drag_active, mode)
+            }
+        };
+        if vim_enabled {
+            let vim_label = render::status::vim_mode_label(vim_mode).unwrap_or("NORMAL");
+            let vim_fg = match vim_mode {
+                Some(crate::vim::ViMode::Insert) => Color::AnsiValue(78),
+                Some(crate::vim::ViMode::Visual) | Some(crate::vim::ViMode::VisualLine) => {
+                    Color::AnsiValue(176)
+                }
+                _ => Color::AnsiValue(74),
+            };
+            spans.push(StatusSpan {
+                text: format!(" {vim_label} "),
+                style: render::StyleState {
+                    fg: Some(vim_fg),
+                    bg: Some(Color::AnsiValue(236)),
+                    ..render::StyleState::default()
+                },
+                priority: 3,
+                ..StatusSpan::default()
+            });
+        }
+
+        // Mode indicator.
+        let mode = self.screen.last_mode();
+        let (mode_icon, mode_name, mode_fg) = match mode {
+            protocol::Mode::Plan => ("◇ ", "plan", crate::theme::PLAN),
+            protocol::Mode::Apply => ("→ ", "apply", crate::theme::APPLY),
+            protocol::Mode::Yolo => ("⚡", "yolo", crate::theme::YOLO),
+            protocol::Mode::Normal => ("○ ", "normal", crate::theme::muted()),
+        };
+        spans.push(StatusSpan {
+            text: format!(" {mode_icon}{mode_name} "),
+            style: render::StyleState {
+                fg: Some(mode_fg),
+                bg: Some(Color::AnsiValue(234)),
+                ..render::StyleState::default()
+            },
+            priority: 1,
+            ..StatusSpan::default()
+        });
+
+        // Throbber spans (timer, tok/s, etc.).
+        let throbber_spans = self.screen.throbber_spans();
+        let is_active = matches!(
+            self.screen.working_throbber(),
+            Some(render::Throbber::Working)
+                | Some(render::Throbber::Compacting)
+                | Some(render::Throbber::Retrying { .. })
+        );
+        let skip = if is_active && !throbber_spans.is_empty() {
+            1
+        } else {
+            0
+        };
+        for bar_span in throbber_spans.iter().skip(skip) {
+            let priority = match bar_span.priority {
+                0 => 4,
+                3 => 6,
+                p => p,
+            };
+            spans.push(StatusSpan {
+                text: bar_span.text.clone(),
+                style: render::StyleState {
+                    fg: Some(bar_span.color),
+                    bg: Some(status_bg),
+                    bold: bar_span.bold,
+                    dim: bar_span.dim,
+                    ..render::StyleState::default()
+                },
+                priority,
+                ..StatusSpan::default()
+            });
+        }
+
+        // Permission pending.
+        if self.screen.pending_dialog() && !self.screen.dialog_open() {
+            spans.push(StatusSpan {
+                text: "permission pending".into(),
+                style: render::StyleState {
+                    fg: Some(crate::theme::accent()),
+                    bg: Some(status_bg),
+                    bold: true,
+                    ..render::StyleState::default()
+                },
+                priority: 2,
+                group: true,
+                ..StatusSpan::default()
+            });
+        }
+
+        // Running procs.
+        let running_procs = self.screen.running_procs();
+        if running_procs > 0 {
+            let label = if running_procs == 1 {
+                "1 proc".into()
+            } else {
+                format!("{running_procs} procs")
+            };
+            spans.push(StatusSpan {
+                text: label,
+                style: render::StyleState {
+                    fg: Some(crate::theme::accent()),
+                    bg: Some(status_bg),
+                    ..render::StyleState::default()
+                },
+                priority: 2,
+                group: true,
+                ..StatusSpan::default()
+            });
+        }
+
+        // Running agents.
+        let running_agents = self.screen.running_agents();
+        if running_agents > 0 {
+            let label = if running_agents == 1 {
+                "1 agent".into()
+            } else {
+                format!("{running_agents} agents")
+            };
+            spans.push(StatusSpan {
+                text: label,
+                style: render::StyleState {
+                    fg: Some(crate::theme::AGENT),
+                    bg: Some(status_bg),
+                    ..render::StyleState::default()
+                },
+                priority: 2,
+                group: true,
+                ..StatusSpan::default()
+            });
+        }
+
+        // Right-aligned position.
+        let position = self.compute_status_position();
+        if let Some(p) = position {
+            spans.push(StatusSpan {
+                text: p.render(),
+                style: render::StyleState {
+                    fg: Some(crate::theme::muted()),
+                    bg: Some(status_bg),
+                    ..render::StyleState::default()
+                },
+                priority: 3,
+                truncatable: true,
+                align_right: true,
+                ..StatusSpan::default()
+            });
+        }
+
+        // Also update Screen's cached vim/position state for the legacy render path.
+        self.screen.set_status_vim(vim_enabled, vim_mode);
+        self.screen.set_status_position(position);
+
+        let (left, right) = spans_to_segments(&mut spans, width, status_bg);
+        self.status_bar = ui::StatusBar::new().with_bg(Style::bg(status_bg));
+        self.status_bar.set_left(left);
+        self.status_bar.set_right(right);
+    }
+
     /// Render a full-mode frame using the compositor pipeline.
     pub(super) fn render_normal(&mut self, agent_running: bool) {
         let _perf = crate::perf::begin("app:tick_compositor");
@@ -920,25 +1163,6 @@ impl App {
             self.transcript_window.apply_pin(total, viewport);
         }
         let _visual = self.content_visual_range();
-
-        // Update status bar state.
-        let (status_vim_enabled, status_vim_mode) = match self.app_focus {
-            crate::app::AppFocus::Content => (
-                self.transcript_window.vim.is_some(),
-                self.transcript_window.vim.as_ref().map(|v| v.mode()),
-            ),
-            crate::app::AppFocus::Prompt => {
-                let mut mode = self.input.vim_mode();
-                if self.mouse_drag_active {
-                    mode = Some(crate::vim::ViMode::Visual);
-                }
-                (self.input.vim_enabled() || self.mouse_drag_active, mode)
-            }
-        };
-        self.screen
-            .set_status_vim(status_vim_enabled, status_vim_mode);
-        let status_position = self.compute_status_position();
-        self.screen.set_status_position(status_position);
 
         let (queued, prediction): (&[String], Option<&str>) = if show_queued {
             (&self.queued_messages, None)
@@ -1057,24 +1281,7 @@ impl App {
             .set_cursor(prompt_cursor, prompt_output.cursor_style);
 
         // ── Status bar ──
-        let status_output =
-            render::status_data::compute_status(&render::status_data::StatusInput {
-                width: term_w,
-                working: self.screen.working_snapshot(),
-                vim_enabled: self.screen.last_vim_enabled(),
-                vim_mode: self.screen.last_vim_mode(),
-                mode: self.screen.last_mode(),
-                pending_dialog: self.screen.pending_dialog(),
-                dialog_open: self.screen.dialog_open(),
-                running_procs: self.screen.running_procs(),
-                running_agents: self.screen.running_agents(),
-                position: self.screen.last_status_position(),
-                custom_items: self.screen.custom_status_items().cloned(),
-                show_slug: self.screen.show_slug(),
-            });
-        self.status_bar = ui::StatusBar::new().with_bg(status_output.bg);
-        self.status_bar.set_left(status_output.left);
-        self.status_bar.set_right(status_output.right);
+        self.refresh_status_bar();
 
         // ── Render via compositor ──
         let transcript_rect = ui::Rect::new(0, 0, term_w, viewport_rows);
