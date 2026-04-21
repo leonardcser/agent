@@ -1195,6 +1195,8 @@ impl App {
         let prompt_height = prompt_rect.height;
 
         // ── Transcript ──
+        let t_pad = self.screen.transcript_gutters().pad_left;
+        let transcript_rect = ui::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
         let tdata = self.screen.project_transcript_buffer(
             width,
             viewport_rows,
@@ -1212,24 +1214,27 @@ impl App {
         self.transcript_window.cursor_line = tcursor.clamped_line;
         self.transcript_window.cursor_col = tcursor.clamped_col;
 
-        // Sync TranscriptView from the projected buffer.
+        let transcript_viewport = ui::WindowViewport::new(
+            transcript_rect,
+            self.screen.transcript_gutters().content_width(term_w),
+            tdata.total_rows,
+            tdata.clamped_scroll,
+            ui::ScrollbarState::new(tdata.scrollbar_col + t_pad, tdata.total_rows, viewport_rows),
+        );
+        self.screen
+            .set_transcript_viewport(Some(transcript_viewport));
+
+        // Sync transcript WindowView from the projected buffer.
         if let Some(tv) = self
             .ui
-            .layer_mut::<render::transcript_view::TranscriptView>("transcript")
+            .layer_mut::<render::window_view::WindowView>("transcript")
         {
             tv.sync_from_buffer(
                 self.screen.transcript_projection.buf(),
                 tdata.clamped_scroll as usize,
             );
-            tv.set_cursor(tcursor.soft_cursor);
-            if tdata.has_scrollbar {
-                tv.set_scrollbar(
-                    tdata.total_rows as usize,
-                    viewport_rows as usize,
-                    tdata.clamped_scroll as usize,
-                    tdata.scrollbar_col,
-                );
-            }
+            tv.set_soft_cursor(tcursor.soft_cursor);
+            tv.set_viewport(Some(transcript_viewport));
         }
 
         // ── Prompt ──
@@ -1263,48 +1268,74 @@ impl App {
             render::prompt_data::compute_prompt(&mut prompt_input)
         };
 
-        // Update side-effect state from prompt computation.
-        self.screen
-            .set_prompt_input_scroll(prompt_output.input_scroll);
-        self.screen
-            .set_prompt_soft_cursor(prompt_output.soft_cursor);
-        if let Some(ref ivp) = prompt_output.input_viewport {
-            self.screen
-                .set_prompt_viewport(Some(render::region::Viewport {
-                    top_row: prompt_rect.top + ivp.top_row,
-                    rows: ivp.rows,
-                    content_width: ivp.content_width,
-                    total_rows: ivp.total_rows,
-                    scroll_top: ivp.scroll_top,
-                    scrollbar: None,
-                }));
-        } else {
-            self.screen.set_prompt_viewport(None);
-        }
+        let chrome_rows = prompt_output.chrome_rows;
+        let input_buf = prompt_output.input_buf;
+        let cursor = prompt_output.cursor;
+        let cursor_style = prompt_output.cursor_style;
+        let input_scroll = prompt_output.input_scroll;
+        let soft_cursor = prompt_output.soft_cursor;
+        let input_viewport_data = prompt_output.input_viewport;
 
-        // Push prompt data to PromptView (cursor is layer-relative).
+        self.screen.set_prompt_input_scroll(input_scroll);
+        self.screen.set_prompt_soft_cursor(soft_cursor);
+
+        let (prompt_input_rect, prompt_viewport) = if let Some(ref ivp) = input_viewport_data {
+            let input_rect = ui::Rect::new(
+                prompt_rect.top + ivp.top_row,
+                0,
+                prompt_rect.width,
+                ivp.rows,
+            );
+            let viewport = ui::WindowViewport::new(
+                input_rect,
+                ivp.content_width,
+                ivp.total_rows,
+                ivp.scroll_top,
+                ui::ScrollbarState::new(
+                    prompt_rect.width.saturating_sub(1),
+                    ivp.total_rows,
+                    ivp.rows,
+                ),
+            );
+            (input_rect, Some(viewport))
+        } else {
+            (
+                ui::Rect::new(prompt_rect.bottom(), 0, prompt_rect.width, 0),
+                None,
+            )
+        };
+        self.screen.set_prompt_viewport(prompt_viewport);
+
         if let Some(pv) = self
             .ui
-            .layer_mut::<render::prompt_view::PromptView>("prompt")
+            .layer_mut::<render::window_view::WindowView>("prompt")
         {
-            pv.set_rows(prompt_output.rows);
-            pv.set_cursor(prompt_output.cursor, prompt_output.cursor_style);
+            pv.set_rows(chrome_rows);
+            pv.set_viewport(None);
+            pv.set_cursor(None, None);
+        }
+        if let Some(pv) = self
+            .ui
+            .layer_mut::<render::window_view::WindowView>("prompt_input")
+        {
+            pv.sync_from_buffer(&input_buf, self.screen.prompt_input_scroll());
+            pv.set_viewport(self.screen.input_viewport());
+            pv.set_cursor(cursor, cursor_style);
         }
 
         // ── Status bar ──
         self.refresh_status_bar();
 
         // ── Update layer rects and focus ──
-        let t_pad = self.screen.transcript_gutters().pad_left;
-        let transcript_rect = ui::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
         let status_rect = ui::Rect::new(term_h - 1, 0, term_w, 1);
         self.ui.set_layer_rect("transcript", transcript_rect);
         self.ui.set_layer_rect("prompt", prompt_rect);
+        self.ui.set_layer_rect("prompt_input", prompt_input_rect);
         self.ui.set_layer_rect("status", status_rect);
 
         if self.ui.focused_float().is_none() {
             match self.app_focus {
-                crate::app::AppFocus::Prompt => self.ui.focus_layer("prompt"),
+                crate::app::AppFocus::Prompt => self.ui.focus_layer("prompt_input"),
                 crate::app::AppFocus::Content => self.ui.focus_layer("transcript"),
             }
         }
@@ -1433,12 +1464,12 @@ impl App {
                 | KeyAction::MoveEndOfLine
                 | KeyAction::MoveWordForward
                 | KeyAction::MoveWordBackward => {
-                    self.transcript_window.selection_anchor = None;
+                    self.transcript_window.win_cursor.clear_anchor();
                 }
-                _ if extending && self.transcript_window.selection_anchor.is_none() => {
-                    let row = self.transcript_window.cursor_abs_row();
-                    let col = self.transcript_window.cursor_col as usize;
-                    self.transcript_window.selection_anchor = Some((row, col));
+                _ if extending => {
+                    self.transcript_window
+                        .win_cursor
+                        .extend(self.transcript_window.cpos);
                 }
                 _ => {}
             }
@@ -1621,7 +1652,7 @@ impl App {
     /// rows the user is looking at. When the pin releases, scroll
     /// resumes its normal stuck-to-bottom behavior.
     fn sync_transcript_pin(&mut self) {
-        let has_selection = self.transcript_window.selection_anchor.is_some();
+        let has_selection = self.transcript_window.win_cursor.anchor().is_some();
         let in_vim_visual = matches!(
             self.transcript_window.vim.as_ref().map(|v| v.mode()),
             Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
@@ -2768,9 +2799,7 @@ impl App {
                 if let Some(vim) = self.transcript_window.vim.as_mut() {
                     vim.begin_visual(crate::vim::ViMode::Visual, anchor);
                 } else {
-                    let row = self.transcript_window.cursor_abs_row();
-                    let col = self.transcript_window.cursor_col as usize;
-                    self.transcript_window.selection_anchor = Some((row, col));
+                    self.transcript_window.win_cursor.set_anchor(Some(anchor));
                 }
                 EventOutcome::Redraw
             }
@@ -2891,8 +2920,8 @@ impl App {
             crate::app::AppFocus::Content => {
                 if let Some(region) = self.screen.transcript_viewport() {
                     let rel_row = row
-                        .saturating_sub(region.top_row)
-                        .min(region.rows.saturating_sub(1));
+                        .saturating_sub(region.rect.top)
+                        .min(region.rect.height.saturating_sub(1));
                     let col = col.min(region.content_width.saturating_sub(1));
                     self.position_content_cursor_from_hit(rel_row, col);
                 } else {
@@ -3015,7 +3044,7 @@ impl App {
         if let Some(vim) = self.transcript_window.vim.as_mut() {
             vim.set_mode(crate::vim::ViMode::Normal);
         } else {
-            self.transcript_window.selection_anchor = None;
+            self.transcript_window.win_cursor.clear_anchor();
         }
         self.sync_transcript_pin();
         self.screen.mark_dirty();
@@ -3036,18 +3065,15 @@ impl App {
         col: u16,
         target: crate::app::AppFocus,
     ) -> bool {
-        let Some(bar) = self.scrollbar_for(target) else {
+        let Some(vp) = self.viewport_for(target) else {
             return false;
         };
-        if !bar.contains(row, col) {
+        let Some(bar) = vp.scrollbar else {
+            return false;
+        };
+        if !bar.contains(vp.rect, row, col) {
             return false;
         }
-        // Simple model: every scrollbar interaction places the thumb's
-        // top at the pointer row (clamped). Mousedown jumps the thumb
-        // there; subsequent drag ticks reuse the same mapping, so the
-        // thumb tracks the mouse 1:1 on screen while the buffer scrolls
-        // proportionally more (the thumb-scale ↔ buffer-scale mapping
-        // lives in `ScrollbarGeom::scroll_from_top_for_thumb`).
         self.drag_on_scrollbar = Some(target);
         self.apply_scrollbar_drag(row);
         true
@@ -3060,23 +3086,19 @@ impl App {
         let Some(target) = self.drag_on_scrollbar else {
             return;
         };
-        let Some(bar) = self.scrollbar_for(target) else {
+        let Some(vp) = self.viewport_for(target) else {
+            return;
+        };
+        let Some(bar) = vp.scrollbar else {
             return;
         };
         let max_thumb = bar.max_thumb_top();
-        let rel_row = row.saturating_sub(bar.top_row);
+        let rel_row = row.saturating_sub(vp.rect.top);
         let thumb_top = rel_row.min(max_thumb);
         let from_top = bar.scroll_from_top_for_thumb(thumb_top);
         match target {
             crate::app::AppFocus::Content => {
                 self.transcript_window.scroll_top = from_top;
-                // Reanchor the cursor to the same screen row and
-                // recompute the column against whichever transcript
-                // line is now under it (via `curswant`). Without this
-                // the cursor would appear frozen — its stored
-                // `cursor_line` is measured relative to the old scroll
-                // and drifts off-screen as the viewport moves.
-
                 let rows = self.screen.full_transcript_display_text();
                 let viewport = self.viewport_rows_estimate();
                 self.transcript_window
@@ -3089,11 +3111,11 @@ impl App {
         self.screen.mark_dirty();
     }
 
-    /// Lookup the currently-painted scrollbar geometry for a pane.
-    fn scrollbar_for(&self, target: crate::app::AppFocus) -> Option<render::ScrollbarGeom> {
+    /// Lookup the currently-painted viewport for a pane.
+    fn viewport_for(&self, target: crate::app::AppFocus) -> Option<render::region::Viewport> {
         match target {
-            crate::app::AppFocus::Content => self.screen.transcript_viewport()?.scrollbar,
-            crate::app::AppFocus::Prompt => self.screen.input_viewport()?.scrollbar,
+            crate::app::AppFocus::Content => self.screen.transcript_viewport(),
+            crate::app::AppFocus::Prompt => self.screen.input_viewport(),
         }
     }
 
@@ -3103,7 +3125,7 @@ impl App {
     /// paint time so viewport rows, content width and scroll offset
     /// all match what the user is actually looking at. `rel_row` and
     /// `col` are already clamped against the region by the caller.
-    fn position_content_cursor_from_hit(&mut self, rel_row: u16, col: u16) {
+    fn position_content_cursor_from_hit(&mut self, rel_row: u16, abs_col: u16) {
         let rows = self.screen.full_transcript_display_text();
         if rows.is_empty() {
             self.screen.mark_dirty();
@@ -3112,8 +3134,9 @@ impl App {
         let Some(region) = self.screen.transcript_viewport() else {
             return;
         };
-        let display_col = col as usize;
-        let viewport_rows = region.rows;
+        let pad_left = self.screen.transcript_gutters().pad_left;
+        let display_col = abs_col.saturating_sub(pad_left) as usize;
+        let viewport_rows = region.rect.height;
         let total = rows.len().min(u16::MAX as usize) as u16;
         let geom =
             render::ViewportGeom::new(total, viewport_rows, self.transcript_window.scroll_top);

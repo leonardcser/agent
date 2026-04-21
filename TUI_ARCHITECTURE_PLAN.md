@@ -687,6 +687,37 @@ Steps 1–4 complete:
   Removed manual cursor painting from TranscriptView and PromptView
   `draw()`. Deleted SoftCursor → CursorInfo conversion in `set_cursor`.
 
+- Step 6g.1: Shared viewport + selection state ✅ — non-vim transcript
+  selection now anchors through `ui::Window::win_cursor`, matching the
+  prompt's selection path instead of keeping transcript-only anchor
+  state. Scrollbar and hit-test geometry moved into
+  `ui::WindowViewport` / `ui::ScrollbarState` in `crates/ui/`, and
+  `prompt_data.rs` no longer owns scrollbar geometry. Transitional
+  `PromptView` / `TranscriptView` now consume generic viewport state
+  rather than pane-specific scrollbar fields.
+
+- Step 6g.2: Shared `WindowView` ✅ — transcript and prompt now use the
+  same `render::window_view::WindowView` component. Buffer-backed
+  transcript rendering and row-backed prompt rendering both go through
+  one scrollbar/cursor/viewport implementation, which removes the
+  duplicated `PromptView` / `TranscriptView` behavior and leaves only
+  one transitional surface to delete in Step 6j.
+
+- Step 6i.1: Prompt input projected into `ui::Buffer` ✅ —
+  `compute_prompt()` now splits prompt chrome from the editable input
+  region. The input area is projected into a buffer with highlights,
+  while bars / notifications / queued rows stay as chrome rows.
+  App wiring now renders prompt chrome and prompt input as separate
+  `WindowView` layers so the input path is buffer-backed like the
+  transcript.
+
+- Step 6i.2: Prompt layout ownership clarified ✅ — prompt chrome keeps
+  owning the full prompt rect, while the buffer-backed input is an
+  overlay sub-viewport inside it. That preserves the existing prompt
+  layout contract and keeps mouse hit-testing / scrollbar geometry tied
+  to the generic window viewport instead of inventing a second prompt
+  layout model.
+
 **Step 6h: Eliminate nav text** ✅ — Switched all Window coordinates
 to display-text space. Replaced `full_transcript_nav_text()` with
 `full_transcript_display_text()` everywhere (vim motions, selection,

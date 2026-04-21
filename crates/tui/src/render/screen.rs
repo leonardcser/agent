@@ -53,13 +53,12 @@ pub(crate) struct TranscriptData {
     pub clamped_scroll: u16,
     pub total_rows: u16,
     pub scrollbar_col: u16,
-    pub has_scrollbar: bool,
 }
 
 pub(crate) struct TranscriptCursor {
     pub clamped_line: u16,
     pub clamped_col: u16,
-    pub soft_cursor: Option<super::transcript_view::SoftCursor>,
+    pub soft_cursor: Option<super::window_view::SoftCursor>,
 }
 
 /// Visual selection in the content pane, captured from vim state.
@@ -971,6 +970,10 @@ impl Screen {
         self.prompt.viewport = vp;
     }
 
+    pub(crate) fn set_transcript_viewport(&mut self, vp: Option<super::region::Viewport>) {
+        self.last_transcript_viewport = vp;
+    }
+
     pub(crate) fn model_label(&self) -> Option<&str> {
         self.model_label.as_deref()
     }
@@ -1838,29 +1841,18 @@ impl Screen {
             .transcript_projection
             .viewport_display_lines(clamped_scroll, viewport_rows);
 
-        self.last_transcript_viewport = Some(super::region::Viewport {
-            top_row: 0,
-            rows: viewport_rows,
-            content_width: tw as u16,
+        self.last_transcript_viewport = Some(super::region::Viewport::new(
+            ui::Rect::new(0, 0, tw as u16, viewport_rows),
+            tw as u16,
             total_rows,
-            scroll_top: clamped_scroll,
-            scrollbar: if geom.max_scroll() > 0 {
-                Some(super::region::ScrollbarGeom {
-                    col: scrollbar_col,
-                    top_row: 0,
-                    rows: viewport_rows,
-                    total_rows,
-                })
-            } else {
-                None
-            },
-        });
+            clamped_scroll,
+            ui::ScrollbarState::new(scrollbar_col, total_rows, viewport_rows),
+        ));
 
         TranscriptData {
             clamped_scroll,
             total_rows,
             scrollbar_col,
-            has_scrollbar: geom.max_scroll() > 0,
         }
     }
 
@@ -1905,7 +1897,7 @@ impl Screen {
         TranscriptCursor {
             clamped_line: line,
             clamped_col: history_cursor_col,
-            soft_cursor: Some(super::transcript_view::SoftCursor {
+            soft_cursor: Some(super::window_view::SoftCursor {
                 col,
                 row: line,
                 glyph: under,
@@ -2001,24 +1993,18 @@ impl Screen {
                 clamped as usize,
             );
             super::scrollbar::paint_column(out, scrollbar_col, 0, viewport_rows, &scrollbar);
-            Some(super::region::ScrollbarGeom {
-                col: scrollbar_col,
-                top_row: 0,
-                rows: viewport_rows,
-                total_rows: total_transcript_rows,
-            })
+            ui::ScrollbarState::new(scrollbar_col, total_transcript_rows, viewport_rows)
         } else {
             None
         };
 
-        self.last_transcript_viewport = Some(super::region::Viewport {
-            top_row: 0,
-            rows: viewport_rows,
-            content_width: tw as u16,
-            total_rows: total_transcript_rows,
-            scroll_top: clamped,
-            scrollbar: scrollbar_geom,
-        });
+        self.last_transcript_viewport = Some(super::region::Viewport::new(
+            ui::Rect::new(0, 0, tw as u16, viewport_rows),
+            tw as u16,
+            total_transcript_rows,
+            clamped,
+            scrollbar_geom,
+        ));
 
         {
             let snap = self.transcript.snapshot(tw as u16, self.show_thinking);
@@ -2572,23 +2558,17 @@ impl Screen {
         // to the event handler.
         let bar_col = (width as u16).saturating_sub(1);
         let input_scrollbar = if total_content_rows > content_rows && painted_input_rows > 0 {
-            Some(super::region::ScrollbarGeom {
-                col: bar_col,
-                top_row: input_top_row,
-                rows: painted_input_rows,
-                total_rows: total_content_rows as u16,
-            })
+            ui::ScrollbarState::new(bar_col, total_content_rows as u16, painted_input_rows)
         } else {
             None
         };
-        self.prompt.viewport = Some(super::region::Viewport {
-            top_row: input_top_row,
-            rows: painted_input_rows,
-            content_width: usable as u16,
-            total_rows: total_content_rows as u16,
-            scroll_top: scroll_offset as u16,
-            scrollbar: input_scrollbar,
-        });
+        self.prompt.viewport = Some(super::region::Viewport::new(
+            ui::Rect::new(input_top_row, 0, width as u16, painted_input_rows),
+            usable as u16,
+            total_content_rows as u16,
+            scroll_offset as u16,
+            input_scrollbar,
+        ));
         for (li, (line, kinds)) in visual_lines
             .iter()
             .skip(scroll_offset)

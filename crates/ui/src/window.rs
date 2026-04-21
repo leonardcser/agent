@@ -1,11 +1,113 @@
 use crate::edit_buffer::EditBuffer;
 use crate::kill_ring::KillRing;
-use crate::layout::{Anchor, Border, Constraint, FloatRelative, Gutters};
+use crate::layout::{Anchor, Border, Constraint, FloatRelative, Gutters, Rect};
 use crate::text::{byte_to_cell, cell_to_byte};
 use crate::vim::{Action, ViMode, Vim, VimContext};
 use crate::window_cursor::WindowCursor;
 use crate::{BufId, WinId};
 use crossterm::event::{KeyCode, KeyEvent};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewportHit {
+    Scrollbar,
+    Content { row: u16, col: u16 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollbarState {
+    pub col: u16,
+    pub total_rows: u16,
+    pub viewport_rows: u16,
+}
+
+impl ScrollbarState {
+    pub fn new(col: u16, total_rows: u16, viewport_rows: u16) -> Option<Self> {
+        (viewport_rows > 0 && total_rows > viewport_rows).then_some(Self {
+            col,
+            total_rows,
+            viewport_rows,
+        })
+    }
+
+    pub fn max_scroll(&self) -> u16 {
+        self.total_rows.saturating_sub(self.viewport_rows)
+    }
+
+    pub fn thumb_size(&self) -> u16 {
+        let rows = self.viewport_rows as usize;
+        let total = self.total_rows as usize;
+        ((rows * rows) / total).max(1) as u16
+    }
+
+    pub fn max_thumb_top(&self) -> u16 {
+        self.viewport_rows.saturating_sub(self.thumb_size())
+    }
+
+    pub fn scroll_from_top_for_thumb(&self, thumb_top: u16) -> u16 {
+        let max_thumb = self.max_thumb_top();
+        let max_scroll = self.max_scroll();
+        if max_thumb == 0 || max_scroll == 0 {
+            return 0;
+        }
+        let thumb_top = thumb_top.min(max_thumb);
+        let from_top =
+            (thumb_top as u32 * max_scroll as u32 + max_thumb as u32 / 2) / max_thumb as u32;
+        from_top.min(u16::MAX as u32) as u16
+    }
+
+    pub fn contains(&self, rect: Rect, row: u16, col: u16) -> bool {
+        col == self.col && row >= rect.top && row < rect.bottom()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowViewport {
+    pub rect: Rect,
+    pub content_width: u16,
+    pub total_rows: u16,
+    pub scroll_top: u16,
+    pub scrollbar: Option<ScrollbarState>,
+}
+
+impl WindowViewport {
+    pub fn new(
+        rect: Rect,
+        content_width: u16,
+        total_rows: u16,
+        scroll_top: u16,
+        scrollbar: Option<ScrollbarState>,
+    ) -> Self {
+        Self {
+            rect,
+            content_width,
+            total_rows,
+            scroll_top,
+            scrollbar,
+        }
+    }
+
+    pub fn contains(&self, row: u16, col: u16) -> bool {
+        self.rect.contains(row, col)
+    }
+
+    pub fn hit(&self, row: u16, col: u16) -> Option<ViewportHit> {
+        if !self.contains(row, col) {
+            return None;
+        }
+        if let Some(bar) = self.scrollbar {
+            if bar.contains(self.rect, row, col) {
+                return Some(ViewportHit::Scrollbar);
+            }
+        }
+        let rel_row = row - self.rect.top;
+        let rel_col = col.saturating_sub(self.rect.left);
+        let max_col = self.content_width.saturating_sub(1);
+        Some(ViewportHit::Content {
+            row: rel_row,
+            col: rel_col.min(max_col),
+        })
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct SplitConfig {
@@ -63,7 +165,6 @@ pub struct Window {
     pub cursor_line: u16,
     pub cursor_col: u16,
     pub pinned_last_total: Option<u16>,
-    pub selection_anchor: Option<(usize, usize)>,
     pub cursor_positioned: bool,
 }
 
@@ -83,7 +184,6 @@ impl Window {
             cursor_line: 0,
             cursor_col: 0,
             pinned_last_total: None,
-            selection_anchor: None,
             cursor_positioned: false,
         }
     }
@@ -129,7 +229,7 @@ impl Window {
             }
         } else {
             self.vim = None;
-            self.selection_anchor = None;
+            self.win_cursor.clear_anchor();
         }
     }
 
@@ -150,34 +250,16 @@ impl Window {
                 return Some(range);
             }
         }
-        let (ar, ac) = self.selection_anchor?;
-        let offsets = Self::line_start_offsets(rows);
-        let anchor_row = ar.min(rows.len().saturating_sub(1));
-        let anchor_byte = offsets.get(anchor_row).copied().unwrap_or(0)
-            + cell_to_byte(rows.get(anchor_row).map(|s| s.as_str()).unwrap_or(""), ac);
-        let (lo, hi) = if anchor_byte <= cpos {
-            (anchor_byte, cpos)
-        } else {
-            (cpos, anchor_byte)
-        };
-        (lo != hi).then_some((lo, hi))
+        self.win_cursor.range(cpos)
     }
 
-    pub fn select_word_at(&mut self, rows: &[String], cpos: usize) -> Option<(usize, usize)> {
+    pub fn select_word_at(&mut self, _rows: &[String], cpos: usize) -> Option<(usize, usize)> {
         let (start, end) = self.edit_buf.word_range_at(cpos)?;
+        self.cpos = end.saturating_sub(1).max(start);
         if let Some(vim) = self.vim.as_mut() {
-            self.cpos = end.saturating_sub(1).max(start);
             vim.begin_visual(ViMode::Visual, start);
         } else {
-            self.cpos = end;
-            let offsets = Self::line_start_offsets(rows);
-            let anchor_line = match offsets.binary_search(&start) {
-                Ok(i) => i,
-                Err(i) => i.saturating_sub(1),
-            };
-            let byte_col = start.saturating_sub(offsets[anchor_line]);
-            let col = byte_to_cell(&rows[anchor_line], byte_col);
-            self.selection_anchor = Some((anchor_line, col));
+            self.win_cursor.set_anchor(Some(start));
         }
         Some((start, end))
     }

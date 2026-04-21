@@ -1,12 +1,14 @@
-use super::prompt_view::{PromptRow, StyledSegment};
 use super::selection::{
     build_char_kinds, build_display_spans, compute_visual_line_offsets, map_cursor,
     spans_to_string, wrap_and_locate_cursor, wrap_line, SpanKind,
 };
 use super::status::BarSpan;
+use super::window_view::{StyledSegment, WindowRow};
 use crate::input::InputState;
 use crate::theme;
+use ui::buffer::{BufCreateOpts, Buffer, SpanStyle};
 use ui::grid::Style;
+use ui::BufId;
 
 use crossterm::style::Color;
 
@@ -34,7 +36,8 @@ pub(crate) struct BarInfo {
 }
 
 pub(crate) struct PromptOutput {
-    pub rows: Vec<PromptRow>,
+    pub chrome_rows: Vec<WindowRow>,
+    pub input_buf: Buffer,
     pub cursor: Option<(u16, u16)>,
     pub cursor_style: Option<(Style, char)>,
     pub input_scroll: usize,
@@ -61,29 +64,29 @@ fn cursor_style() -> (Color, Color) {
 pub(crate) fn compute_prompt(input: &mut PromptInput<'_>) -> PromptOutput {
     let width = input.width as usize;
     let usable = width.saturating_sub(2);
-    let mut rows: Vec<PromptRow> = Vec::new();
+    let mut chrome_rows: Vec<WindowRow> = Vec::new();
     let mut row_offset: u16 = 0;
 
     // ── Notification ──
     if let Some(notif) = input.notification {
-        rows.push(notification_row(notif, usable));
+        chrome_rows.push(notification_row(notif, usable));
         row_offset += 1;
     }
 
     // ── Queued messages ──
     let queued_rows = queued_message_rows(input.queued, usable);
     row_offset += queued_rows.len() as u16;
-    rows.extend(queued_rows);
+    chrome_rows.extend(queued_rows);
 
     // ── Stash indicator ──
     if input.stash.is_some() {
-        rows.push(stash_row(usable));
+        chrome_rows.push(stash_row(usable));
         row_offset += 1;
     }
 
     // ── Top bar ──
     let top_bar_right = build_top_bar_right(&input.bar_info);
-    rows.push(bar_row(
+    chrome_rows.push(bar_row(
         width,
         None,
         if top_bar_right.is_empty() {
@@ -96,33 +99,36 @@ pub(crate) fn compute_prompt(input: &mut PromptInput<'_>) -> PromptOutput {
 
     // ── Input area ──
     let input_area_start = row_offset;
-    let (input_rows, cursor_info, scroll_info) = compute_input_area(input, usable, row_offset);
-    let input_row_count = input_rows.len() as u16;
+    let input_area = compute_input_area(input, usable, row_offset);
+    let input_row_count = input_area.visible_rows;
+    for _ in 0..input_row_count {
+        chrome_rows.push(WindowRow::styled(Vec::new()));
+    }
     row_offset += input_row_count;
-    rows.extend(input_rows);
 
     // ── Bottom bar ──
-    rows.push(bar_row(width, None, None));
+    chrome_rows.push(bar_row(width, None, None));
     row_offset += 1;
 
     // ── Status line ──
-    // Status line is rendered as a separate component (StatusBar), not as a PromptRow.
+    // Status line is rendered as a separate component (StatusBar), not as a WindowRow.
     // The caller handles it separately.
     let _ = row_offset;
 
     PromptOutput {
-        rows,
-        cursor: cursor_info.cursor_pos,
-        cursor_style: cursor_info.cursor_style,
-        input_scroll: scroll_info.scroll_offset,
-        soft_cursor: cursor_info.soft_cursor,
+        chrome_rows,
+        input_buf: input_area.buf,
+        cursor: input_area.cursor_info.cursor_pos,
+        cursor_style: input_area.cursor_info.cursor_style,
+        input_scroll: input_area.scroll_info.scroll_offset,
+        soft_cursor: input_area.cursor_info.soft_cursor,
         input_viewport: if input_row_count > 0 {
             Some(InputViewport {
                 top_row: input_area_start,
                 rows: input_row_count,
                 content_width: usable as u16,
-                total_rows: scroll_info.total_content_rows as u16,
-                scroll_top: scroll_info.scroll_offset as u16,
+                total_rows: input_area.scroll_info.total_content_rows as u16,
+                scroll_top: input_area.scroll_info.scroll_offset as u16,
             })
         } else {
             None
@@ -132,7 +138,7 @@ pub(crate) fn compute_prompt(input: &mut PromptInput<'_>) -> PromptOutput {
 
 // ── Notification ──
 
-fn notification_row(notif: &super::screen::Notification, _usable: usize) -> PromptRow {
+fn notification_row(notif: &super::screen::Notification, _usable: usize) -> WindowRow {
     let label = if notif.is_error { "error" } else { "info" };
     let label_style = Style {
         fg: if notif.is_error {
@@ -147,7 +153,7 @@ fn notification_row(notif: &super::screen::Notification, _usable: usize) -> Prom
     let max_msg = _usable.saturating_sub(label.len() + 3);
     let msg: String = notif.message.chars().take(max_msg).collect();
 
-    PromptRow::styled(vec![
+    WindowRow::styled(vec![
         StyledSegment {
             text: " ".into(),
             style: Style::default(),
@@ -172,7 +178,7 @@ fn notification_row(notif: &super::screen::Notification, _usable: usize) -> Prom
 
 // ── Queued messages ──
 
-fn queued_message_rows(queued: &[String], usable: usize) -> Vec<PromptRow> {
+fn queued_message_rows(queued: &[String], usable: usize) -> Vec<WindowRow> {
     let indent = 1usize;
     let text_w = usable.saturating_sub(indent + 1).max(1);
     let mut rows = Vec::new();
@@ -196,7 +202,7 @@ fn queued_message_rows(queued: &[String], usable: usize) -> Vec<PromptRow> {
                     text: " ".repeat(fill_w),
                     style: Style::bg(user_bg),
                 });
-                rows.push(PromptRow::styled(segs));
+                rows.push(WindowRow::styled(segs));
                 continue;
             }
             let chunks = wrap_line(line, text_w);
@@ -230,7 +236,7 @@ fn queued_message_rows(queued: &[String], usable: usize) -> Vec<PromptRow> {
                     text: " ".repeat(trailing),
                     style: bg_style,
                 });
-                rows.push(PromptRow::styled(segs));
+                rows.push(WindowRow::styled(segs));
             }
         }
     }
@@ -259,10 +265,10 @@ fn user_highlight_segments(text: &str, is_command: bool, base_style: Style) -> V
 
 // ── Stash ──
 
-fn stash_row(_usable: usize) -> PromptRow {
+fn stash_row(_usable: usize) -> WindowRow {
     let text = "› Stashed (ctrl+s to unstash)";
     let display: String = text.chars().take(_usable).collect();
-    PromptRow::styled(vec![
+    WindowRow::styled(vec![
         StyledSegment {
             text: "  ".into(),
             style: Style::default(),
@@ -280,7 +286,7 @@ fn stash_row(_usable: usize) -> PromptRow {
 
 // ── Bar (horizontal rule with optional spans) ──
 
-fn bar_row(width: usize, left: Option<&[BarSpan]>, right: Option<&[BarSpan]>) -> PromptRow {
+fn bar_row(width: usize, left: Option<&[BarSpan]>, right: Option<&[BarSpan]>) -> WindowRow {
     let dash = "\u{2500}";
     let bar_color = theme::bar();
     let min_dashes = 4;
@@ -405,7 +411,7 @@ fn bar_row(width: usize, left: Option<&[BarSpan]>, right: Option<&[BarSpan]>) ->
         });
     }
 
-    PromptRow::styled(segs)
+    WindowRow::styled(segs)
 }
 
 fn build_top_bar_right(info: &BarInfo) -> Vec<BarSpan> {
@@ -499,12 +505,14 @@ struct ScrollInfo {
     total_content_rows: usize,
 }
 
-fn compute_input_area(
-    input: &PromptInput<'_>,
-    usable: usize,
-    row_offset: u16,
-) -> (Vec<PromptRow>, CursorInfo, ScrollInfo) {
-    let width = input.width as usize;
+struct InputArea {
+    buf: Buffer,
+    cursor_info: CursorInfo,
+    scroll_info: ScrollInfo,
+    visible_rows: u16,
+}
+
+fn compute_input_area(input: &PromptInput<'_>, usable: usize, row_offset: u16) -> InputArea {
     let height = input.height as usize;
     let state = input.input;
     let prediction = input.prediction;
@@ -533,8 +541,7 @@ fn compute_input_area(
     let is_exec_invalid = state.buf == "!";
     let total_content_rows = visual_lines.len();
 
-    // Fixed rows in the prompt area: bars + notification + stash + queued + btw + status
-    let fixed = row_offset as usize + 2 + 1; // 2 bars (bottom + top already counted via row_offset) + status
+    let fixed = row_offset as usize + 2 + 1; // bottom bar + top bar + status line
     let max_content_rows = height.saturating_sub(fixed).max(1);
     let content_rows = total_content_rows.min(max_content_rows);
 
@@ -556,21 +563,25 @@ fn compute_input_area(
     };
 
     let show_prediction = prediction.is_some() && state.buf.is_empty();
-
-    let mut rows = Vec::new();
     let mut cursor_info = CursorInfo {
         cursor_pos: None,
         cursor_style: None,
         soft_cursor: None,
     };
+    let mut buf = Buffer::new(
+        BufId(0),
+        BufCreateOpts {
+            modifiable: true,
+            buftype: ui::BufType::Prompt,
+        },
+    );
 
     if show_prediction {
         let pred = prediction.unwrap();
         let first_line = pred.lines().next().unwrap_or(pred);
         let max_chars = usable.saturating_sub(1);
         let mut chars_iter = first_line.chars().take(max_chars);
-
-        if let Some(first) = chars_iter.next() {
+        let line = if let Some(first) = chars_iter.next() {
             let rest: String = chars_iter.collect();
             if input.has_prompt_cursor {
                 let (fg, bg) = cursor_style();
@@ -579,79 +590,62 @@ fn compute_input_area(
                     bg: Some(bg),
                     ..Style::default()
                 };
-                cursor_info.cursor_pos = Some((1, row_offset));
+                cursor_info.cursor_pos = Some((1, 0));
                 cursor_info.cursor_style = Some((cursor_char_style, first));
-                rows.push(PromptRow::styled(vec![
-                    StyledSegment {
-                        text: " ".into(),
-                        style: Style::default(),
-                    },
-                    StyledSegment {
-                        text: first.to_string(),
-                        style: cursor_char_style,
-                    },
-                    StyledSegment {
-                        text: rest,
-                        style: Style {
-                            dim: true,
-                            ..Style::default()
-                        },
-                    },
-                ]));
+                format!(" {first}{rest}")
             } else {
-                rows.push(PromptRow::styled(vec![
-                    StyledSegment {
-                        text: " ".into(),
-                        style: Style::default(),
-                    },
-                    StyledSegment {
-                        text: format!("{}{}", first, rest),
-                        style: Style {
-                            dim: true,
-                            ..Style::default()
-                        },
-                    },
-                ]));
+                format!(" {}{}", first, rest)
             }
-        } else if input.has_prompt_cursor {
-            let (fg, bg) = cursor_style();
-            cursor_info.cursor_pos = Some((1, row_offset));
-            cursor_info.cursor_style = Some((
-                Style {
-                    fg: Some(fg),
-                    bg: Some(bg),
-                    ..Style::default()
-                },
-                ' ',
-            ));
-            rows.push(PromptRow::styled(vec![StyledSegment {
-                text: " ".into(),
-                style: Style::default(),
-            }]));
+        } else {
+            if input.has_prompt_cursor {
+                let (fg, bg) = cursor_style();
+                cursor_info.cursor_pos = Some((1, 0));
+                cursor_info.cursor_style = Some((
+                    Style {
+                        fg: Some(fg),
+                        bg: Some(bg),
+                        ..Style::default()
+                    },
+                    ' ',
+                ));
+            }
+            " ".to_string()
+        };
+        buf.set_all_lines(vec![line]);
+        if let Some((first, rest_start)) = first_prediction_split(first_line, max_chars) {
+            if !input.has_prompt_cursor {
+                let end = 1 + first.chars().count() as u16 + rest_start.chars().count() as u16;
+                buf.add_highlight(0, 1, end, SpanStyle::dim());
+            } else if !rest_start.is_empty() {
+                let start = 2;
+                let end = start + rest_start.chars().count() as u16;
+                buf.add_highlight(0, start, end, SpanStyle::dim());
+            }
         }
-
-        return (
-            rows,
+        return InputArea {
+            buf,
             cursor_info,
-            ScrollInfo {
+            scroll_info: ScrollInfo {
                 scroll_offset: 0,
                 total_content_rows: 0,
             },
-        );
+            visible_rows: 1,
+        };
     }
 
-    // Compute line char offsets for selection mapping
-    let line_char_offsets = compute_visual_line_offsets(&display_buf, &visual_lines);
-
-    let scrollbar = if total_content_rows > content_rows {
-        Some(super::scrollbar::Scrollbar::new(
-            total_content_rows,
-            content_rows,
-            scroll_offset,
-        ))
+    let visible_lines: Vec<String> = visual_lines
+        .iter()
+        .skip(scroll_offset)
+        .take(content_rows)
+        .map(|(line, _)| format!(" {line}"))
+        .collect();
+    buf.set_all_lines(if visible_lines.is_empty() {
+        vec![" ".into()]
     } else {
-        None
-    };
+        visible_lines
+    });
+
+    let line_char_offsets = compute_visual_line_offsets(&display_buf, &visual_lines);
 
     for (li, (line, kinds)) in visual_lines
         .iter()
@@ -660,9 +654,7 @@ fn compute_input_area(
         .enumerate()
     {
         let abs_idx = scroll_offset + li;
-        let current_row = row_offset + li as u16;
 
-        // Per-line selection
         let line_sel = display_selection.and_then(|(sel_start, sel_end)| {
             let line_start = line_char_offsets[abs_idx];
             let line_len = line.chars().count();
@@ -684,23 +676,17 @@ fn compute_input_area(
             None
         };
 
-        let mut segs = vec![StyledSegment {
-            text: " ".into(),
-            style: Style::default(),
-        }];
-
         if has_arg_space && abs_idx == 0 {
             let (prefix, hint) = cmd_hint.as_ref().unwrap();
             let prefix_len = prefix.chars().count();
             let line_chars = line.chars().count();
             let mut cmd_kinds = vec![SpanKind::AtRef; prefix_len.min(line_chars)];
             cmd_kinds.resize(line_chars, SpanKind::Plain);
-            segs.extend(styled_char_segments(
-                line,
-                &cmd_kinds,
-                line_sel,
-                line_cursor,
-            ));
+            add_segments_to_buffer(
+                &mut buf,
+                li,
+                &styled_char_segments(line, &cmd_kinds, line_sel, line_cursor),
+            );
             if line_chars >= prefix_len && state.buf == format!("{prefix} ") {
                 let max = usable.saturating_sub(prefix_len + 2);
                 let truncated: String = if hint.chars().count() > max {
@@ -710,58 +696,55 @@ fn compute_input_area(
                 } else {
                     hint.clone()
                 };
-                segs.push(StyledSegment {
-                    text: truncated,
-                    style: Style {
-                        dim: true,
-                        ..Style::default()
-                    },
-                });
+                add_segments_to_buffer(
+                    &mut buf,
+                    li,
+                    &[StyledSegment {
+                        text: truncated,
+                        style: Style {
+                            dim: true,
+                            ..Style::default()
+                        },
+                    }],
+                );
             }
         } else if has_arg_space {
-            segs.extend(styled_char_segments(line, kinds, line_sel, line_cursor));
+            add_segments_to_buffer(
+                &mut buf,
+                li,
+                &styled_char_segments(line, kinds, line_sel, line_cursor),
+            );
         } else if is_command {
             let accent_kinds = vec![SpanKind::AtRef; line.chars().count()];
-            segs.extend(styled_char_segments(
-                line,
-                &accent_kinds,
-                line_sel,
-                line_cursor,
-            ));
+            add_segments_to_buffer(
+                &mut buf,
+                li,
+                &styled_char_segments(line, &accent_kinds, line_sel, line_cursor),
+            );
         } else if (is_exec || is_exec_invalid) && abs_idx == 0 && line.starts_with('!') {
-            segs.extend(exec_bang_segments(line, kinds, line_sel, line_cursor));
+            add_segments_to_buffer(
+                &mut buf,
+                li,
+                &exec_bang_segments(line, kinds, line_sel, line_cursor),
+            );
         } else {
-            segs.extend(styled_char_segments(line, kinds, line_sel, line_cursor));
-        }
-
-        // Scrollbar indicator on the rightmost column
-        if let Some(ref sb) = scrollbar {
-            let bar_col = (width as u16).saturating_sub(1);
-            let thumb_style = Style::bg(theme::scrollbar_thumb());
-            let track_style = Style::bg(theme::scrollbar_track());
-            let sb_style = if sb.is_thumb(li) {
-                thumb_style
-            } else {
-                track_style
-            };
-            // We'll mark the row with a scrollbar indicator
-            // The scrollbar char needs to be at the far right column
-            rows.push(PromptRow::styled_with_scrollbar(segs, bar_col, sb_style));
-        } else {
-            rows.push(PromptRow::styled(segs));
+            add_segments_to_buffer(
+                &mut buf,
+                li,
+                &styled_char_segments(line, kinds, line_sel, line_cursor),
+            );
         }
 
         if line_cursor.is_some() {
             let cursor_col = 1 + cursor_char_in_line as u16;
-            cursor_info.cursor_pos = Some((cursor_col, current_row));
-            cursor_info.soft_cursor = Some((cursor_col, current_row));
+            cursor_info.cursor_pos = Some((cursor_col, li as u16));
+            cursor_info.soft_cursor = Some((cursor_col, li as u16));
         }
     }
 
-    // End-of-input cursor (past all content)
     if cursor_line >= total_content_rows && input.has_prompt_cursor && !show_prediction {
         let (fg, bg) = cursor_style();
-        cursor_info.cursor_pos = Some((1, row_offset + content_rows.saturating_sub(1) as u16));
+        cursor_info.cursor_pos = Some((1, content_rows.saturating_sub(1) as u16));
         cursor_info.cursor_style = Some((
             Style {
                 fg: Some(fg),
@@ -772,14 +755,46 @@ fn compute_input_area(
         ));
     }
 
-    (
-        rows,
+    InputArea {
+        buf,
         cursor_info,
-        ScrollInfo {
+        scroll_info: ScrollInfo {
             scroll_offset,
             total_content_rows,
         },
-    )
+        visible_rows: content_rows as u16,
+    }
+}
+
+fn first_prediction_split(line: &str, max_chars: usize) -> Option<(String, String)> {
+    let mut chars_iter = line.chars().take(max_chars);
+    let first = chars_iter.next()?;
+    let rest: String = chars_iter.collect();
+    Some((first.to_string(), rest))
+}
+
+fn add_segments_to_buffer(buf: &mut Buffer, line_idx: usize, segments: &[StyledSegment]) {
+    let mut col = 1u16;
+    for seg in segments {
+        let len = seg.text.chars().count() as u16;
+        if len > 0 {
+            let end = col + len;
+            if seg.style != Style::default() {
+                buf.add_highlight(line_idx, col, end, span_style(seg.style));
+            }
+            col = end;
+        }
+    }
+}
+
+fn span_style(style: Style) -> SpanStyle {
+    SpanStyle {
+        fg: style.fg,
+        bg: style.bg,
+        bold: style.bold,
+        dim: style.dim,
+        italic: style.italic,
+    }
 }
 
 /// Convert a styled line into StyledSegments, applying cursor and selection highlighting.
@@ -1052,7 +1067,7 @@ mod tests {
         };
         let output = compute_prompt(&mut prompt_input);
         // Should have at least: top bar + input area + bottom bar
-        assert!(output.rows.len() >= 3);
+        assert!(output.chrome_rows.len() >= 3);
         // Cursor should be in the input area
         assert!(output.cursor.is_some());
     }

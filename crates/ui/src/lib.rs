@@ -40,7 +40,9 @@ pub use style::{HlAttrs, HlGroup};
 pub use text_input::TextInput;
 pub use undo::{UndoEntry, UndoHistory};
 pub use vim::{ViMode, Vim};
-pub use window::{FloatConfig, SplitConfig, WinConfig, Window};
+pub use window::{
+    FloatConfig, ScrollbarState, SplitConfig, ViewportHit, WinConfig, Window, WindowViewport,
+};
 pub use window_cursor::WindowCursor;
 
 use std::collections::HashMap;

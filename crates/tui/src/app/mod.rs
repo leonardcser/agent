@@ -634,8 +634,9 @@ impl App {
                         },
                     ],
                 });
-                let transcript_view = crate::render::transcript_view::TranscriptView::new(w);
-                let prompt_view = crate::render::prompt_view::PromptView::new();
+                let transcript_view = crate::render::window_view::WindowView::new();
+                let prompt_chrome_view = crate::render::window_view::WindowView::new();
+                let prompt_input_view = crate::render::window_view::WindowView::new();
                 let status_bar = ui::StatusBar::new();
                 ui.add_layer(
                     "transcript",
@@ -645,17 +646,23 @@ impl App {
                 );
                 ui.add_layer(
                     "prompt",
-                    Box::new(prompt_view),
+                    Box::new(prompt_chrome_view),
                     ui::Rect::new(0, 0, w, 1),
                     1,
+                );
+                ui.add_layer(
+                    "prompt_input",
+                    Box::new(prompt_input_view),
+                    ui::Rect::new(0, 0, w, 1),
+                    2,
                 );
                 ui.add_layer(
                     "status",
                     Box::new(status_bar),
                     ui::Rect::new(h.saturating_sub(1), 0, w, 1),
-                    2,
+                    3,
                 );
-                ui.focus_layer("prompt");
+                ui.focus_layer("prompt_input");
                 ui
             },
             float_tags: std::collections::HashMap::new(),
