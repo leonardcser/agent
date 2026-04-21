@@ -2209,25 +2209,17 @@ impl App {
         let filtered =
             filter_resume_entries(&entries, &title_haystacks, "", true, &current_cwd, None);
 
-        let list_lines: Vec<String> = resume_list_lines(&entries, &filtered);
-
         let title_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
             buftype: ui::buffer::BufType::Scratch,
             modifiable: false,
         });
-        if let Some(buf) = self.ui.buf_mut(title_buf) {
-            let title = "resume (workspace)";
-            buf.set_all_lines(vec![title.into(), String::new()]);
-            buf.add_highlight(0, 0, title.len() as u16, ui::buffer::SpanStyle::dim());
-        }
+        refresh_resume_title(&mut self.ui, title_buf, true, "");
 
         let list_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
             buftype: ui::buffer::BufType::Scratch,
             modifiable: false,
         });
-        if let Some(buf) = self.ui.buf_mut(list_buf) {
-            buf.set_all_lines(list_lines);
-        }
+        refresh_resume_list(&mut self.ui, list_buf, &entries, &filtered);
 
         let toggle = "ctrl+w: this workspace";
         let hint_text = hints::join(&[
@@ -2247,7 +2239,7 @@ impl App {
             },
             dialog_config,
             vec![
-                ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
+                ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(1)).focusable(false),
                 ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill),
             ],
         );
@@ -2400,10 +2392,7 @@ impl App {
                                         current_cwd,
                                         content_cache.as_ref(),
                                     );
-                                    let lines = resume_list_lines(entries, filtered);
-                                    if let Some(buf) = self.ui.buf_mut(list_buf) {
-                                        buf.set_all_lines(lines);
-                                    }
+                                    refresh_resume_list(&mut self.ui, list_buf, entries, filtered);
                                 }
                             }
                         }
@@ -2423,16 +2412,9 @@ impl App {
                             current_cwd,
                             content_cache.as_ref(),
                         );
-                        let title = if *workspace_only {
-                            "resume (workspace)"
-                        } else {
-                            "resume (all)"
-                        };
-                        update_resume_title(&mut self.ui, title_buf, title, query);
-                        let lines = resume_list_lines(entries, filtered);
-                        if let Some(buf) = self.ui.buf_mut(list_buf) {
-                            buf.set_all_lines(lines);
-                        }
+                        refresh_resume_title(&mut self.ui, title_buf, *workspace_only, query);
+
+                        refresh_resume_list(&mut self.ui, list_buf, entries, filtered);
                         return Some(ui::KeyResult::Consumed);
                     }
                     (KeyCode::Backspace, m)
@@ -2457,16 +2439,9 @@ impl App {
                                 current_cwd,
                                 content_cache.as_ref(),
                             );
-                            let title = if *workspace_only {
-                                "resume (workspace)"
-                            } else {
-                                "resume (all)"
-                            };
-                            update_resume_title(&mut self.ui, title_buf, title, query);
-                            let lines = resume_list_lines(entries, filtered);
-                            if let Some(buf) = self.ui.buf_mut(list_buf) {
-                                buf.set_all_lines(lines);
-                            }
+                            refresh_resume_title(&mut self.ui, title_buf, *workspace_only, query);
+
+                            refresh_resume_list(&mut self.ui, list_buf, entries, filtered);
                         }
                         return Some(ui::KeyResult::Consumed);
                     }
@@ -2481,16 +2456,9 @@ impl App {
                                 current_cwd,
                                 content_cache.as_ref(),
                             );
-                            let title = if *workspace_only {
-                                "resume (workspace)"
-                            } else {
-                                "resume (all)"
-                            };
-                            update_resume_title(&mut self.ui, title_buf, title, query);
-                            let lines = resume_list_lines(entries, filtered);
-                            if let Some(buf) = self.ui.buf_mut(list_buf) {
-                                buf.set_all_lines(lines);
-                            }
+                            refresh_resume_title(&mut self.ui, title_buf, *workspace_only, query);
+
+                            refresh_resume_list(&mut self.ui, list_buf, entries, filtered);
                         }
                         return Some(ui::KeyResult::Consumed);
                     }
@@ -2514,10 +2482,7 @@ impl App {
                                         current_cwd,
                                         content_cache.as_ref(),
                                     );
-                                    let lines = resume_list_lines(entries, filtered);
-                                    if let Some(buf) = self.ui.buf_mut(list_buf) {
-                                        buf.set_all_lines(lines);
-                                    }
+                                    refresh_resume_list(&mut self.ui, list_buf, entries, filtered);
                                 }
                             }
                         }
@@ -2567,16 +2532,9 @@ impl App {
                             current_cwd,
                             content_cache.as_ref(),
                         );
-                        let title = if *workspace_only {
-                            "resume (workspace)"
-                        } else {
-                            "resume (all)"
-                        };
-                        update_resume_title(&mut self.ui, title_buf, title, query);
-                        let lines = resume_list_lines(entries, filtered);
-                        if let Some(buf) = self.ui.buf_mut(list_buf) {
-                            buf.set_all_lines(lines);
-                        }
+                        refresh_resume_title(&mut self.ui, title_buf, *workspace_only, query);
+
+                        refresh_resume_list(&mut self.ui, list_buf, entries, filtered);
                         return Some(ui::KeyResult::Consumed);
                     }
                     _ => {}
@@ -3702,28 +3660,68 @@ fn ensure_resume_content_loaded(
     *content_cache = Some(pairs.into_iter().collect());
 }
 
-fn resume_list_lines(entries: &[render::ResumeEntry], filtered: &[usize]) -> Vec<String> {
+const RESUME_LEADING: usize = 2;
+const RESUME_SIZE_COL: usize = 8;
+const RESUME_TIME_COL: usize = 7;
+const RESUME_GAP: usize = 2;
+
+/// Render a resume entry list into `list_buf`: each row is
+/// `  {size:>8}  {time:>7}  {indent}{title}` with size+time dim.
+fn refresh_resume_list(
+    ui: &mut ui::Ui,
+    list_buf: ui::BufId,
+    entries: &[render::ResumeEntry],
+    filtered: &[usize],
+) {
     let now_ms = crate::session::now_ms();
-    filtered
-        .iter()
-        .filter_map(|&i| entries.get(i))
-        .map(|e| {
-            let title = resume_title(e);
-            let time_ago = crate::session::time_ago(resume_ts(e), now_ms);
-            format!("{time_ago}  {title}")
-        })
-        .collect()
+    let mut lines: Vec<String> = Vec::with_capacity(filtered.len());
+    let mut dim_ranges: Vec<(u16, u16)> = Vec::with_capacity(filtered.len());
+    for &idx in filtered {
+        let Some(e) = entries.get(idx) else {
+            continue;
+        };
+        let title = resume_title(e);
+        let time_ago = crate::session::time_ago(resume_ts(e), now_ms);
+        let size_str = e
+            .size_bytes
+            .map(crate::session::format_size)
+            .unwrap_or_default();
+        let indent = " ".repeat(e.depth * 2);
+        let line = format!(
+            "{leading}{size:>size_w$}{gap}{time:>time_w$}{gap}{indent}{title}",
+            leading = " ".repeat(RESUME_LEADING),
+            size = size_str,
+            time = time_ago,
+            size_w = RESUME_SIZE_COL,
+            time_w = RESUME_TIME_COL,
+            gap = " ".repeat(RESUME_GAP),
+        );
+        // dim runs from start (inclusive) to end of time column (exclusive).
+        let dim_end = (RESUME_LEADING + RESUME_SIZE_COL + RESUME_GAP + RESUME_TIME_COL) as u16;
+        dim_ranges.push((0, dim_end));
+        lines.push(line);
+    }
+    let Some(buf) = ui.buf_mut(list_buf) else {
+        return;
+    };
+    buf.set_all_lines(lines);
+    for (i, (start, end)) in dim_ranges.iter().enumerate() {
+        buf.add_highlight(i, *start, *end, ui::buffer::SpanStyle::dim());
+    }
 }
 
-fn update_resume_title(ui: &mut ui::Ui, title_buf: ui::BufId, title: &str, query: &str) {
+/// Render the resume title row: ` {label}: {query}` with the label
+/// dim. Single line (matches legacy inline title + search).
+fn refresh_resume_title(ui: &mut ui::Ui, title_buf: ui::BufId, workspace_only: bool, query: &str) {
     let Some(buf) = ui.buf_mut(title_buf) else {
         return;
     };
-    let search = if query.is_empty() {
-        String::new()
+    let label = if workspace_only {
+        " resume (workspace):"
     } else {
-        format!(" search: {query}")
+        " resume (all):"
     };
-    buf.set_all_lines(vec![title.into(), search]);
-    buf.add_highlight(0, 0, title.len() as u16, ui::buffer::SpanStyle::dim());
+    let line = format!("{label} {query}");
+    buf.set_all_lines(vec![line]);
+    buf.add_highlight(0, 0, label.len() as u16, ui::buffer::SpanStyle::dim());
 }

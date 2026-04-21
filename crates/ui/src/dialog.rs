@@ -328,6 +328,11 @@ impl Dialog {
                 scroll_top,
                 scrollbar,
             ));
+            // BufferView renders starting at its own scroll_offset;
+            // keep it in lock-step with the window's scroll_top so
+            // scrolling actually moves the visible rows (not just the
+            // scrollbar thumb).
+            panel.view.set_scroll(scroll_top as usize);
             y = y.saturating_add(h);
         }
     }
