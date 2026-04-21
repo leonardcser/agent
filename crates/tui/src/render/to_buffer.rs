@@ -11,9 +11,34 @@
 //! projection in one call.
 
 use super::display::{DisplayLine, SpanStyle as DisplaySpanStyle};
+use super::layout_out::SpanCollector;
 use super::paint::resolve;
 use crate::theme::Theme;
 use ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
+
+/// Run any `LayoutSink`-using renderer (inline diff, syntax
+/// highlighter, markdown, etc.) against a fresh `SpanCollector`,
+/// project the captured `DisplayBlock` into `buf`. Used by Confirm
+/// preview migration: existing renderers write to `&mut SpanCollector`
+/// unchanged; their styled output lands as `SpanStyle` highlights on
+/// `buf`, gaining scrollbar / selection / vim motions for free.
+#[allow(dead_code)] // wired up by the upcoming Confirm dialog migration
+pub(crate) fn render_into_buffer(
+    buf: &mut Buffer,
+    width: u16,
+    theme: &Theme,
+    fill: impl FnOnce(&mut SpanCollector),
+) {
+    let mut collector = SpanCollector::new(width);
+    fill(&mut collector);
+    let block = collector.finish();
+    let lines: Vec<ProjectedLine> = block
+        .lines
+        .iter()
+        .map(|l| project_display_line(l, theme))
+        .collect();
+    apply_to_buffer(buf, &lines);
+}
 
 #[derive(Default)]
 pub(crate) struct ProjectedLine {
@@ -152,6 +177,22 @@ mod tests {
             projected.highlights[0].2.fg,
             Some(Color::Rgb { r: 255, g: 0, b: 0 })
         );
+    }
+
+    #[test]
+    fn render_into_buffer_captures_inline_diff_output() {
+        use super::super::highlight::print_inline_diff;
+        let mut buf = make_buf();
+        let theme = test_theme();
+        render_into_buffer(&mut buf, 40, &theme, |sink| {
+            print_inline_diff(sink, "old\nline\n", "new\nline\n", "/tmp/x.txt", "old\nline\n", 0, 10);
+        });
+        // The diff renderer emits at least one styled line per changed
+        // line; projecting must produce non-empty buffer content.
+        assert!(buf.line_count() > 0);
+        // At least one line should have a highlight (diff bg / fg).
+        let any_highlight = (0..buf.line_count()).any(|i| !buf.highlights_at(i).is_empty());
+        assert!(any_highlight, "expected at least one styled span");
     }
 
     #[test]
