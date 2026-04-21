@@ -32,11 +32,11 @@ use std::time::{Duration, Instant};
 /// What a parked task is waiting for. When the wait is satisfied the
 /// driver resumes the thread with the stored value.
 enum TaskWait {
-    /// Resume on next drive tick with `nil`.
-    Ready,
-    /// Resume on next drive tick with this value (used by external
-    /// resolvers like `resolve_dialog`).
-    ReadyValue(LuaValue),
+    /// Resume on next drive tick with this value. New tasks start
+    /// with `Ready(Nil)` (fire-and-forget) or `Ready(args_table)`
+    /// (initial args for tool execute). External resolvers also set
+    /// this (`resolve_dialog` stores the answer here).
+    Ready(LuaValue),
     /// Resume with `nil` once `Instant` has passed.
     Sleep(Instant),
     /// Waiting for `resolve_dialog(dialog_id, …)` to be called.
@@ -106,12 +106,16 @@ impl LuaTaskRuntime {
         }
     }
 
-    /// Spawn a task from a Lua function. Returns the task id. The
-    /// task runs on the next `drive` call.
+    /// Spawn a task from a Lua function. The task runs on the next
+    /// `drive` call; `initial_arg` is passed to the handler on first
+    /// resume (i.e. becomes its first argument). Pass `Nil` for
+    /// zero-arg kickoffs (`smelt.task(fn)`) and the args table for
+    /// tool execute.
     pub fn spawn(
         &mut self,
         lua: &Lua,
         func: mlua::Function,
+        initial_arg: LuaValue,
         completion: TaskCompletion,
     ) -> LuaResult<u64> {
         let thread = lua.create_thread(func)?;
@@ -119,7 +123,7 @@ impl LuaTaskRuntime {
         self.tasks.push(LuaTask {
             id,
             thread,
-            wait: TaskWait::Ready,
+            wait: TaskWait::Ready(initial_arg),
             completion,
         });
         Ok(id)
@@ -132,7 +136,7 @@ impl LuaTaskRuntime {
     pub fn resolve_dialog(&mut self, dialog_id: u64, value: LuaValue) -> bool {
         for task in &mut self.tasks {
             if matches!(&task.wait, TaskWait::Dialog(id) if *id == dialog_id) {
-                task.wait = TaskWait::ReadyValue(value);
+                task.wait = TaskWait::Ready(value);
                 return true;
             }
         }
@@ -147,7 +151,7 @@ impl LuaTaskRuntime {
         let mut i = 0;
         while i < self.tasks.len() {
             let ready = match &self.tasks[i].wait {
-                TaskWait::Ready | TaskWait::ReadyValue(_) => true,
+                TaskWait::Ready(_) => true,
                 TaskWait::Sleep(deadline) => *deadline <= now,
                 TaskWait::Dialog(_) => false,
             };
@@ -169,9 +173,9 @@ impl LuaTaskRuntime {
     /// be dropped (finished or errored).
     fn step_task(&mut self, lua: &Lua, idx: usize, outputs: &mut Vec<TaskDriveOutput>) -> bool {
         let task = &mut self.tasks[idx];
-        let resume_arg = match std::mem::replace(&mut task.wait, TaskWait::Ready) {
-            TaskWait::Ready | TaskWait::Sleep(_) => LuaValue::Nil,
-            TaskWait::ReadyValue(v) => v,
+        let resume_arg = match std::mem::replace(&mut task.wait, TaskWait::Ready(LuaValue::Nil)) {
+            TaskWait::Ready(v) => v,
+            TaskWait::Sleep(_) => LuaValue::Nil,
             TaskWait::Dialog(_) => LuaValue::Nil, // unreachable per ready check
         };
         let result: LuaResult<LuaValue> = task.thread.resume(resume_arg);
@@ -334,7 +338,8 @@ mod tests {
         let lua = lua_with_sleep();
         let mut rt = LuaTaskRuntime::new();
         let func: mlua::Function = lua.load("function() end").eval().unwrap();
-        rt.spawn(&lua, func, TaskCompletion::FireAndForget).unwrap();
+        rt.spawn(&lua, func, LuaValue::Nil, TaskCompletion::FireAndForget)
+            .unwrap();
         let out = rt.drive(&lua, Instant::now());
         assert!(out.is_empty());
         assert_eq!(rt.tasks.len(), 0);
@@ -353,7 +358,8 @@ mod tests {
             )
             .eval()
             .unwrap();
-        rt.spawn(&lua, func, TaskCompletion::FireAndForget).unwrap();
+        rt.spawn(&lua, func, LuaValue::Nil, TaskCompletion::FireAndForget)
+            .unwrap();
 
         // First drive: task runs, yields sleep, parks.
         let t0 = Instant::now();
@@ -381,6 +387,7 @@ mod tests {
         rt.spawn(
             &lua,
             func,
+            LuaValue::Nil,
             TaskCompletion::ToolResult {
                 request_id: 7,
                 call_id: "c1".into(),
@@ -416,6 +423,7 @@ mod tests {
         rt.spawn(
             &lua,
             func,
+            LuaValue::Nil,
             TaskCompletion::ToolResult {
                 request_id: 1,
                 call_id: "x".into(),
@@ -437,6 +445,7 @@ mod tests {
         rt.spawn(
             &lua,
             func,
+            LuaValue::Nil,
             TaskCompletion::ToolResult {
                 request_id: 2,
                 call_id: "y".into(),

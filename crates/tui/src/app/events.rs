@@ -1880,6 +1880,38 @@ impl App {
         self.apply_ops(ops);
     }
 
+    /// Drive the `LuaTask` runtime and act on its outputs. Errors
+    /// are queued via `NotifyError` internally; only
+    /// `ToolComplete` (tool-as-task results) and `OpenDialog` (step
+    /// iv) need app-side routing.
+    pub(super) fn drive_lua_tasks(&mut self) {
+        let outs = self.lua.drive_tasks();
+        for out in outs {
+            match out {
+                crate::lua::TaskDriveOutput::ToolComplete {
+                    request_id,
+                    call_id,
+                    content,
+                    is_error,
+                } => {
+                    self.engine.send(protocol::UiCommand::PluginToolResult {
+                        request_id,
+                        call_id,
+                        content,
+                        is_error,
+                    });
+                }
+                crate::lua::TaskDriveOutput::OpenDialog { .. } => {
+                    // Wired in step (iv).
+                }
+                crate::lua::TaskDriveOutput::Error(msg) => {
+                    self.screen.notify_error(msg);
+                }
+            }
+        }
+        self.apply_lua_ops();
+    }
+
     pub(super) fn apply_ops(&mut self, ops: Vec<crate::lua::PendingOp>) {
         for op in ops {
             match op {

@@ -758,10 +758,7 @@ impl App {
             // ── Lua timer + notification pump ────────────────────────────
             self.snapshot_engine_context(agent.is_some());
             self.lua.tick_timers();
-            // Drive LuaTask runtime. Step (i) only surfaces Error
-            // (handled internally); OpenDialog/ToolComplete are wired
-            // in (iii)/(iv).
-            let _task_outputs = self.lua.drive_tasks();
+            self.drive_lua_tasks();
             self.screen.set_custom_status(self.lua.tick_statusline());
             for _id in self.screen.drain_finished_blocks() {
                 self.lua.emit(crate::lua::AutocmdEvent::BlockDone);

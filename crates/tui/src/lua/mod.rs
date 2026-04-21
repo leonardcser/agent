@@ -24,6 +24,17 @@ mod task;
 
 pub use task::{LuaTaskRuntime, TaskCompletion, TaskDriveOutput};
 
+/// Outcome of invoking a plugin tool handler.
+pub enum ToolExecResult {
+    /// Handler returned without yielding — caller forwards this
+    /// content to the engine immediately.
+    Immediate { content: String, is_error: bool },
+    /// Handler yielded (called an API that suspends on the
+    /// `LuaTask` runtime). The result will arrive later via
+    /// `drive_tasks() -> TaskDriveOutput::ToolComplete`.
+    Pending,
+}
+
 use mlua::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -1070,7 +1081,7 @@ impl LuaRuntime {
                 "task",
                 lua.create_function(move |lua, handler: mlua::Function| {
                     if let Ok(mut rt) = s.tasks.lock() {
-                        rt.spawn(lua, handler, TaskCompletion::FireAndForget)?;
+                        rt.spawn(lua, handler, LuaValue::Nil, TaskCompletion::FireAndForget)?;
                     }
                     Ok(())
                 })?,
@@ -1437,41 +1448,131 @@ impl LuaRuntime {
         defs
     }
 
-    /// Execute a plugin tool by calling the registered Lua handler.
-    /// Returns `(content, is_error)`.
+    /// Execute a plugin tool by spawning a `LuaTask` around the
+    /// registered handler.
+    ///
+    /// If the handler runs to completion without yielding (the common
+    /// case — today's plugins don't yield), the result is returned as
+    /// `ToolExecResult::Immediate` and the caller forwards it to the
+    /// engine right away.
+    ///
+    /// If the handler yields (e.g. calls `smelt.api.dialog.open` —
+    /// step iv), the task is parked and the result is delivered later
+    /// via `drive_tasks() -> TaskDriveOutput::ToolComplete`; the
+    /// caller receives `ToolExecResult::Pending` and forwards nothing.
     pub fn execute_plugin_tool(
         &self,
         tool_name: &str,
         args: &std::collections::HashMap<String, serde_json::Value>,
-    ) -> (String, bool) {
-        let handlers = self
-            .shared
-            .plugin_tools
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(handle) = handlers.get(tool_name) {
-            if let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) {
-                let args_table = self.lua.create_table().unwrap();
-                for (k, v) in args {
-                    if let Ok(lua_val) = json_to_lua(&self.lua, v) {
-                        let _ = args_table.set(k.as_str(), lua_val);
-                    }
+        request_id: u64,
+        call_id: &str,
+    ) -> ToolExecResult {
+        // Resolve the handler.
+        let func = {
+            let handlers = self
+                .shared
+                .plugin_tools
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let Some(handle) = handlers.get(tool_name) else {
+                return ToolExecResult::Immediate {
+                    content: format!("no plugin tool registered: {tool_name}"),
+                    is_error: true,
+                };
+            };
+            match self.lua.registry_value::<mlua::Function>(&handle.key) {
+                Ok(f) => f,
+                Err(_) => {
+                    return ToolExecResult::Immediate {
+                        content: format!("plugin tool handler not found: {tool_name}"),
+                        is_error: true,
+                    };
                 }
-                match func.call::<mlua::Value>(args_table) {
-                    Ok(mlua::Value::String(s)) => (s.to_string_lossy().to_string(), false),
-                    Ok(mlua::Value::Table(t)) => {
-                        let content: String = t.get("content").unwrap_or_default();
-                        let is_error: bool = t.get("is_error").unwrap_or(false);
-                        (content, is_error)
-                    }
-                    Ok(_) => ("plugin tool returned non-string value".to_string(), true),
-                    Err(e) => (format!("plugin tool error: {e}"), true),
-                }
-            } else {
-                (format!("plugin tool handler not found: {tool_name}"), true)
             }
-        } else {
-            (format!("no plugin tool registered: {tool_name}"), true)
+        };
+
+        // Bake args into a table. The table becomes the handler's
+        // first argument on initial `resume`, so it passes directly
+        // without a Rust thunk (which would block coroutine yield).
+        let args_table = match self.lua.create_table() {
+            Ok(t) => t,
+            Err(e) => {
+                return ToolExecResult::Immediate {
+                    content: format!("plugin tool arg table: {e}"),
+                    is_error: true,
+                };
+            }
+        };
+        for (k, v) in args {
+            if let Ok(lua_val) = json_to_lua(&self.lua, v) {
+                let _ = args_table.set(k.as_str(), lua_val);
+            }
+        }
+
+        // Spawn + drive once. If the task finishes immediately we can
+        // return the result inline; otherwise report Pending.
+        let mut rt = match self.shared.tasks.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return ToolExecResult::Immediate {
+                    content: "task runtime poisoned".into(),
+                    is_error: true,
+                };
+            }
+        };
+        if let Err(e) = rt.spawn(
+            &self.lua,
+            func,
+            mlua::Value::Table(args_table),
+            TaskCompletion::ToolResult {
+                request_id,
+                call_id: call_id.to_string(),
+            },
+        ) {
+            return ToolExecResult::Immediate {
+                content: format!("plugin tool spawn: {e}"),
+                is_error: true,
+            };
+        }
+        let outputs = rt.drive(&self.lua, Instant::now());
+        drop(rt);
+
+        // Partition outputs: a `ToolComplete` matching our request/call
+        // is the immediate result; anything else (Error / future
+        // OpenDialog) gets forwarded via the normal side channels.
+        let mut immediate: Option<(String, bool)> = None;
+        for out in outputs {
+            match out {
+                TaskDriveOutput::ToolComplete {
+                    request_id: rid,
+                    call_id: cid,
+                    content,
+                    is_error,
+                } if rid == request_id && cid == call_id => {
+                    immediate = Some((content, is_error));
+                }
+                TaskDriveOutput::Error(msg) => self.record_error(msg),
+                other => self.queue_task_output(other),
+            }
+        }
+        match immediate {
+            Some((content, is_error)) => ToolExecResult::Immediate { content, is_error },
+            None => ToolExecResult::Pending,
+        }
+    }
+
+    /// Forward a non-terminal task output (OpenDialog, a stray
+    /// ToolComplete) into the app's consumption path. Step (iv) wires
+    /// OpenDialog; for now log a debug warning.
+    fn queue_task_output(&self, out: TaskDriveOutput) {
+        match out {
+            TaskDriveOutput::OpenDialog { .. } => {
+                self.record_error("dialog.open from plugin tool: not wired until step iv".into());
+            }
+            TaskDriveOutput::ToolComplete { .. } => {
+                // Unmatched completion — orphaned task. Swallow.
+            }
+            TaskDriveOutput::Error(msg) => self.record_error(msg),
         }
     }
 
@@ -1921,6 +2022,79 @@ mod tests {
             .eval()
             .expect("eval");
         assert_eq!(version, crate::api::VERSION);
+    }
+
+    #[test]
+    fn plugin_tool_runs_as_task_immediate() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                smelt.api.tools.register({
+                  name = "echo",
+                  description = "",
+                  parameters = { type = "object", properties = {} },
+                  execute = function(args) return "hi " .. (args.who or "?") end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let mut args = std::collections::HashMap::new();
+        args.insert("who".into(), serde_json::json!("world"));
+        match rt.execute_plugin_tool("echo", &args, 1, "c1") {
+            ToolExecResult::Immediate { content, is_error } => {
+                assert_eq!(content, "hi world");
+                assert!(!is_error);
+            }
+            ToolExecResult::Pending => panic!("expected immediate"),
+        }
+    }
+
+    #[test]
+    fn plugin_tool_yield_returns_pending_then_tool_complete() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                smelt.api.tools.register({
+                  name = "wait_then_yes",
+                  description = "",
+                  parameters = { type = "object", properties = {} },
+                  execute = function()
+                    smelt.api.sleep(0)
+                    return "yes"
+                  end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let args = std::collections::HashMap::new();
+        match rt.execute_plugin_tool("wait_then_yes", &args, 7, "c9") {
+            ToolExecResult::Pending => {}
+            ToolExecResult::Immediate { .. } => panic!("expected pending after yield"),
+        }
+        // Drive again — the sleep(0) is elapsed, so the task resumes and completes.
+        let outs = rt.drive_tasks();
+        let complete = outs
+            .iter()
+            .find(|o| matches!(o, TaskDriveOutput::ToolComplete { .. }))
+            .expect("expected ToolComplete");
+        match complete {
+            TaskDriveOutput::ToolComplete {
+                request_id,
+                call_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(*request_id, 7);
+                assert_eq!(call_id, "c9");
+                assert_eq!(content, "yes");
+                assert!(!*is_error);
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]

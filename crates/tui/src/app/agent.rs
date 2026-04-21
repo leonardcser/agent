@@ -694,6 +694,11 @@ impl App {
 
     /// Execute a plugin-defined tool by calling the Lua handler registered for
     /// it. If no handler is found, returns an error result to the engine.
+    ///
+    /// Handlers run as `LuaTask`s. A handler that doesn't yield
+    /// completes synchronously and the result is forwarded right away.
+    /// A handler that yields (e.g. via `smelt.api.dialog.open`) parks;
+    /// its result arrives later through `drive_tasks()`.
     fn handle_plugin_tool(
         &mut self,
         request_id: u64,
@@ -701,13 +706,22 @@ impl App {
         tool_name: String,
         args: std::collections::HashMap<String, serde_json::Value>,
     ) {
-        let (content, is_error) = self.lua.execute_plugin_tool(&tool_name, &args);
-        self.engine.send(protocol::UiCommand::PluginToolResult {
-            request_id,
-            call_id,
-            content,
-            is_error,
-        });
+        match self
+            .lua
+            .execute_plugin_tool(&tool_name, &args, request_id, &call_id)
+        {
+            crate::lua::ToolExecResult::Immediate { content, is_error } => {
+                self.engine.send(protocol::UiCommand::PluginToolResult {
+                    request_id,
+                    call_id,
+                    content,
+                    is_error,
+                });
+            }
+            crate::lua::ToolExecResult::Pending => {
+                // Result will be delivered via drive_tasks.
+            }
+        }
     }
 
     /// Handle engine events that arrive when no agent turn is active.
@@ -1102,13 +1116,20 @@ impl App {
                 let should_cancel = match &choice {
                     ConfirmChoice::PluginApprove(option_index) => {
                         let args = ctx.as_ref().map(|c| c.args.clone()).unwrap_or_default();
-                        let (content, is_error) = self.lua.execute_plugin_tool(&tool_name, &args);
-                        self.engine.send(protocol::UiCommand::PluginToolResult {
-                            request_id,
-                            call_id: call_id.clone(),
-                            content,
-                            is_error,
-                        });
+                        match self
+                            .lua
+                            .execute_plugin_tool(&tool_name, &args, request_id, &call_id)
+                        {
+                            crate::lua::ToolExecResult::Immediate { content, is_error } => {
+                                self.engine.send(protocol::UiCommand::PluginToolResult {
+                                    request_id,
+                                    call_id: call_id.clone(),
+                                    content,
+                                    is_error,
+                                });
+                            }
+                            crate::lua::ToolExecResult::Pending => {}
+                        }
                         self.lua.invoke_confirm_callback(&tool_name, *option_index);
                         self.apply_lua_ops();
                         self.screen.set_active_status(&call_id, ToolStatus::Pending);
