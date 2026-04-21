@@ -43,6 +43,86 @@ These directives govern how this plan is executed. They override defaults.
   with pros/cons. Include the bold option (what would a clean rewrite look
   like?). Let the user choose the direction.
 
+### Testing interactive TUI changes via tmux
+
+Smelt is a full-screen TUI; `cargo test` only covers unit-testable
+logic. For anything visual (dialog rendering, layout, selection
+highlight, prompt shifts), drive the real binary in a tmux pane and
+capture the screen.
+
+1. **Target pane = split inside `smelt:4`** (the worktree window).
+   **Never** run the binary in the pane the assistant is typing
+   into, and never launch a new tmux window — always split the
+   worktree window so both the chat pane and the app pane stay
+   visible to the user.
+2. Create a side pane once and keep its `%id`:
+   ```bash
+   tmux split-window -h -t smelt:4 -c <worktree-path> -P -F '#{pane_id}'
+   ```
+3. Pre-build the binary in the assistant pane
+   (`cargo build --quiet`), then launch the already-compiled binary
+   in the side pane so `cargo run`'s compile output doesn't pollute
+   the captured screen:
+   ```bash
+   tmux send-keys -t %ID './target/debug/smelt' Enter
+   ```
+4. Drive the app with `tmux send-keys` and inspect with
+   `tmux capture-pane -t %ID -p | tail -N`. Don't interrupt the
+   process with `C-c` in the chat pane unless you mean to close the
+   app; when the app exits, the pane dies and you have to recreate
+   it.
+5. For panel content debugging, avoid `eprintln!` (crossterm raw
+   mode swallows stderr). Write to a dedicated logfile:
+   ```rust
+   if let Ok(mut f) = std::fs::OpenOptions::new()
+       .append(true).create(true).open("/tmp/smelt-draw.log")
+   {
+       let _ = writeln!(f, "...");
+   }
+   ```
+   Then `grep` the file between runs. Remove the writes before
+   committing.
+
+### UI conventions
+
+- **Dialog titles are lowercase.** `resume (workspace):`,
+  `permissions`, `help`. Uppercase is reserved for proper nouns
+  (session titles, model names, file paths).
+- **Meta columns are dim, content is normal.** Example in resume
+  list rows: size + time columns use `SpanStyle::dim()`; the actual
+  title keeps the default fg. Selection then retints the *whole*
+  row fg to accent so the selected row pops.
+- **Selection = fg-accent on the cursor row.** No bg fill, no
+  cursor glyph, no layout shift. Single mechanism across every list
+  panel (Step 9.4 choice; see below).
+- **Gap above the hints row.** Every dialog reserves one blank row
+  between panel content and the hints so the layout breathes.
+
+### Known bugs to address during Step 9.4 / 9.5
+
+Stashed here as the migration uncovers them; each gets fixed inside
+the step that rewrites the surrounding code, not as a separate
+patch.
+
+- **Clear command leaves the screen in a half-drawn state.** After
+  `/clear` the prompt window's chrome (top/bottom bars,
+  notification row) disappears or renders stale glyphs. Happens
+  because the clear path tears down screen state but doesn't force
+  a full compositor redraw against the new buffer contents. Fix
+  during the prompt + compositor cleanup in 9.6 / 9.9.
+- **Confirm / Question / Agents dialogs still use the legacy
+  `trait Dialog`.** They render via the separate `Frame` / `RenderOut`
+  path and therefore ignore the fg-accent selection convention,
+  the hints-gap rule, and the callback registry. Fixed when they
+  migrate in Step 9.5.
+- **Resume search typed chars collide with vim j/k.** Typed chars
+  feed the search query so `j` / `k` never reach navigation. Arrow
+  keys work. Revisit when the search moves to a real Input panel
+  (Step 9.6 unlocks that).
+- **No hardware cursor in dialogs.** `Dialog::cursor` returns
+  `None` for now; once Input panels are wired we surface a proper
+  hardware cursor for the text-edit panel.
+
 ---
 
 ## Vision
@@ -824,14 +904,13 @@ panel under the cursor receives the event via its window's
 dialog regression. `app/events.rs` stops hand-routing mouse events
 to `Content`/`Prompt`.
 
-**Step 9.4 — Unified behavior model: per-window keymaps + events.**
+**Step 9.4 — Unified behavior model: per-window keymaps + per-dialog trait.**
 
-The current shape — each built-in dialog's logic smeared across
+The current shape — every built-in dialog's logic smeared across
 `open_X_float`, `handle_builtin_float_select`, `intercept_float_key`,
-and free helpers at the bottom of `events.rs` — is
-effectively Neovim-style data primitives (Buffer, Window) paired
-with ad-hoc behavior glue in an `App` god-object. Three parallel
-behavior mechanisms exist today:
+and free helper fns at the bottom of `events.rs` — is Neovim-style
+data primitives (Buffer, Window) paired with ad-hoc behavior glue in
+an `App` god-object. Three parallel behavior mechanisms exist:
 
 1. Legacy `render::dialogs::Dialog` trait (being retired).
 2. `BuiltinFloat` enum + `intercept_float_key` +
@@ -839,154 +918,183 @@ behavior mechanisms exist today:
 3. `lua::PendingOp` + `lua::Shared::callbacks` — already the right
    actor/effect shape, used only by Lua today.
 
-Collapse them into one before migrating the last three dialogs or
-growing the Lua surface further.
+**The end state: two behavior paths that share primitives.**
 
-**The unified model (Neovim-shaped)**
+After extensive discussion (see the three options explored in the
+plan history: A=keep enum, B=full `Rc<RefCell>`, C=per-dialog trait)
+we settled on **C as the built-in path and a separate per-window
+callback registry for Lua / pure-UI consumers**. The two paths share
+`ui::Buffer`, `ui::Window`, `ui::Dialog`, `ui::Component` — the
+*primitives* — but dispatch behavior differently based on whether
+the dialog author has direct access to `App`.
 
-- **Exactly one trait: `Component`.** Rendering polymorphism only.
-  No `Dialog` / `DialogBehavior` / `FloatBehavior` trait exists.
-- **Two data primitives: `Buffer`, `Window`.** Unchanged.
-- **One behavior mechanism: per-window keymaps + events**, with
-  Rust and Lua callbacks sharing a single registry.
+**Path 1 — Built-in Rust dialogs use `DialogState` trait.**
+
+One file per dialog under `tui/src/dialogs/`. Each file defines a
+struct holding that dialog's state and `impl DialogState` for it.
+Struct + logic + helper fns all sit together.
 
 ```rust
-// In crates/ui/
-pub enum WinEvent {
-    Open, Close, Resize,
-    FocusGained, FocusLost,
-    SelectionChanged,  // list cursor moved
-    Submit,            // Enter on List / Input
-    TextChanged,       // Input buffer edited
-    Dismiss,           // Esc / configured dismiss key
+// crates/ui/src/component.rs (or a new dialog_state.rs in tui)
+pub trait DialogState: 'static {
+    /// Handle a key for this dialog's custom behavior. Returns
+    /// `true` if consumed; `false` falls through to the Dialog
+    /// component's default nav.
+    fn handle_key(
+        &mut self,
+        app: &mut App,
+        win: WinId,
+        code: KeyCode,
+        mods: KeyModifiers,
+    ) -> bool;
+
+    /// Fired when the Dialog emits `select:N` (Enter on a List).
+    fn on_select(
+        &mut self,
+        app: &mut App,
+        win: WinId,
+        idx: usize,
+        agent: &mut Option<TurnState>,
+    ) {}
+
+    /// Fired when the dialog is dismissed (Esc / Ctrl+C /
+    /// configured dismiss key). Runs before `close_float`.
+    fn on_dismiss(&self, app: &mut App, win: WinId) {}
 }
 
-pub enum Payload {
-    None,
-    Key { code: KeyCode, mods: KeyModifiers },
-    Selection { index: usize },
-    Text { content: String },
-}
+// In App:
+float_states: HashMap<WinId, Box<dyn DialogState>>,
+```
 
-pub struct CallbackCtx<'a> {
-    pub ui: &'a mut Ui,
-    pub win: WinId,
-    pub payload: Payload,
-    pub ops: &'a mut Vec<PendingOp>,
-}
+The key routing in `App::dispatch_terminal_event` collapses to:
 
-pub enum CallbackResult { Consumed, Pass }
-
-pub enum Callback {
-    Rust(Box<dyn FnMut(&mut CallbackCtx) -> CallbackResult>),
-    Lua(LuaHandle),
-}
-
-impl Ui {
-    pub fn win_set_keymap(&mut self, win: WinId, key: KeyBind, cb: Callback);
-    pub fn win_clear_keymap(&mut self, win: WinId, key: KeyBind);
-    pub fn win_on_event(&mut self, win: WinId, ev: WinEvent, cb: Callback);
+```rust
+fn intercept_float_key(&mut self, code, mods) -> Option<ui::KeyResult> {
+    let win = self.ui.focused_float()?;
+    // Take the state out so the handler can borrow `&mut App`
+    // without overlapping with the `float_states` table.
+    let mut state = self.float_states.remove(&win)?;
+    let consumed = state.handle_key(self, win, code, mods);
+    self.float_states.insert(win, state);
+    consumed.then_some(ui::KeyResult::Consumed)
 }
 ```
 
-**Key routing**
+Each dialog file looks roughly like `resume.rs`:
+```rust
+pub struct Resume {
+    entries: Vec<ResumeEntry>,
+    title_haystacks: Vec<String>,
+    cwd: String,
+    query: String,
+    workspace_only: bool,
+    filtered: Vec<usize>,
+    pending_d: bool,
+    content_cache: Option<HashMap<String, String>>,
+    list_buf: BufId,
+    title_buf: BufId,
+}
 
-`Compositor::handle_key` dispatches in order:
+impl Resume {
+    pub fn open(app: &mut App, entries: Vec<ResumeEntry>) { /* builds bufs, panels, dialog */ }
+    fn refresh_list(&self, ui: &mut Ui) { /* writes rows with dim spans */ }
+    fn refresh_title(&self, ui: &mut Ui) { /* inline title + query */ }
+    fn delete_selected(&mut self, app: &mut App, win: WinId) { /* ... */ }
+}
 
-1. Focused window's keymap table (Rust or Lua callback).
-2. Component's `handle_key` fallback — generic nav (Tab / BackTab /
-   arrow keys / j / k / etc.) lives here so every dialog doesn't
-   need to rebind them.
-3. Ignored.
-
-Keymaps override `handle_key`, so a dialog can bind `Enter` to its
-own handler and skip the default List-submit wiring. Built-in nav
-stays in `Component::handle_key` (decision: keeping it is cheaper
-than forcing per-window ceremony for nav keys).
-
-**Effects flow through `PendingOp`**
-
-Callbacks never mutate `App` directly. They push variants to
-`ctx.ops`, which the app drains via the existing `apply_ops`
-reducer after each key / mouse event. New variants added as
-needed: `ResumeSession`, `RewindTo`, `DeletePermission`,
-`CopyToClipboard`, `ExportFile`, `CloseDialog`, etc. One reducer,
-shared by Rust + Lua.
-
-**What each dialog becomes**
-
-One file in `tui/src/dialogs/<name>.rs`. The function:
-1. Creates the buffers and panel specs.
-2. Opens the dialog via `ui.dialog_open(...)`.
-3. Wires keymaps / events via `ui.win_set_keymap` /
-   `ui.win_on_event`. Shared state (filter query, workspace
-   toggle, list cache) lives in `Rc<RefCell<State>>` captured by
-   the closures.
-
-Deletions in the same commit that introduces this model:
-- `BuiltinFloat` enum (all variants).
-- `intercept_float_key`, `handle_builtin_float_select`,
-  `handle_builtin_float_dismiss`, `App::float_tags` map.
-- Per-dialog helper fns currently scattered at the bottom of
-  `events.rs` move into their dialog file.
-
-**Lua parity**
-
-```lua
-local win = smelt.ui.dialog_open({ panels = {...}, placement = {...} })
-smelt.ui.win_set_keymap(win, '<c-w>', function(ctx) ... end)
-smelt.ui.win_on_event(win, 'submit', function(ctx) ... end)
+impl DialogState for Resume {
+    fn handle_key(&mut self, app, win, code, mods) -> bool { /* custom keys */ }
+    fn on_select(&mut self, app, win, idx, agent) { /* load session */ }
+}
 ```
 
-Identical shape to Rust. The litmus test: every built-in dialog
-could be rewritten in Lua without framework changes.
+`BuiltinFloat` enum dies; each variant becomes a struct in its own
+file. `handle_builtin_float_select` and `handle_builtin_float_dismiss`
+die (inlined into `DialogState::on_select` / `on_dismiss`).
+`intercept_float_key` becomes the four-line dispatcher above.
 
-**Decisions recorded**
+Estimated shrinkage in `events.rs`: ~1500 lines out, ~100 in
+(just the dispatcher + helpers used by more than one dialog).
 
-- **Callbacks are boxed `FnMut` closures with `Rc<RefCell<T>>`** for
-  shared state. Ergonomic and matches Lua's capture semantics.
-  (Not fn-ptrs + explicit state arguments.)
-- **`Component::handle_key` stays as a fallback path** after
-  keymaps. Removing it would force every generic nav binding
-  (Tab / arrow / j / k) to be registered per window, which is
-  ceremony without gain.
+**Path 2 — Lua + pure-UI consumers use the `ui::callback` registry.**
+
+Already built (crates/ui/src/callback.rs). `Ui::win_set_keymap` and
+`Ui::win_on_event` store Rust closures or `LuaHandle`s keyed by
+WinId. Dispatch happens in `Compositor::handle_key` *before*
+falling through to `Component::handle_key` (the fallback for
+generic nav).
+
+Lua plugins register via `smelt.ui.win_set_keymap(win, key, fn)`.
+Rust callers that don't need `&mut App` (or that want Lua parity)
+can register the same way. Built-in dialogs that *do* need App use
+Path 1 instead — no acrobatics required to reach engine/session
+state through a closure boundary.
+
+Both paths can coexist on the same dialog. A built-in dialog can
+implement `DialogState` for its chords and also register a Lua-style
+callback for user-extensible hotkeys.
+
+**Effects**
+
+- Built-in dialogs (Path 1): mutate `&mut App` directly inside
+  `handle_key` / `on_select` / `on_dismiss`. Typed, synchronous,
+  obvious. This is where most built-in behavior lives.
+- Lua / pure-UI callbacks (Path 2): push `PendingOp` variants via
+  `CallbackCtx::ops`, drained by `App::apply_ops`. The reducer is
+  shared with Lua today and keeps the clean "effects go through a
+  queue" story for plugin authors.
+
+**Key routing order**
+
+`Compositor::handle_key` dispatches:
+
+1. Focused window's keymap table from `ui::callback` (Path 2).
+2. `Component::handle_key` fallback (generic nav: Tab / arrows /
+   j / k / Enter for List-submit / Esc+Ctrl+C for dismiss).
+3. If the component emits a `KeyResult::Action`, App interprets
+   it. For built-in dialogs, that's where Path 1 hooks in:
+   `select:N` → `DialogState::on_select`, `dismiss` →
+   `DialogState::on_dismiss` + `close_float`.
+4. If no handler consumed, App may also give the active
+   `DialogState` a raw-key pass via `intercept_float_key` for
+   custom chords (`dd`, `ctrl+w` search toggle, typed-char search
+   input).
 
 **Retroactive scope**
 
-This step refactors the already-migrated dialogs (Help, Export,
-Rewind, Permissions, Ps, Resume) onto the new shape. Step 9.5
+This step refactors the six already-migrated dialogs (Help, Export,
+Rewind, Permissions, Ps, Resume) into per-dialog files under
+`tui/src/dialogs/`, each owning its `DialogState` impl. Step 9.5
 below then migrates the last three (Confirm, Question, Agents)
 straight to the final shape.
 
-**Known rendering bug to resolve during 9.4**
+**Lessons from the testing-driven iteration**
 
-Post-migration (as of the Resume migration commit), the new
-Dialog-backed floats render the accent top rule, the list cursor
-arrow, and the hints row — but **no panel content text** is
-visible. Likely causes to check when rewriting each dialog file:
+Real-device testing in a tmux pane (see "Testing interactive TUI
+changes via tmux" above) surfaced several bugs inside the new
+Dialog plumbing that unit tests missed. All fixed; record them so
+future work doesn't re-introduce them:
 
-1. `BufferView::scroll_offset` is not synced from
-   `panel.win.scroll_top` in `Dialog::prepare`. On first frame
-   `scroll_top == 0` so this shouldn't hide content, but it will
-   bite any time the list is scrolled.
-2. `Dialog::draw_panel` fills the content slice with the dialog's
-   background style (bg: Black), then `BufferView::draw_content`
-   paints glyphs with `Style::default()` (fg: None, bg: None). The
-   `None` bg overwrites the Black fill, so content chars render
-   on the *terminal* default bg instead of the dialog's bg. On a
-   dark terminal with a near-black default the chars can be
-   indistinguishable. Fix: inherit `config.background_style.bg`
-   when `bg_override` is None in `BufferView::draw_content`, or
-   thread the dialog bg into the view as a default before glyphs
-   are painted.
-3. `sync_from_bufs`'s closure lifetime signature may silently
-   not match when called from `Ui::sync_float_content`; if the
-   Dialog downcast succeeds but the closure is never invoked,
-   panel views stay empty. Verify with a unit test that draws
-   Help into a grid and asserts content bytes land in cells.
-
-Resolve as part of each dialog rewrite in 9.4, not as a separate
-patch — the unified refactor touches these code paths anyway.
+- `Buffer::set_all_lines` used to early-return on `modifiable=false`,
+  silently leaving every dialog buffer empty. `modifiable` now
+  guards only interactive window edits, not framework API calls.
+  Every builtin buffer creates with `modifiable: false` and is
+  populated by `set_all_lines` without issue.
+- `BufferView` now carries a `default_style` used as the cell
+  fallback; `Dialog::new` and `sync_from_bufs` propagate the
+  dialog's bg so panel glyphs stay readable on the dialog fill.
+- `Dialog::prepare` synchronizes `panel.win.scroll_top` →
+  `panel.view.scroll_offset` each frame. Without this, scrolling
+  moved only the scrollbar thumb, not the visible rows.
+- List selection is fg-accent retint on the cursor row. One shared
+  mechanism across every dialog, no bg fill (bg fills hid content
+  with stub `slice_cell` returning `' '` over real glyphs). The
+  old "block cursor arrow" approach was mis-using absolute rects
+  and got dropped.
+- Every dialog reserves a 1-row gap above the hints row inside the
+  layer itself (`hints_rows = 2` in `resolve_panel_rects`, hints
+  painted at the bottom, blank row above) so the layout breathes.
+- Ctrl+C is a built-in dismiss key, matching the legacy UX.
 
 **Step 9.5 — Migrate the final three dialogs onto the unified model.**
 Order: Confirm (heaviest — exercises Content preview with syntax
