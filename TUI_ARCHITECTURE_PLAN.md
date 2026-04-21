@@ -687,6 +687,42 @@ Steps 1–4 complete:
   Removed manual cursor painting from TranscriptView and PromptView
   `draw()`. Deleted SoftCursor → CursorInfo conversion in `set_cursor`.
 
+**Step 6h: Eliminate nav text** — The transcript currently maintains
+two text representations: "display text" (full rendered lines) and
+"nav text" (selectable characters only). All Window state
+(`cpos`, `cursor_col`, `selection_anchor`) stores nav-text
+coordinates, requiring constant conversion via
+`nav_col_to_display_col` / `display_col_to_nav_col`. This causes
+cursor positioning bugs and architectural complexity.
+
+Migration:
+1. Change Window coordinates to display-text space (cursor_col
+   is a display column, cpos is a byte offset in display text).
+2. Replace `full_transcript_nav_text()` with display text (Buffer
+   lines) everywhere — vim motions, selection, copy, click, scroll.
+3. Post-motion snapping: after every cursor motion, call
+   `snap_to_selectable()` to skip non-selectable cells. This is
+   analogous to how editors skip folded lines.
+4. Copy operations use `SpanMeta.copy_as` / `SpanMeta.selectable`
+   to extract only selectable content from display-text byte ranges.
+5. Delete all nav↔display conversion functions from
+   TranscriptSnapshot: `nav_rows`, `nav_col_to_display_col`,
+   `display_col_to_nav_col`, `nav_byte_to_row_col`,
+   `copy_nav_byte_range`. Delete `full_transcript_nav_text` from
+   Screen.
+
+**Step 6i: Prompt rendering through Buffer** — Replace the
+PromptRow/StyledSegment pipeline with Buffer + BufferView rendering.
+`compute_prompt()` syncs input text to a `ui::Buffer` with highlights
+and decorations each frame (same projection pattern as transcript).
+Chrome (notification bar, top/bottom bars, queued messages) drawn
+at the app level around the BufferView. Delete PromptRow,
+StyledSegment, most of prompt_data.rs, PromptView.
+
+**Step 6j: Unified WindowView** — Both transcript and prompt
+surfaces render through BufferView + optional scrollbar. Delete
+TranscriptView. One component type for all buffer-backed surfaces.
+
 Next: Step 6e — rewrite btw.lua as pure Lua plugin.
 
 ## Phase 7: Event dispatch
