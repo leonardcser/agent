@@ -356,6 +356,34 @@ all project into `ui::Buffer` as `Span` / `SpanStyle` and per-line
 draws confirm previews, code diffs, notebook previews, and search-
 result highlights. Lua plugins get the same highlight API.
 
+**The pipeline already exists.** The legacy preview renderers —
+`print_inline_diff`, `render_notebook_preview`, `print_syntax_file`,
+`BashHighlighter::print_line`, `render_markdown_inner` — all write
+to a generic `LayoutSink` trait. `SpanCollector: LayoutSink` in
+`render/layout_out.rs` accumulates their output into a
+`DisplayBlock` (lines + styled spans + fill-bg decorations).
+`transcript_buf.rs::project_display_line` + `apply_to_buffer`
+project that `DisplayBlock` into a `ui::Buffer` — theme-resolved
+`SpanStyle` highlights + `LineDecoration`.
+
+Confirm's preview migration is therefore **not** a renderer
+rewrite. It's:
+
+1. Promote the transcript's `project_display_line` + `apply_to_buffer`
+   helpers to a reusable module (`render/to_buffer.rs` or
+   public on `BufferProjection`).
+2. For each preview variant, at dialog-open time: create a
+   `SpanCollector`, call the existing renderer against it, finish
+   into a `DisplayBlock`, project into a fresh `ui::Buffer`.
+3. Plant the buffer in `Ui::bufs` and open the Confirm dialog
+   with a `PanelSpec::content(preview_buf, PanelHeight::Fill)`
+   panel.
+
+The buffer is static after creation (previews never update
+post-open), so no re-projection loop is needed. Scrolling, cursor,
+selection, and the scrollbar come from `ui::Window` +
+`ui::BufferView` with zero dialog-specific code.
+
 ### Reuse inventory
 
 This model works because the dialog framework is almost entirely
@@ -421,9 +449,16 @@ widget; a buffer-panel behaves as today.
 - `OptionList` — single- or multi-select; per-item checkbox glyph;
   chord-key map for pre-default keybinds (Confirm's `a` / `n` /
   `e` / `l`).
-- `Preview` — read-only buffer with pre-computed highlights (bash,
-  diff, syntect). Confirm's tool-call preview.
 - `TabBar` — single-row label strip for multi-question headers.
+
+Previews (Confirm's inline diff / notebook diff / syntax-highlit
+file / markdown) are **not** widgets. They are buffer-backed
+`Content` panels whose buffer is populated once, at open time, via
+the legacy renderer → `SpanCollector` → `DisplayBlock` →
+`Buffer` pipeline (see "Shared rendering for diffs and code"
+below). Scrollbar, viewport, selection, and vim motions come for
+free from `ui::Window` + `ui::BufferView`. No renderer code
+changes.
 
 Dialog authors can also write ad-hoc widgets inline.
 
@@ -1222,68 +1257,102 @@ focusable-flag design all live under "Design principles" above.
 This step is the sequenced landing plan. Each item is one commit,
 independently reversible.
 
-1. **Foundation A — blocking semantics.** Add
-   `DialogState::blocks_agent()` (default `false`). Gate the
-   engine-drain loop on the focused float's blocks_agent in
-   addition to the legacy `active_dialog` check. Ground for any
-   blocking dialog in the new path.
+**Foundations (landed):**
 
-2. **Foundation B — `FloatConfig.focusable: bool`.** New field,
-   default `true`. Cycle logic (when we add it) + cursor motion
-   already can't reach floats without explicit API; just plumb the
-   flag through `dialog_open` and `add_float_component`.
+1. ✅ **Foundation A — blocking semantics.** `DialogState::blocks_agent()`
+   gates engine-drain loop on the focused float. Commit `588d1d2`.
 
-3. **Foundation C — `PanelContent` + `PanelWidget`.** Split
-   buffer-only `Panel` into `PanelContent::{Buffer, Widget}`. Add
-   the trait. All six migrated dialogs keep working (Buffer
-   variant); no call-site change.
+2. ✅ **Foundation B — `FloatConfig.focusable: bool`.** Plumbed
+   through `dialog_open` and `win_open_float`. Commit `fdc10db`.
 
-4. **Widget — `TextInput`** in `crates/ui/src/widgets/text_input.rs`.
+3. ✅ **Foundation C — `PanelContent` + `PanelWidget`.** Panels
+   hold either a `Buffer(BufId)` or a `Widget(Box<dyn PanelWidget>)`.
+   All six migrated dialogs keep working. Commit `84dc825`.
+
+**Projection pipeline (prerequisite for Confirm previews):**
+
+4. **Buffer projection helper.** Promote `project_display_line` +
+   `apply_to_buffer` out of `render/transcript_buf.rs` into a
+   reusable helper (`render/to_buffer.rs`). API shape:
+   ```rust
+   pub fn render_into_buffer(
+       buf: &mut ui::Buffer,
+       width: u16,
+       theme: &Theme,
+       fill: impl FnOnce(&mut SpanCollector),
+   );
+   ```
+   `fill` is handed a SpanCollector and calls any `LayoutSink`
+   renderer (`print_inline_diff`, `render_markdown_inner`, etc.)
+   against it. Helper finishes, projects, writes into buf.
+   Transcript keeps using its existing path; new callers use
+   the helper.
+
+**Widgets:**
+
+5. **Widget — `TextInput`** in `crates/ui/src/widgets/text_input.rs`.
    Wraps a `Window` + `Buffer`. Delegates keys to
    `Window::apply_action`. Exposes `text()`, `clear()`,
    `append(&str)`.
 
-5. **Widget — `OptionList`** in `crates/ui/src/widgets/option_list.rs`.
-   Single or multi-select. Checkbox glyph when multi. Chord-key map
-   for pre-default keybinds (Confirm's `a` / `n` / `e` / `l`).
+6. **Widget — `OptionList`** in `crates/ui/src/widgets/option_list.rs`.
+   Single- or multi-select. Checkbox glyph when multi. Chord-key
+   map for pre-default keybinds (Confirm's `a` / `n` / `e` / `l`).
+   Rows carry optional per-item description strings for Question.
 
-6. **Widget — `Preview`** in `crates/ui/src/widgets/preview.rs`.
-   Read-only buffer with pre-computed highlight spans. Bash / diff
-   / syntect highlighter selected at open time, baked into buffer
-   spans, never recomputed.
+7. **Widget — `TabBar`** in `crates/ui/src/widgets/tab_bar.rs`.
+   Single-row label strip. Left/Right arrows to switch tabs;
+   emits `Action("tab:N")`. For Question's multi-question header.
 
-7. **Escape hatch — `Ui::add_float_component(rect, zindex, cfg,
-   Box<dyn Component>)`.** Raw compositor layer with a `WinId`. Lua
-   bindings wire to this later.
+**Escape hatch (optional, backlog):**
 
-8. **Migrate Question** → `crates/tui/src/app/dialogs/question.rs`.
-   Panels: `[TabBar (if >1), Header(Content), OptionList(multi),
-   TextInput("Other:" when selected)]`. State machine: `impl
-   DialogState for Question`. `blocks_agent() = true`. Emits
-   answer via `App::resolve_question`.
+8. **`Ui::add_float_component(rect, zindex, cfg, Box<dyn Component>)`.**
+   Raw compositor layer for oddball custom floats. Not needed to
+   migrate Confirm/Question but useful for future Lua plugins.
 
-9. **Migrate Confirm** → `crates/tui/src/app/dialogs/confirm.rs`.
-   Panels: `[MessageHeader(Content), Preview, OptionList(chord),
-   TextInput(reason)]`. State tracks Always-menu expansion and
-   reason-editing mode. `blocks_agent() = true`. Deferred-open via
-   `pending_dialogs` queue (App-level, unchanged).
+**Migrations:**
 
-10. **Delete legacy.** After 8 and 9 land:
+9. **Migrate Question** → `crates/tui/src/app/dialogs/question.rs`.
+   Panels: `[TabBar (widget, if >1), Header(Content), Options
+   (OptionList widget), Other(TextInput widget, when Other row
+   selected)]`. `impl DialogState for Question`. `blocks_agent()
+   = true`. Emits answer via `App::resolve_question`.
+
+10. **Migrate Confirm previews** — port each `ConfirmPreview`
+    variant to `fn build_preview_buffer(variant, width, theme,
+    ui_bufs) -> BufId` via the step-4 helper. **No changes** to
+    `print_inline_diff`, `render_notebook_preview`,
+    `print_syntax_file`, `BashHighlighter`, or
+    `render_markdown_inner`: SpanCollector already captures
+    their output. Test: render an `edit_file` diff preview and
+    verify the buffer's Spans match the expected colors.
+
+11. **Migrate Confirm dialog** → `crates/tui/src/app/dialogs/confirm.rs`.
+    Panels: `[Title(Content), Summary(Content, optional),
+    Preview(Content, from step 10), Options(OptionList widget),
+    Reason(TextInput widget, shown when Always menu expanded)]`.
+    State tracks Always-menu expansion + reason-editing mode.
+    `blocks_agent() = true`. Deferred-open via `pending_dialogs`
+    queue (App-level, unchanged).
+
+**Cleanup:**
+
+12. **Delete legacy dialog infra.** Once 9 and 11 land:
     - `render/dialogs/confirm.rs`, `render/dialogs/question.rs`
     - `trait render::Dialog`, `render::DialogResult`
     - `render::dialogs::{TextArea, begin_dialog_draw,
       finish_dialog_frame, render_inline_textarea}`
     - `App::active_dialog`, `App::handle_dialog_result`,
       `App::open_dialog`, `DeferredDialog`
-    - `render::RenderOut`, `render::StyleState`, `render::Frame`,
-      `render::paint_line` (once all callers are gone — may slip
-      to 9.7)
+    - Retain `RenderOut` / `StyleState` / `Frame` / `paint_line`
+      until a follow-up step verifies no callers remain (Step 9.7).
 
 Bug fixes bundled with this step:
 - Dialog dismiss restoring vim mode when Question was opened from
   Insert.
 - Confirm preview double-rendering when tool-call `PreToolUse`
-  updates arrive mid-dialog.
+  updates arrive mid-dialog (previews are static post-open, so
+  this goes away naturally).
 
 **Step 9.6 — Migrate overlays to Dialogs.** Each overlay becomes a
 one-panel `Dialog` on the compositor, with the focusable flag set
