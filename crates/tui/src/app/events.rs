@@ -1716,6 +1716,50 @@ impl App {
         self.lua.set_history(self.history.clone());
     }
 
+    /// Build the common `DialogConfig` used by all built-in dialogs
+    /// (accent top rule, bar background, scrollbar colors, hints row).
+    pub(super) fn builtin_dialog_config(
+        &self,
+        hint_text: Option<String>,
+        dismiss_keys: Vec<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+    ) -> ui::DialogConfig {
+        let accent = ui::grid::Style {
+            fg: Some(crate::theme::accent()),
+            ..Default::default()
+        };
+        let bg = ui::grid::Style {
+            bg: Some(crossterm::style::Color::Black),
+            ..Default::default()
+        };
+        let separator = ui::grid::Style {
+            fg: Some(crate::theme::bar()),
+            ..Default::default()
+        };
+        let hints = hint_text.map(|text| {
+            let mut sb = ui::StatusBar::new().with_bg(bg);
+            sb.set_left(vec![ui::StatusSegment::styled(
+                text,
+                ui::grid::Style { dim: true, ..bg },
+            )]);
+            sb
+        });
+        ui::DialogConfig {
+            accent_style: accent,
+            separator_style: separator,
+            background_style: bg,
+            scrollbar_track_style: ui::grid::Style {
+                bg: Some(crate::theme::scrollbar_track()),
+                ..Default::default()
+            },
+            scrollbar_thumb_style: ui::grid::Style {
+                bg: Some(crate::theme::scrollbar_thumb()),
+                ..Default::default()
+            },
+            dismiss_keys,
+            hints,
+        }
+    }
+
     pub(super) fn open_help_float(&mut self) {
         use crate::keymap::hints;
         use crossterm::event::{KeyCode, KeyModifiers};
@@ -1723,7 +1767,6 @@ impl App {
         let vim_enabled = self.input.vim_enabled();
         let sections = hints::help_sections(vim_enabled);
 
-        // Format help sections into content lines.
         let label_col = sections
             .iter()
             .flat_map(|(_, entries)| entries.iter().map(|(k, _)| k.len()))
@@ -1731,63 +1774,87 @@ impl App {
             .unwrap_or(0)
             + 4;
 
-        let mut lines: Vec<String> = Vec::new();
+        let mut content_lines: Vec<String> = Vec::new();
         for (si, (_, entries)) in sections.iter().enumerate() {
             for &(label, detail) in entries {
                 let padding = " ".repeat(label_col.saturating_sub(label.len()));
-                lines.push(format!("  {label}{padding}{detail}"));
+                content_lines.push(format!("{label}{padding}{detail}"));
             }
             if si + 1 < sections.len() {
-                lines.push(String::new());
+                content_lines.push(String::new());
             }
         }
 
-        let buf_id = self.ui.buf_create(ui::buffer::BufCreateOpts {
+        let title_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
             buftype: ui::buffer::BufType::Scratch,
-            ..Default::default()
+            modifiable: false,
         });
-        if let Some(buf) = self.ui.buf_mut(buf_id) {
-            buf.set_all_lines(lines);
+        if let Some(buf) = self.ui.buf_mut(title_buf) {
+            buf.set_all_lines(vec!["help".into(), String::new()]);
+            buf.add_highlight(0, 0, 4, ui::buffer::SpanStyle::dim());
         }
 
-        let hint_text = hints::join(&[
+        let content_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            buftype: ui::buffer::BufType::Scratch,
+            modifiable: false,
+        });
+        if let Some(buf) = self.ui.buf_mut(content_buf) {
+            buf.set_all_lines(content_lines);
+            let muted = ui::buffer::SpanStyle {
+                fg: Some(crate::theme::muted()),
+                ..Default::default()
+            };
+            let dim = ui::buffer::SpanStyle::dim();
+            for (i, line) in buf.lines().to_vec().iter().enumerate() {
+                let len = line.chars().count();
+                if len == 0 {
+                    continue;
+                }
+                let label_end = line
+                    .char_indices()
+                    .take(label_col)
+                    .last()
+                    .map(|(_, _)| label_col as u16)
+                    .unwrap_or(len as u16);
+                buf.add_highlight(i, 0, label_end, muted.clone());
+                buf.add_highlight(i, label_end, len as u16, dim.clone());
+            }
+        }
+
+        let hints_text = hints::join(&[
             hints::CLOSE,
             hints::nav(vim_enabled),
             hints::scroll(vim_enabled),
         ]);
 
-        let win_id = self.ui.win_open_float(
-            buf_id,
+        let dialog_config = self.builtin_dialog_config(
+            Some(hints_text),
+            vec![
+                (KeyCode::Char('q'), KeyModifiers::NONE),
+                (KeyCode::Char('?'), KeyModifiers::NONE),
+            ],
+        );
+
+        let panels = vec![
+            ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
+            ui::PanelSpec::content(content_buf, ui::PanelHeight::Fill)
+                .with_pad_left(2)
+                .focusable(true),
+        ];
+
+        let win_id = self.ui.dialog_open(
             ui::FloatConfig {
-                title: Some("help".into()),
-                border: ui::Border::Rounded,
+                title: None,
+                border: ui::Border::None,
                 placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(60)),
                 ..Default::default()
             },
+            dialog_config,
+            panels,
         );
 
         if let Some(win_id) = win_id {
             self.float_tags.insert(win_id, BuiltinFloat::Help);
-            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                let cfg = dialog.config_mut();
-                cfg.accent_style = ui::grid::Style {
-                    fg: Some(crate::theme::accent()),
-                    ..Default::default()
-                };
-                cfg.border_style = ui::grid::Style {
-                    fg: Some(crate::theme::accent()),
-                    ..Default::default()
-                };
-                cfg.background_style = ui::grid::Style {
-                    bg: Some(crate::theme::bar()),
-                    ..Default::default()
-                };
-                cfg.hint_left = Some(hint_text);
-                cfg.dismiss_keys = vec![
-                    (KeyCode::Char('q'), KeyModifiers::NONE),
-                    (KeyCode::Char('?'), KeyModifiers::NONE),
-                ];
-            }
         }
     }
 
