@@ -1223,7 +1223,7 @@ impl App {
         entries
     }
 
-    fn sync_permissions(
+    pub(super) fn sync_permissions(
         &mut self,
         session_entries: Vec<render::PermissionEntry>,
         workspace_rules: Vec<crate::workspace_permissions::Rule>,

@@ -195,7 +195,7 @@ pub struct App {
     float_tags: std::collections::HashMap<ui::WinId, BuiltinFloat>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) enum BuiltinFloat {
     Help,
     Export,
@@ -203,6 +203,32 @@ pub(super) enum BuiltinFloat {
         turns: Vec<(usize, String)>,
         restore_vim_insert: bool,
     },
+    Permissions {
+        session_entries: Vec<render::PermissionEntry>,
+        workspace_rules: Vec<crate::workspace_permissions::Rule>,
+        items: Vec<PermissionItem>,
+        pending_d: bool,
+    },
+    Ps {
+        registry: engine::tools::ProcessRegistry,
+        killed: Vec<String>,
+    },
+    Resume {
+        entries: Vec<ResumeEntry>,
+        title_haystacks: Vec<String>,
+        current_cwd: String,
+        query: String,
+        workspace_only: bool,
+        filtered: Vec<usize>,
+        pending_d: bool,
+        content_cache: Option<HashMap<String, String>>,
+    },
+}
+
+#[derive(Clone)]
+pub(super) enum PermissionItem {
+    Session(usize),
+    Workspace(usize, usize),
 }
 
 /// Which pane currently holds focus (nvim-style window split).

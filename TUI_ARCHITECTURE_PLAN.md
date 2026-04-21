@@ -601,12 +601,23 @@ Migration order (simplest first):
 1. ✅ HelpDialog → FloatDialog with keybindings in buffer, no footer
 2. ✅ ExportDialog → FloatDialog with 2-item ListSelect footer
 3. ✅ RewindDialog → FloatDialog with turn list in ListSelect
-4. PermissionsDialog → FloatDialog with section content + ListSelect
-5. PsDialog → FloatDialog with process list + ListSelect
-6. ResumeDialog → FloatDialog with session list + search TextInput
+4. ✅ PermissionsDialog → FloatDialog with ListSelect + dd-chord intercept
+5. ✅ PsDialog → FloatDialog with ListSelect + backspace-kill intercept
+6. ✅ ResumeDialog → FloatDialog with ListSelect + search intercept
 7. AgentsDialog → Two FloatDialogs (list + detail)
 8. QuestionDialog → Sequential FloatDialogs (one per question)
 9. ConfirmDialog → FloatDialog with preview buffer + ListSelect + TextInput
+
+**Key intercept design** (decided after evaluating trait objects vs
+state-in-enum): Approach A — state-in-enum with App-level key intercept.
+`BuiltinFloat` enum variants carry per-dialog state (e.g.
+`Permissions { pending_d }`, `Resume { query, entries, ... }`).
+`intercept_float_key()` runs before `ui.handle_key()` for builtin
+floats needing custom key handling (dd-chord, backspace-kill, search).
+Unhandled keys fall through to FloatDialog's standard handle_key.
+This aligns with the plan's principle: "each dialog is a configuration
+of a single FloatDialog, not a separate implementation" and
+"dialog-specific behavior stays in the app/domain layer."
 
 Also migrate: Notifications, Completions → float layers.
 

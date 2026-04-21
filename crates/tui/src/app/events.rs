@@ -91,8 +91,8 @@ impl App {
         }
 
         // Compositor float: when a float window is focused, route keys
-        // through the compositor. Actions like "dismiss" and "select:N"
-        // are translated into Lua callbacks.
+        // through the compositor. Builtin floats get a chance to intercept
+        // keys before the generic FloatDialog handler runs.
         if self.ui.focused_float().is_some() {
             if let Event::Resize(w, h) = ev {
                 self.handle_resize(w, h);
@@ -102,8 +102,14 @@ impl App {
                 code, modifiers, ..
             }) = ev
             {
-                let result = self.ui.handle_key(code, modifiers);
-                self.handle_float_action(result, agent);
+                if let Some(result) = self.intercept_float_key(code, modifiers, agent) {
+                    if let ui::KeyResult::Action(_) = &result {
+                        self.handle_float_action(result, agent);
+                    }
+                } else {
+                    let result = self.ui.handle_key(code, modifiers);
+                    self.handle_float_action(result, agent);
+                }
             }
             return false;
         }
@@ -1861,6 +1867,7 @@ impl App {
         match result {
             ui::KeyResult::Action(ref action) if action == "dismiss" => {
                 if let Some(win_id) = self.ui.focused_float() {
+                    self.handle_builtin_float_dismiss(win_id);
                     self.close_float(win_id);
                 }
             }
@@ -1883,6 +1890,17 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn handle_builtin_float_dismiss(&mut self, win_id: ui::WinId) {
+        if let Some(BuiltinFloat::Permissions {
+            session_entries,
+            workspace_rules,
+            ..
+        }) = self.float_tags.get(&win_id)
+        {
+            self.sync_permissions(session_entries.clone(), workspace_rules.clone());
         }
     }
 
@@ -1922,6 +1940,511 @@ impl App {
                     self.input.set_vim_mode(crate::vim::ViMode::Insert);
                 }
             }
+            BuiltinFloat::Permissions { .. } => {}
+            BuiltinFloat::Ps { .. } => {}
+            BuiltinFloat::Resume { .. } => {}
+        }
+    }
+
+    // ── Permissions float ─────────────────────────────────────────────
+
+    pub(super) fn open_permissions_float(&mut self) {
+        use crate::keymap::hints;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let session_entries = self.session_permission_entries();
+        let workspace_rules = crate::workspace_permissions::load(&self.cwd);
+        let vim_enabled = self.input.vim_enabled();
+
+        let items = build_permission_items(&session_entries, &workspace_rules);
+        let labels = permission_labels(&session_entries, &workspace_rules, &items);
+
+        let buf_id = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            buftype: ui::buffer::BufType::Scratch,
+            ..Default::default()
+        });
+        if let Some(buf) = self.ui.buf_mut(buf_id) {
+            buf.set_all_lines(labels.clone());
+        }
+
+        let footer_items: Vec<ui::ListItem> = items
+            .iter()
+            .map(|item| {
+                let label = format_permission_label(&session_entries, &workspace_rules, item);
+                ui::ListItem::plain(label)
+            })
+            .collect();
+
+        let hint_text = hints::join(&[hints::dd_delete(vim_enabled), hints::CLOSE]);
+        let footer_h = (footer_items.len() as u16).min(15);
+
+        let win_id = self.ui.win_open_float(
+            buf_id,
+            ui::FloatConfig {
+                title: Some("permissions".into()),
+                border: ui::Border::Rounded,
+                height: ui::Constraint::Pct(60),
+                ..Default::default()
+            },
+        );
+
+        if let Some(win_id) = win_id {
+            self.float_tags.insert(
+                win_id,
+                BuiltinFloat::Permissions {
+                    session_entries,
+                    workspace_rules,
+                    items,
+                    pending_d: false,
+                },
+            );
+            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                dialog.set_footer_items(footer_items);
+                let cfg = dialog.config_mut();
+                cfg.accent_style = ui::grid::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.border_style = ui::grid::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.hint_left = Some(hint_text);
+                cfg.footer_height = Some(footer_h);
+                cfg.dismiss_keys = vec![(KeyCode::Char('q'), KeyModifiers::NONE)];
+            }
+        }
+    }
+
+    // ── Ps float ────────────────────────────────────────────────────────
+
+    pub(super) fn open_ps_float(&mut self) {
+        use crate::keymap::hints;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let registry = self.engine.processes.clone();
+        let procs = registry.list();
+
+        let footer_items: Vec<ui::ListItem> = procs
+            .iter()
+            .map(|p| {
+                let time = crate::utils::format_duration(p.started_at.elapsed().as_secs());
+                ui::ListItem::plain(format!("{} — {time} {}", p.command, p.id))
+            })
+            .collect();
+
+        let buf_id = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            buftype: ui::buffer::BufType::Scratch,
+            ..Default::default()
+        });
+
+        let hint_text = hints::join(&[hints::CLOSE, hints::KILL_PROC]);
+        let footer_h = (footer_items.len() as u16).min(15);
+
+        let win_id = self.ui.win_open_float(
+            buf_id,
+            ui::FloatConfig {
+                title: Some("processes".into()),
+                border: ui::Border::Rounded,
+                height: ui::Constraint::Pct(50),
+                ..Default::default()
+            },
+        );
+
+        if let Some(win_id) = win_id {
+            self.float_tags.insert(
+                win_id,
+                BuiltinFloat::Ps {
+                    registry,
+                    killed: Vec::new(),
+                },
+            );
+            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                dialog.set_footer_items(footer_items);
+                let cfg = dialog.config_mut();
+                cfg.accent_style = ui::grid::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.border_style = ui::grid::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.hint_left = Some(hint_text);
+                cfg.footer_height = Some(footer_h);
+                cfg.dismiss_keys = vec![(KeyCode::Char('q'), KeyModifiers::NONE)];
+            }
+        }
+    }
+
+    // ── Resume float ────────────────────────────────────────────────────
+
+    pub(super) fn open_resume_float(&mut self, entries: Vec<render::ResumeEntry>) {
+        use crate::keymap::hints;
+
+        let current_cwd = self.cwd.clone();
+        let vim_enabled = self.input.vim_enabled();
+        let title_haystacks: Vec<String> =
+            entries.iter().map(build_resume_title_haystack).collect();
+        let filtered =
+            filter_resume_entries(&entries, &title_haystacks, "", true, &current_cwd, None);
+
+        let footer_items: Vec<ui::ListItem> = filtered
+            .iter()
+            .filter_map(|&i| entries.get(i))
+            .map(|e| ui::ListItem::plain(resume_title(e)))
+            .collect();
+
+        let buf_id = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            buftype: ui::buffer::BufType::Scratch,
+            ..Default::default()
+        });
+        if let Some(buf) = self.ui.buf_mut(buf_id) {
+            buf.set_all_lines(vec!["".into()]);
+        }
+
+        let toggle = "ctrl+w: this workspace";
+        let hint_text = hints::join(&[
+            hints::SELECT,
+            hints::del_delete(vim_enabled),
+            hints::CANCEL,
+            toggle,
+        ]);
+        let footer_h = (footer_items.len() as u16).min(15);
+
+        let win_id = self.ui.win_open_float(
+            buf_id,
+            ui::FloatConfig {
+                title: Some("resume (workspace)".into()),
+                border: ui::Border::Rounded,
+                height: ui::Constraint::Pct(60),
+                ..Default::default()
+            },
+        );
+
+        if let Some(win_id) = win_id {
+            self.float_tags.insert(
+                win_id,
+                BuiltinFloat::Resume {
+                    entries,
+                    title_haystacks,
+                    current_cwd,
+                    query: String::new(),
+                    workspace_only: true,
+                    filtered,
+                    pending_d: false,
+                    content_cache: None,
+                },
+            );
+            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                dialog.set_footer_items(footer_items);
+                let cfg = dialog.config_mut();
+                cfg.accent_style = ui::grid::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.border_style = ui::grid::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.hint_left = Some(hint_text);
+                cfg.footer_height = Some(footer_h);
+            }
+        }
+    }
+
+    // ── Key intercept for builtin floats ────────────────────────────────
+
+    fn intercept_float_key(
+        &mut self,
+        code: KeyCode,
+        mods: KeyModifiers,
+        _agent: &mut Option<TurnState>,
+    ) -> Option<ui::KeyResult> {
+        let win_id = self.ui.focused_float()?;
+        let tag = self.float_tags.get_mut(&win_id)?;
+        match tag {
+            BuiltinFloat::Permissions {
+                ref mut session_entries,
+                ref mut workspace_rules,
+                ref mut items,
+                ref mut pending_d,
+            } => {
+                if *pending_d {
+                    *pending_d = false;
+                    if code == KeyCode::Char('d') && mods == KeyModifiers::NONE {
+                        if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                            if let Some(idx) = dialog.selected() {
+                                delete_permission_item(
+                                    session_entries,
+                                    workspace_rules,
+                                    items,
+                                    idx,
+                                );
+                                let footer_items = permission_footer_items(
+                                    session_entries,
+                                    workspace_rules,
+                                    items,
+                                );
+                                dialog.set_footer_items(footer_items);
+                            }
+                        }
+                        return Some(ui::KeyResult::Consumed);
+                    }
+                }
+                if code == KeyCode::Char('d') && mods == KeyModifiers::NONE {
+                    *pending_d = true;
+                    return Some(ui::KeyResult::Consumed);
+                }
+                if code == KeyCode::Backspace {
+                    if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                        if let Some(idx) = dialog.selected() {
+                            delete_permission_item(session_entries, workspace_rules, items, idx);
+                            let footer_items =
+                                permission_footer_items(session_entries, workspace_rules, items);
+                            dialog.set_footer_items(footer_items);
+                        }
+                    }
+                    return Some(ui::KeyResult::Consumed);
+                }
+                *pending_d = false;
+                None
+            }
+            BuiltinFloat::Ps {
+                ref registry,
+                ref mut killed,
+            } => {
+                if code == KeyCode::Backspace {
+                    if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                        if let Some(idx) = dialog.selected() {
+                            let procs: Vec<_> = registry
+                                .list()
+                                .into_iter()
+                                .filter(|p| !killed.contains(&p.id))
+                                .collect();
+                            if let Some(p) = procs.get(idx) {
+                                killed.push(p.id.clone());
+                                let fresh: Vec<_> = registry
+                                    .list()
+                                    .into_iter()
+                                    .filter(|p| !killed.contains(&p.id))
+                                    .collect();
+                                let footer_items: Vec<ui::ListItem> = fresh
+                                    .iter()
+                                    .map(|p| {
+                                        let time = crate::utils::format_duration(
+                                            p.started_at.elapsed().as_secs(),
+                                        );
+                                        ui::ListItem::plain(format!(
+                                            "{} — {time} {}",
+                                            p.command, p.id
+                                        ))
+                                    })
+                                    .collect();
+                                dialog.set_footer_items(footer_items);
+                            }
+                        }
+                    }
+                    return Some(ui::KeyResult::Consumed);
+                }
+                None
+            }
+            BuiltinFloat::Resume {
+                ref mut entries,
+                ref mut title_haystacks,
+                ref current_cwd,
+                ref mut query,
+                ref mut workspace_only,
+                ref mut filtered,
+                ref mut pending_d,
+                ref mut content_cache,
+            } => {
+                // DD completion check
+                if *pending_d {
+                    *pending_d = false;
+                    if code == KeyCode::Char('d') && mods == KeyModifiers::NONE {
+                        if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                            if let Some(sel) = dialog.selected() {
+                                if let Some(&idx) = filtered.get(sel) {
+                                    if let Some(entry) = entries.get(idx) {
+                                        let id = entry.id.clone();
+                                        crate::session::delete(&id);
+                                        entries.remove(idx);
+                                        title_haystacks.remove(idx);
+                                        if let Some(cache) = content_cache.as_mut() {
+                                            cache.remove(&id);
+                                        }
+                                        *filtered = filter_resume_entries(
+                                            entries,
+                                            title_haystacks,
+                                            query,
+                                            *workspace_only,
+                                            current_cwd,
+                                            content_cache.as_ref(),
+                                        );
+                                        refresh_resume_footer(dialog, entries, filtered);
+                                    }
+                                }
+                            }
+                        }
+                        return Some(ui::KeyResult::Consumed);
+                    }
+                    query.push('d');
+                }
+
+                match (code, mods) {
+                    (KeyCode::Char('w'), m) if m.contains(KeyModifiers::CONTROL) => {
+                        *workspace_only = !*workspace_only;
+                        *filtered = filter_resume_entries(
+                            entries,
+                            title_haystacks,
+                            query,
+                            *workspace_only,
+                            current_cwd,
+                            content_cache.as_ref(),
+                        );
+                        if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                            refresh_resume_footer(dialog, entries, filtered);
+                            let title = if *workspace_only {
+                                "resume (workspace)"
+                            } else {
+                                "resume (all)"
+                            };
+                            dialog.config_mut().title = Some(title.into());
+                        }
+                        return Some(ui::KeyResult::Consumed);
+                    }
+                    (KeyCode::Backspace, m)
+                        if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if !query.is_empty() {
+                            let len = query.len();
+                            let target = crate::text_utils::word_backward_pos(
+                                query,
+                                len,
+                                crate::text_utils::CharClass::Word,
+                            );
+                            query.truncate(target);
+                            if !query.is_empty() {
+                                ensure_resume_content_loaded(entries, content_cache);
+                            }
+                            *filtered = filter_resume_entries(
+                                entries,
+                                title_haystacks,
+                                query,
+                                *workspace_only,
+                                current_cwd,
+                                content_cache.as_ref(),
+                            );
+                            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                                refresh_resume_footer(dialog, entries, filtered);
+                                refresh_resume_content(dialog, query);
+                            }
+                        }
+                        return Some(ui::KeyResult::Consumed);
+                    }
+                    (KeyCode::Backspace, _) => {
+                        if !query.is_empty() {
+                            query.pop();
+                            *filtered = filter_resume_entries(
+                                entries,
+                                title_haystacks,
+                                query,
+                                *workspace_only,
+                                current_cwd,
+                                content_cache.as_ref(),
+                            );
+                            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                                refresh_resume_footer(dialog, entries, filtered);
+                                refresh_resume_content(dialog, query);
+                            }
+                        }
+                        return Some(ui::KeyResult::Consumed);
+                    }
+                    (KeyCode::Delete, _) => {
+                        if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                            if let Some(sel) = dialog.selected() {
+                                if let Some(&idx) = filtered.get(sel) {
+                                    if let Some(entry) = entries.get(idx) {
+                                        let id = entry.id.clone();
+                                        crate::session::delete(&id);
+                                        entries.remove(idx);
+                                        title_haystacks.remove(idx);
+                                        if let Some(cache) = content_cache.as_mut() {
+                                            cache.remove(&id);
+                                        }
+                                        *filtered = filter_resume_entries(
+                                            entries,
+                                            title_haystacks,
+                                            query,
+                                            *workspace_only,
+                                            current_cwd,
+                                            content_cache.as_ref(),
+                                        );
+                                        refresh_resume_footer(dialog, entries, filtered);
+                                    }
+                                }
+                            }
+                        }
+                        return Some(ui::KeyResult::Consumed);
+                    }
+                    (KeyCode::Char('d'), KeyModifiers::NONE) if query.is_empty() => {
+                        *pending_d = true;
+                        return Some(ui::KeyResult::Consumed);
+                    }
+                    (KeyCode::Enter, KeyModifiers::NONE) => {
+                        if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                            if let Some(sel) = dialog.selected() {
+                                if let Some(&idx) = filtered.get(sel) {
+                                    if let Some(entry) = entries.get(idx) {
+                                        let id = entry.id.clone();
+                                        self.close_float(win_id);
+                                        self.finalize_dialog_close();
+                                        if let Some(loaded) = crate::session::load(&id) {
+                                            self.load_session(loaded);
+                                            self.restore_screen();
+                                            if let Some(tokens) = self.session.context_tokens {
+                                                self.screen.set_context_tokens(tokens);
+                                            }
+                                            self.screen.finish_turn();
+                                            self.transcript_window.scroll_top = u16::MAX;
+                                        }
+                                        return Some(ui::KeyResult::Consumed);
+                                    }
+                                }
+                            }
+                        }
+                        return Some(ui::KeyResult::Consumed);
+                    }
+                    (KeyCode::Esc, KeyModifiers::NONE) => {
+                        self.close_float(win_id);
+                        return Some(ui::KeyResult::Consumed);
+                    }
+                    (KeyCode::Char(c), m) if m.is_empty() || m == KeyModifiers::SHIFT => {
+                        query.push(c);
+                        if !query.is_empty() {
+                            ensure_resume_content_loaded(entries, content_cache);
+                        }
+                        *filtered = filter_resume_entries(
+                            entries,
+                            title_haystacks,
+                            query,
+                            *workspace_only,
+                            current_cwd,
+                            content_cache.as_ref(),
+                        );
+                        if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                            refresh_resume_footer(dialog, entries, filtered);
+                            refresh_resume_content(dialog, query);
+                        }
+                        return Some(ui::KeyResult::Consumed);
+                    }
+                    _ => {}
+                }
+                *pending_d = false;
+                None
+            }
+            _ => None,
         }
     }
 
@@ -2861,3 +3384,252 @@ impl App {
 
 /// Max inter-key gap between `Ctrl-W` and its follow-up key.
 const PANE_CHORD_WINDOW: Duration = Duration::from_millis(750);
+
+// ── Permission helpers ──────────────────────────────────────────────────
+
+fn build_permission_items(
+    session_entries: &[render::PermissionEntry],
+    workspace_rules: &[crate::workspace_permissions::Rule],
+) -> Vec<PermissionItem> {
+    let mut items = Vec::new();
+    for i in 0..session_entries.len() {
+        items.push(PermissionItem::Session(i));
+    }
+    for (ri, rule) in workspace_rules.iter().enumerate() {
+        if rule.patterns.is_empty() {
+            items.push(PermissionItem::Workspace(ri, 0));
+        } else {
+            for pi in 0..rule.patterns.len() {
+                items.push(PermissionItem::Workspace(ri, pi));
+            }
+        }
+    }
+    items
+}
+
+fn format_permission_label(
+    session_entries: &[render::PermissionEntry],
+    workspace_rules: &[crate::workspace_permissions::Rule],
+    item: &PermissionItem,
+) -> String {
+    match item {
+        PermissionItem::Session(idx) => {
+            let e = &session_entries[*idx];
+            format!("{}: {}", e.tool, e.pattern)
+        }
+        PermissionItem::Workspace(ri, pi) => {
+            let rule = &workspace_rules[*ri];
+            if rule.patterns.is_empty() {
+                format!("{}: *", rule.tool)
+            } else {
+                format!("{}: {}", rule.tool, rule.patterns[*pi])
+            }
+        }
+    }
+}
+
+fn permission_labels(
+    session_entries: &[render::PermissionEntry],
+    workspace_rules: &[crate::workspace_permissions::Rule],
+    items: &[PermissionItem],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let has_session = !session_entries.is_empty();
+    let mut in_workspace = false;
+
+    if items.is_empty() {
+        lines.push("  No permissions".into());
+        return lines;
+    }
+
+    for item in items {
+        match item {
+            PermissionItem::Session(_) if !in_workspace && has_session && lines.is_empty() => {
+                lines.push(" Session".into());
+            }
+            PermissionItem::Workspace(_, _) if !in_workspace => {
+                if has_session && !lines.is_empty() {
+                    lines.push(String::new());
+                }
+                lines.push(" Workspace".into());
+                in_workspace = true;
+            }
+            _ => {}
+        }
+        lines.push(format!(
+            "  {}",
+            format_permission_label(session_entries, workspace_rules, item)
+        ));
+    }
+    lines
+}
+
+fn delete_permission_item(
+    session_entries: &mut Vec<render::PermissionEntry>,
+    workspace_rules: &mut Vec<crate::workspace_permissions::Rule>,
+    items: &mut Vec<PermissionItem>,
+    idx: usize,
+) {
+    let Some(item) = items.get(idx).cloned() else {
+        return;
+    };
+    match item {
+        PermissionItem::Session(si) => {
+            session_entries.remove(si);
+        }
+        PermissionItem::Workspace(ri, pi) => {
+            let rule = &mut workspace_rules[ri];
+            if rule.patterns.is_empty() || rule.patterns.len() == 1 {
+                workspace_rules.remove(ri);
+            } else {
+                rule.patterns.remove(pi);
+            }
+        }
+    }
+    *items = build_permission_items(session_entries, workspace_rules);
+}
+
+fn permission_footer_items(
+    session_entries: &[render::PermissionEntry],
+    workspace_rules: &[crate::workspace_permissions::Rule],
+    items: &[PermissionItem],
+) -> Vec<ui::ListItem> {
+    items
+        .iter()
+        .map(|item| {
+            ui::ListItem::plain(format_permission_label(
+                session_entries,
+                workspace_rules,
+                item,
+            ))
+        })
+        .collect()
+}
+
+// ── Resume helpers ──────────────────────────────────────────────────────
+
+fn resume_title(entry: &render::ResumeEntry) -> String {
+    fn is_junk(s: &str) -> bool {
+        let t = s.trim();
+        t.is_empty()
+            || t.eq_ignore_ascii_case("untitled")
+            || t.starts_with('/')
+            || t.starts_with('\x00')
+    }
+    let raw = if !is_junk(&entry.title) {
+        &entry.title
+    } else if let Some(ref sub) = entry.subtitle {
+        if !is_junk(sub) {
+            sub
+        } else {
+            return "Untitled".into();
+        }
+    } else {
+        return "Untitled".into();
+    };
+    raw.lines().next().unwrap_or("Untitled").trim().to_string()
+}
+
+fn build_resume_title_haystack(entry: &render::ResumeEntry) -> String {
+    let mut hay = resume_title(entry);
+    if let Some(ref subtitle) = entry.subtitle {
+        hay.push(' ');
+        hay.push_str(subtitle);
+    }
+    hay.to_lowercase()
+}
+
+fn resume_ts(entry: &render::ResumeEntry) -> u64 {
+    if entry.updated_at_ms > 0 {
+        entry.updated_at_ms
+    } else {
+        entry.created_at_ms
+    }
+}
+
+fn filter_resume_entries(
+    entries: &[render::ResumeEntry],
+    title_haystacks: &[String],
+    query: &str,
+    workspace_only: bool,
+    current_cwd: &str,
+    content_cache: Option<&std::collections::HashMap<String, String>>,
+) -> Vec<usize> {
+    let in_workspace = |e: &render::ResumeEntry| -> bool {
+        if !workspace_only {
+            return true;
+        }
+        matches!(e.cwd, Some(ref cwd) if cwd == current_cwd)
+    };
+
+    if query.is_empty() {
+        return entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| in_workspace(e))
+            .map(|(i, _)| i)
+            .collect();
+    }
+
+    let q = query.to_lowercase();
+    let mut title_hits: Vec<usize> = Vec::new();
+    let mut content_hits: Vec<usize> = Vec::new();
+    for (i, entry) in entries.iter().enumerate() {
+        if !in_workspace(entry) {
+            continue;
+        }
+        if crate::fuzzy::fuzzy_match_lower(&title_haystacks[i], &q) {
+            title_hits.push(i);
+            continue;
+        }
+        if let Some(cache) = content_cache {
+            if cache.get(&entry.id).is_some_and(|blob| blob.contains(&q)) {
+                content_hits.push(i);
+            }
+        }
+    }
+    title_hits.extend(content_hits);
+    title_hits
+}
+
+fn ensure_resume_content_loaded(
+    entries: &[render::ResumeEntry],
+    content_cache: &mut Option<std::collections::HashMap<String, String>>,
+) {
+    if content_cache.is_some() {
+        return;
+    }
+    let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
+    let pairs = crate::utils::parallel_filter_map(ids, |id| {
+        crate::session::load_search_blob(&id).map(|b| (id, b.to_lowercase()))
+    });
+    *content_cache = Some(pairs.into_iter().collect());
+}
+
+fn refresh_resume_footer(
+    dialog: &mut ui::FloatDialog,
+    entries: &[render::ResumeEntry],
+    filtered: &[usize],
+) {
+    let now_ms = crate::session::now_ms();
+    let footer_items: Vec<ui::ListItem> = filtered
+        .iter()
+        .filter_map(|&i| entries.get(i))
+        .map(|e| {
+            let title = resume_title(e);
+            let time_ago = crate::session::time_ago(resume_ts(e), now_ms);
+            ui::ListItem::plain(format!("{time_ago}  {title}"))
+        })
+        .collect();
+    let footer_h = (footer_items.len() as u16).min(15);
+    dialog.set_footer_items(footer_items);
+    dialog.config_mut().footer_height = Some(footer_h);
+}
+
+fn refresh_resume_content(dialog: &mut ui::FloatDialog, query: &str) {
+    if query.is_empty() {
+        dialog.set_content_lines(vec!["".into()]);
+    } else {
+        dialog.set_content_lines(vec![format!(" search: {query}")]);
+    }
+}

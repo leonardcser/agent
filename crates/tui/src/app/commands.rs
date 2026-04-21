@@ -72,14 +72,10 @@ impl App {
                 let entries = self.resume_entries();
                 if entries.is_empty() {
                     self.screen.notify_error("no saved sessions".into());
-                    CommandAction::Continue
                 } else {
-                    CommandAction::OpenDialog(Box::new(render::ResumeDialog::new(
-                        entries,
-                        self.cwd.clone(),
-                        self.input.vim_enabled(),
-                    )))
+                    self.open_resume_float(entries);
                 }
+                CommandAction::Continue
             }
             "/rewind" => {
                 let turns = self.screen.user_turns();
@@ -125,26 +121,20 @@ impl App {
             "/ps" => {
                 if self.engine.processes.list().is_empty() {
                     self.screen.notify_error("no background processes".into());
-                    CommandAction::Continue
                 } else {
-                    CommandAction::OpenDialog(Box::new(render::PsDialog::new(
-                        self.engine.processes.clone(),
-                    )))
+                    self.open_ps_float();
                 }
+                CommandAction::Continue
             }
             "/permissions" => {
                 let session_entries = self.session_permission_entries();
                 let workspace_rules = crate::workspace_permissions::load(&self.cwd);
                 if session_entries.is_empty() && workspace_rules.is_empty() {
                     self.screen.notify_error("no permissions".into());
-                    CommandAction::Continue
                 } else {
-                    CommandAction::OpenDialog(Box::new(render::PermissionsDialog::new(
-                        session_entries,
-                        workspace_rules,
-                        self.input.vim_enabled(),
-                    )))
+                    self.open_permissions_float();
                 }
+                CommandAction::Continue
             }
             "/fork" | "/branch" => {
                 self.fork_session();
