@@ -18,6 +18,7 @@ mod scrollbar;
 mod selection;
 pub(crate) mod status;
 mod stream_parser;
+pub(crate) mod to_buffer;
 pub(crate) mod transcript;
 pub(crate) mod transcript_buf;
 mod viewport;

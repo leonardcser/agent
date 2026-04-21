@@ -1,0 +1,184 @@
+//! Projection: turn `DisplayBlock` output (produced by `SpanCollector`,
+//! the in-memory `LayoutSink`) into a `ui::Buffer` so content rendered
+//! by legacy renderers (`print_inline_diff`, `print_syntax_file`,
+//! `render_markdown_inner`, etc.) can be displayed through the normal
+//! buffer → view → grid path and inherit scrollbar, selection, and
+//! vim motions.
+//!
+//! Transcript projection uses these helpers directly; Confirm preview
+//! migration will add a `render_into_buffer(buf, width, theme, fill)`
+//! convenience that wraps `SpanCollector::new`, `finish`, and this
+//! projection in one call.
+
+use super::display::{DisplayLine, SpanStyle as DisplaySpanStyle};
+use super::paint::resolve;
+use crate::theme::Theme;
+use ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
+
+#[derive(Default)]
+pub(crate) struct ProjectedLine {
+    pub text: String,
+    pub highlights: Vec<(u16, u16, SpanStyle, SpanMeta)>,
+    pub decoration: LineDecoration,
+}
+
+pub(crate) fn project_display_line(dline: &DisplayLine, theme: &Theme) -> ProjectedLine {
+    let mut text = String::new();
+    let mut highlights = Vec::new();
+    let mut char_offset: u16 = 0;
+
+    for span in &dline.spans {
+        let col_start = char_offset;
+        text.push_str(&span.text);
+        let span_chars = span.text.chars().count() as u16;
+        char_offset += span_chars;
+        let col_end = char_offset;
+
+        let style = resolve_span_style(&span.style, theme);
+        let has_style = !style_is_default(&style);
+        let has_meta = !span.meta.selectable || span.meta.copy_as.is_some();
+        if has_style || has_meta {
+            highlights.push((
+                col_start,
+                col_end,
+                style,
+                SpanMeta {
+                    selectable: span.meta.selectable,
+                    copy_as: span.meta.copy_as.clone(),
+                },
+            ));
+        }
+    }
+
+    let decoration = LineDecoration {
+        gutter_bg: dline.gutter_bg.map(|c| resolve(c, theme, true)),
+        fill_bg: dline.fill_bg.map(|c| resolve(c, theme, true)),
+        fill_right_margin: dline.fill_right_margin,
+        soft_wrapped: dline.soft_wrapped,
+        source_text: dline.source_text.clone(),
+    };
+
+    ProjectedLine {
+        text,
+        highlights,
+        decoration,
+    }
+}
+
+fn resolve_span_style(span: &DisplaySpanStyle, theme: &Theme) -> SpanStyle {
+    SpanStyle {
+        fg: span.fg.map(|c| resolve(c, theme, false)),
+        bg: span.bg.map(|c| resolve(c, theme, true)),
+        bold: span.bold,
+        dim: span.dim,
+        italic: span.italic,
+    }
+}
+
+fn style_is_default(s: &SpanStyle) -> bool {
+    s.fg.is_none() && s.bg.is_none() && !s.bold && !s.dim && !s.italic
+}
+
+pub(crate) fn apply_to_buffer(buf: &mut Buffer, lines: &[ProjectedLine]) {
+    let text_lines: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+    buf.set_all_lines(text_lines);
+
+    for (i, pline) in lines.iter().enumerate() {
+        for (col_start, col_end, style, meta) in &pline.highlights {
+            buf.add_highlight_with_meta(i, *col_start, *col_end, style.clone(), meta.clone());
+        }
+
+        let dec = &pline.decoration;
+        if dec.gutter_bg.is_some()
+            || dec.fill_bg.is_some()
+            || dec.fill_right_margin != 0
+            || dec.soft_wrapped
+            || dec.source_text.is_some()
+        {
+            buf.set_decoration(i, dec.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::display::{ColorValue, DisplaySpan, SpanStyle as DSpanStyle};
+    use crossterm::style::Color;
+    use ui::buffer::BufCreateOpts;
+    use ui::BufId;
+
+    fn test_theme() -> Theme {
+        crate::theme::snapshot()
+    }
+
+    fn make_buf() -> Buffer {
+        Buffer::new(
+            BufId(99),
+            BufCreateOpts {
+                modifiable: true,
+                ..BufCreateOpts::default()
+            },
+        )
+    }
+
+    #[test]
+    fn projects_styled_spans() {
+        let theme = test_theme();
+        let dline = DisplayLine {
+            spans: vec![
+                DisplaySpan {
+                    text: "red".into(),
+                    style: DSpanStyle {
+                        fg: Some(ColorValue::Rgb(255, 0, 0)),
+                        ..Default::default()
+                    },
+                    meta: Default::default(),
+                },
+                DisplaySpan {
+                    text: " normal".into(),
+                    style: DSpanStyle::default(),
+                    meta: Default::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let projected = project_display_line(&dline, &theme);
+        assert_eq!(projected.text, "red normal");
+        assert_eq!(projected.highlights.len(), 1);
+        assert_eq!(projected.highlights[0].0, 0);
+        assert_eq!(projected.highlights[0].1, 3);
+        assert_eq!(
+            projected.highlights[0].2.fg,
+            Some(Color::Rgb { r: 255, g: 0, b: 0 })
+        );
+    }
+
+    #[test]
+    fn apply_writes_to_buffer() {
+        let mut buf = make_buf();
+        let lines = vec![
+            ProjectedLine {
+                text: "line one".into(),
+                highlights: vec![(0, 4, SpanStyle::bold(), SpanMeta::default())],
+                decoration: LineDecoration::default(),
+            },
+            ProjectedLine {
+                text: "line two".into(),
+                highlights: vec![],
+                decoration: LineDecoration {
+                    fill_bg: Some(Color::Blue),
+                    ..LineDecoration::default()
+                },
+            },
+        ];
+        apply_to_buffer(&mut buf, &lines);
+
+        assert_eq!(buf.line_count(), 2);
+        assert_eq!(buf.get_line(0), Some("line one"));
+        assert_eq!(buf.get_line(1), Some("line two"));
+        assert_eq!(buf.highlights_at(0).len(), 1);
+        assert!(buf.highlights_at(0)[0].style.bold);
+        assert_eq!(buf.decoration_at(1).fill_bg, Some(Color::Blue));
+    }
+}
