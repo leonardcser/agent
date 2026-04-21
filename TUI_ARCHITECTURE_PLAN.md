@@ -1108,24 +1108,40 @@ future work doesn't re-introduce them:
 - Ctrl+C is a built-in dismiss key, matching the legacy UX.
 
 **Step 9.5 — Migrate the final three dialogs onto the unified model.**
-Order: Agents (two separate Dialogs — list, then detail; no mode
-switch; simplest because non-blocking and already uses a list +
-free-form detail view), Question (sequential Dialog per question —
-kill the tab / `visited` / `answered` / `multi_toggles` state
-machine), Confirm (heaviest — exercises Content preview with
-syntax highlights, List options, Input message, multi-panel
-chrome, plugin tool options, Always/AlwaysPatterns/AlwaysDir
-keybinds, deferred-while-typing behavior). Each lands as a single
-file under `tui/src/app/dialogs/` using the model from 9.4.
 
-Prep already done (2026-04-21): the six legacy dialog impls
-(Export/Help/Permissions/Ps/Resume/Rewind) under
-`render/dialogs/*.rs` have been deleted, their `DialogResult`
-variants removed, and their dead arms pruned from
-`handle_dialog_result`. `PermissionEntry` moved to
-`render::history` alongside `ApprovalScope`. The only dialogs
-still on the legacy `render::Dialog` trait are Confirm, Question,
-and Agents.
+**Agents — ✅ done** (2026-04-21). Lives at
+`crates/tui/src/app/dialogs/agents.rs` as two `DialogState`s
+(`AgentsList`, `AgentsDetail`) that swap via Enter (list → detail)
+and Esc (detail → list, restoring the parent selection). Added a
+`DialogState::tick()` hook + `App::tick_focused_float()` so the
+agents dialog refreshes from live `SharedSnapshots` every
+event-loop iteration. `DialogResult::AgentsClosed` variant removed;
+dismissal runs `refresh_agent_counts` inline via `on_dismiss`.
+
+**Question** — pending. 556 LoC state machine with multi-question
+tabs, per-question selection, multi-select toggles, and an "Other"
+free-form text input per question. Needs the panel framework's
+`Input` panel kind plus per-panel visited/answered tracking.
+Blocks the agent while open (must mark the dialog blocking so the
+engine-drain loop pauses).
+
+**Confirm** — pending. 1018 LoC. Exercises Content preview with
+syntax highlights (inline diff or `BashHighlighter`), scrollable
+option list with the Always/AlwaysPatterns/AlwaysDir keybind trio
+plus plugin tool options, Input message panel, multi-panel chrome,
+deferred-while-typing behavior (1500 ms after last keystroke), and
+mode-toggle auto-approve (shift-tab). Blocking dialog. Expected
+to need small additions to the panel framework: per-panel
+syntax-aware highlighting (content + styles from decorators,
+already supported) and the deferred-open trigger (trivially lives
+in `App::dispatch_terminal_event`, not in `DialogState`).
+
+Prep already done: the six other legacy dialog impls
+(Export/Help/Permissions/Ps/Resume/Rewind/Agents) under
+`render/dialogs/*.rs` are deleted, their `DialogResult` variants
+removed, their dead arms pruned from `handle_dialog_result`.
+`PermissionEntry` moved to `render::history`. Only Confirm and
+Question remain on the legacy `render::Dialog` trait.
 
 **Step 9.6 — Migrate overlays to Dialogs.** Completer (one List
 panel, `AnchorCursor`), cmdline (one Input panel, docked bottom),
