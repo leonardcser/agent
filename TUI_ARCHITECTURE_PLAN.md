@@ -600,7 +600,7 @@ becomes a `ui::FloatDialog` configuration added as a compositor layer.
 Migration order (simplest first):
 1. ✅ HelpDialog → FloatDialog with keybindings in buffer, no footer
 2. ✅ ExportDialog → FloatDialog with 2-item ListSelect footer
-3. RewindDialog → FloatDialog with turn list in ListSelect
+3. ✅ RewindDialog → FloatDialog with turn list in ListSelect
 4. PermissionsDialog → FloatDialog with section content + ListSelect
 5. PsDialog → FloatDialog with process list + ListSelect
 6. ResumeDialog → FloatDialog with session list + search TextInput

@@ -103,7 +103,7 @@ impl App {
             }) = ev
             {
                 let result = self.ui.handle_key(code, modifiers);
-                self.handle_float_action(result);
+                self.handle_float_action(result, agent);
             }
             return false;
         }
@@ -416,12 +416,9 @@ impl App {
                     if turns.is_empty() {
                         return EventOutcome::Noop;
                     }
-                    self.screen.erase_prompt();
                     let restore_vim_insert = restore_mode == Some(vim::ViMode::Insert);
-                    return EventOutcome::OpenDialog(Box::new(render::RewindDialog::new(
-                        turns,
-                        restore_vim_insert,
-                    )));
+                    self.open_rewind_float(turns, restore_vim_insert);
+                    return EventOutcome::Redraw;
                 }
                 // Single Esc in normal mode — start timer.
                 t.last_esc = Some(Instant::now());
@@ -1744,6 +1741,67 @@ impl App {
         }
     }
 
+    pub(super) fn open_rewind_float(
+        &mut self,
+        turns: Vec<(usize, String)>,
+        restore_vim_insert: bool,
+    ) {
+        use crate::keymap::hints;
+
+        let total = turns.len() + 1;
+        let mut items: Vec<ui::ListItem> = turns
+            .iter()
+            .enumerate()
+            .map(|(i, (_, label))| {
+                let line = label.lines().next().unwrap_or("");
+                ui::ListItem::plain(format!("{}. {line}", i + 1))
+            })
+            .collect();
+        items.push(ui::ListItem::plain(format!("{}. (current)", total)));
+
+        let buf_id = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            buftype: ui::buffer::BufType::Scratch,
+            ..Default::default()
+        });
+
+        let hint_text = hints::join(&[hints::SELECT, hints::CANCEL]);
+        let footer_h = (total as u16).min(10);
+
+        let win_id = self.ui.win_open_float(
+            buf_id,
+            ui::FloatConfig {
+                title: Some("rewind".into()),
+                border: ui::Border::Rounded,
+                height: ui::Constraint::Fixed(footer_h + 4),
+                ..Default::default()
+            },
+        );
+
+        if let Some(win_id) = win_id {
+            self.float_tags.insert(
+                win_id,
+                BuiltinFloat::Rewind {
+                    turns,
+                    restore_vim_insert,
+                },
+            );
+            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                dialog.set_footer_items(items);
+                let cfg = dialog.config_mut();
+                cfg.accent_style = ui::grid::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.border_style = ui::grid::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.hint_left = Some(hint_text);
+                cfg.footer_height = Some(footer_h);
+            }
+        }
+    }
+
     pub(super) fn open_export_float(&mut self) {
         use crate::keymap::hints;
 
@@ -1799,7 +1857,7 @@ impl App {
         self.ui.buf_delete(ui::BufId(id));
     }
 
-    fn handle_float_action(&mut self, result: ui::KeyResult) {
+    fn handle_float_action(&mut self, result: ui::KeyResult, agent: &mut Option<TurnState>) {
         match result {
             ui::KeyResult::Action(ref action) if action == "dismiss" => {
                 if let Some(win_id) = self.ui.focused_float() {
@@ -1816,9 +1874,9 @@ impl App {
                     self.apply_ops(ops);
 
                     // Dispatch to builtin float handler.
-                    if let Some(&tag) = self.float_tags.get(&win_id) {
+                    if let Some(tag) = self.float_tags.remove(&win_id) {
                         if let Ok(idx) = idx_str.parse::<usize>() {
-                            self.handle_builtin_float_select(tag, idx);
+                            self.handle_builtin_float_select(tag, idx, agent);
                         }
                         self.close_float(win_id);
                     }
@@ -1828,7 +1886,12 @@ impl App {
         }
     }
 
-    fn handle_builtin_float_select(&mut self, tag: BuiltinFloat, idx: usize) {
+    fn handle_builtin_float_select(
+        &mut self,
+        tag: BuiltinFloat,
+        idx: usize,
+        agent: &mut Option<TurnState>,
+    ) {
         match tag {
             BuiltinFloat::Help => {}
             BuiltinFloat::Export => match idx {
@@ -1836,6 +1899,29 @@ impl App {
                 1 => self.export_to_file(),
                 _ => {}
             },
+            BuiltinFloat::Rewind {
+                ref turns,
+                restore_vim_insert,
+            } => {
+                let block_idx = if idx < turns.len() {
+                    Some(turns[idx].0)
+                } else {
+                    None
+                };
+                if let Some(bidx) = block_idx {
+                    if agent.is_some() {
+                        self.cancel_agent();
+                        *agent = None;
+                    }
+                    if let Some((text, images)) = self.rewind_to(bidx) {
+                        self.input.restore_from_rewind(text, images);
+                    }
+                    while self.engine.try_recv().is_ok() {}
+                    self.save_session();
+                } else if restore_vim_insert {
+                    self.input.set_vim_mode(crate::vim::ViMode::Insert);
+                }
+            }
         }
     }
 

@@ -195,10 +195,14 @@ pub struct App {
     float_tags: std::collections::HashMap<ui::WinId, BuiltinFloat>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) enum BuiltinFloat {
     Help,
     Export,
+    Rewind {
+        turns: Vec<(usize, String)>,
+        restore_vim_insert: bool,
+    },
 }
 
 /// Which pane currently holds focus (nvim-style window split).
