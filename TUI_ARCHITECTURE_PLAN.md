@@ -171,21 +171,72 @@ gates insert mode and text mutations).
 No separate "transcript navigation state" or "prompt surface state."
 Just windows looking at buffers.
 
-### Everything is a window (except the status bar)
+### Window vs Component: the two-concept model
 
-Every interactive surface in the UI is a **window** backed by a **buffer**:
+Two orthogonal primitives, following Neovim's architecture:
 
-- **Transcript** — split window, readonly buffer, block content projected in
-- **Prompt** — split window, editable buffer with vim motions
-- **All dialogs** — float windows (help, confirm, resume, rewind, etc.)
-- **BtwBlock** — float window (plugin-owned, not part of prompt)
-- **Notifications** — ephemeral float window with auto-dismiss
-- **Completions** — float window anchored to cursor position
-- **Lua floats** — float windows created by plugins
+- **`ui::Component`** — anything that draws into a grid. Gets a rect
+  and paints into a `GridSlice`. Also handles keys (returns
+  `KeyResult`). That's the entire contract. Components are what the
+  compositor stacks as layers.
+- **`ui::Window`** — a buffer viewer. Owns `BufId`, cursor, scroll
+  offset, vim state, selection, kill ring. A `Window` is state, not
+  a renderer — a Component wraps a Window to paint its buffer.
 
-The **status bar** is the only non-window surface — it's a single-row
-component with no buffer, no scroll, no cursor. Making it a window would
-force an abstraction that doesn't fit.
+**Not every Component needs a Window.** Neovim doesn't make its
+statusline a window either — the statusline is a row drawn inside
+the owning window's grid, governed by `w_status_height` (0 or 1).
+Popups, messages, and cmdline use separate grids but not windows.
+
+**Rules of thumb:**
+
+| Question | Answer → Window or Component? |
+|---|---|
+| User puts cursor in it? | Window |
+| User selects text + copies? | Window |
+| Is it pure decoration (bars, labels)? | Component |
+| Fixed-height, app-driven rendering? | Component |
+
+**Focusable flag.** A `Window` can opt out of the focus cycle via a
+`focusable: bool` on its float config (default `true`). Modeled
+directly on Neovim's `WinConfig.focusable`: `<C-w>w` cycling skips
+non-focusable floats, and the cursor can't roam into them. Splits
+are always focusable; only floats carry the flag.
+
+**Chrome split.** Not everything above the prompt needs to be a
+window. Apply the rules:
+
+| Surface | Kind | Focusable? |
+|---|---|---|
+| Transcript | Window (split) | yes |
+| Prompt input | Window (split) | yes |
+| Normal dialogs (resume, agents, rewind, etc.) | Window (float) | yes |
+| Confirm / Question dialogs | Window (float) | yes |
+| Completer (fuzzy finder) | Window (float) | **no** — matches nvim-cmp |
+| Notification | Window (float) | **no** — selectable by mouse/cmd but not tab-target |
+| Queued messages | Window (float) | **no** |
+| Top / bottom prompt bars | Component | n/a — no buffer |
+| Status bar | Component | n/a |
+| Stash indicator | Component | n/a |
+
+Chrome items become real windows only when their content needs
+selection or copy. Pure decoration stays as a Component.
+
+### Layout stack vs focus graph
+
+Two more orthogonal concepts:
+
+- **Layout** — where a surface is on screen. All windows *and*
+  components participate in the layout. Adding a chrome window
+  shrinks the transcript by its row count.
+- **Focus graph** — which windows `<C-w>` cycles through. Only
+  focusable windows are in the graph.
+
+A window can be in the layout without being in the focus graph
+(notification, completer). A component is always in the layout and
+never in the focus graph (status bar, decorative bars). This
+decoupling is what resolves "should chrome be a window?" — layout
+participation and focus participation are separate choices.
 
 ### Dialogs are stacks of panels, panels are windows
 
@@ -337,32 +388,67 @@ Retired as part of the panel rewrite:
 - Inline `[x/y]` scroll position rendering in confirm chrome —
   replaced by the buffer scrollbar.
 
-### Simplify question dialogs
+### Widgets inside panels
 
-The current question dialog has a complex tab system with `active_tab`,
-`visited`, `answered`, `multi_toggles`, `other_areas`, `editing_other`.
-Replace with a sequential wizard-style flow: one question per Dialog,
-advance to next on answer. Same panel stack as every other dialog.
+`PanelKind::{Content, List, Input}` covers simple dialogs but
+can't express composite UX (tabs, multi-select with chord keys,
+syntax-highlighted preview, reason-message textarea). Instead of
+multiplying kinds per UX idea, a panel holds **either a buffer or
+a widget**:
 
-### Agent detail as separate dialog
+```rust
+enum PanelContent {
+    Buffer(BufId),                // current — 6 migrated dialogs use this
+    Widget(Box<dyn PanelWidget>), // custom rendering + keys
+}
 
-The agents dialog currently has a two-mode design (list → detail with
-mode switch). Replace with two separate Dialogs: selecting an agent in
-the list closes it and opens a detail dialog. Simpler state, no mode
-switching.
+pub trait PanelWidget {
+    fn prepare(&mut self, rect: Rect, ctx: &DrawContext) {}
+    fn draw(&self, rect: Rect, grid: &mut GridSlice<'_>, ctx: &DrawContext);
+    fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult;
+    fn cursor(&self) -> Option<(u16, u16)> { None }
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+```
 
-### Simplify question dialogs
+`ui::Dialog` still owns outer chrome (accent rule, hints, dismiss,
+focus between panels). A widget-panel delegates draw/keys to its
+widget; a buffer-panel behaves as today.
 
-The current question dialog has a complex tab system with `active_tab`,
-`visited`, `answered`, `multi_toggles`, `other_areas`, `editing_other`.
-Replace with a sequential wizard-style flow: one question per float,
-advance to next on answer. Same visual pattern as every other dialog.
+**Shipped widgets** (`crates/ui/src/widgets/`):
+- `TextInput` — wraps a `Window` + `Buffer`, reuses kill ring / vim
+  / undo. For Question's "Other:" and Confirm's reason message.
+- `OptionList` — single- or multi-select; per-item checkbox glyph;
+  chord-key map for pre-default keybinds (Confirm's `a` / `n` /
+  `e` / `l`).
+- `Preview` — read-only buffer with pre-computed highlights (bash,
+  diff, syntect). Confirm's tool-call preview.
+- `TabBar` — single-row label strip for multi-question headers.
 
-### Agent detail as separate float
+Dialog authors can also write ad-hoc widgets inline.
 
-The agents dialog currently has a two-mode design (list → detail with mode
-switch). Replace with two separate floats: selecting an agent in the list
-closes it and opens a detail float. Simpler state, no mode switching.
+### Escape hatch: bare Component floats
+
+For truly custom floats (image viewer, mini-editor, dataviz), a
+dialog isn't needed. `Ui::add_float_component(rect, zindex, Box<dyn
+Component>)` registers a raw compositor layer — no chrome, no
+panels. This is the Neovim-parity story: "draw whatever you want
+in a window." Most dialogs still use `Dialog` + widgets because
+chrome consistency is worth the small ceremony.
+
+### Dialog simplifications
+
+Two legacy patterns die as part of migrating to the widget model:
+
+- **Question's tab state machine** (`active_tab`, `visited`,
+  `answered`, `multi_toggles`, `other_areas`, `editing_other`)
+  becomes a sequential wizard: one question per Dialog, advance on
+  answer. Or — if multi-question display is valuable — a single
+  Dialog with a `TabBar` widget on top.
+- **Agents dialog two-mode design** (list ↔ detail with mode
+  switch) becomes two separate Dialogs — already done
+  (`d17ba9b`). Selecting an agent closes the list dialog and opens
+  a detail dialog.
 
 ## Why not ratatui
 
@@ -510,22 +596,24 @@ Every piece of state has exactly one owner. No duplication.
 | Concern | Owner | Notes |
 |---|---|---|
 | Transcript content | `ui::Buffer` | Projected from blocks at event time |
-| Transcript cursor/scroll/selection/vim | `ui::Window` | All interaction state on window |
+| Transcript cursor/scroll/selection/vim | `ui::Window` | Focusable split window |
 | Transcript tail-follow | `ui::Window::tail_follow` | Generic property; transcript sets true by default |
 | Prompt editable text | `ui::Buffer` | Editable buffer, same type as transcript |
-| Prompt cursor/scroll/selection/vim | `ui::Window` | Same window behavior as transcript |
-| Prompt chrome (notification bar, top/bottom bars, queued rows) | Separate compositor float layers | Each is a window with a buffer, stacked above the prompt input window |
+| Prompt cursor/scroll/selection/vim | `ui::Window` | Focusable split window |
 | Buffer modifiability | `ui::Buffer::modifiable` + mirrored on `ui::Window` | Gates insert mode uniformly |
 | Selection rendering | `ui::Window` / `WindowView::draw` | Reverse-video overlay painted by window, not per-surface |
-| Status bar segments | `StatusBar` component | Set at event time, not recomputed per frame |
-| Dialog content | `ui::Buffer` per dialog | Written when dialog opens or content changes |
-| Dialog semantic state | App/domain layer (`BuiltinFloat` enum) | Confirm choices, question answers, etc. |
-| Dialog rendering/layout | `FloatDialog` component + `Placement` config | Chrome and placement are framework; behavior is app |
-| Dialog background | `FloatDialog::draw` | Solid fill across dialog rect |
+| Dialog content | `ui::Buffer` per panel or widget-owned state | `PanelContent::Buffer` or `::Widget` |
+| Dialog semantic state | `App.float_states[WinId]: Box<dyn DialogState>` | Take/put-back dispatch; per-dialog file |
+| Dialog rendering/layout | `ui::Dialog` component + `Placement` config | Chrome and placement are framework; behavior is app |
+| Dialog background | `ui::Dialog::draw` | Solid fill across dialog rect |
 | Mouse z-order | `Compositor::handle_mouse` | Topmost layer at hit point consumes event |
-| Completer | Compositor float layer (`AnchorCursor`) | Same path as any other float |
-| Cmdline | Compositor float layer | Anchored at bottom |
-| Notifications | Ephemeral compositor float layer | Not part of prompt |
+| Completer (fuzzy finder) | Float `Window` + `Dialog`, `focusable = false`, `Placement::AnchorCursor` | Matches nvim-cmp pattern |
+| Notifications | Float `Window`, `focusable = false`, ephemeral | Selectable by mouse / cmd; not in focus cycle |
+| Queued messages | Float `Window`, `focusable = false` | Content selectable; never a focus target |
+| Top / bottom prompt bars | `Component` (no buffer) | Pure decoration |
+| Stash indicator | `Component` (no buffer) | Single-row label |
+| Status bar | `StatusBar` component | Set at event time, not recomputed per frame |
+| Cmdline | Float `Window` (single-panel Input, `focusable = true`) | Modal input, closes on Esc |
 | Block history + layout cache | `tui::BlockHistory` | Projects into transcript buffer |
 
 ### What `Screen` currently owns vs. where it moves
@@ -1127,160 +1215,101 @@ Question remain on the legacy `render::Dialog` trait.
 
 ---
 
-### Step 9.5b — Widget architecture for composite dialogs
+### Step 9.5b — Implementation order for Confirm / Question migration
 
-**Why.** The current `PanelKind::{Content, List, Input}` can't
-represent composite dialogs without multiplying special kinds.
-Question needs tabs + multi-select + inline text input per tab.
-Confirm needs a syntax-highlighted preview + chord-driven option
-list + reason-message input + blocking semantics. Adding a kind
-per UX idea is a franchise; instead we let a panel hold **either
-a buffer or a widget**.
-
-**The model.**
-
-```
-enum PanelContent {
-    Buffer(BufId),               // current — 6 migrated dialogs keep this
-    Widget(Box<dyn PanelWidget>), // new — custom rendering/behavior
-}
-
-pub trait PanelWidget {
-    fn prepare(&mut self, rect: Rect, ctx: &DrawContext) {}
-    fn draw(&self, rect: Rect, grid: &mut GridSlice<'_>, ctx: &DrawContext);
-    fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult;
-    fn cursor(&self) -> Option<(u16, u16)> { None }  // for text-input widgets
-    fn as_any_mut(&mut self) -> &mut dyn Any;        // for state access
-}
-```
-
-`ui::Dialog` still owns the outer chrome (accent rule, hints row,
-scrollbar, dismiss keys, focus-between-panels). A panel that
-holds a widget delegates draw/keys to it; a panel that holds a
-buffer behaves exactly like today.
-
-**Built-in widgets** (in `crates/ui/src/widgets/`):
-
-- `TextInput { window: Window, buf: BufId, multiline: bool }` —
-  wraps `ui::Window` so it inherits kill ring, vim mode, undo,
-  paste handling. Used by Question's "Other:" and Confirm's
-  reason message.
-- `OptionList { items, selected, multi_select, chords }` —
-  richer than `PanelKind::List`: per-item checkbox glyph (when
-  `multi_select = true`), per-item chord-key map
-  (`'a' → action`) that fires before default nav.
-- `Preview { buf: BufId, highlighter: PreviewHighlight }` —
-  read-only scrollable view with `bash | diff | syntax(ext)`
-  highlight modes. Used by Confirm's tool-call preview.
-- `TabBar { tabs: Vec<TabLabel>, active: usize }` — single-row
-  panel with clickable/keybinded labels. Used by Question's
-  multi-question header.
-
-Widgets are plain `Box<dyn PanelWidget>`; dialog authors can also
-write ad-hoc ones and drop them straight into a `PanelSpec`.
-
-**Escape hatch: bare Components.** For truly custom floats (an
-image viewer, a mini-editor, a dataviz panel), expose a public
-`Ui::add_float_component(rect, zindex, Box<dyn Component>)` that
-bypasses `Dialog` entirely — no chrome, no panels, just a
-compositor layer. This is the "draw whatever you want in a
-window" story; most dialogs will still use the `Dialog` +
-widgets path because chrome consistency is worth the small
-ceremony.
-
-**Blocking dialogs.** Both Confirm and Question pause the
-engine-event drain while open. Add
-`DialogState::blocks_agent() -> bool` (default `false`) and gate
-the drain loop on `self.focused_blocking_float()`. The old
-`active_dialog.blocks_agent()` check migrates to the same shape
-in `float_states`.
-
-**Deferred open.** Confirm delays 1.5 s after the last keystroke
-before opening, so it doesn't interrupt typing. The existing
-`pending_dialogs: VecDeque<DeferredDialog>` stays — it's an
-App-level queue, agnostic to the dialog shape. The open fn
-enqueues; `tick_focused_float`'s sibling `tick_deferred_dialogs`
-fires after the debounce window.
-
-**Implementation order.** Land each as its own commit, so each
-step is independently reviewable and reversible.
+The widget architecture, escape hatch, chrome ownership, and
+focusable-flag design all live under "Design principles" above.
+This step is the sequenced landing plan. Each item is one commit,
+independently reversible.
 
 1. **Foundation A — blocking semantics.** Add
-   `DialogState::blocks_agent()` (default false). Gate
-   engine-drain loop on both `active_dialog.blocks_agent()` and
-   the focused float's `DialogState::blocks_agent()`. Tests:
-   existing dialogs still pass.
+   `DialogState::blocks_agent()` (default `false`). Gate the
+   engine-drain loop on the focused float's blocks_agent in
+   addition to the legacy `active_dialog` check. Ground for any
+   blocking dialog in the new path.
 
-2. **Foundation B — `PanelContent` + `PanelWidget`.** Split the
-   existing buffer-only `Panel` into the `PanelContent` enum.
-   Add the trait. All six migrated dialogs keep working because
-   they use the `Buffer` variant; no call-site change.
+2. **Foundation B — `FloatConfig.focusable: bool`.** New field,
+   default `true`. Cycle logic (when we add it) + cursor motion
+   already can't reach floats without explicit API; just plumb the
+   flag through `dialog_open` and `add_float_component`.
 
-3. **Widget — `TextInput`.** Ship in `crates/ui/src/widgets/
-   text_input.rs`. Internally a one-line or multi-line `Window`
-   + `Buffer`. `draw` paints through the buffer's highlight
-   machinery; `handle_key` delegates to `Window::apply_action`.
-   Exposes `text() -> String`, `clear()`, `append(&str)` for
-   host access.
+3. **Foundation C — `PanelContent` + `PanelWidget`.** Split
+   buffer-only `Panel` into `PanelContent::{Buffer, Widget}`. Add
+   the trait. All six migrated dialogs keep working (Buffer
+   variant); no call-site change.
 
-4. **Widget — `OptionList`.** Ship in
-   `crates/ui/src/widgets/option_list.rs`. Can be single- or
-   multi-select; draws through a buffer (checkboxes prefixed as
-   `[x]` / `[ ]` text); exposes `selected_indices() -> Vec<usize>`
-   and a `ChordMap` for pre-default keybinds like Confirm's 'a'.
+4. **Widget — `TextInput`** in `crates/ui/src/widgets/text_input.rs`.
+   Wraps a `Window` + `Buffer`. Delegates keys to
+   `Window::apply_action`. Exposes `text()`, `clear()`,
+   `append(&str)`.
 
-5. **Widget — `Preview`.** Thin wrapper over a read-only buffer
-   with pre-applied highlight spans. The highlighter is computed
-   at open time (bash → `BashHighlighter`, diff → `print_inline_diff`,
-   file → syntect via `print_syntax_file`), baked into buffer
+5. **Widget — `OptionList`** in `crates/ui/src/widgets/option_list.rs`.
+   Single or multi-select. Checkbox glyph when multi. Chord-key map
+   for pre-default keybinds (Confirm's `a` / `n` / `e` / `l`).
+
+6. **Widget — `Preview`** in `crates/ui/src/widgets/preview.rs`.
+   Read-only buffer with pre-computed highlight spans. Bash / diff
+   / syntect highlighter selected at open time, baked into buffer
    spans, never recomputed.
 
-6. **Escape hatch — `Ui::add_float_component`.** Public API that
-   wraps `compositor.add` with a `WinId` allocation and
-   `float_layer_id` key. Lua bindings wire to this later.
+7. **Escape hatch — `Ui::add_float_component(rect, zindex, cfg,
+   Box<dyn Component>)`.** Raw compositor layer with a `WinId`. Lua
+   bindings wire to this later.
 
-7. **Migrate Question →
-   `crates/tui/src/app/dialogs/question.rs`.** Dialog panels:
-   `[TabBar (if >1 question), Header(Content), OptionList(multi),
-   TextInput("Other:" when selected)]`. State machine lives in
-   `impl DialogState for Question`. Emits Lua-free
-   `ask_question_response` via `App::resolve_question`
-   (unchanged).
+8. **Migrate Question** → `crates/tui/src/app/dialogs/question.rs`.
+   Panels: `[TabBar (if >1), Header(Content), OptionList(multi),
+   TextInput("Other:" when selected)]`. State machine: `impl
+   DialogState for Question`. `blocks_agent() = true`. Emits
+   answer via `App::resolve_question`.
 
-8. **Migrate Confirm →
-   `crates/tui/src/app/dialogs/confirm.rs`.** Panels:
-   `[MessageHeader(Content), Preview, OptionList(chord-aware),
-   TextInput(reason, multiline, focusable)]`. State machine:
-   tracks whether 'a' Always-menu is expanded (swap the
-   OptionList's items), tracks reason editing mode. `on_select`
-   translates the chosen option into `ConfirmChoice::*` and
-   calls `App::resolve_confirm` (unchanged).
+9. **Migrate Confirm** → `crates/tui/src/app/dialogs/confirm.rs`.
+   Panels: `[MessageHeader(Content), Preview, OptionList(chord),
+   TextInput(reason)]`. State tracks Always-menu expansion and
+   reason-editing mode. `blocks_agent() = true`. Deferred-open via
+   `pending_dialogs` queue (App-level, unchanged).
 
-9. **Delete legacy.** After 7 and 8 land:
-   - `render/dialogs/confirm.rs`, `render/dialogs/question.rs`
-   - `trait render::Dialog`, `render::DialogResult`
-   - `render::dialogs::{TextArea, begin_dialog_draw,
-     finish_dialog_frame, render_inline_textarea}`
-   - `App::active_dialog`, `App::handle_dialog_result`,
-     `App::open_dialog`, `DeferredDialog` (absorbed into float
-     deferred-open queue)
-   - `render::RenderOut`, `render::StyleState`, `render::Frame`,
-     `render::paint_line` (once all callers are gone — may slip
-     to 9.7)
+10. **Delete legacy.** After 8 and 9 land:
+    - `render/dialogs/confirm.rs`, `render/dialogs/question.rs`
+    - `trait render::Dialog`, `render::DialogResult`
+    - `render::dialogs::{TextArea, begin_dialog_draw,
+      finish_dialog_frame, render_inline_textarea}`
+    - `App::active_dialog`, `App::handle_dialog_result`,
+      `App::open_dialog`, `DeferredDialog`
+    - `render::RenderOut`, `render::StyleState`, `render::Frame`,
+      `render::paint_line` (once all callers are gone — may slip
+      to 9.7)
 
-Bug fixes covered as part of this step rather than deferred:
-- Dialog dismiss not restoring vim mode when Question was
-  opened while in Insert (checked before leaving Normal).
-- Confirm preview double-rendering when the underlying tool
-  call emits a `PreToolUse` update mid-dialog.
+Bug fixes bundled with this step:
+- Dialog dismiss restoring vim mode when Question was opened from
+  Insert.
+- Confirm preview double-rendering when tool-call `PreToolUse`
+  updates arrive mid-dialog.
 
-**Step 9.6 — Migrate overlays to Dialogs.** Completer (one List
-panel, `AnchorCursor`), cmdline (one Input panel, docked bottom),
-notification (one Content panel, ephemeral, `DockBottom` with a
-short timeout). Each is just a Dialog with one panel. Deletes
-`paint_completer_float`, `render/completions.rs` draw path,
-`render/cmdline.rs`, `draw_prompt_sections` overlay branches,
-`Screen::cmdline` drawing.
+**Step 9.6 — Migrate overlays to Dialogs.** Each overlay becomes a
+one-panel `Dialog` on the compositor, with the focusable flag set
+per the rules above.
+
+| Overlay | Panel | Placement | `focusable` |
+|---|---|---|---|
+| Completer (fuzzy finder) | List (of matches) | `AnchorCursor` | `false` |
+| Cmdline | Widget (`TextInput`) | `DockBottom` | `true` |
+| Notification | Content (message) | `DockBottom`, ephemeral | `false` |
+| Queued messages | Content (one line each) | `DockBottom` (above prompt) | `false` |
+
+Completer specifically matches the **nvim-cmp** pattern: float
+window backed by a buffer of result rows, `focusable = false` so
+`<C-w>` skips it and the cursor never moves in. A `DialogState`
+handles fuzzy filtering on typed characters (reading the
+underlying prompt window's buffer delta) and `Enter` / `Tab` to
+accept.
+
+Cmdline is the one overlay that *is* focusable: it's a modal
+input. Entering cmdline mode focuses it; Esc dismisses. No need
+for a separate `Screen::cmdline` drawing path.
+
+Deletes: `paint_completer_float`, `render/completions.rs` draw
+path, `render/cmdline.rs`, `draw_prompt_sections` overlay
+branches, `Screen::cmdline` drawing.
 
 **Step 9.7 — Delete legacy rendering.** After 9.1–9.6 land, the
 following have no callers and get deleted in a single pass:
