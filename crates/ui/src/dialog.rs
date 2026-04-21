@@ -59,6 +59,13 @@ pub enum SeparatorStyle {
 /// multi-select lists with "Other" fields, tab bars, previews) that go
 /// beyond what a raw buffer-backed panel can express.
 pub trait PanelWidget: Send {
+    /// Called once per frame before `draw`, with the widget's resolved
+    /// draw rect. Use this to cache viewport-dependent state
+    /// (scrolling, layout) so `draw` / `cursor` can remain `&self`.
+    /// Default: no-op.
+    fn prepare(&mut self, area: Rect, ctx: &DrawContext) {
+        let _ = (area, ctx);
+    }
     fn draw(&self, area: Rect, slice: &mut GridSlice<'_>, ctx: &DrawContext);
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult {
         let _ = (code, mods);
@@ -429,9 +436,8 @@ impl Dialog {
                     // the scrollbar thumb).
                     view.set_scroll(scroll_top as usize);
                 }
-                DialogPanelContent::Widget(widget) => {
+                DialogPanelContent::Widget(_) => {
                     panel.viewport = None;
-                    crate::option_list::set_option_list_viewport(widget.as_mut(), rect.height);
                 }
             }
             y = y.saturating_add(h);
@@ -683,9 +689,14 @@ impl Dialog {
 }
 
 impl Component for Dialog {
-    fn prepare(&mut self, area: Rect, _ctx: &DrawContext) {
+    fn prepare(&mut self, area: Rect, ctx: &DrawContext) {
         self.area = area;
         self.resolve_panel_rects(area);
+        for panel in &mut self.panels {
+            if let DialogPanelContent::Widget(widget) = &mut panel.content {
+                widget.prepare(panel.rect, ctx);
+            }
+        }
     }
 
     fn draw(&self, area: Rect, grid: &mut GridSlice<'_>, ctx: &DrawContext) {

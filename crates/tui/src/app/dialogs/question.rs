@@ -11,7 +11,6 @@ use crate::keymap::hints;
 use crate::render::{wrap_line, Question as QuestionDef};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
-use std::cell::Cell;
 use ui::component::{Component, CursorInfo, DrawContext, KeyResult};
 use ui::dialog::PanelWidget;
 use ui::grid::{GridSlice, Style};
@@ -88,11 +87,14 @@ pub(crate) struct QuestionWidget {
     visited: Vec<bool>,
     answered: Vec<bool>,
     /// Row/col (relative to widget's draw area) where the current
-    /// tab's "Other" text value starts. Written by `draw`, read by
-    /// `cursor`. Only meaningful when `editing_other[active_tab]` is
-    /// true.
-    other_row: Cell<u16>,
-    other_col: Cell<u16>,
+    /// tab's "Other" text value starts. Written by `prepare`, read by
+    /// `draw` / `cursor`. Only meaningful when
+    /// `editing_other[active_tab]` is true.
+    other_row: u16,
+    other_col: u16,
+    /// Draw width captured at `prepare` time; used by `draw` / cursor
+    /// layout.
+    width: u16,
 }
 
 impl QuestionWidget {
@@ -110,10 +112,48 @@ impl QuestionWidget {
             editing_other: vec![false; n],
             visited: vec![false; n],
             answered: vec![false; n],
-            other_row: Cell::new(0),
-            other_col: Cell::new(0),
+            other_row: 0,
+            other_col: 0,
+            width: 0,
             questions,
         }
+    }
+
+    /// Recompute the "Other" row/col based on the current tab's state
+    /// and the widget's draw width. Walks the same layout logic as
+    /// `draw` without painting.
+    fn recompute_other_layout(&mut self) {
+        let w = self.width;
+        if w == 0 {
+            self.other_row = 0;
+            self.other_col = 0;
+            return;
+        }
+        let mut row: u16 = 0;
+        row += 1; // accent bar
+        if self.has_tabs {
+            row += 1;
+        }
+        row += 1; // blank
+        let q = &self.questions[self.active_tab];
+        let is_multi = q.multi_select;
+        let other_idx = q.options.len();
+        let suffix = if is_multi { " (space to toggle)" } else { "" };
+        let q_max = (w as usize).saturating_sub(1 + suffix.len());
+        let segments = wrap_line(&q.question, q_max);
+        row += segments.len() as u16;
+        row += 1; // blank
+        row += q.options.len() as u16;
+        // "Other" row is here; text column depends on the multi /
+        // single prefix.
+        self.other_row = row;
+        let col_prefix: u16 = if is_multi {
+            2 + 2 /* "X " */ + 5 /* "Other" */ + 2 /* "  " gap */
+        } else {
+            let digits = format!("{}", other_idx + 1).len() as u16;
+            2 + digits + 1 /* "N. " */ + 5 + 2
+        };
+        self.other_col = col_prefix;
     }
 
     pub(crate) fn build_answer(&self) -> String {
@@ -213,6 +253,11 @@ impl<'a, 'b> RowPainter<'a, 'b> {
 }
 
 impl PanelWidget for QuestionWidget {
+    fn prepare(&mut self, area: Rect, _ctx: &DrawContext) {
+        self.width = area.width;
+        self.recompute_other_layout();
+    }
+
     fn draw(&self, _area: Rect, slice: &mut GridSlice<'_>, _ctx: &DrawContext) {
         let w = slice.width();
         let h = slice.height();
@@ -376,11 +421,8 @@ impl PanelWidget for QuestionWidget {
             let text = self.other_inputs[self.active_tab].text();
             if editing || !text.is_empty() {
                 rp.pad(2);
-                let text_col = rp.col;
-                self.other_row.set(row);
-                self.other_col.set(text_col);
-                // Paint the text directly so cursor tracking stays
-                // within this widget (no sub-slice bookkeeping).
+                // Layout of other_row/other_col was precomputed in
+                // `prepare`; just paint the text.
                 rp.write(text, Style::default());
             }
             row = row.saturating_add(1);
@@ -539,8 +581,8 @@ impl PanelWidget for QuestionWidget {
         let ti = &self.other_inputs[self.active_tab];
         let col_offset = ti.cursor_col() as u16;
         Some(CursorInfo {
-            col: self.other_col.get().saturating_add(col_offset),
-            row: self.other_row.get(),
+            col: self.other_col.saturating_add(col_offset),
+            row: self.other_row,
             style: None,
         })
     }

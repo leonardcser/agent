@@ -146,6 +146,11 @@ impl OptionList {
 }
 
 impl PanelWidget for OptionList {
+    fn prepare(&mut self, area: Rect, _ctx: &DrawContext) {
+        self.viewport_rows = area.height;
+        self.ensure_visible();
+    }
+
     fn draw(&self, _area: Rect, slice: &mut GridSlice<'_>, _ctx: &DrawContext) {
         let w = slice.width();
         let h = slice.height();
@@ -281,16 +286,6 @@ impl PanelWidget for OptionList {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
-    }
-}
-
-/// Lets a dialog notify the widget of its actual viewport height so
-/// scrolling/page motion work. Called by the dialog; not a trait method
-/// because only `OptionList` uses it.
-pub fn set_option_list_viewport(widget: &mut dyn PanelWidget, rows: u16) {
-    if let Some(ol) = widget.as_any_mut().downcast_mut::<OptionList>() {
-        ol.viewport_rows = rows;
-        ol.ensure_visible();
     }
 }
 
