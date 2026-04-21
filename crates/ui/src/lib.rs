@@ -1,5 +1,6 @@
 pub mod buffer;
 pub mod buffer_view;
+pub mod callback;
 pub mod component;
 pub mod compositor;
 pub mod dialog;
@@ -26,6 +27,10 @@ pub type AttachmentId = u64;
 
 pub use buffer::{BufType, Buffer, Span, SpanStyle};
 pub use buffer_view::BufferView;
+pub use callback::{
+    Callback, CallbackCtx, CallbackResult, Callbacks, KeyBind, LuaHandle, Payload, RustCallback,
+    WinEvent,
+};
 pub use component::{Component, CursorInfo, CursorStyle, DrawContext, KeyResult};
 pub use compositor::Compositor;
 pub use dialog::{Dialog, DialogConfig, PanelHeight, PanelKind, PanelSpec, SeparatorStyle};
@@ -58,6 +63,7 @@ pub struct Ui {
     layout: Option<LayoutTree>,
     terminal_size: (u16, u16),
     compositor: Compositor,
+    callbacks: Callbacks,
 }
 
 impl Ui {
@@ -71,6 +77,7 @@ impl Ui {
             layout: None,
             terminal_size: (80, 24),
             compositor: Compositor::new(80, 24),
+            callbacks: Callbacks::new(),
         }
     }
 
@@ -154,9 +161,68 @@ impl Ui {
         let layer_id = float_layer_id(id);
         self.compositor.remove(&layer_id);
         self.wins.remove(&id);
+        self.callbacks.clear_all(id);
         if self.current_win == Some(id) {
             self.current_win = self.wins.keys().next().copied();
         }
+    }
+
+    // ── Callbacks ────────────────────────────────────────────────────
+    //
+    // Per-window keymap + event callbacks. The registry is the single
+    // behavior mechanism shared by Rust and Lua.
+
+    /// Bind a key chord on a specific window to a callback.
+    pub fn win_set_keymap(&mut self, win: WinId, key: KeyBind, cb: Callback) {
+        self.callbacks.set_keymap(win, key, cb);
+    }
+
+    /// Remove a keymap binding. No-op if not set.
+    pub fn win_clear_keymap(&mut self, win: WinId, key: KeyBind) {
+        self.callbacks.clear_keymap(win, key);
+    }
+
+    /// Register a callback for a window lifecycle / semantic event.
+    /// Multiple callbacks per (win, event) are supported and fire
+    /// in registration order.
+    pub fn win_on_event(&mut self, win: WinId, ev: WinEvent, cb: Callback) {
+        self.callbacks.on_event(win, ev, cb);
+    }
+
+    /// Dispatch a window event to its registered callbacks. Returns
+    /// the collected action strings. `lua_invoke` is called for each
+    /// Lua callback with (handle, payload) and may return extra
+    /// action strings.
+    pub fn dispatch_event(
+        &mut self,
+        win: WinId,
+        ev: WinEvent,
+        payload: Payload,
+        lua_invoke: &mut dyn FnMut(LuaHandle, &Payload) -> Vec<String>,
+    ) -> Vec<String> {
+        let mut actions = Vec::new();
+        let Some(mut cbs) = self.callbacks.take_event(win, ev) else {
+            return actions;
+        };
+        for cb in cbs.iter_mut() {
+            match cb {
+                Callback::Rust(inner) => {
+                    let mut ctx = CallbackCtx {
+                        ui: self,
+                        win,
+                        payload: payload.clone(),
+                        actions: &mut actions,
+                    };
+                    let _ = inner(&mut ctx);
+                }
+                Callback::Lua(handle) => {
+                    let extra = lua_invoke(*handle, &payload);
+                    actions.extend(extra);
+                }
+            }
+        }
+        self.callbacks.restore_event(win, ev, cbs);
+        actions
     }
 
     /// Open a multi-panel `Dialog` as a compositor float layer.
@@ -334,7 +400,53 @@ impl Ui {
         code: crossterm::event::KeyCode,
         mods: crossterm::event::KeyModifiers,
     ) -> KeyResult {
-        self.compositor.handle_key(code, mods)
+        let (result, _actions) = self.handle_key_with_actions(code, mods, &mut |_, _| Vec::new());
+        result
+    }
+
+    /// Dispatch a key event through the focused window's keymap
+    /// table, falling back to `Component::handle_key` if no binding
+    /// matches. Returns both the compositor result and any action
+    /// strings emitted by callbacks. `lua_invoke` is called for each
+    /// Lua callback with (handle, payload) and returns action
+    /// strings to merge.
+    pub fn handle_key_with_actions(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+        lua_invoke: &mut dyn FnMut(LuaHandle, &Payload) -> Vec<String>,
+    ) -> (KeyResult, Vec<String>) {
+        let mut actions = Vec::new();
+        let focused = self.compositor.focused().and_then(parse_float_layer_id);
+        let Some(win) = focused else {
+            return (self.compositor.handle_key(code, mods), actions);
+        };
+        let key = KeyBind::new(code, mods);
+        let Some(mut cb) = self.callbacks.take_keymap(win, key) else {
+            return (self.compositor.handle_key(code, mods), actions);
+        };
+        let result = match &mut cb {
+            Callback::Rust(inner) => {
+                let mut ctx = CallbackCtx {
+                    ui: self,
+                    win,
+                    payload: Payload::Key { code, mods },
+                    actions: &mut actions,
+                };
+                let r = inner(&mut ctx);
+                match r {
+                    CallbackResult::Consumed => KeyResult::Consumed,
+                    CallbackResult::Pass => self.compositor.handle_key(code, mods),
+                }
+            }
+            Callback::Lua(handle) => {
+                let payload = Payload::Key { code, mods };
+                actions.extend(lua_invoke(*handle, &payload));
+                KeyResult::Consumed
+            }
+        };
+        self.callbacks.restore_keymap(win, key, cb);
+        (result, actions)
     }
 
     pub fn focused_float(&self) -> Option<WinId> {
