@@ -232,6 +232,13 @@ pub enum ApprovalScope {
     Workspace,
 }
 
+/// A single runtime permission rule: one tool + one pattern.
+#[derive(Clone)]
+pub struct PermissionEntry {
+    pub tool: String,
+    pub pattern: String,
+}
+
 #[derive(Clone, PartialEq, serde::Serialize)]
 pub enum ConfirmChoice {
     Yes,

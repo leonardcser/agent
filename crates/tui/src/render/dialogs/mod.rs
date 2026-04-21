@@ -1,22 +1,10 @@
 mod agents;
 mod confirm;
-mod export;
-mod help;
-mod permissions;
-mod ps;
 mod question;
-mod resume;
-mod rewind;
 
 pub use agents::{AgentSnapshot, AgentsDialog, SharedSnapshots};
 pub use confirm::ConfirmDialog;
-pub use export::{ExportDialog, ExportTarget};
-pub use help::HelpDialog;
-pub use permissions::{PermissionEntry, PermissionsDialog};
-pub use ps::PsDialog;
 pub use question::{parse_questions, Question, QuestionDialog, QuestionOption};
-pub use resume::ResumeDialog;
-pub use rewind::RewindDialog;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{cursor, terminal, QueueableCommand};
@@ -34,21 +22,6 @@ pub enum DialogResult {
     Question {
         answer: Option<String>,
         request_id: u64,
-    },
-    Rewind {
-        block_idx: Option<usize>,
-        restore_vim_insert: bool,
-    },
-    Resume {
-        session_id: Option<String>,
-    },
-    Export {
-        target: Option<ExportTarget>,
-    },
-    PsClosed,
-    PermissionsClosed {
-        session_remaining: Vec<PermissionEntry>,
-        workspace_remaining: Vec<crate::workspace_permissions::Rule>,
     },
     AgentsClosed,
 }

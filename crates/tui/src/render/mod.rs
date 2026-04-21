@@ -34,8 +34,8 @@ pub use viewport::ViewportGeom;
 
 pub use history::{
     ActiveAgent, ActiveTool, AgentBlockStatus, ApprovalScope, Block, BlockArtifact, BlockId,
-    ConfirmChoice, ConfirmRequest, LayoutKey, PluginConfirmMeta, PluginOptionMeta, ResumeEntry,
-    Status, Throbber, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
+    ConfirmChoice, ConfirmRequest, LayoutKey, PermissionEntry, PluginConfirmMeta, PluginOptionMeta,
+    ResumeEntry, Status, Throbber, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
 
 pub(crate) use selection::{scan_at_token, truncate_str, try_at_ref, wrap_line};
@@ -44,9 +44,8 @@ pub use status::StatusPosition;
 pub(crate) use status::{draw_bar, BarSpan};
 
 pub use dialogs::{
-    parse_questions, AgentSnapshot, AgentsDialog, ConfirmDialog, Dialog, DialogResult,
-    ExportDialog, ExportTarget, HelpDialog, PermissionEntry, PermissionsDialog, PsDialog, Question,
-    QuestionDialog, QuestionOption, ResumeDialog, RewindDialog, SharedSnapshots,
+    parse_questions, AgentSnapshot, AgentsDialog, ConfirmDialog, Dialog, DialogResult, Question,
+    QuestionDialog, QuestionOption, SharedSnapshots,
 };
 
 /// Layout placement computed by `draw_frame` for the active dialog.

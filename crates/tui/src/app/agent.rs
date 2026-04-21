@@ -1145,54 +1145,10 @@ impl App {
                     *agent = None;
                 }
             }
-            render::DialogResult::Rewind {
-                block_idx,
-                restore_vim_insert,
-            } => {
-                if let Some(idx) = block_idx {
-                    if agent.is_some() {
-                        self.cancel_agent();
-                        *agent = None;
-                    }
-                    if let Some((text, images)) = self.rewind_to(idx) {
-                        self.input.restore_from_rewind(text, images);
-                    }
-                    // rewind_to → redraw(true) already purged the screen;
-                    // drain stale engine events and save the truncated state.
-                    while self.engine.try_recv().is_ok() {}
-                    self.save_session();
-                } else if restore_vim_insert {
-                    self.input.set_vim_mode(vim::ViMode::Insert);
-                }
-            }
-            render::DialogResult::Resume { session_id } => {
-                if let Some(id) = session_id {
-                    if let Some(loaded) = session::load(&id) {
-                        self.load_session(loaded);
-                        self.restore_screen();
-                        if let Some(tokens) = self.session.context_tokens {
-                            self.screen.set_context_tokens(tokens);
-                        }
-                        self.screen.finish_turn();
-                        self.transcript_window.scroll_top = u16::MAX;
-                    }
-                }
-            }
-            render::DialogResult::Export { target } => match target {
-                Some(render::ExportTarget::Clipboard) => self.export_to_clipboard(),
-                Some(render::ExportTarget::File) => self.export_to_file(),
-                None => {}
-            },
-            render::DialogResult::PermissionsClosed {
-                session_remaining,
-                workspace_remaining,
-            } => {
-                self.sync_permissions(session_remaining, workspace_remaining);
-            }
             render::DialogResult::AgentsClosed => {
                 self.refresh_agent_counts();
             }
-            render::DialogResult::PsClosed | render::DialogResult::Dismissed => {}
+            render::DialogResult::Dismissed => {}
         }
     }
 
