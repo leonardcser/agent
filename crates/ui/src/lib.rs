@@ -239,7 +239,11 @@ impl Ui {
         dialog_config: dialog::DialogConfig,
         panels: Vec<dialog::PanelSpec>,
     ) -> Option<WinId> {
-        if !panels.iter().all(|p| self.bufs.contains_key(&p.buf)) {
+        let all_bufs_registered = panels.iter().all(|p| match &p.content {
+            dialog::PanelContent::Buffer(b) => self.bufs.contains_key(b),
+            dialog::PanelContent::Widget(_) => true,
+        });
+        if !all_bufs_registered {
             return None;
         }
         let id = WinId(self.next_win_id);
@@ -249,9 +253,16 @@ impl Ui {
         let rect = resolve_float_rect(&float_config, tw, th);
         let zindex = float_config.zindex;
 
-        // Use the first panel's buffer as the dialog window's "buf"
-        // pointer for registry purposes (dialogs are multi-buffer).
-        let primary_buf = panels.first().map(|p| p.buf).unwrap_or(BufId(0));
+        // Use the first buffer-backed panel's buffer as the dialog
+        // window's "buf" pointer for registry purposes (dialogs are
+        // multi-buffer and may be widget-only).
+        let primary_buf = panels
+            .iter()
+            .find_map(|p| match &p.content {
+                dialog::PanelContent::Buffer(b) => Some(*b),
+                dialog::PanelContent::Widget(_) => None,
+            })
+            .unwrap_or(BufId(0));
 
         let panel_structs = dialog::build_panels(panels, &self.bufs);
         let dlg = dialog::Dialog::new(dialog_config, panel_structs);

@@ -54,11 +54,40 @@ pub enum SeparatorStyle {
     Solid,
 }
 
+/// A self-contained panel renderer with its own interaction state.
+/// Widgets let dialogs embed composite components (multi-line editors,
+/// multi-select lists with "Other" fields, tab bars, previews) that go
+/// beyond what a raw buffer-backed panel can express.
+pub trait PanelWidget: Send {
+    fn draw(&self, area: Rect, slice: &mut GridSlice<'_>, ctx: &DrawContext);
+    fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult {
+        let _ = (code, mods);
+        KeyResult::Ignored
+    }
+    fn cursor(&self, area: Rect) -> Option<CursorInfo> {
+        let _ = area;
+        None
+    }
+    /// Rows the widget would like to occupy. Used for `PanelHeight::Fit`.
+    fn content_rows(&self) -> usize {
+        0
+    }
+    fn tick(&mut self) {}
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+/// What a panel renders: a buffer in `Ui::bufs`, or a self-contained
+/// widget.
+pub enum PanelContent {
+    Buffer(BufId),
+    Widget(Box<dyn PanelWidget>),
+}
+
 /// Description of a panel passed to `Ui::dialog_open`. The dialog
 /// instantiates an internal `ui::Window` from this spec; the buffer
 /// stays in the Ui registry.
 pub struct PanelSpec {
-    pub buf: BufId,
+    pub content: PanelContent,
     pub kind: PanelKind,
     pub height: PanelHeight,
     pub separator_above: Option<SeparatorStyle>,
@@ -74,7 +103,7 @@ pub struct PanelSpec {
 impl PanelSpec {
     pub fn content(buf: BufId, height: PanelHeight) -> Self {
         Self {
-            buf,
+            content: PanelContent::Buffer(buf),
             kind: PanelKind::Content,
             height,
             separator_above: None,
@@ -86,7 +115,7 @@ impl PanelSpec {
 
     pub fn list(buf: BufId, height: PanelHeight) -> Self {
         Self {
-            buf,
+            content: PanelContent::Buffer(buf),
             kind: PanelKind::List { multi: false },
             height,
             separator_above: None,
@@ -98,8 +127,22 @@ impl PanelSpec {
 
     pub fn input(buf: BufId, height: PanelHeight, multiline: bool) -> Self {
         Self {
-            buf,
+            content: PanelContent::Buffer(buf),
             kind: PanelKind::Input { multiline },
+            height,
+            separator_above: None,
+            pad_left: 1,
+            focusable: true,
+            collapse_when_empty: false,
+        }
+    }
+
+    /// Widget-backed panel. The widget owns its own draw + key
+    /// handling; the dialog only places it in the panel layout.
+    pub fn widget(widget: Box<dyn PanelWidget>, height: PanelHeight) -> Self {
+        Self {
+            content: PanelContent::Widget(widget),
+            kind: PanelKind::Content,
             height,
             separator_above: None,
             pad_left: 1,
@@ -142,27 +185,52 @@ pub struct DialogConfig {
     pub hints: Option<StatusBar>,
 }
 
-/// Internal panel state held by `Dialog`. The `Window` lives here,
-/// not in `Ui::wins`: panels are dialog-local interaction, the buffer
-/// in `Ui::bufs` is the shared piece.
+/// Internal panel state held by `Dialog`. For buffer-backed panels
+/// the dialog owns a `Window` (cursor, scroll, selection anchor) and
+/// a `BufferView` snapshot synced each frame. Widget-backed panels
+/// manage their own state.
 pub(crate) struct DialogPanel {
-    pub buf: BufId,
     pub kind: PanelKind,
     pub height: PanelHeight,
     pub separator_above: Option<SeparatorStyle>,
     pub pad_left: u16,
     pub focusable: bool,
     pub collapse_when_empty: bool,
-    pub win: Window,
-    /// Cached snapshot of the panel's buffer used by `draw`. Synced
-    /// each frame via `Dialog::sync_from_bufs`.
-    view: BufferView,
-    line_count: usize,
+    pub content: DialogPanelContent,
+    /// Rows the content wants to render. For buffers, `buf.line_count`
+    /// at last sync. For widgets, `widget.content_rows()`.
+    pub line_count: usize,
     /// Resolved rect within the dialog, recomputed each frame.
     rect: Rect,
     /// Resolved viewport (rect + scrollbar geometry) recomputed each
-    /// frame.
+    /// frame. `None` for widget panels.
     viewport: Option<WindowViewport>,
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum DialogPanelContent {
+    Buffer {
+        buf: BufId,
+        view: BufferView,
+        win: Window,
+    },
+    Widget(Box<dyn PanelWidget>),
+}
+
+impl DialogPanel {
+    pub(crate) fn win_mut(&mut self) -> Option<&mut Window> {
+        match &mut self.content {
+            DialogPanelContent::Buffer { win, .. } => Some(win),
+            DialogPanelContent::Widget(_) => None,
+        }
+    }
+
+    pub(crate) fn win(&self) -> Option<&Window> {
+        match &self.content {
+            DialogPanelContent::Buffer { win, .. } => Some(win),
+            DialogPanelContent::Widget(_) => None,
+        }
+    }
 }
 
 pub struct Dialog {
@@ -174,10 +242,13 @@ pub struct Dialog {
 impl Dialog {
     pub(crate) fn new(config: DialogConfig, mut panels: Vec<DialogPanel>) -> Self {
         let focused = panels.iter().position(|p| p.focusable).unwrap_or(0);
-        // Propagate the dialog's bg to each panel's view so glyphs
-        // render on the dialog fill instead of terminal defaults.
+        // Propagate the dialog's bg to each buffer panel's view so
+        // glyphs render on the dialog fill instead of terminal
+        // defaults. Widgets handle their own styling.
         for panel in panels.iter_mut() {
-            panel.view.set_default_style(config.background_style);
+            if let DialogPanelContent::Buffer { view, .. } = &mut panel.content {
+                view.set_default_style(config.background_style);
+            }
         }
         Self {
             config,
@@ -206,13 +277,20 @@ impl Dialog {
     {
         let default_style = self.config.background_style;
         for panel in &mut self.panels {
-            if let Some(buf) = resolve(panel.buf) {
-                panel.line_count = buf.line_count();
-                panel.view.sync_from_buffer(buf);
+            match &mut panel.content {
+                DialogPanelContent::Buffer { buf, view, .. } => {
+                    if let Some(b) = resolve(*buf) {
+                        panel.line_count = b.line_count();
+                        view.sync_from_buffer(b);
+                    }
+                    // Inherit the dialog's background so content cells
+                    // keep the bg fill after the view paints glyphs.
+                    view.set_default_style(default_style);
+                }
+                DialogPanelContent::Widget(widget) => {
+                    panel.line_count = widget.content_rows();
+                }
             }
-            // Inherit the dialog's background so content cells keep
-            // the bg fill after the view paints glyphs.
-            panel.view.set_default_style(default_style);
         }
     }
 
@@ -311,28 +389,32 @@ impl Dialog {
             panel.rect = rect;
             let total_lines = panel.line_count as u16;
             let viewport_rows = rect.height;
-            let scroll_top = panel
-                .win
-                .scroll_top
-                .min(total_lines.saturating_sub(viewport_rows));
-            panel.win.scroll_top = scroll_top;
-            let scrollbar = ScrollbarState::new(
-                rect.left + rect.width.saturating_sub(1),
-                total_lines,
-                viewport_rows,
-            );
-            panel.viewport = Some(WindowViewport::new(
-                rect,
-                rect.width,
-                total_lines,
-                scroll_top,
-                scrollbar,
-            ));
-            // BufferView renders starting at its own scroll_offset;
-            // keep it in lock-step with the window's scroll_top so
-            // scrolling actually moves the visible rows (not just the
-            // scrollbar thumb).
-            panel.view.set_scroll(scroll_top as usize);
+            match &mut panel.content {
+                DialogPanelContent::Buffer { view, win, .. } => {
+                    let scroll_top = win.scroll_top.min(total_lines.saturating_sub(viewport_rows));
+                    win.scroll_top = scroll_top;
+                    let scrollbar = ScrollbarState::new(
+                        rect.left + rect.width.saturating_sub(1),
+                        total_lines,
+                        viewport_rows,
+                    );
+                    panel.viewport = Some(WindowViewport::new(
+                        rect,
+                        rect.width,
+                        total_lines,
+                        scroll_top,
+                        scrollbar,
+                    ));
+                    // BufferView renders starting at its own scroll_offset;
+                    // keep it in lock-step with the window's scroll_top so
+                    // scrolling actually moves the visible rows (not just
+                    // the scrollbar thumb).
+                    view.set_scroll(scroll_top as usize);
+                }
+                DialogPanelContent::Widget(_) => {
+                    panel.viewport = None;
+                }
+            }
             y = y.saturating_add(h);
         }
     }
@@ -395,12 +477,16 @@ impl Dialog {
                 ' ',
                 self.config.background_style,
             );
-            panel.view.draw(content_rect, &mut content_slice, ctx);
-
-            // List selection: retint the cursor row's fg to accent.
-            // Preserves symbols and the dialog bg; no layout shift.
-            if let PanelKind::List { .. } = panel.kind {
-                self.paint_list_selection(panel, &mut content_slice);
+            match &panel.content {
+                DialogPanelContent::Buffer { view, .. } => {
+                    view.draw(content_rect, &mut content_slice, ctx);
+                    if let PanelKind::List { .. } = panel.kind {
+                        self.paint_list_selection(panel, &mut content_slice);
+                    }
+                }
+                DialogPanelContent::Widget(widget) => {
+                    widget.draw(content_rect, &mut content_slice, ctx);
+                }
             }
         }
 
@@ -416,7 +502,8 @@ impl Dialog {
         let Some(viewport) = panel.viewport else {
             return;
         };
-        let cursor_line = panel.win.cursor_line;
+        let Some(win) = panel.win() else { return };
+        let cursor_line = win.cursor_line;
         if cursor_line >= viewport.rect.height {
             return;
         }
@@ -449,7 +536,7 @@ impl Dialog {
         let thumb_size = bar.thumb_size() as usize;
         let max_thumb = bar.max_thumb_top() as usize;
         let max_scroll = bar.max_scroll() as usize;
-        let scroll_top = panel.win.scroll_top as usize;
+        let scroll_top = panel.win().map(|w| w.scroll_top).unwrap_or(0) as usize;
         let thumb_top = (scroll_top * max_thumb + max_scroll / 2)
             .checked_div(max_scroll)
             .unwrap_or(0);
@@ -496,15 +583,16 @@ impl Dialog {
             return;
         };
         let total = panel.line_count as isize;
-        let rows = panel.rect.height as isize;
+        let rect_height = panel.rect.height;
+        let rows = rect_height as isize;
         let max_scroll = (total - rows).max(0);
-        let new = (panel.win.scroll_top as isize + delta).clamp(0, max_scroll);
-        panel.win.scroll_top = new as u16;
-        // For List panels, cursor_line follows to stay inside the
-        // viewport; selection is cursor-line, not a separate index.
-        if matches!(panel.kind, PanelKind::List { .. }) {
-            let max_line = panel.rect.height.saturating_sub(1);
-            panel.win.cursor_line = panel.win.cursor_line.min(max_line);
+        let is_list = matches!(panel.kind, PanelKind::List { .. });
+        let Some(win) = panel.win_mut() else { return };
+        let new = (win.scroll_top as isize + delta).clamp(0, max_scroll);
+        win.scroll_top = new as u16;
+        if is_list {
+            let max_line = rect_height.saturating_sub(1);
+            win.cursor_line = win.cursor_line.min(max_line);
         }
     }
 
@@ -519,18 +607,19 @@ impl Dialog {
         if total == 0 {
             return;
         }
-        let current = panel.win.scroll_top as isize + panel.win.cursor_line as isize;
-        let new = (current + delta).clamp(0, total - 1);
         let rows = panel.rect.height as isize;
-        let scroll = panel.win.scroll_top as isize;
+        let Some(win) = panel.win_mut() else { return };
+        let current = win.scroll_top as isize + win.cursor_line as isize;
+        let new = (current + delta).clamp(0, total - 1);
+        let scroll = win.scroll_top as isize;
         if new < scroll {
-            panel.win.scroll_top = new as u16;
-            panel.win.cursor_line = 0;
+            win.scroll_top = new as u16;
+            win.cursor_line = 0;
         } else if new >= scroll + rows {
-            panel.win.scroll_top = (new - rows + 1).max(0) as u16;
-            panel.win.cursor_line = (new - panel.win.scroll_top as isize) as u16;
+            win.scroll_top = (new - rows + 1).max(0) as u16;
+            win.cursor_line = (new - win.scroll_top as isize) as u16;
         } else {
-            panel.win.cursor_line = (new - scroll) as u16;
+            win.cursor_line = (new - scroll) as u16;
         }
     }
 
@@ -549,17 +638,18 @@ impl Dialog {
         }
         let clamped = idx.min(total - 1) as u16;
         let rows = panel.rect.height;
+        let Some(win) = panel.win_mut() else { return };
         if rows == 0 {
-            panel.win.scroll_top = clamped;
-            panel.win.cursor_line = 0;
+            win.scroll_top = clamped;
+            win.cursor_line = 0;
             return;
         }
         if clamped < rows {
-            panel.win.scroll_top = 0;
-            panel.win.cursor_line = clamped;
+            win.scroll_top = 0;
+            win.cursor_line = clamped;
         } else {
-            panel.win.scroll_top = clamped + 1 - rows;
-            panel.win.cursor_line = rows - 1;
+            win.scroll_top = clamped + 1 - rows;
+            win.cursor_line = rows - 1;
         }
     }
 
@@ -568,7 +658,8 @@ impl Dialog {
         if !matches!(panel.kind, PanelKind::List { .. }) {
             return None;
         }
-        Some(panel.win.scroll_top as usize + panel.win.cursor_line as usize)
+        let win = panel.win()?;
+        Some(win.scroll_top as usize + win.cursor_line as usize)
     }
 }
 
@@ -644,6 +735,13 @@ impl Component for Dialog {
                 return KeyResult::Consumed;
             }
             _ => {}
+        }
+
+        // Widget panels: route directly to widget.
+        if let Some(panel) = self.panels.get_mut(self.focused) {
+            if let DialogPanelContent::Widget(widget) = &mut panel.content {
+                return widget.handle_key(code, mods);
+            }
         }
 
         // Focused-panel-specific routing.
@@ -723,8 +821,11 @@ impl Component for Dialog {
     fn cursor(&self) -> Option<CursorInfo> {
         // List panels show selection as fg-accent tint on the cursor
         // row (painted inside `draw_panel`), not via a terminal
-        // cursor glyph. Input panels will expose a hardware cursor
-        // once EditBuffer is wired.
+        // cursor glyph. Widgets may expose a hardware cursor.
+        let panel = self.panels.get(self.focused)?;
+        if let DialogPanelContent::Widget(widget) = &panel.content {
+            return widget.cursor(panel.rect);
+        }
         None
     }
 
@@ -749,27 +850,41 @@ pub(crate) fn build_panels(
         .into_iter()
         .enumerate()
         .map(|(i, spec)| {
-            let line_count = bufs.get(&spec.buf).map(|b| b.line_count()).unwrap_or(0);
-            let mut view = BufferView::new();
-            if let Some(buf) = bufs.get(&spec.buf) {
-                view.sync_from_buffer(buf);
-            }
-            let win = Window::new(
-                WinId(u64::MAX - i as u64),
-                spec.buf,
-                WinConfig::Float(FloatConfig::default()),
-            );
+            let (content, line_count) = match spec.content {
+                PanelContent::Buffer(buf_id) => {
+                    let line_count = bufs.get(&buf_id).map(|b| b.line_count()).unwrap_or(0);
+                    let mut view = BufferView::new();
+                    if let Some(buf) = bufs.get(&buf_id) {
+                        view.sync_from_buffer(buf);
+                    }
+                    let win = Window::new(
+                        WinId(u64::MAX - i as u64),
+                        buf_id,
+                        WinConfig::Float(FloatConfig::default()),
+                    );
+                    (
+                        DialogPanelContent::Buffer {
+                            buf: buf_id,
+                            view,
+                            win,
+                        },
+                        line_count,
+                    )
+                }
+                PanelContent::Widget(widget) => {
+                    let rows = widget.content_rows();
+                    (DialogPanelContent::Widget(widget), rows)
+                }
+            };
             let _ = LineDecoration::default();
             DialogPanel {
-                buf: spec.buf,
                 kind: spec.kind,
                 height: spec.height,
                 separator_above: spec.separator_above,
                 pad_left: spec.pad_left,
                 focusable: spec.focusable,
                 collapse_when_empty: spec.collapse_when_empty,
-                win,
-                view,
+                content,
                 line_count,
                 rect: Rect::new(0, 0, 0, 0),
                 viewport: None,
