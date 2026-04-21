@@ -495,9 +495,8 @@ impl App {
                             return EventOutcome::Redraw;
                         }
                         KeyAction::OpenHelp => {
-                            return EventOutcome::OpenDialog(Box::new(render::HelpDialog::new(
-                                self.input.vim_enabled(),
-                            )));
+                            self.open_help_float();
+                            return EventOutcome::Redraw;
                         }
                         KeyAction::OpenHistorySearch => {
                             if self.input.history_search_query().is_none() {
@@ -1672,6 +1671,76 @@ impl App {
             session_id: self.session.id.clone(),
         });
         self.lua.set_history(self.history.clone());
+    }
+
+    pub(super) fn open_help_float(&mut self) {
+        use crate::keymap::hints;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let vim_enabled = self.input.vim_enabled();
+        let sections = hints::help_sections(vim_enabled);
+
+        // Format help sections into content lines.
+        let label_col = sections
+            .iter()
+            .flat_map(|(_, entries)| entries.iter().map(|(k, _)| k.len()))
+            .max()
+            .unwrap_or(0)
+            + 4;
+
+        let mut lines: Vec<String> = Vec::new();
+        for (si, (_, entries)) in sections.iter().enumerate() {
+            for &(label, detail) in entries {
+                let padding = " ".repeat(label_col.saturating_sub(label.len()));
+                lines.push(format!("  {label}{padding}{detail}"));
+            }
+            if si + 1 < sections.len() {
+                lines.push(String::new());
+            }
+        }
+
+        let buf_id = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            buftype: ui::buffer::BufType::Scratch,
+            ..Default::default()
+        });
+        if let Some(buf) = self.ui.buf_mut(buf_id) {
+            buf.set_all_lines(lines);
+        }
+
+        let hint_text = hints::join(&[
+            hints::CLOSE,
+            hints::nav(vim_enabled),
+            hints::scroll(vim_enabled),
+        ]);
+
+        let win_id = self.ui.win_open_float(
+            buf_id,
+            ui::FloatConfig {
+                title: Some("help".into()),
+                border: ui::Border::Rounded,
+                height: ui::Constraint::Pct(60),
+                ..Default::default()
+            },
+        );
+
+        if let Some(win_id) = win_id {
+            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                let cfg = dialog.config_mut();
+                cfg.accent_style = ui::grid::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.border_style = ui::grid::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.hint_left = Some(hint_text);
+                cfg.dismiss_keys = vec![
+                    (KeyCode::Char('q'), KeyModifiers::NONE),
+                    (KeyCode::Char('?'), KeyModifiers::NONE),
+                ];
+            }
+        }
     }
 
     fn handle_float_action(&mut self, result: ui::KeyResult) {

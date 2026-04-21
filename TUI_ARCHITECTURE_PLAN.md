@@ -582,18 +582,23 @@ Sub-steps:
     → `engine.ask({on_response = set_lines})`. Zero btw-specific
     Rust code. This proves the architecture.
 
-**Step 7: Status bar event-driven** — status bar segments are updated
-when the underlying data changes (mode switch, new tokens, cost update),
-not recomputed every frame. Delete `status_data.rs`.
+**Step 7: Status bar event-driven** ✅ — `status_data.rs` deleted.
+`App::refresh_status_bar()` builds status segments directly from App/Screen
+state (no intermediate `StatusInput`/`StatusOutput` structs). `spans_to_segments`
+moved to `status.rs`. Screen getters (`last_vim_enabled`, `last_vim_mode`,
+`last_status_position`) removed; `refresh_status_bar` computes vim/position
+inline and syncs to Screen for the legacy render path.
 
-**Step 8: Hollow out Screen** — as each piece moves to its final owner,
-Screen shrinks. Data that was in Screen moves to buffers, windows, or
-app state. Delete Screen when empty.
+**Step 8: Hollow out Screen** (deferred) — Screen's fields are all read
+by its own legacy render methods (`render_status_line`, `draw_prompt_sections`).
+Moving them out adds indirection until those methods are deleted. This step
+is folded into Steps 9–10: as each dialog migrates, its legacy render
+dependencies are removed, and Screen fields can move to App.
 
 **Step 9: Migrate dialogs** — each of the 10 Dialog implementations
 becomes a `ui::FloatDialog` configuration added as a compositor layer.
 Migration order (simplest first):
-1. HelpDialog → FloatDialog with keybindings in buffer, no footer
+1. ✅ HelpDialog → FloatDialog with keybindings in buffer, no footer
 2. ExportDialog → FloatDialog with 2-item ListSelect footer
 3. RewindDialog → FloatDialog with turn list in ListSelect
 4. PermissionsDialog → FloatDialog with section content + ListSelect

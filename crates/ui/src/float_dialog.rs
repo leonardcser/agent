@@ -17,6 +17,7 @@ pub struct FloatDialogConfig {
     pub hint_style: Style,
     pub accent_style: Style,
     pub footer_height: Option<u16>,
+    pub dismiss_keys: Vec<(KeyCode, KeyModifiers)>,
 }
 
 impl Default for FloatDialogConfig {
@@ -34,6 +35,7 @@ impl Default for FloatDialogConfig {
             },
             accent_style: Style::default(),
             footer_height: None,
+            dismiss_keys: Vec::new(),
         }
     }
 }
@@ -397,6 +399,14 @@ impl Component for FloatDialog {
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult {
         // Global dismiss
         if matches!(code, KeyCode::Esc) && mods == KeyModifiers::NONE {
+            return KeyResult::Action("dismiss".into());
+        }
+        if self
+            .config
+            .dismiss_keys
+            .iter()
+            .any(|&(k, m)| k == code && m == mods)
+        {
             return KeyResult::Action("dismiss".into());
         }
 
