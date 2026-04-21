@@ -35,7 +35,7 @@ pub use flush::flush_diff;
 pub use grid::{Cell, Grid, GridSlice, Style};
 pub use id::{BufId, WinId};
 pub use kill_ring::KillRing;
-pub use layout::{Anchor, Border, Constraint, FloatRelative, Gutters, LayoutTree, Rect};
+pub use layout::{Anchor, Border, Constraint, FloatRelative, Gutters, LayoutTree, Placement, Rect};
 pub use list_select::{ListItem, ListSelect};
 pub use status_bar::{StatusBar, StatusSegment};
 pub use style::{HlAttrs, HlGroup};
@@ -423,30 +423,74 @@ fn resolve_constraint_dim(c: Constraint, total: u16) -> u16 {
 }
 
 fn resolve_float_rect(fc: &FloatConfig, term_w: u16, term_h: u16) -> Rect {
-    let w = resolve_constraint_dim(fc.width, term_w);
-    let h = resolve_constraint_dim(fc.height, term_h);
+    resolve_placement(&fc.placement, term_w, term_h)
+}
 
-    let (anchor_row, anchor_col) = match fc.relative {
-        FloatRelative::Editor => (0i32, 0i32),
-        FloatRelative::Cursor => (0, 0),
-    };
-
-    let (top, left) = match fc.anchor {
-        Anchor::NW => (anchor_row + fc.row, anchor_col + fc.col),
-        Anchor::NE => (anchor_row + fc.row, anchor_col + fc.col - w as i32),
-        Anchor::SW => (anchor_row + fc.row - h as i32, anchor_col + fc.col),
-        Anchor::SE => (
-            anchor_row + fc.row - h as i32,
-            anchor_col + fc.col - w as i32,
-        ),
-    };
-
-    let top = top.max(0) as u16;
-    let left = left.max(0) as u16;
-    let w = w.min(term_w.saturating_sub(left));
-    let h = h.min(term_h.saturating_sub(top));
-
-    Rect::new(top, left, w, h)
+fn resolve_placement(p: &layout::Placement, term_w: u16, term_h: u16) -> Rect {
+    match p {
+        layout::Placement::DockBottom {
+            above_rows,
+            full_width,
+            max_width,
+            max_height,
+        } => {
+            let avail_h = term_h.saturating_sub(*above_rows);
+            let h = resolve_constraint_dim(*max_height, avail_h).min(avail_h);
+            let w = if *full_width {
+                term_w
+            } else {
+                resolve_constraint_dim(*max_width, term_w).min(term_w)
+            };
+            let left = (term_w.saturating_sub(w)) / 2;
+            let top = term_h.saturating_sub(*above_rows).saturating_sub(h);
+            Rect::new(top, left, w, h)
+        }
+        layout::Placement::Centered { width, height } => {
+            let w = resolve_constraint_dim(*width, term_w).min(term_w);
+            let h = resolve_constraint_dim(*height, term_h).min(term_h);
+            let top = term_h.saturating_sub(h) / 2;
+            let left = term_w.saturating_sub(w) / 2;
+            Rect::new(top, left, w, h)
+        }
+        layout::Placement::AnchorCursor {
+            row_offset,
+            col_offset,
+            width,
+            height,
+        } => {
+            // Without an explicit caret position in the ui crate, treat
+            // AnchorCursor as an offset from the top-left. The tui layer
+            // sets the layer rect after construction.
+            let w = resolve_constraint_dim(*width, term_w).min(term_w);
+            let h = resolve_constraint_dim(*height, term_h).min(term_h);
+            let top = (*row_offset).max(0) as u16;
+            let left = (*col_offset).max(0) as u16;
+            let w = w.min(term_w.saturating_sub(left));
+            let h = h.min(term_h.saturating_sub(top));
+            Rect::new(top, left, w, h)
+        }
+        layout::Placement::Manual {
+            anchor,
+            row,
+            col,
+            width,
+            height,
+        } => {
+            let w = resolve_constraint_dim(*width, term_w);
+            let h = resolve_constraint_dim(*height, term_h);
+            let (top, left) = match anchor {
+                layout::Anchor::NW => (*row, *col),
+                layout::Anchor::NE => (*row, *col - w as i32),
+                layout::Anchor::SW => (*row - h as i32, *col),
+                layout::Anchor::SE => (*row - h as i32, *col - w as i32),
+            };
+            let top = top.max(0) as u16;
+            let left = left.max(0) as u16;
+            let w = w.min(term_w.saturating_sub(left));
+            let h = h.min(term_h.saturating_sub(top));
+            Rect::new(top, left, w, h)
+        }
+    }
 }
 
 fn float_layer_id(win_id: WinId) -> String {
@@ -479,26 +523,26 @@ mod tests {
         let buf = ui.buf_create(buffer::BufCreateOpts::default());
         let win = ui.win_open_float(buf, FloatConfig::default()).unwrap();
         let rect = ui.resolve_float(win).unwrap();
-        // Default: 80% width, 50% height, NW anchor at (0,0)
-        assert_eq!(rect.width, 64); // 80% of 80
-        assert_eq!(rect.height, 12); // 50% of 24
-        assert_eq!(rect.top, 0);
-        assert_eq!(rect.left, 0);
+        // Default placement: Centered 80%x50%.
+        assert_eq!(rect.width, 64);
+        assert_eq!(rect.height, 12);
     }
 
     #[test]
-    fn float_centered() {
+    fn float_manual_placement() {
         let mut ui = make_ui();
         let buf = ui.buf_create(buffer::BufCreateOpts::default());
         let win = ui
             .win_open_float(
                 buf,
                 FloatConfig {
-                    anchor: Anchor::NW,
-                    row: 4,
-                    col: 10,
-                    width: Constraint::Fixed(60),
-                    height: Constraint::Fixed(16),
+                    placement: Placement::Manual {
+                        anchor: Anchor::NW,
+                        row: 4,
+                        col: 10,
+                        width: Constraint::Fixed(60),
+                        height: Constraint::Fixed(16),
+                    },
                     ..Default::default()
                 },
             )
@@ -515,11 +559,13 @@ mod tests {
             .win_open_float(
                 buf,
                 FloatConfig {
-                    anchor: Anchor::SE,
-                    row: 24,
-                    col: 80,
-                    width: Constraint::Fixed(40),
-                    height: Constraint::Fixed(10),
+                    placement: Placement::Manual {
+                        anchor: Anchor::SE,
+                        row: 24,
+                        col: 80,
+                        width: Constraint::Fixed(40),
+                        height: Constraint::Fixed(10),
+                    },
                     ..Default::default()
                 },
             )
@@ -536,20 +582,41 @@ mod tests {
             .win_open_float(
                 buf,
                 FloatConfig {
-                    anchor: Anchor::NW,
-                    row: 20,
-                    col: 70,
-                    width: Constraint::Fixed(30),
-                    height: Constraint::Fixed(10),
+                    placement: Placement::Manual {
+                        anchor: Anchor::NW,
+                        row: 20,
+                        col: 70,
+                        width: Constraint::Fixed(30),
+                        height: Constraint::Fixed(10),
+                    },
                     ..Default::default()
                 },
             )
             .unwrap();
         let rect = ui.resolve_float(win).unwrap();
-        // Width clamped: 80 - 70 = 10
         assert_eq!(rect.width, 10);
-        // Height clamped: 24 - 20 = 4
         assert_eq!(rect.height, 4);
+    }
+
+    #[test]
+    fn dock_bottom_full_width() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_float(
+                buf,
+                FloatConfig {
+                    placement: Placement::dock_bottom_full_width(Constraint::Fixed(6)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let rect = ui.resolve_float(win).unwrap();
+        assert_eq!(rect.width, 80);
+        assert_eq!(rect.height, 6);
+        assert_eq!(rect.left, 0);
+        // above_rows=1 by default → top = 24 - 1 - 6 = 17
+        assert_eq!(rect.top, 17);
     }
 
     #[test]

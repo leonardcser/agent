@@ -1,6 +1,6 @@
 use crate::edit_buffer::EditBuffer;
 use crate::kill_ring::KillRing;
-use crate::layout::{Anchor, Border, Constraint, FloatRelative, Gutters, Rect};
+use crate::layout::{Border, Constraint, Gutters, Placement, Rect};
 use crate::text::{byte_to_cell, cell_to_byte};
 use crate::vim::{Action, ViMode, Vim, VimContext};
 use crate::window_cursor::WindowCursor;
@@ -117,12 +117,7 @@ pub struct SplitConfig {
 
 #[derive(Clone, Debug)]
 pub struct FloatConfig {
-    pub relative: FloatRelative,
-    pub anchor: Anchor,
-    pub row: i32,
-    pub col: i32,
-    pub width: Constraint,
-    pub height: Constraint,
+    pub placement: Placement,
     pub border: Border,
     pub title: Option<String>,
     pub zindex: u16,
@@ -131,12 +126,10 @@ pub struct FloatConfig {
 impl Default for FloatConfig {
     fn default() -> Self {
         Self {
-            relative: FloatRelative::Editor,
-            anchor: Anchor::NW,
-            row: 0,
-            col: 0,
-            width: Constraint::Pct(80),
-            height: Constraint::Pct(50),
+            placement: Placement::Centered {
+                width: Constraint::Pct(80),
+                height: Constraint::Pct(50),
+            },
             border: Border::Single,
             title: None,
             zindex: 50,

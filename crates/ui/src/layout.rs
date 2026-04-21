@@ -48,6 +48,60 @@ pub enum Constraint {
     Fill,
 }
 
+/// High-level dialog / float placement inside the terminal. Chosen over
+/// raw anchor+row+col to keep per-dialog call sites free of rect math.
+#[derive(Clone, Copy, Debug)]
+pub enum Placement {
+    /// Docked at the terminal bottom. Reserves `above_rows` for surfaces
+    /// that must stay visible (status bar). `full_width = true` spans
+    /// the full terminal width and ignores `max_width`.
+    DockBottom {
+        above_rows: u16,
+        full_width: bool,
+        max_width: Constraint,
+        max_height: Constraint,
+    },
+    /// Centered in the terminal.
+    Centered {
+        width: Constraint,
+        height: Constraint,
+    },
+    /// Positioned relative to the caret (completer / hover).
+    /// `row_offset` is added to the anchor row, `col_offset` to the
+    /// anchor column. If the dialog would overflow, the framework
+    /// flips to render above/left of the anchor.
+    AnchorCursor {
+        row_offset: i32,
+        col_offset: i32,
+        width: Constraint,
+        height: Constraint,
+    },
+    /// Escape hatch for absolute positioning. Prefer one of the above
+    /// when possible.
+    Manual {
+        anchor: Anchor,
+        row: i32,
+        col: i32,
+        width: Constraint,
+        height: Constraint,
+    },
+}
+
+impl Placement {
+    pub fn dock_bottom_full_width(max_height: Constraint) -> Self {
+        Placement::DockBottom {
+            above_rows: 1,
+            full_width: true,
+            max_width: Constraint::Fill,
+            max_height,
+        }
+    }
+
+    pub fn centered(width: Constraint, height: Constraint) -> Self {
+        Placement::Centered { width, height }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum LayoutTree {
     Leaf {

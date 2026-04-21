@@ -1761,7 +1761,7 @@ impl App {
             ui::FloatConfig {
                 title: Some("help".into()),
                 border: ui::Border::Rounded,
-                height: ui::Constraint::Pct(60),
+                placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(60)),
                 ..Default::default()
             },
         );
@@ -1822,7 +1822,9 @@ impl App {
             ui::FloatConfig {
                 title: Some("rewind".into()),
                 border: ui::Border::Rounded,
-                height: ui::Constraint::Fixed(footer_h + 4),
+                placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Fixed(
+                    footer_h + 4,
+                )),
                 ..Default::default()
             },
         );
@@ -1871,8 +1873,7 @@ impl App {
             ui::FloatConfig {
                 title: Some("export".into()),
                 border: ui::Border::Rounded,
-                width: ui::Constraint::Pct(60),
-                height: ui::Constraint::Fixed(8),
+                placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Fixed(8)),
                 ..Default::default()
             },
         );
@@ -2035,7 +2036,7 @@ impl App {
             ui::FloatConfig {
                 title: Some("permissions".into()),
                 border: ui::Border::Rounded,
-                height: ui::Constraint::Pct(60),
+                placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(60)),
                 ..Default::default()
             },
         );
@@ -2102,7 +2103,7 @@ impl App {
             ui::FloatConfig {
                 title: Some("processes".into()),
                 border: ui::Border::Rounded,
-                height: ui::Constraint::Pct(50),
+                placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(50)),
                 ..Default::default()
             },
         );
@@ -2177,7 +2178,7 @@ impl App {
             ui::FloatConfig {
                 title: Some("resume (workspace)".into()),
                 border: ui::Border::Rounded,
-                height: ui::Constraint::Pct(60),
+                placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(60)),
                 ..Default::default()
             },
         );
