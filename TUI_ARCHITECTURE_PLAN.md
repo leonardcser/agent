@@ -199,10 +199,12 @@ Retained rendering unit. Each UI surface implements `Component`:
 - `handle_key()` — returns Consumed, Ignored, or Action(string)
 - `cursor()` — cursor position if focused
 
-### Compositor
+### Compositor (inside Ui)
 
-Manages the component tree, orchestrates rendering, diffs frames.
-Each frame: resolve layout → draw components → diff grids → emit SGR.
+Internal to `Ui`. Manages the component tree, orchestrates rendering,
+diffs frames. Each frame: resolve layout → draw components → diff
+grids → emit SGR. The tui crate never touches the compositor directly
+— it calls `ui.render()`, `ui.handle_key()`, `ui.win_open_float()`.
 
 ### Buffer
 
@@ -359,18 +361,16 @@ ui.hl_buf_clear(buf, line_start, line_end)
 ui.layout_set(tree)
 ui.layout_resize(w, h)
 
-// Rendering (called by tui)
+// Rendering (called by tui — compositor is internal)
 ui.render<W: Write>(w) -> io::Result<()>
-ui.mark_dirty(win)
+ui.render_with(base_components, cursor_override, w)  // transitional
 ui.force_redraw()
+ui.resize(w, h)
 
-// Components
-ui.register_component(id, Box<dyn Component>)
-ui.remove_component(id)
-
-// Event dispatch
+// Event dispatch (compositor routes to focused float)
 ui.handle_key(key, mods) -> KeyResult
 ui.handle_mouse(event) -> bool
+ui.focused_float() -> Option<WinId>
 ```
 
 ## Mapping existing concepts
@@ -467,21 +467,25 @@ buffer/window model.
 event (key, engine, timer)
     │
     ▼
-App updates buffer content
+App updates buffer content  (buf_set_lines, win_open_float, etc.)
     │
     ▼
 render tick
     │
     ▼
-Compositor
+Ui (owns compositor internally)
 ├── Transcript Window  — reads from readonly buffer, draws into grid
 ├── Prompt Window      — reads from editable buffer, draws into grid
 ├── StatusBar          — 1-row component (segments set at event time)
-└── FloatDialog(s)     — float layers reading from their buffers
+└─��� Float windows      — auto-created FloatDialog layers
     │
     ▼
 Grid diff → terminal
 ```
+
+`win_open_float()` both creates the window in the registry AND adds
+the visual component to the compositor. One call, one system. Whether
+called from Rust or Lua, the path is identical.
 
 ### Data flow (pull model)
 
@@ -530,38 +534,48 @@ The prompt window handles key input, vim motions, cursor rendering.
 Prompt chrome (notification bar, top/bottom bars) is app-level layout
 around the window — not buffer content.
 
-**Step 6: Lua float bridge + btw as plugin** — wire Lua's
-`smelt.api.buf/win` to the real `Ui` registry so plugin floats are
-backed by real `ui::Buffer` + `ui::Window` + compositor layers. Then
-prove the architecture by making `/btw` a pure Lua plugin with zero
-btw-specific Rust code.
+**Step 6: Unified window system + btw as plugin** — merge the
+compositor into `Ui` so that `win_open_float()` is a single call
+that creates the buffer, window, AND compositor layer. Neovim model:
+one system, one owner. Whether Rust or Lua opens a float, the path
+is identical. Then prove it by making `/btw` a pure Lua plugin.
 
 Sub-steps:
 
-6a. **Remove btw from Screen** — delete `BtwBlock`, all btw methods
-    (`set_btw`, `set_btw_response`, `dismiss_btw`, `has_btw`,
-    `btw_scroll`, `btw_mut`), btw rendering from `prompt_data.rs`
-    and `draw_prompt_sections`, btw handling from
-    `handle_overlay_keys`, btw tick dirty-marking. The feature is
-    broken today (`set_btw` is never called) so this is pure deletion.
+6a. **Remove btw from Screen** ✅ — delete `BtwBlock`, all btw
+    methods, btw rendering, btw handling. Pure deletion (feature was
+    broken — `set_btw` was never called).
 
-6b. **Wire Lua buf/win to Ui** — rewrite Lua's `buf.create()` to call
-    `ui.buf_create()` (real `ui::Buffer`). Rewrite `win.open_float()`
-    to call `ui.win_open_float()` (real `ui::Window`) and add a
-    `ui::FloatDialog` component to the compositor backed by that
-    buffer. Rewrite `buf.set_lines()` to write to the real buffer.
-    Delete `PendingOp::OpenFloat/UpdateFloat/CloseFloat`, `FloatOp`,
-    `drain_float_ops`, and `render::FloatDialog` (legacy float dialog).
+6b. **Merge Compositor into Ui** — `Ui` absorbs the `Compositor`.
+    `win_open_float()` automatically creates a `FloatDialog`
+    component as a compositor layer backed by the window's buffer.
+    `win_close()` removes it. `buf_set_all_lines()` syncs the
+    float's visual content automatically. Key dispatch goes through
+    `ui.handle_key()` → compositor → returns `KeyResult`. Rendering
+    goes through `ui.render()` → compositor.
 
-6c. **Compositor key dispatch** — when the compositor has a focused
-    layer, route keys through it before normal dispatch. Compositor
-    `KeyResult::Action("dismiss")` fires the Lua on_dismiss callback
-    and removes the layer. `KeyResult::Action("select:N")` fires
-    on_select. Other consumed keys just mark dirty.
+    This eliminates the split between Ui (registry) and Compositor
+    (rendering). They become one system, like Neovim's window manager.
+    The tui crate passes external base components (transcript view,
+    prompt view, status bar) to `ui.render_with()` until those are
+    migrated to real windows (Steps 4–5 above made them windows but
+    they still render through transitional views).
 
-6d. **Float sync** — before each render, sync each float's
-    `BufferView` from its backing `ui::Buffer` (same pattern as
-    transcript: `sync_from_buffer()`).
+    Delete: `App.compositor` field (replaced by `App.ui` owning it),
+    direct compositor calls from tui code.
+
+6c. **Wire Lua ops to Ui** — Lua PendingOps become `BufCreate`,
+    `BufSetLines`, `WinOpenFloat`, `WinClose`, `WinUpdate`.
+    `apply_ops` calls `self.ui.buf_create()`, `self.ui.win_open_float()`,
+    etc. — same API as Rust code would use. Delete `FloatOp`,
+    `drain_float_ops`, `pending_float_ops`, `render::FloatDialog`
+    (legacy Dialog-trait float).
+
+6d. **Action dispatch** — `Ui.handle_key()` returns
+    `KeyResult::Action("dismiss")` or `KeyResult::Action("select:N")`.
+    App maps these to Lua callbacks (or Rust handlers for built-in
+    dialogs). Generic — no Lua knowledge in Ui, no caller knowledge
+    in Ui.
 
 6e. **btw.lua** — rewrite to use generic `smelt.api.buf/win` API:
     `buf.create()` → `win.open_float(buf, {title, border, hints})`
@@ -626,11 +640,11 @@ Steps 1–4 complete:
   InputState is the prompt-specific side-car (completer, menu,
   history, attachments). `Deref<Target = EditBuffer>` still works.
 
-- Step 6a: Remove btw from Screen ✅ (partial) — deleted `BtwBlock`,
+- Step 6a: Remove btw from Screen ✅ — deleted `BtwBlock`,
   all btw methods from Screen, btw rendering from `prompt_data.rs`
   and `draw_prompt_sections`, btw field from `PromptInput`.
 
-Next: Step 6b — wire Lua buf/win to real `Ui` registry, then 6c–6e.
+Next: Step 6b — merge Compositor into Ui (single window system).
 
 ## Phase 7: Event dispatch
 

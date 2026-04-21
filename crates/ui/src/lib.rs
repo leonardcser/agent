@@ -76,6 +76,15 @@ impl Ui {
         id
     }
 
+    pub fn buf_create_with_id(&mut self, id: BufId, opts: buffer::BufCreateOpts) -> BufId {
+        let buf = Buffer::new(id, opts);
+        self.bufs.insert(id, buf);
+        if id.0 >= self.next_buf_id {
+            self.next_buf_id = id.0 + 1;
+        }
+        id
+    }
+
     pub fn buf_delete(&mut self, id: BufId) {
         self.wins.retain(|_, w| w.buf != id);
         self.bufs.remove(&id);
