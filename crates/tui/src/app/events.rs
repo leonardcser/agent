@@ -2067,6 +2067,14 @@ impl App {
                 self.ui.win_close(ui::WinId(id));
                 self.ui.buf_delete(ui::BufId(id));
             }
+            UiOp::WinBindLuaKeymap {
+                win,
+                key,
+                callback_id,
+            } => {
+                self.ui
+                    .win_set_keymap(win, key, ui::Callback::Lua(ui::LuaHandle(callback_id)));
+            }
         }
     }
 

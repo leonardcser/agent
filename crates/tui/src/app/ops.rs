@@ -133,6 +133,16 @@ pub enum UiOp {
     WinClose {
         id: u64,
     },
+    /// Register a Lua fn (previously stashed in `shared.callbacks`
+    /// under `callback_id`) as a `Callback::Lua` keymap on `win`.
+    /// Pushed by `smelt.api.win.set_keymap`; the reducer does the
+    /// actual `ui.win_set_keymap` call with a `Callback::Lua(LuaHandle
+    /// (callback_id))`.
+    WinBindLuaKeymap {
+        win: ui::WinId,
+        key: ui::KeyBind,
+        callback_id: u64,
+    },
 }
 
 /// App-state mutations, engine commands, and session/agent/permission

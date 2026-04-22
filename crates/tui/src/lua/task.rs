@@ -43,6 +43,12 @@ enum TaskWait {
     Dialog(u64),
     /// Waiting for `resolve_picker(picker_id, …)` to be called.
     Picker(u64),
+    /// Waiting for a Lua runtime file to call `smelt.api.task.resume
+    /// (id, value)`. Used by `runtime/lua/smelt/*.lua` helpers that
+    /// own the coroutine dance themselves — no Rust-side TaskDriveOutput
+    /// is emitted, because the Lua runtime file opens the float + binds
+    /// keymaps + closes the float on its own.
+    External(u64),
 }
 
 /// What to do when a task's top-level function returns.
@@ -102,6 +108,7 @@ pub struct LuaTaskRuntime {
     next_task_id: AtomicU64,
     next_dialog_id: AtomicU64,
     next_picker_id: AtomicU64,
+    next_external_id: AtomicU64,
     /// Outputs that an in-line `drive` produced but whose caller
     /// doesn't route them itself — e.g. `execute_plugin_tool` runs
     /// one drive inline and consumes only its own `ToolComplete`;
@@ -117,8 +124,16 @@ impl LuaTaskRuntime {
             next_task_id: AtomicU64::new(1),
             next_dialog_id: AtomicU64::new(1),
             next_picker_id: AtomicU64::new(1),
+            next_external_id: AtomicU64::new(1),
             deferred: Vec::new(),
         }
+    }
+
+    /// Mint an external-wait id without spawning a task. The Lua
+    /// runtime file calls this, holds the id, and later passes it to
+    /// `resolve_external` when its keymaps fire.
+    pub fn alloc_external_id(&self) -> u64 {
+        self.next_external_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Queue outputs produced by an inline drive whose caller didn't
@@ -174,6 +189,18 @@ impl LuaTaskRuntime {
         false
     }
 
+    /// Satisfy a `TaskWait::External(id)` wait with the given result
+    /// value. Returns `true` if a matching task was found.
+    pub fn resolve_external(&mut self, external_id: u64, value: LuaValue) -> bool {
+        for task in &mut self.tasks {
+            if matches!(&task.wait, TaskWait::External(id) if *id == external_id) {
+                task.wait = TaskWait::Ready(value);
+                return true;
+            }
+        }
+        false
+    }
+
     /// Drive all ready tasks once. Each ready task is resumed; if it
     /// yields, it's parked on a new wait; if it returns, its
     /// completion is reported. Any outputs deferred from a previous
@@ -185,7 +212,7 @@ impl LuaTaskRuntime {
             let ready = match &self.tasks[i].wait {
                 TaskWait::Ready(_) => true,
                 TaskWait::Sleep(deadline) => *deadline <= now,
-                TaskWait::Dialog(_) | TaskWait::Picker(_) => false,
+                TaskWait::Dialog(_) | TaskWait::Picker(_) | TaskWait::External(_) => false,
             };
             if !ready {
                 i += 1;
@@ -208,7 +235,8 @@ impl LuaTaskRuntime {
         let resume_arg = match std::mem::replace(&mut task.wait, TaskWait::Ready(LuaValue::Nil)) {
             TaskWait::Ready(v) => v,
             TaskWait::Sleep(_) => LuaValue::Nil,
-            TaskWait::Dialog(_) | TaskWait::Picker(_) => LuaValue::Nil, // unreachable per ready check
+            // unreachable per ready check above:
+            TaskWait::Dialog(_) | TaskWait::Picker(_) | TaskWait::External(_) => LuaValue::Nil,
         };
         let result: LuaResult<LuaValue> = task.thread.resume(resume_arg);
 
@@ -260,6 +288,12 @@ impl LuaTaskRuntime {
                         });
                         false
                     }
+                    Ok(Yield::External(id)) => {
+                        // No Rust-side output — the Lua runtime file
+                        // owns the resume via `smelt.api.task.resume`.
+                        task.wait = TaskWait::External(id);
+                        false
+                    }
                     Err(msg) => {
                         outputs.push(TaskDriveOutput::Error(format!("task {}: {msg}", task.id)));
                         fail_completion(&task.completion, &msg, outputs);
@@ -303,6 +337,10 @@ enum Yield {
     Sleep(Duration),
     OpenDialog(mlua::RegistryKey),
     OpenPicker(mlua::RegistryKey),
+    /// Park the task on an externally-resolved wait. The id must have
+    /// been minted via `alloc_external_id` beforehand, so the Lua
+    /// runtime file can hand it to its keymaps before yielding.
+    External(u64),
 }
 
 fn decode_yield(lua: &Lua, v: LuaValue) -> Result<Yield, String> {
@@ -333,6 +371,10 @@ fn decode_yield(lua: &Lua, v: LuaValue) -> Result<Yield, String> {
                 .create_registry_value(opts)
                 .map_err(|e| format!("picker opts registry: {e}"))?;
             Ok(Yield::OpenPicker(key))
+        }
+        "external" => {
+            let id: u64 = table.get("id").map_err(|e| format!("external: {e}"))?;
+            Ok(Yield::External(id))
         }
         other => Err(format!("unknown yield kind: {other}")),
     }

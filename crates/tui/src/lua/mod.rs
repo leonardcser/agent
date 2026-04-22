@@ -154,6 +154,62 @@ pub fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
     Some(format!("<{prefix}{base}>"))
 }
 
+/// Parse a plugin-facing key spec like `"enter"`, `"esc"`, `"tab"`,
+/// `"bs"`, `"space"`, `"up"`, `"c-j"` (ctrl-j), `"a-x"` / `"m-x"`
+/// (alt-x), `"s-tab"` (shift-tab), or a single printable char into a
+/// [`ui::KeyBind`]. Modifiers separate with `-`; the final token is
+/// the key name. Case-insensitive for names and modifiers. Returns
+/// `None` for unknown keys — the caller surfaces a Lua error.
+pub(crate) fn parse_keybind(spec: &str) -> Option<ui::KeyBind> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let raw = spec.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (mods, name) = match raw.rsplit_once('-') {
+        Some((prefix, name)) => {
+            let mut mods = KeyModifiers::NONE;
+            for part in prefix.split('-') {
+                match part.to_ascii_lowercase().as_str() {
+                    "ctrl" | "c" => mods |= KeyModifiers::CONTROL,
+                    "alt" | "a" | "meta" | "m" => mods |= KeyModifiers::ALT,
+                    "shift" | "s" => mods |= KeyModifiers::SHIFT,
+                    _ => return None,
+                }
+            }
+            (mods, name)
+        }
+        None => (KeyModifiers::NONE, raw),
+    };
+    let code = match name.to_ascii_lowercase().as_str() {
+        "bs" | "backspace" => KeyCode::Backspace,
+        "tab" => {
+            if mods.contains(KeyModifiers::SHIFT) {
+                return Some(ui::KeyBind::new(
+                    KeyCode::BackTab,
+                    mods - KeyModifiers::SHIFT,
+                ));
+            }
+            KeyCode::Tab
+        }
+        "del" | "delete" => KeyCode::Delete,
+        "enter" | "return" | "cr" => KeyCode::Enter,
+        "esc" | "escape" => KeyCode::Esc,
+        "space" => KeyCode::Char(' '),
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "pageup" | "pgup" => KeyCode::PageUp,
+        "pagedown" | "pgdn" => KeyCode::PageDown,
+        s if s.chars().count() == 1 => KeyCode::Char(name.chars().next().unwrap()),
+        _ => return None,
+    };
+    Some(ui::KeyBind::new(code, mods))
+}
+
 impl AutocmdEvent {
     pub fn lua_name(&self) -> &'static str {
         match self {
@@ -358,6 +414,14 @@ pub enum TaskEvent {
         /// Registry key for the original `opts.items` table so the
         /// resolver can look up the picked entry by index.
         opts: mlua::RegistryKey,
+    },
+    /// `smelt.api.task.resume(id, value)` posts this to route the
+    /// resume through the Lua pump. The pump looks up the parked task
+    /// by `id` and resumes it with the stored value on the next
+    /// `pump_task_events` drain.
+    ExternalResolved {
+        external_id: u64,
+        value: mlua::RegistryKey,
     },
     /// An input panel on an open dialog had its text edited. Lua pump
     /// invokes the registered `on_change(ctx)` callback (non-closing,
@@ -1483,7 +1547,90 @@ impl LuaRuntime {
                 })?,
             )?;
         }
+        // smelt.api.win.set_keymap(win_id, key, fn)
+        //
+        // Registers a Lua fn as a `Callback::Lua` on the target window.
+        // `key` is a string like "enter", "esc", "up", "down", "tab",
+        // "bs", "space", "c-j" (ctrl-j), or a single printable char.
+        // The fn is invoked from the compositor's key dispatcher with
+        // a `ctx` table describing the triggering event (empty for
+        // plain chord hits — the Ui passes `Payload::None` for chord
+        // matches).
+        {
+            let s = shared.clone();
+            win_tbl.set(
+                "set_keymap",
+                lua.create_function(
+                    move |lua, (win_id, key_str, func): (u64, String, mlua::Function)| {
+                        let Some(key) = parse_keybind(&key_str) else {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "win.set_keymap: unknown key `{key_str}`"
+                            )));
+                        };
+                        let registry_key = lua.create_registry_value(func)?;
+                        let id = s.next_id.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(mut cbs) = s.callbacks.lock() {
+                            cbs.insert(
+                                id,
+                                LuaHandle {
+                                    key: registry_key,
+                                    dead: false,
+                                },
+                            );
+                        }
+                        if let Ok(mut o) = s.ops.lock() {
+                            o.push(UiOp::WinBindLuaKeymap {
+                                win: ui::WinId(win_id),
+                                key,
+                                callback_id: id,
+                            });
+                        }
+                        Ok(())
+                    },
+                )?,
+            )?;
+        }
         api.set("win", win_tbl)?;
+
+        // smelt.api.task.alloc() / resume(id, value)
+        //
+        // Enable Lua runtime files (`runtime/lua/smelt/picker.lua`
+        // etc.) to own the coroutine resume themselves. `alloc()` mints
+        // an id used inside a `coroutine.yield({__yield = "external",
+        // id = ...})`; when a keymap fires, the Lua runtime file calls
+        // `resume(id, value)` to satisfy the wait.
+        {
+            let task_tbl = lua.create_table()?;
+            {
+                let s = shared.clone();
+                task_tbl.set(
+                    "alloc",
+                    lua.create_function(move |_, ()| {
+                        let Ok(rt) = s.tasks.lock() else {
+                            return Ok(0u64);
+                        };
+                        Ok(rt.alloc_external_id())
+                    })?,
+                )?;
+            }
+            {
+                let s = shared.clone();
+                task_tbl.set(
+                    "resume",
+                    lua.create_function(move |lua, (id, value): (u64, mlua::Value)| {
+                        let key = lua.create_registry_value(value)?;
+                        if let Ok(mut inbox) = s.task_inbox.lock() {
+                            inbox.push(TaskEvent::ExternalResolved {
+                                external_id: id,
+                                value: key,
+                            });
+                        }
+                        Ok(())
+                    })?,
+                )?;
+            }
+            api.set("task", task_tbl)?;
+        }
 
         // smelt.api.prompt.set_section(name, content) / remove_section(name)
         let prompt_tbl = lua.create_table()?;
@@ -1943,6 +2090,28 @@ impl LuaRuntime {
         rt.resolve_picker(picker_id, value)
     }
 
+    /// Satisfy a `TaskWait::External(id)` from outside the runtime —
+    /// `smelt.api.task.resume(id, value)` calls this via a queued
+    /// `TaskEvent::ExternalResolved` so the resume lands on the next
+    /// `pump_task_events` drain. Returns `true` if a matching task was
+    /// found.
+    pub fn resolve_external(&self, external_id: u64, value: mlua::Value) -> bool {
+        let Ok(mut rt) = self.shared.tasks.lock() else {
+            return false;
+        };
+        rt.resolve_external(external_id, value)
+    }
+
+    /// Mint a fresh external-wait id. Used by `smelt.api.task.alloc`
+    /// so a Lua runtime file can register keymaps with the id baked
+    /// in *before* yielding the matching `{__yield = "external", id}`.
+    pub fn alloc_external_id(&self) -> u64 {
+        let Ok(rt) = self.shared.tasks.lock() else {
+            return 0;
+        };
+        rt.alloc_external_id()
+    }
+
     /// Drain the task-runtime inbox and apply each event. Dialog
     /// callbacks push here (instead of `AppOp`) so the reducer doesn't
     /// know about Lua-task lifecycle; the Lua module handles its own
@@ -2042,6 +2211,10 @@ impl LuaRuntime {
                         },
                     };
                     self.resolve_picker(picker_id, value);
+                }
+                TaskEvent::ExternalResolved { external_id, value } => {
+                    let v = self.lua.registry_value(&value).unwrap_or(mlua::Value::Nil);
+                    self.resolve_external(external_id, v);
                 }
                 TaskEvent::InputChanged {
                     callback_id,
@@ -3417,6 +3590,40 @@ mod tests {
             chord_string(ev(KeyCode::Char('x'), M::ALT)).as_deref(),
             Some("<M-x>")
         );
+    }
+
+    #[test]
+    fn parse_keybind_handles_names_and_modifiers() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        assert_eq!(
+            parse_keybind("enter"),
+            Some(ui::KeyBind::new(KeyCode::Enter, KeyModifiers::NONE))
+        );
+        assert_eq!(
+            parse_keybind("esc"),
+            Some(ui::KeyBind::new(KeyCode::Esc, KeyModifiers::NONE))
+        );
+        assert_eq!(
+            parse_keybind("c-j"),
+            Some(ui::KeyBind::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
+        );
+        assert_eq!(
+            parse_keybind("a-x"),
+            Some(ui::KeyBind::new(KeyCode::Char('x'), KeyModifiers::ALT))
+        );
+        // shift-tab collapses to BackTab without the SHIFT bit so
+        // crossterm's event matches lookups done elsewhere.
+        assert_eq!(
+            parse_keybind("s-tab"),
+            Some(ui::KeyBind::new(KeyCode::BackTab, KeyModifiers::NONE))
+        );
+        assert_eq!(
+            parse_keybind("k"),
+            Some(ui::KeyBind::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        );
+        assert_eq!(parse_keybind("bogus"), None);
+        assert_eq!(parse_keybind("ctrl-nope"), None);
+        assert_eq!(parse_keybind(""), None);
     }
 
     #[test]

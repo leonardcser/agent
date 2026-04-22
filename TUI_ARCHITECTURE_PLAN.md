@@ -608,6 +608,31 @@ change today since no Rust code registers `Callback::Lua`, but the
 plumbing is the prereq for `smelt.api.win.set_keymap(id, key,
 lua_fn)` in the D2b picker-first migration.
 
+**D2b primitives · External task yield + keymap + task-id API**
+(shipped 2026-04-23). Additive foundation for Option 3 — no
+deletions yet. Shipped:
+- `TaskWait::External(u64)` + `Yield::External(u64)` +
+  `TaskEvent::ExternalResolved { external_id, value }`, so a Lua
+  coroutine can `coroutine.yield({__yield = "external", id = ...})`
+  and park cleanly without the runtime knowing what intent it is
+  waiting for. `LuaRuntime::pump_task_events` feeds the resume into
+  `resolve_external`.
+- `smelt.api.task.alloc()` mints an external id;
+  `smelt.api.task.resume(id, value)` enqueues the resume from a
+  keymap / callback. These are the two primitives every Lua runtime
+  file will use.
+- `smelt.api.win.set_keymap(win_id, key_str, lua_fn)` pushes
+  `UiOp::WinBindLuaKeymap`; the reducer calls
+  `ui.win_set_keymap(win, key, Callback::Lua(LuaHandle(id)))`.
+  `parse_keybind` handles `"enter"` / `"esc"` / `"tab"` / `"bs"` /
+  `"c-j"` / `"s-tab"` / single chars — same shape as the old
+  `lua_dialog::parse_key` but returns `Option<KeyBind>`. Covered
+  by `parse_keybind_handles_names_and_modifiers`.
+With these in place, a runtime file can open a raw float, register
+Lua keymaps, and resume its caller coroutine end-to-end without any
+per-intent Rust glue. The D2b migration itself (port picker + delete
+`lua_picker.rs`) is the next commit.
+
 **D3 · Collapse intent glue into Lua runtime files.** After D2,
 **delete `lua_dialog.rs` and `lua_picker.rs` entirely** — no
 generic `lua_float.rs` successor, no `TaskDriveOutput::OpenDialog`/
