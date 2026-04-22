@@ -2010,6 +2010,16 @@ impl App {
                         let _ = registry.stop(&id).await;
                     });
                 }
+                crate::app::ops::AppOp::YankBlockAtCursor => {
+                    let abs_row = self.transcript_window.cursor_abs_row();
+                    if let Some(text) = self.block_text_at_row(abs_row, self.settings.show_thinking)
+                    {
+                        let _ = super::commands::copy_to_clipboard(&text);
+                        self.notify("block copied".into());
+                    } else {
+                        self.notify_error("no block at cursor".into());
+                    }
+                }
             }
         }
     }

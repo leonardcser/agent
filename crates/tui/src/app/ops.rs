@@ -163,4 +163,7 @@ pub enum AppOp {
     /// Kill a background process by id (e.g. from `/ps`). The actual
     /// `ProcessRegistry::stop` runs on the tokio runtime, fire-and-forget.
     KillProcess(String),
+    /// Copy the transcript block under the cursor to the clipboard.
+    /// Notifies success / failure. Used by `/yank-block`.
+    YankBlockAtCursor,
 }

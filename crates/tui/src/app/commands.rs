@@ -182,16 +182,6 @@ impl App {
                 }
                 CommandAction::Continue
             }
-            "/yank-block" => {
-                let abs_row = self.transcript_window.cursor_abs_row();
-                if let Some(text) = self.block_text_at_row(abs_row, self.settings.show_thinking) {
-                    let _ = copy_to_clipboard(&text);
-                    self.notify("block copied".into());
-                } else {
-                    self.notify_error("no block at cursor".into());
-                }
-                CommandAction::Continue
-            }
             _ if input.starts_with('!') && !self.input.skip_shell_escape() => {
                 if let Some((rx, kill)) = self.start_shell_escape(input.strip_prefix('!').unwrap())
                 {

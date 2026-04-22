@@ -425,19 +425,6 @@ impl LuaRuntime {
             }};
         }
 
-        // smelt.api.transcript.text()
-        let transcript_tbl = lua.create_table()?;
-        transcript_tbl.set(
-            "text",
-            snap_read!(lua, shared, |o| o
-                .transcript_text
-                .clone()
-                .unwrap_or_default()),
-        )?;
-        api.set("transcript", transcript_tbl)?;
-
-        // smelt.api.win.focus() / smelt.api.win.mode()
-        // Helper macro: lock shared.ops and push an AppOp.
         macro_rules! push_op {
             ($lua:expr, $s:expr, |$val:ident : $ty:ty| $op:expr) => {{
                 let s = $s.clone();
@@ -459,6 +446,23 @@ impl LuaRuntime {
             }};
         }
 
+        // smelt.api.transcript.text()
+        let transcript_tbl = lua.create_table()?;
+        transcript_tbl.set(
+            "text",
+            snap_read!(lua, shared, |o| o
+                .transcript_text
+                .clone()
+                .unwrap_or_default()),
+        )?;
+        transcript_tbl.set(
+            "yank_block",
+            push_op!(lua, shared, || AppOp::YankBlockAtCursor),
+        )?;
+        api.set("transcript", transcript_tbl)?;
+
+        // smelt.api.win.focus() / smelt.api.win.mode()
+        // Helper macro: lock shared.ops and push an AppOp.
         // smelt.api.cmd
         let cmd_tbl = lua.create_table()?;
         {
@@ -2099,6 +2103,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.plugins.help",
         include_str!("../../../../runtime/lua/smelt/plugins/help.lua"),
     ),
+    (
+        "smelt.plugins.yank_block",
+        include_str!("../../../../runtime/lua/smelt/plugins/yank_block.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -2110,6 +2118,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.rewind",
     "smelt.plugins.ps",
     "smelt.plugins.help",
+    "smelt.plugins.yank_block",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`
