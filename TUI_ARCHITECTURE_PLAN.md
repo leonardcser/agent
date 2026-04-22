@@ -279,83 +279,58 @@ to capture `Arc<Mutex<AppOps>>` (the same channel Lua uses) and push
 `AppOp` directly — `CallbackCtx.actions` stays as a ui-level field
 but tui code doesn't write to it.
 
-### Phase B — Dispatch unification (multiple small commits)
+### Phase B — Dispatch unification **(done 2026-04-22)**
 
-**Revised 2026-04-22**: landing Phase B as one 2000+ line atomic
-commit isn't practical to execute carefully. We break Phase B into
-a series of small, individually-landable commits. Each commit leaves
-the tree compiling and passing tests. The two dispatch systems
-(`DialogState` + `Callbacks`) coexist at the *codebase* level during
-the transition — but never at the *per-dialog* level. Each dialog
-belongs to exactly one system. No shim, no forwarding, no
-scaffolding code that gets deleted next commit.
+Landed as a series of small commits rather than one atomic big-bang.
+Each commit left the tree building + tests green. `DialogState` and
+`Callbacks` coexisted at the *codebase* level during the transition
+but never at the *per-dialog* level — each dialog belonged to exactly
+one system at a time. No shims, no forwarding.
 
-Sub-commit ordering:
+Shipped commits:
 
-- **B.0 · Infrastructure.** `ui::Ui` auto-translates widget
-  `KeyResult::Action("select:N"|"submit"|"dismiss")` into
-  `dispatch_event(WinEvent::Submit|Dismiss, Payload::…)` *only when
-  the target window has a callback registered for that event*.
-  Unregistered windows keep bubbling `Action` as before — preserves
-  unmigrated dialogs. Adds `WinEvent::Tick` variant. Adds
-  `Ui::dispatch_tick(win, lua_invoke)` helper.
-- **B.1..B.6 · Per-dialog migrations.** Each commit migrates one
-  or a small group of related dialogs and deletes its
-  `DialogState` impl + `float_states.insert` line. `DialogState`
-  trait remains alive — still used by unmigrated dialogs.
-  1. Help, Export, Ps (trivial).
-  2. Rewind, Permissions.
-  3. Resume.
-  4. Question.
-  5. Agents (list↔detail swap).
-  6. Confirm (`blocks_agent`, `ApprovalScope` submenu).
-- **B.final · Delete `DialogState` infrastructure.** Once all 9
-  dialogs are migrated, drop `DialogState` trait, `ActionResult`,
-  `App::float_states` HashMap, `handle_float_action`,
-  `intercept_float_key`, `tick_focused_float`,
-  `focused_float_blocks_agent` (replaced by
-  `App::blocking_wins: HashSet<WinId>`). Drop host-side
-  `KeyResult::Action` matching in `events.rs:74` and `:1709`.
-- **B.rename · `BackgroundAsk` → `EngineAsk`.** Separate commit.
-  Rename `AppOp::BackgroundAsk`, `UiCommand::BackgroundAsk`,
-  `EngineEvent::BackgroundAskResponse`. Replace `task:
-  Option<String>` with a typed `AuxiliaryTask` enum (moved from
-  `engine` to `protocol`). Delete the silent `_ => Btw` fallback
-  in `spawn_background_ask`.
+- **B.0 · Infrastructure.** `ui::Ui::handle_key_with_actions`
+  auto-translates widget `KeyResult::Action` strings (`"select:N"`,
+  `"submit"`, `"submit:T"`, `"dismiss"`) into `WinEvent` dispatches
+  when the target window has a callback registered for that event.
+  Added `WinEvent::Tick`, `Ui::dispatch_tick`, per-window key
+  fallback (for Resume's typed-into-filter pattern).
+- **B.1..B.6 · Per-dialog migrations.** Help/Export/Ps, then
+  Rewind/Permissions, Resume, Question, Agents, Confirm. Each commit
+  deleted one dialog's `DialogState` impl and replaced it with
+  `Rc<RefCell<State>>`-captured closures registered via
+  `win_on_event` / `win_set_keymap`. Confirm added the
+  `blocking_wins: HashSet<WinId>` path as a replacement for
+  `DialogState::blocks_agent`.
+- **B.7 · LuaDialog.** Migrated the Lua-driven dialog path
+  (`smelt.api.dialog.open`) onto the same Callbacks+AppOp pipeline.
+  New `AppOp::ResolveLuaDialog` carries the `on_select` RegistryKey
+  from the callback into the reducer by *moving* it out of the
+  dialog state. Simplified `OptionList::handle_key` to emit
+  `select:N` (and move the cursor) on shortcut match, deleting the
+  `shortcut:X` action string plus the shortcut lookup code that
+  consumed it.
+- **B.final · Delete `DialogState` infrastructure.** With every
+  dialog on Callbacks+AppOp, deleted: `DialogState` trait,
+  `ActionResult` enum, `App::float_states` HashMap,
+  `handle_float_action`, `intercept_float_key`, `tick_focused_float`,
+  and the legacy `close_float` branch. `focused_float_blocks_agent`
+  now reads `blocking_wins` only. Host-side `KeyResult::Action`
+  matching in `events.rs` is gone — the focused-float key path is
+  now just `ui.handle_key(...)` + `apply_lua_ops()`.
+- **B.rename · `BackgroundAsk` → `EngineAsk`.** Moved `AuxiliaryTask`
+  from `engine` to `protocol` (single source of truth; `engine` and
+  `tui::config` now re-export). Renamed `UiCommand::BackgroundAsk` →
+  `UiCommand::EngineAsk`, `EngineEvent::BackgroundAskResponse` →
+  `EngineAskResponse`, `AppOp::BackgroundAsk` → `AppOp::EngineAsk`.
+  Replaced `task: Option<String>` with a typed
+  `task: AuxiliaryTask` (serde-default `Btw`); deleted the silent
+  `_ => AuxiliaryTask::Btw` fallback in the engine — unknown task
+  strings from Lua now error explicitly.
 
-Original (pre-revision) atomic-commit plan:
+Net: ~−250 LOC and one uniform dispatch path for every float window
+in the app.
 
-**B1 (superseded) · All 9 dialogs + `DialogState` deletion + `KeyResult::Action`
-deletion.** Atomic because splitting it per dialog forces DialogState
-+ Callbacks to coexist — exactly the scaffolding we're avoiding.
-
-Inside the commit (done in order but shipped together):
-1. Help, Export, Ps — trivial list+select+dismiss via
-   `WinEvent::{Submit, Dismiss}` callbacks pushing `AppOp`.
-2. Rewind, Permissions — list+delete via `WinEvent::Submit` + per-chord
-   keymap callbacks.
-3. Resume — filter (keymap callbacks typing into a ui buffer),
-   workspace toggle (ctrl+w keymap callback), `d`/`dd` delete
-   (custom keymap). State lives in `Rc<RefCell<ResumeState>>`.
-4. Question — multi-step wizard (state machine inside one closure set).
-5. Agents — list↔detail swap (close + open pattern via ops).
-6. Confirm — `blocks_agent`, `ApprovalScope` submenu, deferred
-   `pending_dialogs` queue. Hardest; landing last.
-7. Delete `DialogState` trait, `ActionResult`, `App::float_states`
-   HashMap, take/put-back dance in `events.rs`.
-8. Delete host-side string matching on `KeyResult::Action`. The
-   Dialog / Window container translates widget action strings
-   (`select:N`, `dismiss`, `submit`) into `dispatch_event(WinEvent::…,
-   Payload::…)` internally. `KeyResult::Action` stays as the
-   widget→container protocol inside `ui`, invisible to tui.
-9. Rename `BackgroundAsk` → `EngineAsk` across `AppOp`,
-   `UiCommand`, `EngineEvent` (`BackgroundAskResponse` →
-   `EngineAskResponse`). Replace `task: Option<String>` with a
-   typed `AuxiliaryTask` enum (moved from `engine` to `protocol`).
-   Delete the `_ => AuxiliaryTask::Btw` silent fallback in
-   `spawn_background_ask`; unknown task → error.
-
-Expected LOC: net −400..−600 lines.
 
 ### Phase C — Rendering: kill Screen (2–3 commits)
 
