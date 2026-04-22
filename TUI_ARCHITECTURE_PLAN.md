@@ -650,8 +650,20 @@ internally past the cap — the existing bottom-clip logic in
 is content-sized. (B4 resolved)
 
 **E2 · `Compositor::hit_test` + mouse routing to focused float +
-scrollbar click-drag.** (B6 + B7) Single commit — mouse routing
-enables both.
+scrollbar click-drag.** Both halves shipped.
+
+- **E2a** (shipped 2026-04-23) — `Compositor::hit_test(row, col)` +
+  `Ui::float_at`; wheel over a float synthesises Up/Down into the
+  float's keymap. (B6)
+- **E2b** (shipped 2026-04-23) — Scrollbar click-drag inside dialog
+  panels. `Dialog::{panel_at, panel_viewport, apply_panel_scrollbar_drag}`
+  expose enough surface for the App to treat a dialog-panel
+  scrollbar exactly like the transcript/prompt scrollbars: a
+  `ScrollbarDragTarget::DialogPanel { win, panel }` variant on
+  `App.drag_on_scrollbar` latches the gesture at mouse-down, and
+  `apply_scrollbar_drag` dispatches on the variant so every
+  subsequent drag tick reaches the right buffer. Click on the
+  track jump-scrolls; click on the thumb starts a drag. (B7)
 
 **E3 · TextInput as the blessed input widget** — Confirm's reason,
 Resume's filter, Agents' search all use the same `TextInput` with
@@ -1462,10 +1474,19 @@ coherent arc because splitting them left two render engines coexisting.
   `Ui::float_at(row, col)`. The interim "focused float captures the
   wheel" hack from the /resume port is gone — wheel events now
   route to whichever float the cursor actually lands on, regardless
-  of focus, so background floats scroll under the cursor. Scrollbar
-  click-drag and click-to-position are still pending (E2b) — they
-  need widgets to grow a `handle_mouse` path, which is a larger
-  refactor.
+  of focus, so background floats scroll under the cursor.
+- **2026-04-23** — Phase E2b shipped. Dialog-panel scrollbars
+  accept click-and-drag and track-jump clicks. The existing
+  transcript/prompt drag state generalised from `Option<AppFocus>`
+  to `Option<ScrollbarDragTarget>` with a `DialogPanel { win, panel }`
+  variant; `App::begin_dialog_scrollbar_drag_if_hit` runs ahead of
+  any focus-aware click handling so a click on a float's thumb or
+  track is captured cleanly, and `apply_scrollbar_drag` dispatches
+  on the target variant so every drag tick reaches the right
+  buffer. New Dialog surface — `panel_at(row, col)`,
+  `panel_viewport(idx)`, `apply_panel_scrollbar_drag(idx, thumb_top)`
+  — keeps the tui side in charge of gesture state while the ui
+  crate owns the panel-geometry math.
 - **2026-04-23** — Phase E1 shipped: `Placement::FitContent { max }`
   with `FitMax::{HalfScreen, FullScreen}`. All Lua dialogs switched
   from the fixed `dock_bottom_full_width(Pct(60))` to

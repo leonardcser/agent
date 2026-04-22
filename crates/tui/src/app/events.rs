@@ -2291,6 +2291,15 @@ impl App {
                 EventOutcome::Redraw
             }
             MouseEventKind::Down(_) => {
+                // Dialog-panel scrollbar grabs the gesture ahead of any
+                // focus-aware handling — clicks on a float's thumb or
+                // track jump-scroll and latch the drag.
+                if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
+                    && self.begin_dialog_scrollbar_drag_if_hit(me.row, me.column)
+                {
+                    self.mouse_drag_active = true;
+                    return EventOutcome::Redraw;
+                }
                 // Double-click detection: two primary-button Downs on
                 // the same cell within 400ms → word-select + copy.
                 let now = Instant::now();
@@ -2650,8 +2659,39 @@ impl App {
         if !bar.contains(vp.rect, row, col) {
             return false;
         }
-        self.drag_on_scrollbar = Some(target);
+        self.drag_on_scrollbar = Some(crate::app::ScrollbarDragTarget::Focus(target));
         self.apply_scrollbar_drag(row);
+        true
+    }
+
+    /// If `(row, col)` lands on the scrollbar of a dialog panel owned by
+    /// a compositor float, latch a `DialogPanel` drag and snap the
+    /// thumb to the pointer. Returns `true` when the event was consumed.
+    fn begin_dialog_scrollbar_drag_if_hit(&mut self, row: u16, col: u16) -> bool {
+        let Some(win) = self.ui.float_at(row, col) else {
+            return false;
+        };
+        let Some(dialog) = self.ui.dialog_mut(win) else {
+            return false;
+        };
+        let Some(panel_idx) = dialog.panel_at(row, col) else {
+            return false;
+        };
+        let Some(viewport) = dialog.panel_viewport(panel_idx) else {
+            return false;
+        };
+        let Some(bar) = viewport.scrollbar else {
+            return false;
+        };
+        if !bar.contains(viewport.rect, row, col) {
+            return false;
+        }
+        let rel_row = row.saturating_sub(viewport.rect.top);
+        dialog.apply_panel_scrollbar_drag(panel_idx, rel_row);
+        self.drag_on_scrollbar = Some(crate::app::ScrollbarDragTarget::DialogPanel {
+            win,
+            panel: panel_idx,
+        });
         true
     }
 
@@ -2662,26 +2702,40 @@ impl App {
         let Some(target) = self.drag_on_scrollbar else {
             return;
         };
-        let Some(vp) = self.viewport_for(target) else {
-            return;
-        };
-        let Some(bar) = vp.scrollbar else {
-            return;
-        };
-        let max_thumb = bar.max_thumb_top();
-        let rel_row = row.saturating_sub(vp.rect.top);
-        let thumb_top = rel_row.min(max_thumb);
-        let from_top = bar.scroll_from_top_for_thumb(thumb_top);
         match target {
-            crate::app::AppFocus::Content => {
-                self.transcript_window.scroll_top = from_top;
-                let rows = self.full_transcript_display_text(self.settings.show_thinking);
-                let viewport = self.viewport_rows_estimate();
-                self.transcript_window
-                    .reanchor_to_visible_row(&rows, viewport);
+            crate::app::ScrollbarDragTarget::Focus(focus) => {
+                let Some(vp) = self.viewport_for(focus) else {
+                    return;
+                };
+                let Some(bar) = vp.scrollbar else {
+                    return;
+                };
+                let max_thumb = bar.max_thumb_top();
+                let rel_row = row.saturating_sub(vp.rect.top);
+                let thumb_top = rel_row.min(max_thumb);
+                let from_top = bar.scroll_from_top_for_thumb(thumb_top);
+                match focus {
+                    crate::app::AppFocus::Content => {
+                        self.transcript_window.scroll_top = from_top;
+                        let rows = self.full_transcript_display_text(self.settings.show_thinking);
+                        let viewport = self.viewport_rows_estimate();
+                        self.transcript_window
+                            .reanchor_to_visible_row(&rows, viewport);
+                    }
+                    crate::app::AppFocus::Prompt => {
+                        self.prompt_input_scroll = from_top as usize;
+                    }
+                }
             }
-            crate::app::AppFocus::Prompt => {
-                self.prompt_input_scroll = from_top as usize;
+            crate::app::ScrollbarDragTarget::DialogPanel { win, panel } => {
+                let Some(dialog) = self.ui.dialog_mut(win) else {
+                    return;
+                };
+                let Some(viewport) = dialog.panel_viewport(panel) else {
+                    return;
+                };
+                let rel_row = row.saturating_sub(viewport.rect.top);
+                dialog.apply_panel_scrollbar_drag(panel, rel_row);
             }
         }
     }

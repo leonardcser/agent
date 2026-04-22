@@ -297,6 +297,44 @@ impl Dialog {
         self.focused
     }
 
+    /// Panel index whose resolved rect contains `(row, col)`. Rects are
+    /// recomputed each `prepare`/`draw`, so this reflects the last
+    /// rendered frame.
+    pub fn panel_at(&self, row: u16, col: u16) -> Option<usize> {
+        self.panels.iter().position(|p| p.rect.contains(row, col))
+    }
+
+    /// Resolved viewport (rect + scrollbar geometry) for a buffer-backed
+    /// panel. `None` for widget panels or an out-of-range index.
+    pub fn panel_viewport(&self, panel_idx: usize) -> Option<WindowViewport> {
+        self.panels.get(panel_idx).and_then(|p| p.viewport)
+    }
+
+    /// Snap the buffer-backed panel's scroll so its scrollbar thumb
+    /// lands with its top at `thumb_top` rows from the viewport top.
+    /// Caller is responsible for clamping to `max_thumb_top()` if it
+    /// cares; this method clamps internally too. Returns `true` when
+    /// the panel is buffer-backed with a visible scrollbar.
+    pub fn apply_panel_scrollbar_drag(&mut self, panel_idx: usize, thumb_top: u16) -> bool {
+        let Some(panel) = self.panels.get_mut(panel_idx) else {
+            return false;
+        };
+        let Some(viewport) = panel.viewport else {
+            return false;
+        };
+        let Some(bar) = viewport.scrollbar else {
+            return false;
+        };
+        let DialogPanelContent::Buffer { win, view, .. } = &mut panel.content else {
+            return false;
+        };
+        let thumb_top = thumb_top.min(bar.max_thumb_top());
+        let from_top = bar.scroll_from_top_for_thumb(thumb_top);
+        win.scroll_top = from_top;
+        view.set_scroll(from_top as usize);
+        true
+    }
+
     /// Set focus to `panel_idx`. No-op if the index is out of range or
     /// the panel is not focusable.
     pub fn focus_panel(&mut self, panel_idx: usize) {
@@ -1327,5 +1365,60 @@ mod tests {
         // Cursor is translated to dialog-relative coords.
         let ci = dlg.cursor().expect("widget cursor");
         assert_eq!((ci.col, ci.row), (3, 1));
+    }
+
+    #[test]
+    fn panel_at_returns_hit_panel_index() {
+        let mut bufs = std::collections::HashMap::new();
+        bufs.insert(BufId(1), make_buf(1, &["title"]));
+        bufs.insert(BufId(2), make_buf(2, &["body-line"; 30]));
+        let panels = build_panels(
+            vec![
+                PanelSpec::content(BufId(1), PanelHeight::Fixed(1)),
+                PanelSpec::content(BufId(2), PanelHeight::Fill),
+            ],
+            &bufs,
+        );
+        let mut dlg = Dialog::new(DialogConfig::default(), panels);
+        dlg.resolve_panel_rects(Rect::new(0, 0, 20, 10));
+        // Row 1 is the Fixed(1) title panel, row 2+ is the Fill body.
+        assert_eq!(dlg.panel_at(1, 5), Some(0));
+        assert_eq!(dlg.panel_at(5, 5), Some(1));
+        // Top rule (row 0) is chrome — no panel.
+        assert_eq!(dlg.panel_at(0, 5), None);
+    }
+
+    #[test]
+    fn apply_panel_scrollbar_drag_moves_scroll_top() {
+        let mut bufs = std::collections::HashMap::new();
+        bufs.insert(BufId(1), make_buf(1, &["row"; 40]));
+        let panels = build_panels(vec![PanelSpec::content(BufId(1), PanelHeight::Fill)], &bufs);
+        let mut dlg = Dialog::new(DialogConfig::default(), panels);
+        dlg.resolve_panel_rects(Rect::new(0, 0, 20, 10));
+        let vp = dlg.panel_viewport(0).expect("panel has viewport");
+        let bar = vp.scrollbar.expect("scrollbar visible");
+        // Dragging the thumb to the max position snaps scroll_top to
+        // max_scroll (total - viewport = 40 - 9 = 31).
+        assert!(dlg.apply_panel_scrollbar_drag(0, bar.max_thumb_top()));
+        let scroll = match &dlg.panels[0].content {
+            DialogPanelContent::Buffer { win, .. } => win.scroll_top,
+            _ => unreachable!(),
+        };
+        assert_eq!(scroll, bar.max_scroll());
+    }
+
+    #[test]
+    fn apply_panel_scrollbar_drag_ignores_widget_panel() {
+        use crate::text_input::TextInput;
+        let panels = build_panels(
+            vec![PanelSpec::widget(
+                Box::new(TextInput::new()),
+                PanelHeight::Fixed(1),
+            )],
+            &std::collections::HashMap::new(),
+        );
+        let mut dlg = Dialog::new(DialogConfig::default(), panels);
+        dlg.resolve_panel_rects(Rect::new(0, 0, 20, 3));
+        assert!(!dlg.apply_panel_scrollbar_drag(0, 5));
     }
 }

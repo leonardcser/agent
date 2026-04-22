@@ -227,12 +227,13 @@ pub struct App {
     /// started. Used by `tick_drag_autoscroll` to ramp the scroll speed
     /// up the longer the cursor stays at the edge.
     pub drag_autoscroll_since: Option<std::time::Instant>,
-    /// When the initial mouse-down landed on a scrollbar (prompt or
-    /// transcript), every subsequent drag tick re-maps the pointer row
-    /// to a scroll offset instead of extending a visual selection —
-    /// even if the pointer wanders off the track column. The stored
-    /// value records which pane's scrollbar owns the gesture.
-    pub drag_on_scrollbar: Option<AppFocus>,
+    /// When the initial mouse-down landed on a scrollbar (prompt,
+    /// transcript, or a dialog-panel float), every subsequent drag tick
+    /// re-maps the pointer row to a scroll offset instead of extending
+    /// a visual selection — even if the pointer wanders off the track
+    /// column. The stored value records which surface's scrollbar owns
+    /// the gesture.
+    pub drag_on_scrollbar: Option<ScrollbarDragTarget>,
     /// Lua runtime — loads `~/.config/smelt/init.lua`, dispatches
     /// user-registered commands / keymaps / autocmds.
     pub lua: crate::lua::LuaRuntime,
@@ -262,6 +263,16 @@ pub struct App {
 pub enum AppFocus {
     Prompt,
     Content,
+}
+
+/// Which surface's scrollbar is driving an in-flight drag gesture.
+/// `Focus(_)` points at the transcript or prompt window; `DialogPanel`
+/// points at a specific buffer-backed panel inside a compositor float
+/// dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollbarDragTarget {
+    Focus(AppFocus),
+    DialogPanel { win: ui::WinId, panel: usize },
 }
 
 pub(super) struct TurnState {
