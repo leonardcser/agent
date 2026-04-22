@@ -799,7 +799,10 @@ impl App {
                 })
             }
             crate::app::AppFocus::Content => {
-                let total_lines = self.screen.full_transcript_display_text().len();
+                let total_lines = self
+                    .screen
+                    .full_transcript_display_text(self.settings.show_thinking)
+                    .len();
                 if total_lines == 0 {
                     return None;
                 }
@@ -1077,7 +1080,7 @@ impl App {
     pub(super) fn render_normal(&mut self, agent_running: bool) {
         let _perf = crate::perf::begin("app:tick_compositor");
         self.screen.update_spinner();
-        if !self.screen.needs_draw(false) {
+        if !self.screen.needs_draw(false, self.settings.show_thinking) {
             return;
         }
 
@@ -1126,6 +1129,7 @@ impl App {
             width,
             viewport_rows,
             self.transcript_window.scroll_top,
+            self.settings.show_thinking,
         );
         self.transcript_window.scroll_top = tdata.clamped_scroll;
 
@@ -1366,7 +1370,9 @@ impl App {
         // Pull in the latest nav-only text (selectable chars) so cpos
         // stays valid across streaming updates.
 
-        let rows = self.screen.full_transcript_display_text();
+        let rows = self
+            .screen
+            .full_transcript_display_text(self.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window.resync(&rows, viewport);
         let ctx = KeyContext {
@@ -1449,7 +1455,9 @@ impl App {
                         let s = crate::text_utils::snap(&buf, s);
                         let e = crate::text_utils::snap(&buf, e);
                         if s < e {
-                            let copy = self.screen.copy_display_range(s, e);
+                            let copy =
+                                self.screen
+                                    .copy_display_range(s, e, self.settings.show_thinking);
                             let _ = crate::app::commands::copy_to_clipboard(&copy);
                         }
                     }
@@ -1462,7 +1470,9 @@ impl App {
                 self.transcript_window.cpos = new_cpos;
                 self.snap_transcript_cursor();
 
-                let rows = self.screen.full_transcript_display_text();
+                let rows = self
+                    .screen
+                    .full_transcript_display_text(self.settings.show_thinking);
                 let viewport = self.viewport_rows_estimate();
                 self.transcript_window.resync(&rows, viewport);
                 self.sync_transcript_pin();
@@ -1481,7 +1491,9 @@ impl App {
     /// vertical motion shares one code path (with `curswant`) across
     /// mouse wheel, Ctrl-U/D, arrows and j/k.
     fn move_content_cursor_by_lines(&mut self, delta: isize) {
-        let rows = self.screen.full_transcript_display_text();
+        let rows = self
+            .screen
+            .full_transcript_display_text(self.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
             .scroll_by_lines(delta, &rows, viewport);
@@ -1494,7 +1506,9 @@ impl App {
     /// state back onto our scroll + cursor. Returns `true` when vim
     /// consumed the key (caller should return `Redraw`).
     fn handle_content_vim_key(&mut self, k: KeyEvent) -> bool {
-        let rows = self.screen.full_transcript_display_text();
+        let rows = self
+            .screen
+            .full_transcript_display_text(self.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         match self.transcript_window.handle_key(k, &rows, viewport) {
             None => false,
@@ -1502,7 +1516,8 @@ impl App {
                 if let Some(raw) = yanked {
                     let copy = if let Some((s, e)) = self.transcript_window.kill_ring.source_range()
                     {
-                        self.screen.copy_display_range(s, e)
+                        self.screen
+                            .copy_display_range(s, e, self.settings.show_thinking)
                     } else {
                         raw
                     };
@@ -1522,7 +1537,9 @@ impl App {
         if self.app_focus != crate::app::AppFocus::Content {
             return None;
         }
-        let rows = self.screen.full_transcript_display_text();
+        let rows = self
+            .screen
+            .full_transcript_display_text(self.settings.show_thinking);
         if rows.is_empty() {
             return None;
         }
@@ -1608,7 +1625,10 @@ impl App {
     /// Snapshot app state into the Lua ops context and return the
     /// vim_mode + focused_window for callers that need them locally.
     pub(super) fn snapshot_lua_context(&mut self) -> (Option<String>, String) {
-        let transcript_text = self.screen.full_transcript_text().join("\n");
+        let transcript_text = self
+            .screen
+            .full_transcript_text(self.settings.show_thinking)
+            .join("\n");
         let prompt_text = self.input.win.edit_buf.buf.clone();
         let focused_window = match self.app_focus {
             crate::app::AppFocus::Content => "transcript",
@@ -2060,7 +2080,10 @@ impl App {
     }
 
     fn transcript_dims(&mut self) -> (u16, u16) {
-        let total = self.screen.full_transcript_text().len() as u16;
+        let total = self
+            .screen
+            .full_transcript_text(self.settings.show_thinking)
+            .len() as u16;
         let viewport = self.viewport_rows_estimate();
         (total, viewport)
     }
@@ -2163,7 +2186,10 @@ impl App {
                     }
                     return EventOutcome::Noop;
                 }
-                if !self.screen.has_transcript_content() {
+                if !self
+                    .screen
+                    .has_transcript_content(self.settings.show_thinking)
+                {
                     return EventOutcome::Noop;
                 }
                 self.app_focus = crate::app::AppFocus::Content;
@@ -2231,7 +2257,10 @@ impl App {
             self.scroll_prompt_by_lines(delta);
             return;
         }
-        if !self.screen.has_transcript_content() {
+        if !self
+            .screen
+            .has_transcript_content(self.settings.show_thinking)
+        {
             return;
         }
         self.app_focus = crate::app::AppFocus::Content;
@@ -2419,7 +2448,9 @@ impl App {
     /// Double-click on the content pane: enter vim Visual over the
     /// word under the cursor and copy it.
     fn select_and_copy_word_in_content(&mut self) {
-        let rows = self.screen.full_transcript_display_text();
+        let rows = self
+            .screen
+            .full_transcript_display_text(self.settings.show_thinking);
         let cpos = self.transcript_window.compute_cpos(&rows);
         if let Some((s, e)) = self.transcript_window.select_word_at(&rows, cpos) {
             let text = self.transcript_window.edit_buf.buf[s..e].to_string();
@@ -2434,7 +2465,9 @@ impl App {
     /// though vim Visual selects the char under the cursor by default.
     fn copy_content_selection_and_clear(&mut self, dragged: bool) {
         if dragged {
-            let rows = self.screen.full_transcript_display_text();
+            let rows = self
+                .screen
+                .full_transcript_display_text(self.settings.show_thinking);
             let buf = rows.join("\n");
             let range = if let Some(vim) = self.transcript_window.vim.as_ref() {
                 let cpos = self.transcript_window.compute_cpos(&rows);
@@ -2446,7 +2479,9 @@ impl App {
                 let s = crate::text_utils::snap(&buf, s);
                 let e = crate::text_utils::snap(&buf, e);
                 if s < e {
-                    let copy = self.screen.copy_display_range(s, e);
+                    let copy = self
+                        .screen
+                        .copy_display_range(s, e, self.settings.show_thinking);
                     let _ = crate::app::commands::copy_to_clipboard(&copy);
                 }
             }
@@ -2509,7 +2544,9 @@ impl App {
         match target {
             crate::app::AppFocus::Content => {
                 self.transcript_window.scroll_top = from_top;
-                let rows = self.screen.full_transcript_display_text();
+                let rows = self
+                    .screen
+                    .full_transcript_display_text(self.settings.show_thinking);
                 let viewport = self.viewport_rows_estimate();
                 self.transcript_window
                     .reanchor_to_visible_row(&rows, viewport);
@@ -2536,7 +2573,9 @@ impl App {
     /// all match what the user is actually looking at. `rel_row` and
     /// `col` are already clamped against the region by the caller.
     fn position_content_cursor_from_hit(&mut self, rel_row: u16, abs_col: u16) {
-        let rows = self.screen.full_transcript_display_text();
+        let rows = self
+            .screen
+            .full_transcript_display_text(self.settings.show_thinking);
         if rows.is_empty() {
             self.screen.mark_dirty();
             return;
@@ -2552,7 +2591,9 @@ impl App {
             render::ViewportGeom::new(total, viewport_rows, self.transcript_window.scroll_top);
         let line_idx = geom.line_of_row(rel_row).unwrap_or(total.saturating_sub(1)) as usize;
         let line_idx = line_idx.min(rows.len() - 1);
-        let snapped = self.screen.snap_col_to_selectable(line_idx, display_col);
+        let snapped =
+            self.screen
+                .snap_col_to_selectable(line_idx, display_col, self.settings.show_thinking);
         self.transcript_window
             .jump_to_line_col(&rows, line_idx, snapped, viewport_rows);
         self.screen.mark_dirty();
@@ -2597,7 +2638,11 @@ impl App {
             crate::app::AppFocus::Prompt => crate::app::AppFocus::Content,
             crate::app::AppFocus::Content => crate::app::AppFocus::Prompt,
         };
-        if target == crate::app::AppFocus::Content && !self.screen.has_transcript_content() {
+        if target == crate::app::AppFocus::Content
+            && !self
+                .screen
+                .has_transcript_content(self.settings.show_thinking)
+        {
             return;
         }
         self.app_focus = target;
@@ -2611,7 +2656,9 @@ impl App {
     /// resumed session has stale/zero state and the first key press
     /// is a no-op until the user triggers a click-to-position.
     fn refocus_content(&mut self) {
-        let rows = self.screen.full_transcript_display_text();
+        let rows = self
+            .screen
+            .full_transcript_display_text(self.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window.refocus(&rows, viewport);
         self.snap_transcript_cursor();
@@ -2622,10 +2669,14 @@ impl App {
     /// Called after every cursor motion to skip non-selectable gutters
     /// and padding now that the cursor operates in display-text space.
     fn snap_transcript_cursor(&mut self) {
-        let rows = self.screen.full_transcript_display_text();
-        let snapped = self
+        let rows = self
             .screen
-            .snap_cpos_to_selectable(&rows, self.transcript_window.cpos);
+            .full_transcript_display_text(self.settings.show_thinking);
+        let snapped = self.screen.snap_cpos_to_selectable(
+            &rows,
+            self.transcript_window.cpos,
+            self.settings.show_thinking,
+        );
         if snapped != self.transcript_window.cpos {
             self.transcript_window.cpos = snapped;
             let viewport = self.viewport_rows_estimate();

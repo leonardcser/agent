@@ -74,11 +74,6 @@ pub struct Screen {
     prompt: PromptState,
     dirty: bool,
     working: WorkingState,
-    /// Mirror of `App.settings.show_thinking`, consulted by the
-    /// transcript snapshot / copy paths. Synced by
-    /// `Screen::set_show_thinking` on every settings change until
-    /// Phase C3 deletes Screen and consumers take this as a parameter.
-    show_thinking: bool,
     /// App-level focus (Prompt / History). Driven by App::app_focus.
     last_app_focus: crate::app::AppFocus,
     /// Plain-text snapshot of each visible row (top to bottom) captured
@@ -128,7 +123,6 @@ impl Screen {
             prompt: PromptState::new(),
             dirty: true,
             working: WorkingState::new(),
-            show_thinking: true,
             last_app_focus: crate::app::AppFocus::Prompt,
             last_viewport_text: Vec::new(),
             last_viewport_lines: Vec::new(),
@@ -169,13 +163,6 @@ impl Screen {
     pub fn transcript_width(&self) -> usize {
         let (w, _) = self.backend.size();
         (self.transcript_gutters.content_width(w) as usize).max(1)
-    }
-
-    pub fn set_show_thinking(&mut self, v: bool) {
-        if self.show_thinking != v {
-            self.show_thinking = v;
-            self.dirty = true;
-        }
     }
 
     /// Expose the backend for dialogs that need output + size.
@@ -470,17 +457,17 @@ impl Screen {
     /// ephemeral streaming content). Used by the content pane as the
     /// vim buffer so motions span the entire conversation, not just the
     /// current viewport slice.
-    pub fn has_transcript_content(&mut self) -> bool {
-        !self.transcript.history.is_empty() || self.has_ephemeral()
+    pub fn has_transcript_content(&mut self, show_thinking: bool) -> bool {
+        !self.transcript.history.is_empty() || self.has_ephemeral(show_thinking)
     }
 
-    pub fn full_transcript_text(&mut self) -> Vec<String> {
+    pub fn full_transcript_text(&mut self, show_thinking: bool) -> Vec<String> {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let snap = self.transcript.snapshot(tw, show_thinking);
         let mut rows = snap.rows.clone();
-        if self.has_ephemeral() {
+        if self.has_ephemeral(show_thinking) {
             let mut col = SpanCollector::new(tw);
-            self.render_ephemeral_into(&mut col, tw as usize);
+            self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
             for line in col.finish().lines {
                 let mut s = String::new();
                 for span in &line.spans {
@@ -495,13 +482,13 @@ impl Screen {
     /// Full transcript display text — every character including gutters
     /// and padding. Cursor motions operate on this buffer; non-selectable
     /// cells are skipped via `snap_to_selectable` after each motion.
-    pub fn full_transcript_display_text(&mut self) -> Vec<String> {
+    pub fn full_transcript_display_text(&mut self, show_thinking: bool) -> Vec<String> {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let snap = self.transcript.snapshot(tw, show_thinking);
         let mut rows = snap.rows.clone();
-        if self.has_ephemeral() {
+        if self.has_ephemeral(show_thinking) {
             let mut col = SpanCollector::new(tw);
-            self.render_ephemeral_into(&mut col, tw as usize);
+            self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
             for line in col.finish().lines {
                 let mut s = String::new();
                 for span in &line.spans {
@@ -516,13 +503,13 @@ impl Screen {
     /// Navigation-only transcript text: selectable display characters
     /// only (gutters, padding stripped). This is the buffer that vim
     /// motions and cursor positioning operate on.
-    pub fn full_transcript_nav_text(&mut self) -> Vec<String> {
+    pub fn full_transcript_nav_text(&mut self, show_thinking: bool) -> Vec<String> {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let snap = self.transcript.snapshot(tw, show_thinking);
         let mut rows = snap.nav_rows();
-        if self.has_ephemeral() {
+        if self.has_ephemeral(show_thinking) {
             let mut col = SpanCollector::new(tw);
-            self.render_ephemeral_into(&mut col, tw as usize);
+            self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
             for line in col.finish().lines {
                 let mut s = String::new();
                 for span in &line.spans {
@@ -538,9 +525,14 @@ impl Screen {
     }
 
     /// Map a nav column to a display column for an absolute row.
-    pub fn nav_col_to_display_col(&mut self, abs_row: usize, nav_col: usize) -> usize {
+    pub fn nav_col_to_display_col(
+        &mut self,
+        abs_row: usize,
+        nav_col: usize,
+        show_thinking: bool,
+    ) -> usize {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let snap = self.transcript.snapshot(tw, show_thinking);
         let snap_rows = snap.row_cells.len();
         if abs_row < snap_rows {
             snap.nav_col_to_display_col(abs_row, nav_col)
@@ -550,9 +542,14 @@ impl Screen {
     }
 
     /// Map a display column to a nav column for an absolute row.
-    pub fn display_col_to_nav_col(&mut self, abs_row: usize, display_col: usize) -> usize {
+    pub fn display_col_to_nav_col(
+        &mut self,
+        abs_row: usize,
+        display_col: usize,
+        show_thinking: bool,
+    ) -> usize {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let snap = self.transcript.snapshot(tw, show_thinking);
         let snap_rows = snap.row_cells.len();
         if abs_row < snap_rows {
             snap.display_col_to_nav_col(abs_row, display_col)
@@ -562,17 +559,22 @@ impl Screen {
     }
 
     /// Extract the full selectable text of the block at `abs_row`.
-    pub fn block_text_at_row(&mut self, abs_row: usize) -> Option<String> {
+    pub fn block_text_at_row(&mut self, abs_row: usize, show_thinking: bool) -> Option<String> {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let snap = self.transcript.snapshot(tw, show_thinking);
         snap.block_text_at(abs_row)
     }
 
     /// Snap a transcript `(row, col)` to the nearest selectable cell.
     /// Returns the adjusted column, or the original if no snap needed.
-    pub fn snap_col_to_selectable(&mut self, abs_row: usize, col: usize) -> usize {
+    pub fn snap_col_to_selectable(
+        &mut self,
+        abs_row: usize,
+        col: usize,
+        show_thinking: bool,
+    ) -> usize {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let snap = self.transcript.snapshot(tw, show_thinking);
         snap.snap_to_selectable(abs_row, col)
             .map(|(_, c)| c)
             .unwrap_or(col)
@@ -580,9 +582,14 @@ impl Screen {
 
     /// Snap a byte offset in the display-text buffer to the nearest
     /// selectable cell. Returns the (possibly adjusted) byte offset.
-    pub fn snap_cpos_to_selectable(&mut self, rows: &[String], cpos: usize) -> usize {
+    pub fn snap_cpos_to_selectable(
+        &mut self,
+        rows: &[String],
+        cpos: usize,
+        show_thinking: bool,
+    ) -> usize {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let snap = self.transcript.snapshot(tw, show_thinking);
         let (row, col) = snap.byte_to_row_col(cpos);
         if let Some((_, snapped_col)) = snap.snap_to_selectable(row, col) {
             if snapped_col == col {
@@ -604,9 +611,9 @@ impl Screen {
 
     /// Copy text from a display-text byte range, applying `copy_as`
     /// substitutions via the snapshot's `copy_range`.
-    pub fn copy_display_range(&mut self, start: usize, end: usize) -> String {
+    pub fn copy_display_range(&mut self, start: usize, end: usize, show_thinking: bool) -> String {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let snap = self.transcript.snapshot(tw, show_thinking);
         snap.copy_byte_range(start, end)
     }
 
@@ -925,10 +932,10 @@ impl Screen {
     }
 
     /// Returns true when there is content or prompt work to render.
-    pub fn needs_draw(&self, is_dialog: bool) -> bool {
+    pub fn needs_draw(&self, is_dialog: bool, show_thinking: bool) -> bool {
         let has_new_blocks = self.transcript.history.has_unflushed();
         if is_dialog {
-            has_new_blocks || (self.has_ephemeral() && self.dirty)
+            has_new_blocks || (self.has_ephemeral(show_thinking) && self.dirty)
         } else {
             has_new_blocks || self.dirty
         }
@@ -941,23 +948,25 @@ impl Screen {
         width: usize,
         viewport_rows: u16,
         scroll_top: u16,
+        show_thinking: bool,
     ) -> TranscriptData {
         let gutters = self.transcript_gutters;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
         let theme = crate::theme::snapshot();
 
-        let ephemeral_lines: Vec<crate::render::display::DisplayLine> = if self.has_ephemeral() {
-            let mut col = SpanCollector::new(tw as u16);
-            self.render_ephemeral_into(&mut col, tw);
-            col.finish().lines
-        } else {
-            Vec::new()
-        };
+        let ephemeral_lines: Vec<crate::render::display::DisplayLine> =
+            if self.has_ephemeral(show_thinking) {
+                let mut col = SpanCollector::new(tw as u16);
+                self.render_ephemeral_into(&mut col, tw, show_thinking);
+                col.finish().lines
+            } else {
+                Vec::new()
+            };
 
         self.transcript_projection.project(
             &mut self.transcript.history,
             tw as u16,
-            self.show_thinking,
+            show_thinking,
             &theme,
             &ephemeral_lines,
         );
@@ -1052,18 +1061,18 @@ impl Screen {
     /// aggregate thinking summary (shown when `show_thinking == false`)
     /// remains as an overlay because it's a synthesized summary, not a
     /// stream.
-    fn has_ephemeral(&self) -> bool {
-        self.parser.has_active_thinking() && !self.show_thinking
+    fn has_ephemeral(&self, show_thinking: bool) -> bool {
+        self.parser.has_active_thinking() && !show_thinking
     }
 
     /// Paint the animated thinking-summary above the prompt when
     /// thinking is hidden. Every other live element renders as a
     /// streaming block in the main transcript.
-    fn render_ephemeral_into<S: LayoutSink>(&self, out: &mut S, width: usize) {
+    fn render_ephemeral_into<S: LayoutSink>(&self, out: &mut S, width: usize, show_thinking: bool) {
         let Some(at) = self.parser.active_thinking() else {
             return;
         };
-        if self.show_thinking {
+        if show_thinking {
             return;
         }
         let mut combined = at.paragraph.clone();

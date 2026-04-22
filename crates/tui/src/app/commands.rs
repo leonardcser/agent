@@ -218,7 +218,10 @@ impl App {
             }
             "/yank-block" => {
                 let abs_row = self.transcript_window.cursor_abs_row();
-                if let Some(text) = self.screen.block_text_at_row(abs_row) {
+                if let Some(text) = self
+                    .screen
+                    .block_text_at_row(abs_row, self.settings.show_thinking)
+                {
                     let _ = copy_to_clipboard(&text);
                     self.notify("block copied".into());
                 } else {
@@ -439,7 +442,6 @@ impl App {
         f(&mut self.settings);
         self.input.set_vim_enabled(self.settings.vim);
         self.transcript_window.set_vim_enabled(self.settings.vim);
-        self.screen.set_show_thinking(self.settings.show_thinking);
         state::save_settings(&self.settings);
         if self.settings.show_thinking != prev_show_thinking {
             self.screen.redraw();

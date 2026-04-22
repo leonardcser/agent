@@ -500,8 +500,7 @@ impl App {
             reasoning_effort
         };
         crate::completer::set_multi_agent(multi_agent);
-        let mut screen = Screen::new();
-        screen.set_show_thinking(settings.show_thinking);
+        let screen = Screen::new();
 
         let cwd = std::env::current_dir()
             .ok()
