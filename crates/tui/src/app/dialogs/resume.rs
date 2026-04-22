@@ -1,5 +1,5 @@
 use super::super::App;
-use crate::app::ops::{AppOp, OpsHandle};
+use crate::app::ops::AppOp;
 use crate::render::ResumeEntry;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::cell::RefCell;
@@ -440,5 +440,3 @@ fn refresh_title(ui: &mut ui::Ui, title_buf: ui::BufId, workspace_only: bool, qu
     buf.add_highlight(0, 0, label.len() as u16, ui::buffer::SpanStyle::dim());
 }
 
-#[allow(dead_code)]
-fn _ops_marker(_o: &OpsHandle) {}

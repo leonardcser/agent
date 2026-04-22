@@ -40,7 +40,6 @@ enum TaskWait {
     /// Resume with `nil` once `Instant` has passed.
     Sleep(Instant),
     /// Waiting for `resolve_dialog(dialog_id, …)` to be called.
-    #[allow(dead_code)] // wired in step (iv)
     Dialog(u64),
 }
 
@@ -50,8 +49,7 @@ pub enum TaskCompletion {
     /// surface as notifications.
     FireAndForget,
     /// Tool `execute` handler — return value is delivered to the
-    /// engine as the tool result. Wired in step (iii).
-    #[allow(dead_code)]
+    /// engine as the tool result.
     ToolResult { request_id: u64, call_id: String },
 }
 
@@ -69,15 +67,12 @@ pub enum TaskDriveOutput {
     /// Task yielded `{ __yield = "dialog", opts = {...} }`. The app
     /// builds the dialog, pushes it onto the compositor, and later
     /// calls `LuaTaskRuntime::resolve_dialog(dialog_id, result)`.
-    /// Wired in step (iv).
-    #[allow(dead_code)]
     OpenDialog {
         task_id: u64,
         dialog_id: u64,
         opts: mlua::RegistryKey,
     },
-    /// Tool-execute task returned. Wired in step (iii).
-    #[allow(dead_code)]
+    /// Tool-execute task returned.
     ToolComplete {
         request_id: u64,
         call_id: String,
@@ -143,9 +138,7 @@ impl LuaTaskRuntime {
     }
 
     /// Satisfy a `TaskWait::Dialog(id)` wait with the given result
-    /// value. Returns `true` if a matching task was found. Wired in
-    /// step (iv).
-    #[allow(dead_code)]
+    /// value. Returns `true` if a matching task was found.
     pub fn resolve_dialog(&mut self, dialog_id: u64, value: LuaValue) -> bool {
         for task in &mut self.tasks {
             if matches!(&task.wait, TaskWait::Dialog(id) if *id == dialog_id) {

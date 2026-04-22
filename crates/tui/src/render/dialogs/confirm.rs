@@ -6,9 +6,7 @@
 //! `app/dialogs/confirm.rs` consumes both `from_tool` and
 //! `render_into_buffer`.
 
-use crate::render::highlight::{
-    count_inline_diff_rows, print_inline_diff, print_syntax_file, BashHighlighter,
-};
+use crate::render::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
 use crate::render::layout_out::LayoutSink;
 use crate::render::wrap_line;
 use crate::theme;
@@ -302,19 +300,3 @@ fn render_notebook_preview<S: LayoutSink>(
     }
 }
 
-#[allow(dead_code)]
-fn _count_rows_unused(data: &NotebookRenderData) -> u16 {
-    let title = data.title();
-    if data.edit_mode == "insert" {
-        wrap_line(&title, crate::render::term_width().saturating_sub(4)).len() as u16
-            + data.new_source.lines().count().max(1) as u16
-    } else {
-        wrap_line(&title, crate::render::term_width().saturating_sub(4)).len() as u16
-            + count_inline_diff_rows(
-                &data.old_source,
-                &data.new_source,
-                &data.path,
-                &data.old_source,
-            )
-    }
-}

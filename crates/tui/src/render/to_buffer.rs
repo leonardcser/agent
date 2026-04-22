@@ -22,7 +22,6 @@ use ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
 /// preview migration: existing renderers write to `&mut SpanCollector`
 /// unchanged; their styled output lands as `SpanStyle` highlights on
 /// `buf`, gaining scrollbar / selection / vim motions for free.
-#[allow(dead_code)] // wired up by the upcoming Confirm dialog migration
 pub(crate) fn render_into_buffer(
     buf: &mut Buffer,
     width: u16,

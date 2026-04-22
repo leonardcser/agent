@@ -676,41 +676,6 @@ pub(super) fn print_cached_inline_diff<S: LayoutSink>(
     emitted
 }
 
-/// Count rows an inline diff would take without rendering.
-pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &str) -> u16 {
-    let cache = build_inline_diff_cache(old, new, path, anchor);
-    count_cached_inline_diff_rows(&cache)
-}
-
-pub(super) fn count_cached_inline_diff_rows(cache: &CachedInlineDiff) -> u16 {
-    let indent = "  ";
-    let gutter_width = format!("{}", cache.max_display_lineno).len();
-    let prefix_len = indent.len() + 1 + gutter_width + 3;
-    let right_margin = indent.len();
-    let max_content = term_width().saturating_sub(prefix_len + right_margin);
-
-    let visual_rows_for = |line: &str| -> usize {
-        let chars = line.replace('\t', "    ").chars().count();
-        if max_content == 0 {
-            1
-        } else {
-            chars.div_ceil(max_content)
-        }
-        .max(1)
-    };
-
-    cache
-        .lines
-        .iter()
-        .map(|line| match line {
-            CachedDiffLine::Ellipsis => 1,
-            CachedDiffLine::Context { text, .. }
-            | CachedDiffLine::Delete { text, .. }
-            | CachedDiffLine::Insert { text, .. } => visual_rows_for(text),
-        })
-        .sum::<usize>() as u16
-}
-
 /// Split syntax regions into visual rows that each fit within `max_width` columns.
 fn split_regions_into_rows<S: LayoutSink>(
     out: &mut S,
