@@ -110,6 +110,10 @@ pub struct App {
     pub custom_status_items: Option<Vec<render::status::StatusItem>>,
     /// Ephemeral notification shown above the prompt, dismissed on any key.
     pub notification: Option<render::screen::Notification>,
+    /// Nvim-style `:` command line. When `active`, the status bar
+    /// paints it in place of the usual status spans and keystrokes
+    /// route through `handle_cmdline_key`.
+    pub cmdline: render::CmdlineState,
     pub settings: state::ResolvedSettings,
     pub multi_agent: bool,
     /// Human-readable name for this agent.
@@ -587,6 +591,7 @@ impl App {
             pending_dialog: false,
             custom_status_items: None,
             notification: None,
+            cmdline: render::CmdlineState::new(),
             settings,
             multi_agent,
             agent_id: String::new(),

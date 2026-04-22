@@ -95,8 +95,6 @@ pub struct Screen {
     pub(crate) layout: super::layout::LayoutState,
     /// Buffer-backed transcript projection — blocks projected at event time.
     pub(crate) transcript_projection: TranscriptProjection,
-    /// Nvim-style command line rendered inside the status bar row.
-    pub(crate) cmdline: super::cmdline::CmdlineState,
     /// Who owns the soft cursor this frame. Recomputed at the start of
     /// each paint via `refresh_cursor_owner`.
     cursor_owner: CursorOwner,
@@ -151,7 +149,6 @@ impl Screen {
                     buftype: ui::buffer::BufType::Nofile,
                 },
             )),
-            cmdline: super::cmdline::CmdlineState::new(),
             cursor_owner: CursorOwner::Prompt,
             backend,
             focused: true,
@@ -388,8 +385,8 @@ impl Screen {
         }
     }
 
-    fn refresh_cursor_owner(&mut self) {
-        self.cursor_owner = if self.cmdline.active {
+    fn refresh_cursor_owner(&mut self, cmdline_active: bool) {
+        self.cursor_owner = if cmdline_active {
             CursorOwner::Cmdline
         } else if !self.focused {
             CursorOwner::None
@@ -433,8 +430,8 @@ impl Screen {
         self.dirty = false;
     }
 
-    pub(crate) fn refresh_cursor_owner_pub(&mut self) {
-        self.refresh_cursor_owner();
+    pub(crate) fn refresh_cursor_owner_pub(&mut self, cmdline_active: bool) {
+        self.refresh_cursor_owner(cmdline_active);
     }
 
     pub(crate) fn measure_prompt_height_pub(

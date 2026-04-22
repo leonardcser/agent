@@ -419,8 +419,21 @@ just the data move.
 is folded into **C3** (see below) where prompt becomes a `ui::Window`
 and floats can anchor relative to its rect.
 
-**C2 · Cmdline as float window.** Self-contained commit. Cmdline
-becomes a single-panel `Input` dialog, focusable, `DockBottom`.
+**C2 · Cmdline off Screen, statusline-mode paint.** The original
+shape was "cmdline as focusable float." That ran aground on the fact
+that cmdline rendering had already been regressed to invisible in an
+earlier status-bar cleanup — and going full-float demands focus
+save/restore that only starts to earn its keep once prompt and
+transcript are windows (C3). Revised shape:
+
+- `CmdlineState` moves from `render::Screen` to `App.cmdline`.
+- `refresh_status_bar` short-circuits when `cmdline.active`: the
+  status row IS the `:` line, with inverse-video cursor cell.
+- Input routing stays as-is (`if self.cmdline.active { handle_cmdline_key }`)
+  for now — windowed cmdline dispatch revisits in C3 alongside the
+  prompt/transcript window migration.
+- `Screen::refresh_cursor_owner_pub` takes `cmdline_active: bool` so
+  `CursorOwner::Cmdline` still suppresses prompt/transcript cursors.
 
 **C3 · Prompt + Transcript as real `ui::Window`s + Screen deletion.**
 The big atomic commit:

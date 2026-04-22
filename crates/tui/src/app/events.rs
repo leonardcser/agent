@@ -77,7 +77,7 @@ impl App {
 
         // Cmdline mode: when the `:` command line is active, route
         // all key events to it. Esc cancels, Enter executes.
-        if self.screen.cmdline.active {
+        if self.cmdline.active {
             if let Event::Key(k) = ev {
                 return self.handle_cmdline_key(k);
             }
@@ -827,6 +827,18 @@ impl App {
         let width = term_w as usize;
         let status_bg = Color::AnsiValue(233);
 
+        // Cmdline mode: the status row IS the `:` line when active.
+        if self.cmdline.active {
+            let _ = width;
+            let (left, right) = render::status::build_cmdline_segments(&self.cmdline, status_bg);
+            if let Some(bar) = self.ui.layer_mut::<ui::StatusBar>("status") {
+                *bar = ui::StatusBar::new().with_bg(Style::bg(status_bg));
+                bar.set_left(left);
+                bar.set_right(right);
+            }
+            return;
+        }
+
         // Custom status items (from Lua plugins) override everything.
         if let Some(items) = self.custom_status_items.as_ref() {
             let mut spans: Vec<StatusSpan> = items.iter().map(|i| i.to_span(status_bg)).collect();
@@ -1088,7 +1100,7 @@ impl App {
         };
 
         // Refresh cursor ownership.
-        self.screen.refresh_cursor_owner_pub();
+        self.screen.refresh_cursor_owner_pub(self.cmdline.active);
 
         // ── Compute layout ──
         let natural_prompt_height = self.screen.measure_prompt_height_pub(
@@ -2669,23 +2681,23 @@ impl App {
     // ── Cmdline (:) ───────────────────────────────────────────────────
 
     pub fn open_cmdline(&mut self) {
-        self.screen.cmdline.open();
+        self.cmdline.open();
         self.screen.mark_dirty();
     }
 
     fn handle_cmdline_key(&mut self, k: KeyEvent) -> bool {
         use crossterm::event::KeyModifiers as M;
-        if !self.screen.cmdline.active {
+        if !self.cmdline.active {
             return false;
         }
         let mut needs_completer_update = false;
         match (k.code, k.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('c'), M::CONTROL) => {
-                self.screen.cmdline.close();
+                self.cmdline.close();
                 self.screen.mark_dirty();
             }
             (KeyCode::Enter, _) => {
-                let line = self.screen.cmdline.submit();
+                let line = self.cmdline.submit();
                 self.screen.mark_dirty();
                 if !line.is_empty() {
                     let action = super::commands::run_command(self, &format!(":{line}"));
@@ -2713,94 +2725,94 @@ impl App {
             (KeyCode::Tab, _)
             | (KeyCode::Char('j'), M::CONTROL)
             | (KeyCode::Char('n'), M::CONTROL) => {
-                if self.screen.cmdline.completer.is_some() {
-                    if let Some(ref mut comp) = self.screen.cmdline.completer {
+                if self.cmdline.completer.is_some() {
+                    if let Some(ref mut comp) = self.cmdline.completer {
                         comp.move_up();
                     }
                 } else {
                     let lua_cmds = self.lua.command_names();
-                    self.screen.cmdline.update_completer(&lua_cmds);
+                    self.cmdline.update_completer(&lua_cmds);
                 }
-                self.screen.cmdline.apply_selected_completion();
+                self.cmdline.apply_selected_completion();
                 self.screen.mark_dirty();
             }
             (KeyCode::BackTab, _)
             | (KeyCode::Char('k'), M::CONTROL)
             | (KeyCode::Char('p'), M::CONTROL) => {
-                if self.screen.cmdline.completer.is_some() {
-                    if let Some(ref mut comp) = self.screen.cmdline.completer {
+                if self.cmdline.completer.is_some() {
+                    if let Some(ref mut comp) = self.cmdline.completer {
                         comp.move_down();
                     }
                 } else {
                     let lua_cmds = self.lua.command_names();
-                    self.screen.cmdline.update_completer(&lua_cmds);
+                    self.cmdline.update_completer(&lua_cmds);
                 }
-                self.screen.cmdline.apply_selected_completion();
+                self.cmdline.apply_selected_completion();
                 self.screen.mark_dirty();
             }
             (KeyCode::Backspace, _) => {
-                self.screen.cmdline.backspace();
-                if self.screen.cmdline.buf.is_empty() {
-                    self.screen.cmdline.close();
+                self.cmdline.backspace();
+                if self.cmdline.buf.is_empty() {
+                    self.cmdline.close();
                 } else {
                     needs_completer_update = true;
                 }
                 self.screen.mark_dirty();
             }
             (KeyCode::Delete, _) => {
-                self.screen.cmdline.delete();
+                self.cmdline.delete();
                 needs_completer_update = true;
                 self.screen.mark_dirty();
             }
             (KeyCode::Left, _) => {
-                self.screen.cmdline.move_left();
+                self.cmdline.move_left();
                 self.screen.mark_dirty();
             }
             (KeyCode::Right, _) => {
-                self.screen.cmdline.move_right();
+                self.cmdline.move_right();
                 self.screen.mark_dirty();
             }
             (KeyCode::Up, _) => {
-                self.screen.cmdline.history_up();
+                self.cmdline.history_up();
                 self.screen.mark_dirty();
             }
             (KeyCode::Down, _) => {
-                self.screen.cmdline.history_down();
+                self.cmdline.history_down();
                 self.screen.mark_dirty();
             }
             (KeyCode::Home, _) | (KeyCode::Char('a'), M::CONTROL) => {
-                self.screen.cmdline.move_start();
+                self.cmdline.move_start();
                 self.screen.mark_dirty();
             }
             (KeyCode::End, _) | (KeyCode::Char('e'), M::CONTROL) => {
-                self.screen.cmdline.move_end();
+                self.cmdline.move_end();
                 self.screen.mark_dirty();
             }
             (KeyCode::Char('w'), M::CONTROL) => {
-                self.screen.cmdline.delete_word_back();
-                if self.screen.cmdline.buf.is_empty() {
-                    self.screen.cmdline.close();
+                self.cmdline.delete_word_back();
+                if self.cmdline.buf.is_empty() {
+                    self.cmdline.close();
                 } else {
                     needs_completer_update = true;
                 }
                 self.screen.mark_dirty();
             }
             (KeyCode::Char('u'), M::CONTROL) => {
-                self.screen.cmdline.buf.clear();
-                self.screen.cmdline.cursor = 0;
-                self.screen.cmdline.completer = None;
+                self.cmdline.buf.clear();
+                self.cmdline.cursor = 0;
+                self.cmdline.completer = None;
                 self.screen.mark_dirty();
             }
             (KeyCode::Char(ch), M::NONE | M::SHIFT) => {
-                self.screen.cmdline.insert_char(ch);
+                self.cmdline.insert_char(ch);
                 needs_completer_update = true;
                 self.screen.mark_dirty();
             }
             _ => {}
         }
-        if needs_completer_update && self.screen.cmdline.completer.is_some() {
+        if needs_completer_update && self.cmdline.completer.is_some() {
             let lua_cmds = self.lua.command_names();
-            self.screen.cmdline.update_completer(&lua_cmds);
+            self.cmdline.update_completer(&lua_cmds);
         }
         false
     }

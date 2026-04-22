@@ -105,6 +105,45 @@ pub(crate) struct StatusSpan {
 const STATUS_SEP: &str = " \u{00b7} "; // " · "
 const STATUS_SEP_LEN: usize = 3;
 
+/// Produce status-bar segments for the nvim-style `:` command line.
+/// The whole row becomes `:<buf>` with the character under the cursor
+/// rendered in inverse video. The right-side segment is empty — the
+/// cmdline owns the entire row.
+pub(crate) fn build_cmdline_segments(
+    cmdline: &super::CmdlineState,
+    bg: Color,
+) -> (Vec<ui::StatusSegment>, Vec<ui::StatusSegment>) {
+    let text_style = ui::grid::Style {
+        fg: Some(Color::White),
+        bg: Some(bg),
+        ..ui::grid::Style::default()
+    };
+    let cursor_style = ui::grid::Style {
+        fg: Some(bg),
+        bg: Some(Color::White),
+        ..ui::grid::Style::default()
+    };
+
+    let mut left: Vec<ui::StatusSegment> = Vec::with_capacity(4);
+    left.push(ui::StatusSegment::styled(":", text_style));
+
+    let buf = &cmdline.buf;
+    let cursor = cmdline.cursor.min(buf.len());
+    let (before, rest) = buf.split_at(cursor);
+    if !before.is_empty() {
+        left.push(ui::StatusSegment::styled(before.to_string(), text_style));
+    }
+    let (cursor_ch, after) = match rest.chars().next() {
+        Some(c) => (c.to_string(), &rest[c.len_utf8()..]),
+        None => (" ".to_string(), rest),
+    };
+    left.push(ui::StatusSegment::styled(cursor_ch, cursor_style));
+    if !after.is_empty() {
+        left.push(ui::StatusSegment::styled(after.to_string(), text_style));
+    }
+    (left, Vec::new())
+}
+
 pub(crate) fn spans_to_segments(
     spans: &mut Vec<StatusSpan>,
     width: usize,

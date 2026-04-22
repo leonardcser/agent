@@ -28,3 +28,13 @@ dialoguer = "0.12.0"
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# Faster dev/test builds: dependencies don't need debug info (we never
+# step into them), and line-tables-only on our own code keeps backtraces
+# usable while drastically cutting link time and dSYM generation on macOS.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 0
