@@ -1172,6 +1172,26 @@ coherent arc because splitting them left two render engines coexisting.
 
 ## Progress log
 
+- **2026-04-22** — Phase D0 + callback-first keymaps landed. New
+  `LuaShared.task_inbox: Mutex<Vec<TaskEvent>>` owns dialog-resolution
+  + keymap-fired events; reducer no longer sees `AppOp::ResolveLuaDialog`.
+  Dialog `keymaps` entries now take `on_press = function(ctx) ... end`
+  (ctx carries `selected_index`, `inputs`, `close()`), replacing the
+  brittle `action = "kill"` string-dispatch. Also renamed
+  `LuaDialogState` → `DialogState` (leaky name). Unlocks Tier-2
+  dialogs (permissions/resume/agents) that need `d/D/Tab`-style
+  custom keys. Commits `20f8d63`, `ecc8645`, `eef68e6`.
+- **2026-04-22** — Phase F2 dialog sweep landed (5 plugins): `/help`
+  (109 LOC) + `/export` (72 LOC) + `/rewind` (87 LOC) + `/ps`
+  (114 LOC) + `/yank-block` (9 LOC Rust) all ported to Lua. Kept
+  primitives minimal: `smelt.api.session.{turns,rewind_to}`,
+  `smelt.api.process.{list,kill}`, `smelt.api.keymap.help_sections`,
+  `smelt.api.transcript.yank_block`. Remaining F2 items (`/model`,
+  `/theme`, `/color`, `/stats`, `/cost`) are completer-based, not
+  dialog-based — porting would require a new completer primitive or
+  a UX simplification (inline completer → modal dialog). Deferred
+  pending UX decision. Net so far: ~−400 Rust, +220 Lua across
+  F1+F2 dialog sweep.
 - **2026-04-22** — plan pivot: added North-star commitment #3
   ("Rust core, Lua features"). Phase D reframed as "Neovim-model FFI
   completion" — audit showed all primitives to build features in Lua
