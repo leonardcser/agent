@@ -685,6 +685,16 @@ impl Ui {
         parse_float_layer_id(focused)
     }
 
+    /// Topmost float (by zindex) whose rect contains (row, col). Used
+    /// by the host's mouse dispatcher to route wheel / click events
+    /// onto the float they actually land on — independent of focus —
+    /// so scrolling an unfocused-but-visible float just works.
+    pub fn float_at(&self, row: u16, col: u16) -> Option<WinId> {
+        self.compositor
+            .hit_test(row, col)
+            .and_then(parse_float_layer_id)
+    }
+
     /// Look up the `FloatConfig` for a window, if it's a float.
     /// Non-float windows (splits) return `None`.
     pub fn float_config(&self, win: WinId) -> Option<&FloatConfig> {

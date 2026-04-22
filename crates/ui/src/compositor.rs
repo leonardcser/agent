@@ -201,6 +201,18 @@ impl Compositor {
         self.layers.iter().map(|l| l.id.as_str()).collect()
     }
 
+    /// Return the id of the topmost layer whose rect contains (row, col),
+    /// or `None` if the cell is not covered by any layer. "Topmost" =
+    /// highest zindex since `sort_layers` orders ascending and we
+    /// iterate in reverse.
+    pub fn hit_test(&self, row: u16, col: u16) -> Option<&str> {
+        self.layers
+            .iter()
+            .rev()
+            .find(|l| l.rect.contains(row, col))
+            .map(|l| l.id.as_str())
+    }
+
     fn sort_layers(&mut self) {
         self.layers.sort_by_key(|l| l.zindex);
     }
@@ -361,6 +373,30 @@ mod tests {
             10,
         );
         assert_eq!(comp.layer_ids(), vec!["back", "front"]);
+    }
+
+    #[test]
+    fn hit_test_returns_topmost_layer_under_cell() {
+        let mut comp = Compositor::new(40, 10);
+        comp.add(
+            "back",
+            Box::new(TestComponent::new("")),
+            Rect::new(0, 0, 40, 10),
+            0,
+        );
+        comp.add(
+            "front",
+            Box::new(TestComponent::new("")),
+            Rect::new(3, 5, 10, 4),
+            5,
+        );
+        // Inside the front rect → front wins.
+        assert_eq!(comp.hit_test(4, 6), Some("front"));
+        // Outside the front rect but inside back → back.
+        assert_eq!(comp.hit_test(8, 0), Some("back"));
+        // Outside both.
+        assert_eq!(comp.hit_test(9, 39), Some("back"));
+        assert_eq!(comp.hit_test(10, 0), None);
     }
 
     #[test]

@@ -2228,23 +2228,24 @@ impl App {
     // ── Mouse event dispatch ─────────────────────────────────────────────
     fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         use crossterm::event::{KeyCode, KeyModifiers, MouseButton};
-        // A focused float (Lua dialog, confirm, picker, etc.) captures
-        // wheel events as list-nav keys — until compositor hit-testing
-        // for floats lands in phase E2, this keeps pickers scrollable
-        // without waiting on the full mouse→float routing rewrite.
-        if self.ui.focused_float().is_some() {
-            let step = match me.kind {
-                MouseEventKind::ScrollUp => -1isize,
-                MouseEventKind::ScrollDown => 1,
-                _ => return EventOutcome::Noop,
-            };
-            let (code, mods) = if step < 0 {
-                (KeyCode::Up, KeyModifiers::NONE)
+        // Wheel events over a float route into that float regardless
+        // of focus — the compositor hit-test finds the topmost layer
+        // under the cursor. Lua dialogs and confirm/picker panels all
+        // respond to Up/Down for list-nav; synthesising keys keeps
+        // the dispatch uniform until widgets grow a real mouse
+        // handler (scrollbar drag comes next).
+        if matches!(
+            me.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && self.ui.float_at(me.row, me.column).is_some()
+        {
+            let code = if matches!(me.kind, MouseEventKind::ScrollUp) {
+                KeyCode::Up
             } else {
-                (KeyCode::Down, KeyModifiers::NONE)
+                KeyCode::Down
             };
             for _ in 0..3 {
-                let _ = self.ui.handle_key(code, mods);
+                let _ = self.ui.handle_key(code, KeyModifiers::NONE);
             }
             self.apply_lua_ops();
             return EventOutcome::Redraw;

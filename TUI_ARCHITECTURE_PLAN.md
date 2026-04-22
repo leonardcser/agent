@@ -1434,6 +1434,14 @@ coherent arc because splitting them left two render engines coexisting.
 
 ## Progress log
 
+- **2026-04-23** — Phase E2a: `Compositor::hit_test(row, col)` +
+  `Ui::float_at(row, col)`. The interim "focused float captures the
+  wheel" hack from the /resume port is gone — wheel events now
+  route to whichever float the cursor actually lands on, regardless
+  of focus, so background floats scroll under the cursor. Scrollbar
+  click-drag and click-to-position are still pending (E2b) — they
+  need widgets to grow a `handle_mouse` path, which is a larger
+  refactor.
 - **2026-04-23** — Phase E1 shipped: `Placement::FitContent { max }`
   with `FitMax::{HalfScreen, FullScreen}`. All Lua dialogs switched
   from the fixed `dock_bottom_full_width(Pct(60))` to
