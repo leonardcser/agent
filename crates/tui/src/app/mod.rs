@@ -1,5 +1,6 @@
 mod agent;
 pub mod commands;
+mod transcript;
 pub(crate) use commands::copy_to_clipboard;
 pub(crate) mod dialogs;
 mod events;
@@ -8,7 +9,7 @@ pub mod ops;
 
 use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, MenuResult};
 use crate::render::{
-    tool_arg_summary, ApprovalScope, Block, ConfirmChoice, ConfirmRequest, ResumeEntry, Screen,
+    tool_arg_summary, ApprovalScope, Block, ConfirmChoice, ConfirmRequest, ResumeEntry,
     ToolOutput, ToolStatus,
 };
 use crate::session::Session;
@@ -81,7 +82,17 @@ pub struct App {
     pub reasoning_cycle: Vec<ReasoningEffort>,
     pub mode: Mode,
     pub mode_cycle: Vec<Mode>,
-    pub screen: Screen,
+    /// Block history, tool states, layout cache — the committed transcript.
+    pub(crate) transcript: crate::render::transcript::Transcript,
+    /// Streaming parser state (active text/thinking/tool/agent/exec blocks).
+    pub(crate) parser: crate::render::stream_parser::StreamParser,
+    /// Buffer-backed projection of the transcript into a ui::Buffer.
+    pub(crate) transcript_projection: crate::render::transcript_buf::TranscriptProjection,
+    /// Plain-text snapshot of each visible row (top to bottom) captured
+    /// during `project_transcript_buffer`. Read by
+    /// `compute_transcript_cursor` to look up the glyph under the soft
+    /// cursor.
+    pub(crate) last_viewport_text: Vec<String>,
     pub history: Vec<Message>,
     pub input_history: History,
     pub input: InputState,
@@ -527,7 +538,6 @@ impl App {
             reasoning_effort
         };
         crate::completer::set_multi_agent(multi_agent);
-        let screen = Screen::new();
 
         let cwd = std::env::current_dir()
             .ok()
@@ -599,7 +609,18 @@ impl App {
             reasoning_cycle,
             mode,
             mode_cycle,
-            screen,
+            transcript: crate::render::transcript::Transcript::new(),
+            parser: crate::render::stream_parser::StreamParser::new(),
+            transcript_projection: crate::render::transcript_buf::TranscriptProjection::new(
+                ui::buffer::Buffer::new(
+                    ui::BufId(0),
+                    ui::buffer::BufCreateOpts {
+                        modifiable: true,
+                        buftype: ui::buffer::BufType::Nofile,
+                    },
+                ),
+            ),
+            last_viewport_text: Vec::new(),
             history: Vec::new(),
             input_history: History::load(),
             input,
@@ -779,7 +800,7 @@ impl App {
             if let Some(ref slug) = self.session.slug {
                 self.set_task_label(slug.clone());
             }
-            self.screen.finish_turn();
+            self.finish_transcript_turn();
             self.transcript_window.scroll_top = u16::MAX;
         }
         if let Some(message) = self.startup_auth_error.take() {
@@ -833,7 +854,7 @@ impl App {
             self.lua.tick_timers();
             self.drive_lua_tasks();
             self.custom_status_items = self.lua.tick_statusline();
-            for _id in self.screen.drain_finished_blocks() {
+            for _id in self.drain_finished_blocks() {
                 self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
             }
             self.apply_lua_ops();
@@ -1020,6 +1041,17 @@ impl App {
             self.render_normal(self.agent.is_some());
             let last_frame = Instant::now();
 
+            // Pre-compute animation signal here so the sleep expression
+            // inside `tokio::select!` below can read it without holding
+            // a borrow on `self` that conflicts with other branches.
+            let has_animation = self.ui.focused_float().is_some()
+                || self.has_active_exec()
+                || self.working.throbber.is_some()
+                || self
+                    .agents
+                    .iter()
+                    .any(|a| a.status == AgentTrackStatus::Working);
+
             // ── Wait for next event ──────────────────────────────────────
             tokio::select! {
                 biased;
@@ -1109,11 +1141,11 @@ impl App {
                 } => {
                     match ev {
                         commands::ExecEvent::Output(line) => {
-                            self.screen.append_exec_output(&line);
+                            self.append_exec_output(&line);
                         }
                         commands::ExecEvent::Done(code) => {
-                            self.screen.finish_exec(code);
-                            self.screen.finalize_exec();
+                            self.finish_exec(code);
+                            self.finalize_exec();
                             self.exec_rx = None;
                             self.exec_kill = None;
                         }
@@ -1129,13 +1161,6 @@ impl App {
                     // subagent turn, open dialog) we tick at the
                     // normal frame interval; otherwise idle at 80ms.
                     let since = last_frame.elapsed();
-                    let has_animation = self.ui.focused_float().is_some()
-                        || self.screen.has_active_exec()
-                        || self.working.throbber.is_some()
-                        || self
-                            .agents
-                            .iter()
-                            .any(|a| a.status == AgentTrackStatus::Working);
                     let want = if let Some(started) = self.drag_autoscroll_since {
                         let held = started.elapsed().as_millis() as u64;
                         // Start at ~33 lines/sec (30 ms), ramp to ~200 lines/sec (5 ms).

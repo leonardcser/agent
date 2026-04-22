@@ -78,7 +78,7 @@ impl App {
                 CommandAction::Continue
             }
             "/rewind" => {
-                let turns = self.screen.user_turns();
+                let turns = self.user_turns();
                 if turns.is_empty() {
                     self.notify_error("nothing to rewind".into());
                 } else {
@@ -179,7 +179,7 @@ impl App {
                 CommandAction::Continue
             }
             "/cost" => {
-                let turns = self.screen.user_turns().len();
+                let turns = self.user_turns().len();
                 let resolved =
                     engine::pricing::resolve(&self.model, &self.provider_type, &self.model_config);
                 let lines = crate::metrics::render_session_cost(
@@ -211,9 +211,7 @@ impl App {
             }
             "/yank-block" => {
                 let abs_row = self.transcript_window.cursor_abs_row();
-                if let Some(text) = self
-                    .screen
-                    .block_text_at_row(abs_row, self.settings.show_thinking)
+                if let Some(text) = self.block_text_at_row(abs_row, self.settings.show_thinking)
                 {
                     let _ = copy_to_clipboard(&text);
                     self.notify("block copied".into());
@@ -325,7 +323,7 @@ impl App {
         if cmd.is_empty() {
             return None;
         }
-        self.screen.start_exec(cmd.to_string());
+        self.start_exec(cmd.to_string());
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let kill = std::sync::Arc::new(tokio::sync::Notify::new());

@@ -26,7 +26,7 @@ impl App {
     pub(super) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
         self.sleep_inhibit.acquire();
         self.input_prediction = None;
-        self.screen.begin_turn();
+        self.begin_turn();
         self.show_user_message(display, content.image_labels());
         let text = content.text_content();
         if self.session.first_user_message.is_none() {
@@ -46,7 +46,7 @@ impl App {
     /// rendered as AgentMessage blocks.
     pub(super) fn begin_agent_message_turn(&mut self) -> TurnState {
         self.input_prediction = None;
-        self.screen.begin_turn();
+        self.begin_turn();
         self.sync_session_snapshot();
         self.dispatch_turn(Content::text(""))
     }
@@ -235,7 +235,7 @@ impl App {
         };
 
         self.sleep_inhibit.acquire();
-        self.screen.begin_turn();
+        self.begin_turn();
         self.show_user_message(&display, vec![]);
         if self.session.first_user_message.is_none() {
             self.session.first_user_message = Some(display.clone());
@@ -312,12 +312,12 @@ impl App {
             });
         self.apply_lua_ops();
         // Flush any in-flight streaming content before committing tools.
-        self.screen.flush_streaming_thinking();
-        self.screen.flush_streaming_text();
+        self.flush_streaming_thinking();
+        self.flush_streaming_text();
         // Commit active tools to block history but don't render yet —
         // the next draw_frame renders blocks + prompt atomically in one
         // synchronized update, avoiding a flash where the prompt disappears.
-        self.screen.finalize_active_tools();
+        self.finalize_active_tools();
         if cancelled {
             {
                 self.working.set_throbber(render::Throbber::Interrupted);
@@ -410,16 +410,16 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::ToolOutput { call_id, chunk } => {
-                self.screen.append_active_output(&call_id, &chunk);
+                self.append_active_output(&call_id, &chunk);
                 SessionControl::Continue
             }
             EngineEvent::Steered { text, count } => {
-                self.screen.flush_streaming_thinking();
-                self.screen.flush_streaming_text();
+                self.flush_streaming_thinking();
+                self.flush_streaming_text();
                 let drain_n = count.min(self.queued_messages.len());
                 self.queued_messages.drain(..drain_n);
                 if drain_n > 0 {
-                    self.screen.push(Block::User {
+                    self.push_block(Block::User {
                         text,
                         image_labels: vec![],
                     });
@@ -427,20 +427,20 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::ThinkingDelta { delta } => {
-                self.screen.append_streaming_thinking(&delta);
+                self.append_streaming_thinking(&delta);
                 SessionControl::Continue
             }
             EngineEvent::Thinking { content } => {
-                self.screen.push(Block::Thinking { content });
+                self.push_block(Block::Thinking { content });
                 SessionControl::Continue
             }
             EngineEvent::TextDelta { delta } => {
-                self.screen.append_streaming_text(&delta);
+                self.append_streaming_text(&delta);
                 SessionControl::Continue
             }
             EngineEvent::Text { content } => {
-                self.screen.flush_streaming_text();
-                self.screen.push(Block::Text { content });
+                self.flush_streaming_text();
+                self.push_block(Block::Text { content });
                 SessionControl::Continue
             }
             EngineEvent::ToolStarted {
@@ -449,10 +449,10 @@ impl App {
                 args,
                 summary,
             } => {
-                self.screen.flush_streaming_thinking();
-                self.screen.flush_streaming_text();
+                self.flush_streaming_thinking();
+                self.flush_streaming_text();
                 if tool_name != "spawn_agent" {
-                    self.screen.start_tool(
+                    self.start_tool(
                         call_id.clone(),
                         tool_name.clone(),
                         summary.clone(),
@@ -496,7 +496,7 @@ impl App {
                             .and_then(|s| s.split_whitespace().next())
                             .unwrap_or("")
                             .to_string();
-                        self.screen.finish_active_agent(&agent_id);
+                        self.finish_active_agent(&agent_id);
                         if let Some(idx) = self
                             .agents
                             .iter()
@@ -547,7 +547,7 @@ impl App {
                             render_cache,
                         }));
                         let elapsed = elapsed_ms.map(Duration::from_millis);
-                        self.screen.finish_tool(&call_id, status, output, elapsed);
+                        self.finish_tool(&call_id, status, output, elapsed);
                     }
                 }
                 if let Some(tool_name) = finished_tool_name {
@@ -675,7 +675,7 @@ impl App {
                     .iter()
                     .any(|a| a.agent_id == from_id && a.blocking);
                 if !is_blocking {
-                    self.screen.push(Block::AgentMessage {
+                    self.push_block(Block::AgentMessage {
                         from_id: from_id.clone(),
                         from_slug: from_slug.clone(),
                         content: message.clone(),
@@ -798,7 +798,7 @@ impl App {
                     .iter()
                     .any(|a| a.agent_id == from_id && a.blocking);
                 if !is_blocking {
-                    self.screen.push(Block::AgentMessage {
+                    self.push_block(Block::AgentMessage {
                         from_id: from_id.clone(),
                         from_slug: from_slug.clone(),
                         content: message.clone(),
@@ -886,7 +886,7 @@ impl App {
     fn handle_agent_exited(&mut self, agent_id: &str, exit_code: Option<i32>) {
         if let Some(c) = exit_code {
             if c != 0 {
-                self.screen.push(Block::Hint {
+                self.push_block(Block::Hint {
                     content: format!("{agent_id} exited with code {c}."),
                 });
             }
@@ -912,7 +912,7 @@ impl App {
                 agent.status = super::AgentTrackStatus::Error;
             }
         }
-        self.screen.cancel_active_agents();
+        self.cancel_active_agents();
     }
 
     pub(super) fn refresh_agent_counts(&mut self) {
@@ -945,10 +945,10 @@ impl App {
 
             if child.blocking {
                 // Blocking agents render as a live overlay (like active tools).
-                self.screen.start_active_agent(child.agent_id.clone());
+                self.start_active_agent(child.agent_id.clone());
             } else {
                 // Non-blocking agents get a one-line static block.
-                self.screen.push(Block::Agent {
+                self.push_block(Block::Agent {
                     agent_id: child.agent_id.clone(),
                     slug: None,
                     blocking: false,
@@ -1055,20 +1055,26 @@ impl App {
         }
 
         // Update active blocking agent overlays on screen.
-        for agent in &self.agents {
-            if agent.blocking {
-                let status = match agent.status {
+        let agent_updates: Vec<_> = self
+            .agents
+            .iter()
+            .filter(|a| a.blocking)
+            .map(|a| {
+                let status = match a.status {
                     super::AgentTrackStatus::Working => render::AgentBlockStatus::Running,
                     super::AgentTrackStatus::Idle => render::AgentBlockStatus::Done,
                     super::AgentTrackStatus::Error => render::AgentBlockStatus::Error,
                 };
-                self.screen.update_active_agent(
-                    &agent.agent_id,
-                    agent.slug.as_deref(),
-                    &agent.tool_calls,
+                (
+                    a.agent_id.clone(),
+                    a.slug.clone(),
+                    a.tool_calls.clone(),
                     status,
-                );
-            }
+                )
+            })
+            .collect();
+        for (agent_id, slug, tool_calls, status) in agent_updates {
+            self.update_active_agent(&agent_id, slug.as_deref(), &tool_calls, status);
         }
 
         self.refresh_agent_counts();
@@ -1097,7 +1103,7 @@ impl App {
             Some(c) => format!("Background process {id} exited with code {c}."),
             None => format!("Background process {id} exited."),
         };
-        self.screen.push(Block::Text { content: msg });
+        self.push_block(Block::Text { content: msg });
     }
 
     pub(super) fn session_permission_entries(&self) -> Vec<render::PermissionEntry> {
@@ -1185,12 +1191,11 @@ impl App {
             ConfirmChoice::No => "denied",
         };
         if let Some(ref msg) = message {
-            self.screen
-                .set_active_user_message(call_id, format!("{label}: {msg}"));
+            self.set_active_user_message(call_id, format!("{label}: {msg}"));
         }
         match choice {
             ConfirmChoice::Yes => {
-                self.screen.set_active_status(call_id, ToolStatus::Pending);
+                self.set_active_status(call_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
                 false
             }
@@ -1207,7 +1212,7 @@ impl App {
                         self.reload_workspace_permissions();
                     }
                 }
-                self.screen.set_active_status(call_id, ToolStatus::Pending);
+                self.set_active_status(call_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
                 false
             }
@@ -1232,7 +1237,7 @@ impl App {
                         self.reload_workspace_permissions();
                     }
                 }
-                self.screen.set_active_status(call_id, ToolStatus::Pending);
+                self.set_active_status(call_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
                 false
             }
@@ -1249,15 +1254,14 @@ impl App {
                         self.reload_workspace_permissions();
                     }
                 }
-                self.screen.set_active_status(call_id, ToolStatus::Pending);
+                self.set_active_status(call_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
                 false
             }
             ConfirmChoice::No => {
                 let has_message = message.is_some();
                 self.send_permission_decision(request_id, false, message);
-                self.screen
-                    .finish_tool(call_id, ToolStatus::Denied, None, None);
+                self.finish_tool(call_id, ToolStatus::Denied, None, None);
                 if has_message {
                     if let Some(ref mut ag) = self.agent {
                         ag.pending.retain(|p| p.call_id != call_id);
@@ -1305,7 +1309,7 @@ impl App {
                     request_id,
                     answer: None,
                 });
-                self.screen.finish_tool("", ToolStatus::Denied, None, None);
+                self.finish_tool("", ToolStatus::Denied, None, None);
                 if let Some(ref mut ag) = self.agent {
                     ag.pending.clear();
                 }
@@ -1374,8 +1378,7 @@ impl App {
 
                 // Auto-approval didn't match — queue if we can't show a dialog now.
                 if should_queue {
-                    self.screen
-                        .set_active_status(&req.call_id, ToolStatus::Confirm);
+                    self.set_active_status(&req.call_id, ToolStatus::Confirm);
                     self.pending_dialog = true;
                     pending_dialogs.push_back(DeferredDialog::Confirm(req));
                     return LoopAction::Continue;
@@ -1410,8 +1413,7 @@ impl App {
 
                 // Close any non-blocking float (e.g. Ps) to make room.
                 self.close_focused_non_blocking_float();
-                self.screen
-                    .set_active_status(&req.call_id, ToolStatus::Confirm);
+                self.set_active_status(&req.call_id, ToolStatus::Confirm);
                 crate::app::dialogs::confirm::open(self, &req);
                 LoopAction::Continue
             }
@@ -1425,7 +1427,7 @@ impl App {
                 self.close_focused_non_blocking_float();
                 // ask_user_question doesn't have a call_id in the permission flow,
                 // use empty string (it targets the last active tool via fallback).
-                self.screen.set_active_status("", ToolStatus::Confirm);
+                self.set_active_status("", ToolStatus::Confirm);
                 let questions = render::parse_questions(&args);
                 crate::app::dialogs::question::open(self, questions, request_id);
                 LoopAction::Continue

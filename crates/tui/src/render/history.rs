@@ -36,7 +36,7 @@ pub struct ActiveTool {
 }
 
 impl ActiveTool {
-    pub(super) fn elapsed(&self) -> Option<Duration> {
+    pub(crate) fn elapsed(&self) -> Option<Duration> {
         if matches!(
             self.name.as_str(),
             "bash" | "web_fetch" | "read_process_output" | "stop_process" | "peek_agent"
@@ -307,7 +307,7 @@ pub struct BlockArtifact {
 }
 
 impl BlockArtifact {
-    pub(super) const MAX_LAYOUTS: usize = 4;
+    pub(crate) const MAX_LAYOUTS: usize = 4;
 
     pub fn get(&self, key: LayoutKey) -> Option<&DisplayBlock> {
         self.layouts.iter().find(|(k, _)| *k == key).map(|(_, b)| b)
@@ -336,42 +336,42 @@ impl BlockArtifact {
     }
 }
 
-pub(super) struct BlockHistory {
+pub(crate) struct BlockHistory {
     /// Append-only sequence of `BlockId`s. Each entry is a unique
     /// monotonic handle; positions are 1:1 with block instances.
-    pub(super) order: Vec<BlockId>,
+    pub(crate) order: Vec<BlockId>,
     /// Per-instance block store.
-    pub(super) blocks: HashMap<BlockId, Block>,
+    pub(crate) blocks: HashMap<BlockId, Block>,
     /// Cached content hash per `BlockId`. Populated on push / mutation
     /// so layout-key construction and persisted-cache re-keying can
     /// skip re-hashing the block bytes.
-    pub(super) content_hashes: HashMap<BlockId, u64>,
+    pub(crate) content_hashes: HashMap<BlockId, u64>,
     /// Per-block layout cache, keyed by the monotonic `BlockId`. Cache
     /// invalidation on content change is handled via
     /// `LayoutKey::content_hash` + the bounded LRU in `BlockArtifact`.
-    pub(super) artifacts: HashMap<BlockId, BlockArtifact>,
+    pub(crate) artifacts: HashMap<BlockId, BlockArtifact>,
     /// Monotonic counter driving fresh `BlockId`s on push.
-    pub(super) next_id: u64,
+    pub(crate) next_id: u64,
     /// Mutable sidecar state for `Block::ToolCall` entries, keyed by `call_id`.
-    pub(super) tool_states: HashMap<String, ToolState>,
+    pub(crate) tool_states: HashMap<String, ToolState>,
     /// Per-block view state (collapsed / trimmed / expanded). Absent
     /// entries default to `ViewState::Expanded`. Mutating this map
     /// invalidates that block's layout cache — `LayoutKey` includes
     /// `view_state`.
-    pub(super) view_states: HashMap<BlockId, ViewState>,
+    pub(crate) view_states: HashMap<BlockId, ViewState>,
     /// Per-block lifecycle state (streaming vs done). Absent entries
     /// default to `Status::Done`. Streaming blocks signal to callers
     /// that layout may change on the next frame.
-    pub(super) statuses: HashMap<BlockId, Status>,
+    pub(crate) statuses: HashMap<BlockId, Status>,
     /// Terminal width when artifacts were last width-pruned.
-    pub(super) cache_width: usize,
+    pub(crate) cache_width: usize,
     /// True iff the layout cache has changed since the last persisted save.
     /// When false, `save_session` skips writing the layout cache file.
-    pub(super) cache_dirty: bool,
+    pub(crate) cache_dirty: bool,
     /// Block ids that transitioned from `Streaming` to `Done` since the
     /// last drain. Drained by the app loop to emit `block_done`
     /// autocmds into the Lua runtime.
-    pub(super) finished_blocks: Vec<BlockId>,
+    pub(crate) finished_blocks: Vec<BlockId>,
     /// Monotonic generation counter — bumped on every content mutation
     /// (push, rewrite, status change, view state change, truncate,
     /// clear). Used by `TranscriptSnapshot` to detect staleness.
@@ -379,7 +379,7 @@ pub(super) struct BlockHistory {
 }
 
 impl BlockHistory {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             order: Vec::new(),
             blocks: HashMap::new(),
@@ -396,7 +396,7 @@ impl BlockHistory {
         }
     }
 
-    pub(super) fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
 
@@ -406,40 +406,40 @@ impl BlockHistory {
 
     /// Drain block ids that transitioned `Streaming` → `Done` since the
     /// last call.
-    pub(super) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
+    pub(crate) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
         std::mem::take(&mut self.finished_blocks)
     }
 
     /// Cached content hash for `id`. Falls back to re-hashing if the
     /// cache entry is missing (shouldn't happen in steady state).
-    pub(super) fn content_hash(&self, id: BlockId) -> u64 {
+    pub(crate) fn content_hash(&self, id: BlockId) -> u64 {
         if let Some(h) = self.content_hashes.get(&id) {
             return *h;
         }
         self.blocks.get(&id).map(|b| b.content_hash()).unwrap_or(0)
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.order.len()
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.order.is_empty()
     }
 
-    pub(super) fn block_at(&self, i: usize) -> &Block {
+    pub(crate) fn block_at(&self, i: usize) -> &Block {
         &self.blocks[&self.order[i]]
     }
 
     /// Current view state for `id`. Defaults to [`ViewState::Expanded`]
     /// when no explicit state has been set.
-    pub(super) fn view_state(&self, id: BlockId) -> ViewState {
+    pub(crate) fn view_state(&self, id: BlockId) -> ViewState {
         self.view_states.get(&id).copied().unwrap_or_default()
     }
 
     /// Set the view state for `id`. Invalidates cached layouts for
     /// that block so the next paint re-lays-out under the new state.
-    pub(super) fn set_view_state(&mut self, id: BlockId, state: ViewState) {
+    pub(crate) fn set_view_state(&mut self, id: BlockId, state: ViewState) {
         let prev = self.view_states.get(&id).copied().unwrap_or_default();
         if prev == state {
             return;
@@ -457,13 +457,13 @@ impl BlockHistory {
     }
 
     /// Current status for `id`. Defaults to [`Status::Done`].
-    pub(super) fn status(&self, id: BlockId) -> Status {
+    pub(crate) fn status(&self, id: BlockId) -> Status {
         self.statuses.get(&id).copied().unwrap_or_default()
     }
 
     /// Set the status for `id`. Does not invalidate the layout cache —
     /// status is a style concern, not a layout one.
-    pub(super) fn set_status(&mut self, id: BlockId, status: Status) {
+    pub(crate) fn set_status(&mut self, id: BlockId, status: Status) {
         let was_streaming = matches!(
             self.statuses.get(&id).copied().unwrap_or_default(),
             Status::Streaming
@@ -484,7 +484,7 @@ impl BlockHistory {
     /// gets distinct ids and distinct cache slots. Cross-session cache
     /// sharing of identical blocks is preserved at the persistence
     /// boundary (see [`Self::export_layouts_by_hash`]).
-    pub(super) fn push(&mut self, block: Block) -> BlockId {
+    pub(crate) fn push(&mut self, block: Block) -> BlockId {
         let hash = block.content_hash();
         let id = BlockId(self.next_id);
         self.next_id += 1;
@@ -498,7 +498,7 @@ impl BlockHistory {
     }
 
     /// Push a `Block::ToolCall` alongside its initial `ToolState`.
-    pub(super) fn push_with_state(
+    pub(crate) fn push_with_state(
         &mut self,
         block: Block,
         call_id: String,
@@ -517,7 +517,7 @@ impl BlockHistory {
     /// holds a `BlockId` from `push`, then calls `rewrite` as each
     /// chunk arrives. No-ops when the block doesn't exist (e.g. it
     /// was truncated by a rewind while a stream was in flight).
-    pub(super) fn rewrite(&mut self, id: BlockId, block: Block) {
+    pub(crate) fn rewrite(&mut self, id: BlockId, block: Block) {
         if !self.blocks.contains_key(&id) {
             return;
         }
@@ -536,7 +536,7 @@ impl BlockHistory {
     /// Iterator over `BlockId`s currently in the `Streaming` state, in
     /// insertion order. Callers use this to find "the live block" for
     /// an in-flight stream without tracking separate handles.
-    pub(super) fn streaming_block_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
+    pub(crate) fn streaming_block_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
         self.order
             .iter()
             .copied()
@@ -544,7 +544,7 @@ impl BlockHistory {
     }
 
     /// `BlockId` of the most recent `Block::ToolCall` whose `call_id` matches.
-    pub(super) fn tool_block_id(&self, call_id: &str) -> Option<BlockId> {
+    pub(crate) fn tool_block_id(&self, call_id: &str) -> Option<BlockId> {
         self.order.iter().rev().copied().find(|id| {
             matches!(
                 self.blocks.get(id),
@@ -554,7 +554,7 @@ impl BlockHistory {
     }
 
     /// Drop every cached layout for a single block id.
-    pub(super) fn invalidate_block_layout(&mut self, id: BlockId) {
+    pub(crate) fn invalidate_block_layout(&mut self, id: BlockId) {
         if let Some(artifact) = self.artifacts.get_mut(&id) {
             if !artifact.is_empty() {
                 artifact.clear();
@@ -564,7 +564,7 @@ impl BlockHistory {
         }
     }
 
-    pub(super) fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.order.clear();
         self.blocks.clear();
         self.content_hashes.clear();
@@ -581,7 +581,7 @@ impl BlockHistory {
     /// replayable at `new_width`. The bounded LRU in each artifact means
     /// layouts from previous widths survive and can be reused after a
     /// resize cycle.
-    pub(super) fn invalidate_for_width(&mut self, new_width: usize) {
+    pub(crate) fn invalidate_for_width(&mut self, new_width: usize) {
         let _perf = crate::perf::begin("history:invalidate_for_width");
         let nw = new_width as u16;
         let mut dirty = false;
@@ -602,7 +602,7 @@ impl BlockHistory {
     /// Streaming blocks participate in the main paint path like any other
     /// block — alt-buffer repaints every frame, so "live" vs "committed"
     /// is a style distinction, not a layout one.
-    pub(super) fn block_gap(&self, i: usize) -> u16 {
+    pub(crate) fn block_gap(&self, i: usize) -> u16 {
         if i > 0 {
             gap_between(
                 &Element::Block(self.block_at(i - 1)),
@@ -620,7 +620,7 @@ impl BlockHistory {
     /// `(width, show_thinking, view_state=Expanded)` without needing to
     /// know each block's individual view state; this substitutes the
     /// actual per-block value so the cache lookup + layout pass agree.
-    pub(super) fn resolve_key(&self, id: BlockId, base: LayoutKey) -> LayoutKey {
+    pub(crate) fn resolve_key(&self, id: BlockId, base: LayoutKey) -> LayoutKey {
         LayoutKey {
             view_state: self.view_state(id),
             content_hash: self.content_hash(id),
@@ -628,7 +628,7 @@ impl BlockHistory {
         }
     }
 
-    pub(super) fn ensure_rows(&mut self, i: usize, base: LayoutKey) -> u16 {
+    pub(crate) fn ensure_rows(&mut self, i: usize, base: LayoutKey) -> u16 {
         let id = self.order[i];
         // While streaming with thinking hidden, the ephemeral overlay
         // renders the combined animated summary. Suppress the committed
@@ -667,7 +667,7 @@ impl BlockHistory {
         rows
     }
 
-    pub(super) fn truncate(&mut self, idx: usize) {
+    pub(crate) fn truncate(&mut self, idx: usize) {
         if idx >= self.order.len() {
             return;
         }
@@ -686,7 +686,7 @@ impl BlockHistory {
 
     /// Drop tool states whose owning `Block::ToolCall` no longer appears in
     /// `order`.
-    pub(super) fn gc_tool_states(&mut self) {
+    pub(crate) fn gc_tool_states(&mut self) {
         let live: HashSet<String> = self
             .order
             .iter()
@@ -713,7 +713,7 @@ impl BlockHistory {
     /// Returns the clamped scroll offset (for the caller to sync state).
     /// Plain-text rendering of the full transcript at the given width.
     #[cfg(test)]
-    pub(super) fn total_rows(&mut self, width: usize, show_thinking: bool) -> u16 {
+    pub(crate) fn total_rows(&mut self, width: usize, show_thinking: bool) -> u16 {
         let key = LayoutKey {
             view_state: super::history::ViewState::Expanded,
             width: width as u16,
@@ -732,31 +732,31 @@ impl BlockHistory {
 /// Streaming state for incremental thinking output.
 /// Completed lines are committed to block history immediately.
 /// Only the current incomplete line lives in the overlay.
-pub(super) struct ActiveThinking {
-    pub(super) current_line: String,
-    pub(super) paragraph: String,
-    pub(super) streaming_id: Option<BlockId>,
+pub(crate) struct ActiveThinking {
+    pub(crate) current_line: String,
+    pub(crate) paragraph: String,
+    pub(crate) streaming_id: Option<BlockId>,
 }
 
 /// Streaming state for incremental LLM text output.
 /// Completed lines are committed to block history immediately.
 /// Only the current incomplete line lives in the overlay.
-pub(super) struct ActiveText {
-    pub(super) current_line: String,
-    pub(super) paragraph: String,
-    pub(super) in_code_block: Option<String>,
+pub(crate) struct ActiveText {
+    pub(crate) current_line: String,
+    pub(crate) paragraph: String,
+    pub(crate) in_code_block: Option<String>,
     /// Table rows accumulated silently during streaming.
-    pub(super) table_rows: Vec<String>,
+    pub(crate) table_rows: Vec<String>,
     /// Cached count of non-separator data rows (avoids recomputing per frame).
-    pub(super) table_data_rows: usize,
+    pub(crate) table_data_rows: usize,
     /// Streaming block id for the in-flight paragraph (if any).
-    pub(super) streaming_id: Option<BlockId>,
+    pub(crate) streaming_id: Option<BlockId>,
     /// Streaming block id for the in-flight table (if any). Rewritten
     /// with the accumulated table text on each new row.
-    pub(super) table_streaming_id: Option<BlockId>,
+    pub(crate) table_streaming_id: Option<BlockId>,
     /// Streaming block id for the in-flight code line (if any).
     /// Rewritten as characters flow; set to `Done` on newline.
-    pub(super) code_line_streaming_id: Option<BlockId>,
+    pub(crate) code_line_streaming_id: Option<BlockId>,
 }
 
 #[cfg(test)]

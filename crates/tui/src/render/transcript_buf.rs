@@ -29,7 +29,7 @@ impl TranscriptProjection {
         self.buf.line_count()
     }
 
-    pub(super) fn project(
+    pub(crate) fn project(
         &mut self,
         history: &mut BlockHistory,
         width: u16,

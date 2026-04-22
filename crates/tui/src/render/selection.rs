@@ -30,7 +30,7 @@ pub(crate) fn truncate_str(s: &str, max: usize) -> String {
 
 pub(crate) use ui::text::wrap_line;
 
-pub(super) fn wrap_and_locate_cursor(
+pub(crate) fn wrap_and_locate_cursor(
     buf: &str,
     char_kinds: &[SpanKind],
     cursor_char: usize,
@@ -253,7 +253,7 @@ pub(super) enum Span {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub(super) enum SpanKind {
+pub(crate) enum SpanKind {
     Plain,
     Attachment,
     AtRef,

@@ -92,7 +92,7 @@ impl App {
         self.prompt_input_scroll = 0;
         self.prompt_viewport = None;
         self.transcript_viewport = None;
-        self.screen.clear();
+        self.clear_transcript();
         self.app_focus = crate::app::AppFocus::Prompt;
         self.input.clear();
         self.input.store.clear();
@@ -187,7 +187,7 @@ impl App {
     }
 
     fn rebuild_screen_from_history(&mut self) {
-        self.screen.clear();
+        self.clear_transcript();
         if let Some(ref slug) = self.session.slug {
             self.set_task_label(slug.clone());
         }
@@ -237,7 +237,8 @@ impl App {
         let mut blocking_agent_ids: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
-        for msg in &self.history {
+        let messages = self.history.clone();
+        for msg in &messages {
             match msg.role {
                 Role::User => {
                     if let Some(ref content) = msg.content {
@@ -245,7 +246,7 @@ impl App {
                         let prefix_marker = engine::compact::SUMMARY_PREFIX.trim_end();
                         if let Some(rest) = text.strip_prefix(prefix_marker) {
                             let summary = rest.trim_start_matches('\n');
-                            self.screen.push(Block::Compacted {
+                            self.push_block(Block::Compacted {
                                 summary: summary.to_string(),
                             });
                         } else {
@@ -260,7 +261,7 @@ impl App {
                                     format!("{text} {suffix}")
                                 }
                             };
-                            self.screen.push(Block::User {
+                            self.push_block(Block::User {
                                 text: display_text,
                                 image_labels,
                             });
@@ -270,13 +271,13 @@ impl App {
                 Role::Assistant => {
                     if let Some(ref reasoning) = msg.reasoning_content {
                         if !reasoning.is_empty() {
-                            self.screen.push(Block::Thinking {
+                            self.push_block(Block::Thinking {
                                 content: reasoning.clone(),
                             });
                         }
                     }
                     if let Some(ref content) = msg.content {
-                        self.screen.push(Block::Text {
+                        self.push_block(Block::Text {
                             content: content.text_content(),
                         });
                     }
@@ -340,7 +341,7 @@ impl App {
                                 if is_blocking {
                                     blocking_agent_ids.insert(agent_id.clone());
                                 }
-                                self.screen.push(Block::Agent {
+                                self.push_block(Block::Agent {
                                     agent_id,
                                     slug,
                                     blocking: is_blocking,
@@ -368,7 +369,7 @@ impl App {
                             let elapsed = tool_elapsed
                                 .get(&tc.id)
                                 .map(|ms| Duration::from_millis(*ms));
-                            self.screen.push_tool_call(
+                            self.push_tool_call(
                                 Block::ToolCall {
                                     call_id: tc.id.clone(),
                                     name: tc.function.name.clone(),
@@ -393,7 +394,7 @@ impl App {
                     // is already shown in the spawn_agent block.
                     if !blocking_agent_ids.contains(&from_id) {
                         if let Some(ref content) = msg.content {
-                            self.screen.push(Block::AgentMessage {
+                            self.push_block(Block::AgentMessage {
                                 from_id,
                                 from_slug: msg.agent_from_slug.clone().unwrap_or_default(),
                                 content: content.text_content(),
@@ -412,7 +413,7 @@ impl App {
         // every block has been pushed so the cache vector lengths match.
         // Per-block width validity is enforced inside `import_layout_cache`.
         if let Some(layout_cache) = session::load_layout_cache(&self.session) {
-            self.screen.import_layout_cache(layout_cache);
+            self.import_layout_cache(layout_cache);
         }
     }
 
@@ -429,10 +430,9 @@ impl App {
             (None, None)
         } else {
             (
-                self.screen.export_render_cache(),
-                self.screen
-                    .layout_cache_dirty()
-                    .then(|| self.screen.export_layout_cache())
+                self.export_render_cache(),
+                self.layout_cache_dirty()
+                    .then(|| self.export_layout_cache())
                     .flatten(),
             )
         };
@@ -574,7 +574,7 @@ impl App {
     }
 
     pub fn rewind_to(&mut self, block_idx: usize) -> Option<(String, Vec<(String, String)>)> {
-        let turns = self.screen.user_turns();
+        let turns = self.user_turns();
         let turn_text = turns
             .iter()
             .find(|(i, _)| *i == block_idx)
@@ -616,7 +616,7 @@ impl App {
         self.history.truncate(hist_idx);
         self.truncate_snapshots_to(hist_idx);
         self.context_tokens = self.token_snapshots.last().map(|&(_, t)| t);
-        self.screen.truncate_to(block_idx);
+        self.truncate_to(block_idx);
         self.reset_session_permissions();
         self.compact_epoch += 1;
 
@@ -626,7 +626,7 @@ impl App {
     // ── Agent internals ──────────────────────────────────────────────────
 
     pub fn show_user_message(&mut self, input: &str, image_labels: Vec<String>) {
-        self.screen.push(Block::User {
+        self.push_block(Block::User {
             text: input.to_string(),
             image_labels,
         });

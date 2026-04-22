@@ -51,48 +51,49 @@ pub mod buf {
 /// `rewrite`, `invoke`, and per-block keymaps arrive in Stage 3.5's
 /// subsequent slices as the `active_*` → live-block collapse progresses.
 pub mod block {
-    use crate::render::{Block, BlockId, Screen, Status, ViewState};
+    use crate::app::App;
+    use crate::render::{Block, BlockId, Status, ViewState};
 
     /// Current view state of a block.
-    pub fn view_state(screen: &Screen, id: BlockId) -> ViewState {
-        screen.block_view_state(id)
+    pub fn view_state(app: &App, id: BlockId) -> ViewState {
+        app.block_view_state(id)
     }
 
     /// Set a block's view state. Invalidates that block's layout cache
     /// so the next frame re-lays-out against the new state.
-    pub fn set_view_state(screen: &mut Screen, id: BlockId, state: ViewState) {
-        screen.set_block_view_state(id, state);
+    pub fn set_view_state(app: &mut App, id: BlockId, state: ViewState) {
+        app.set_block_view_state(id, state);
     }
 
     /// Current lifecycle status of a block.
-    pub fn status(screen: &Screen, id: BlockId) -> Status {
-        screen.block_status(id)
+    pub fn status(app: &App, id: BlockId) -> Status {
+        app.block_status(id)
     }
 
     /// Set a block's lifecycle status.
-    pub fn set_status(screen: &mut Screen, id: BlockId, status: Status) {
-        screen.set_block_status(id, status);
+    pub fn set_status(app: &mut App, id: BlockId, status: Status) {
+        app.set_block_status(id, status);
     }
 
     /// Push a new `Streaming` block onto the transcript and return its
     /// `BlockId`. The id is stable across subsequent `rewrite` calls —
     /// the canonical handle for live-updating a block as a stream
     /// arrives.
-    pub fn push_streaming(screen: &mut Screen, block: Block) -> BlockId {
-        screen.push_streaming(block)
+    pub fn push_streaming(app: &mut App, block: Block) -> BlockId {
+        app.push_streaming(block)
     }
 
     /// Replace the content of an existing block in place. Preserves
     /// `BlockId`, `Status`, and `ViewState`; the layout cache
     /// auto-invalidates via the content-hash component of `LayoutKey`.
-    pub fn rewrite(screen: &mut Screen, id: BlockId, block: Block) {
-        screen.rewrite_block(id, block);
+    pub fn rewrite(app: &mut App, id: BlockId, block: Block) {
+        app.rewrite_block(id, block);
     }
 
     /// `BlockId`s of blocks currently in `Status::Streaming`, in
     /// transcript order.
-    pub fn streaming_ids(screen: &Screen) -> Vec<BlockId> {
-        screen.streaming_block_ids()
+    pub fn streaming_ids(app: &App) -> Vec<BlockId> {
+        app.streaming_block_ids()
     }
 }
 

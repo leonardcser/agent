@@ -18,7 +18,7 @@ use super::{
 
 /// Preprocessed user message layout: tab-expanded, blank-trimmed lines
 /// with a computed `block_w` for multiline bubble rendering.
-pub(super) struct UserBlockGeometry {
+pub(crate) struct UserBlockGeometry {
     pub lines: Vec<String>,
     pub block_w: usize,
 }
@@ -160,7 +160,7 @@ pub(super) fn animated_dots() -> &'static str {
 
 /// Extract a title and non-empty line count from thinking content.
 /// If the first non-empty line is a markdown bold title (`**...**`), use it as the label.
-pub(super) fn thinking_summary(content: &str) -> (String, usize) {
+pub(crate) fn thinking_summary(content: &str) -> (String, usize) {
     let mut label = None;
     let mut lines = 0usize;
     for line in content.lines() {
@@ -181,7 +181,7 @@ pub(super) fn thinking_summary(content: &str) -> (String, usize) {
 }
 
 /// Render a single hidden-thinking summary row with optional animated dots.
-pub(super) fn render_thinking_summary<S: LayoutSink>(
+pub(crate) fn render_thinking_summary<S: LayoutSink>(
     out: &mut S,
     width: usize,
     label: &str,
@@ -208,12 +208,12 @@ pub(super) fn render_thinking_summary<S: LayoutSink>(
 }
 
 /// Element types for spacing calculation.
-pub(super) enum Element<'a> {
+pub(crate) enum Element<'a> {
     Block(&'a Block),
 }
 
 /// Number of blank lines to insert between two adjacent elements.
-pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
+pub(crate) fn gap_between(above: &Element, below: &Element) -> u16 {
     match (above, below) {
         // CodeLine→CodeLine: no gap (consecutive lines in same block).
         (Element::Block(Block::CodeLine { .. }), Element::Block(Block::CodeLine { .. })) => {

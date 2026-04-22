@@ -433,7 +433,7 @@ impl TranscriptSnapshot {
 }
 
 pub struct Transcript {
-    pub(super) history: BlockHistory,
+    pub(crate) history: BlockHistory,
     cached_snapshot: Option<TranscriptSnapshot>,
 }
 
