@@ -11,6 +11,7 @@ impl Completer {
             .iter()
             .any(|(label, _)| *label == slash_name)
             || crate::custom_commands::is_custom_command(s)
+            || crate::lua::is_lua_command(s)
     }
 
     /// Returns the argument hint for a command that accepts arguments.
@@ -97,6 +98,17 @@ impl Completer {
             all_items.push(CompletionItem {
                 label: name,
                 description: if desc.is_empty() { None } else { Some(desc) },
+                ..Default::default()
+            });
+        }
+        let mut seen: HashSet<String> = all_items.iter().map(|i| i.label.clone()).collect();
+        for (name, desc) in crate::lua::list_commands() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            all_items.push(CompletionItem {
+                label: name,
+                description: desc,
                 ..Default::default()
             });
         }

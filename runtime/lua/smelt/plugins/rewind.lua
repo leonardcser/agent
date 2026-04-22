@@ -54,4 +54,4 @@ smelt.api.cmd.register("rewind", function(args)
       restore_vim_insert = restore_vim_insert,
     })
   end)
-end)
+end, { desc = "rewind to a previous turn" })

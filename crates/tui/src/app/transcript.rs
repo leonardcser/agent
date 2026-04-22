@@ -190,9 +190,9 @@ impl App {
         width: usize,
         queued: &[String],
         prediction: Option<&str>,
-        has_notification: bool,
+        _has_notification: bool,
     ) -> u16 {
-        self.measure_prompt_height(state, width, queued, prediction, has_notification)
+        self.measure_prompt_height(state, width, queued, prediction)
     }
 
     pub fn has_transcript_content(&mut self, show_thinking: bool) -> bool {
@@ -708,12 +708,10 @@ impl App {
         width: usize,
         queued: &[String],
         prediction: Option<&str>,
-        has_notification: bool,
     ) -> u16 {
         let usable = width.saturating_sub(2);
         let text_w = usable.saturating_sub(2).max(1);
 
-        let notification: u16 = if has_notification { 1 } else { 0 };
         let stash: u16 = if state.stash.is_some() { 1 } else { 0 };
 
         let mut queued_rows = 0u16;
@@ -733,6 +731,6 @@ impl App {
             visual_lines.len() as u16
         };
 
-        notification + queued_rows + stash + 1 + input_rows + 1 + 1
+        queued_rows + stash + 1 + input_rows + 1 + 1
     }
 }

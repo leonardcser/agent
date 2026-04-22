@@ -68,4 +68,4 @@ smelt.api.cmd.register("ps", function()
       end
     end
   end)
-end)
+end, { desc = "manage background processes" })

@@ -212,12 +212,35 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
     use crossterm::style::{
         Attribute, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     };
+    use unicode_width::UnicodeWidthChar;
 
     let mut current_style = Style::default();
     for y in 0..grid.height() {
         w.queue(MoveTo(0, y))?;
-        for x in 0..grid.width() {
+        let mut terminal_col: u16 = 0;
+        let mut x = 0u16;
+        while x < grid.width() {
             let cell = grid.cell(x, y);
+            // `\0` marks the continuation half of a preceding wide
+            // char. If the path through the row is aligned it should
+            // have been skipped; if we somehow land on one, paint a
+            // space so the cursor stays in sync instead of emitting a
+            // literal NUL.
+            let symbol = if cell.symbol == '\0' {
+                ' '
+            } else {
+                cell.symbol
+            };
+            let cw = UnicodeWidthChar::width(symbol).unwrap_or(1).max(1) as u16;
+
+            // Wide char whose second cell would fall past the terminal edge:
+            // emit a space instead so the terminal doesn't wrap.
+            let (sym, emit_w) = if terminal_col + cw > grid.width() {
+                (' ', 1u16)
+            } else {
+                (symbol, cw)
+            };
+
             if cell.style != current_style {
                 w.queue(SetAttribute(Attribute::Reset))?;
                 w.queue(ResetColor)?;
@@ -245,8 +268,15 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
                 current_style = cell.style;
             }
             let mut buf = [0u8; 4];
-            let s = cell.symbol.encode_utf8(&mut buf);
+            let s = sym.encode_utf8(&mut buf);
             w.queue(Print(s.to_string()))?;
+
+            terminal_col += emit_w;
+            // Advance grid by emit_w so wide chars consume their
+            // continuation cell — the grid allocates 1 slot per char,
+            // so the compositor must skip the next column to stay in
+            // sync with the terminal's visual width.
+            x += emit_w;
         }
     }
     w.queue(SetAttribute(Attribute::Reset))?;

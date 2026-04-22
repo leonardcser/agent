@@ -6,4 +6,4 @@
 
 smelt.api.cmd.register("yank-block", function()
   smelt.api.transcript.yank_block()
-end)
+end, { desc = "copy transcript block under cursor" })

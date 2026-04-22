@@ -41,6 +41,8 @@ enum TaskWait {
     Sleep(Instant),
     /// Waiting for `resolve_dialog(dialog_id, …)` to be called.
     Dialog(u64),
+    /// Waiting for `resolve_picker(picker_id, …)` to be called.
+    Picker(u64),
 }
 
 /// What to do when a task's top-level function returns.
@@ -72,6 +74,15 @@ pub enum TaskDriveOutput {
         dialog_id: u64,
         opts: mlua::RegistryKey,
     },
+    /// Task yielded `{ __yield = "picker", opts = {...} }`. The app
+    /// opens a focusable picker float, registers Up/Down/Enter/Escape
+    /// keymaps, and on resolution calls
+    /// `LuaTaskRuntime::resolve_picker(picker_id, result)`.
+    OpenPicker {
+        task_id: u64,
+        picker_id: u64,
+        opts: mlua::RegistryKey,
+    },
     /// Tool-execute task returned.
     ToolComplete {
         request_id: u64,
@@ -90,6 +101,7 @@ pub struct LuaTaskRuntime {
     tasks: Vec<LuaTask>,
     next_task_id: AtomicU64,
     next_dialog_id: AtomicU64,
+    next_picker_id: AtomicU64,
     /// Outputs that an in-line `drive` produced but whose caller
     /// doesn't route them itself — e.g. `execute_plugin_tool` runs
     /// one drive inline and consumes only its own `ToolComplete`;
@@ -104,6 +116,7 @@ impl LuaTaskRuntime {
             tasks: Vec::new(),
             next_task_id: AtomicU64::new(1),
             next_dialog_id: AtomicU64::new(1),
+            next_picker_id: AtomicU64::new(1),
             deferred: Vec::new(),
         }
     }
@@ -149,6 +162,18 @@ impl LuaTaskRuntime {
         false
     }
 
+    /// Satisfy a `TaskWait::Picker(id)` wait with the given result
+    /// value. Returns `true` if a matching task was found.
+    pub fn resolve_picker(&mut self, picker_id: u64, value: LuaValue) -> bool {
+        for task in &mut self.tasks {
+            if matches!(&task.wait, TaskWait::Picker(id) if *id == picker_id) {
+                task.wait = TaskWait::Ready(value);
+                return true;
+            }
+        }
+        false
+    }
+
     /// Drive all ready tasks once. Each ready task is resumed; if it
     /// yields, it's parked on a new wait; if it returns, its
     /// completion is reported. Any outputs deferred from a previous
@@ -160,7 +185,7 @@ impl LuaTaskRuntime {
             let ready = match &self.tasks[i].wait {
                 TaskWait::Ready(_) => true,
                 TaskWait::Sleep(deadline) => *deadline <= now,
-                TaskWait::Dialog(_) => false,
+                TaskWait::Dialog(_) | TaskWait::Picker(_) => false,
             };
             if !ready {
                 i += 1;
@@ -183,7 +208,7 @@ impl LuaTaskRuntime {
         let resume_arg = match std::mem::replace(&mut task.wait, TaskWait::Ready(LuaValue::Nil)) {
             TaskWait::Ready(v) => v,
             TaskWait::Sleep(_) => LuaValue::Nil,
-            TaskWait::Dialog(_) => LuaValue::Nil, // unreachable per ready check
+            TaskWait::Dialog(_) | TaskWait::Picker(_) => LuaValue::Nil, // unreachable per ready check
         };
         let result: LuaResult<LuaValue> = task.thread.resume(resume_arg);
 
@@ -220,6 +245,17 @@ impl LuaTaskRuntime {
                         outputs.push(TaskDriveOutput::OpenDialog {
                             task_id,
                             dialog_id: did,
+                            opts: opts_key,
+                        });
+                        false
+                    }
+                    Ok(Yield::OpenPicker(opts_key)) => {
+                        let pid = self.next_picker_id.fetch_add(1, Ordering::Relaxed);
+                        let task_id = task.id;
+                        task.wait = TaskWait::Picker(pid);
+                        outputs.push(TaskDriveOutput::OpenPicker {
+                            task_id,
+                            picker_id: pid,
                             opts: opts_key,
                         });
                         false
@@ -267,6 +303,7 @@ enum Yield {
     Sleep(Duration),
     #[allow(dead_code)] // step (iv) populates this via smelt.api.dialog.open
     OpenDialog(mlua::RegistryKey),
+    OpenPicker(mlua::RegistryKey),
 }
 
 fn decode_yield(lua: &Lua, v: LuaValue) -> Result<Yield, String> {
@@ -290,6 +327,13 @@ fn decode_yield(lua: &Lua, v: LuaValue) -> Result<Yield, String> {
                 .create_registry_value(opts)
                 .map_err(|e| format!("dialog opts registry: {e}"))?;
             Ok(Yield::OpenDialog(key))
+        }
+        "picker" => {
+            let opts: mlua::Table = table.get("opts").map_err(|e| format!("picker: {e}"))?;
+            let key = lua
+                .create_registry_value(opts)
+                .map_err(|e| format!("picker opts registry: {e}"))?;
+            Ok(Yield::OpenPicker(key))
         }
         other => Err(format!("unknown yield kind: {other}")),
     }

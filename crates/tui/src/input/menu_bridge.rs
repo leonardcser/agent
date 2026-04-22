@@ -54,11 +54,11 @@ impl InputState {
         }
         let mut comp = Completer::settings(state);
         comp.update_query(self.win.edit_buf.buf.clone());
-        self.completer = Some(comp);
+        self.completer = Some(crate::completer::CompleterSession::new(comp));
     }
 
     pub fn open_stats(&mut self, stats: crate::metrics::StatsOutput) {
-        self.completer = None;
+        self.close_completer();
         self.menu = Some(MenuState {
             nav: Menu {
                 selected: 0,
@@ -73,7 +73,7 @@ impl InputState {
     }
 
     pub fn open_cost(&mut self, lines: Vec<crate::metrics::StatsLine>) {
-        self.completer = None;
+        self.close_completer();
         self.menu = Some(MenuState {
             nav: Menu {
                 selected: 0,
@@ -89,7 +89,7 @@ impl InputState {
         self.history_saved_buf = Some((self.win.edit_buf.buf.clone(), self.win.cpos));
         let mut comp = Completer::models(models);
         comp.update_query(self.win.edit_buf.buf.clone());
-        self.completer = Some(comp);
+        self.completer = Some(crate::completer::CompleterSession::new(comp));
     }
 
     pub fn open_theme_completer(&mut self) {
@@ -97,7 +97,7 @@ impl InputState {
         self.history_saved_buf = Some((self.win.edit_buf.buf.clone(), self.win.cpos));
         let mut comp = Completer::themes(crate::theme::accent_value());
         comp.update_query(self.win.edit_buf.buf.clone());
-        self.completer = Some(comp);
+        self.completer = Some(crate::completer::CompleterSession::new(comp));
     }
 
     pub fn open_color_completer(&mut self) {
@@ -105,7 +105,7 @@ impl InputState {
         self.history_saved_buf = Some((self.win.edit_buf.buf.clone(), self.win.cpos));
         let mut comp = Completer::colors(crate::theme::slug_color_value());
         comp.update_query(self.win.edit_buf.buf.clone());
-        self.completer = Some(comp);
+        self.completer = Some(crate::completer::CompleterSession::new(comp));
     }
 
     /// Open history fuzzy search using the completer component.
@@ -114,6 +114,6 @@ impl InputState {
         // Keep buf as-is so the current content becomes the initial search query.
         let mut comp = Completer::history(history.entries());
         comp.update_query(self.win.edit_buf.buf.clone());
-        self.completer = Some(comp);
+        self.completer = Some(crate::completer::CompleterSession::new(comp));
     }
 }

@@ -11,7 +11,7 @@ pub use kill_ring::KillRing;
 pub use settings::{Menu, MenuAction, MenuKind, MenuResult, MenuState, SettingsState};
 
 use crate::attachment::{Attachment, AttachmentId, AttachmentStore};
-use crate::completer::{Completer, CompleterKind};
+use crate::completer::{CompleterKind, CompleterSession};
 use crate::keymap::{self, KeyAction, KeyContext};
 use crate::render;
 use crate::vim::{ViMode, Vim};
@@ -46,7 +46,11 @@ pub struct InputSnapshot {
 pub struct InputState {
     pub win: ui::Window,
     pub store: AttachmentStore,
-    pub completer: Option<Completer>,
+    pub completer: Option<CompleterSession>,
+    /// Picker float IDs from closed completer sessions, waiting for the
+    /// next frame to drain and `win_close`. `InputState` doesn't hold a
+    /// `&mut ui::Ui`, so closing has to happen out-of-band.
+    pub pending_picker_close: Vec<ui::WinId>,
     pub menu: Option<MenuState>,
     /// Saved buffer before history search, restored on cancel.
     pub(super) history_saved_buf: Option<(String, usize)>,
@@ -104,6 +108,7 @@ impl InputState {
             win,
             store: AttachmentStore::new(),
             completer: None,
+            pending_picker_close: Vec::new(),
             menu: None,
             history_saved_buf: None,
             stash: None,
@@ -132,6 +137,17 @@ impl InputState {
     /// Clear any active selection (non-vim). Called on non-shift movement or editing.
     pub fn clear_selection(&mut self) {
         self.win.win_cursor.clear_anchor();
+    }
+
+    /// End the active completer session, queueing its Picker float for
+    /// close on the next frame. Replaces bare `self.completer = None`
+    /// so the associated `ui::WinId` doesn't leak.
+    pub fn close_completer(&mut self) {
+        if let Some(session) = self.completer.take() {
+            if let Some(win) = session.picker_win {
+                self.pending_picker_close.push(win);
+            }
+        }
     }
 
     /// Select the word at `cpos`. Used by mouse double-click.
@@ -226,7 +242,7 @@ impl InputState {
         self.win.edit_buf.buf.clear();
         self.win.cpos = 0;
         self.win.edit_buf.attachment_ids.clear();
-        self.completer = None;
+        self.close_completer();
         self.menu = None;
         self.history_saved_buf = None;
         self.from_paste = false;
@@ -247,7 +263,7 @@ impl InputState {
         self.win.edit_buf.attachment_ids.clear();
         self.win.win_cursor.clear_anchor();
         self.from_paste = false;
-        self.completer = None;
+        self.close_completer();
         self.recompute_completer();
     }
 
@@ -263,7 +279,7 @@ impl InputState {
                 .map(|a| self.store.insert(a))
                 .collect();
             self.from_paste = snap.from_paste;
-            self.completer = None;
+            self.close_completer();
         } else if !self.win.edit_buf.buf.is_empty() || !self.win.edit_buf.attachment_ids.is_empty()
         {
             let attachments = std::mem::take(&mut self.win.edit_buf.attachment_ids)
@@ -276,7 +292,7 @@ impl InputState {
                 attachments,
                 from_paste: self.from_paste,
             });
-            self.completer = None;
+            self.close_completer();
             self.history_saved_buf = None;
         }
     }
@@ -537,7 +553,7 @@ impl InputState {
                 }
                 self.win.edit_buf.buf.insert(self.win.cpos, '\n');
                 self.win.cpos += 1;
-                self.completer = None;
+                self.close_completer();
                 Action::Redraw
             }
 

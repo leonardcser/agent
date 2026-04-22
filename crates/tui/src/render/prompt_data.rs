@@ -12,7 +12,6 @@ use ui::grid::Style;
 use crossterm::style::Color;
 
 pub(crate) struct PromptInput<'a> {
-    pub notification: Option<&'a super::screen::Notification>,
     pub queued: &'a [String],
     pub stash: &'a Option<crate::input::InputSnapshot>,
     pub input: &'a InputState,
@@ -63,12 +62,6 @@ pub(crate) fn compute_prompt(input: &mut PromptInput<'_>, input_buf: &mut Buffer
     let usable = width.saturating_sub(2);
     let mut chrome_rows: Vec<WindowRow> = Vec::new();
     let mut row_offset: u16 = 0;
-
-    // ── Notification ──
-    if let Some(notif) = input.notification {
-        chrome_rows.push(notification_row(notif, usable));
-        row_offset += 1;
-    }
 
     // ── Queued messages ──
     let queued_rows = queued_message_rows(input.queued, usable);
@@ -129,46 +122,6 @@ pub(crate) fn compute_prompt(input: &mut PromptInput<'_>, input_buf: &mut Buffer
             None
         },
     }
-}
-
-// ── Notification ──
-
-fn notification_row(notif: &super::screen::Notification, _usable: usize) -> WindowRow {
-    let label = if notif.is_error { "error" } else { "info" };
-    let label_style = Style {
-        fg: if notif.is_error {
-            Some(theme::ERROR)
-        } else {
-            None
-        },
-        bold: true,
-        ..Style::default()
-    };
-
-    let max_msg = _usable.saturating_sub(label.len() + 3);
-    let msg: String = notif.message.chars().take(max_msg).collect();
-
-    WindowRow::styled(vec![
-        StyledSegment {
-            text: " ".into(),
-            style: Style::default(),
-        },
-        StyledSegment {
-            text: label.into(),
-            style: label_style,
-        },
-        StyledSegment {
-            text: "  ".into(),
-            style: Style::default(),
-        },
-        StyledSegment {
-            text: msg,
-            style: Style {
-                dim: true,
-                ..Style::default()
-            },
-        },
-    ])
 }
 
 // ── Queued messages ──
@@ -539,7 +492,7 @@ fn compute_input_area(
     let is_exec_invalid = state.buf == "!";
     let total_content_rows = visual_lines.len();
 
-    let fixed = row_offset as usize + 2 + 1; // bottom bar + top bar + status line
+    let fixed = row_offset as usize + 1 + 1; // bottom bar + status line
     let max_content_rows = height.saturating_sub(fixed).max(1);
     let content_rows = total_content_rows.min(max_content_rows);
 
@@ -931,30 +884,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn notification_row_produces_correct_segments() {
-        let notif = super::super::screen::Notification {
-            message: "test message".into(),
-            is_error: false,
-        };
-        let row = notification_row(&notif, 40);
-        assert_eq!(row.segments.len(), 4);
-        assert_eq!(row.segments[1].text, "info");
-        assert!(row.segments[1].style.bold);
-        assert_eq!(row.segments[3].text, "test message");
-    }
-
-    #[test]
-    fn notification_row_error_style() {
-        let notif = super::super::screen::Notification {
-            message: "oops".into(),
-            is_error: true,
-        };
-        let row = notification_row(&notif, 40);
-        assert_eq!(row.segments[1].text, "error");
-        assert_eq!(row.segments[1].style.fg, Some(theme::ERROR));
-    }
-
-    #[test]
     fn stash_row_has_muted_style() {
         let row = stash_row(40);
         assert!(row.segments[1].style.dim);
@@ -1032,7 +961,6 @@ mod tests {
     fn compute_prompt_produces_bars_and_status() {
         let input_state = InputState::default();
         let mut prompt_input = PromptInput {
-            notification: None,
             queued: &[],
             stash: &None,
             input: &input_state,

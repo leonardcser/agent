@@ -156,4 +156,4 @@ smelt.api.cmd.register("export", function()
       smelt.api.ui.notify("exported to " .. name)
     end
   end)
-end)
+end, { desc = "copy conversation to clipboard" })

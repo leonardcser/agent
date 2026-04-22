@@ -99,7 +99,11 @@ impl InputState {
                     let comp = self.completer.as_ref().unwrap();
                     return Some(self.toggle_selected_setting(comp));
                 }
-                let comp = self.completer.take().unwrap();
+                let session = self.completer.take().unwrap();
+                if let Some(win) = session.picker_win {
+                    self.pending_picker_close.push(win);
+                }
+                let comp = session.completer;
                 match comp.kind {
                     CompleterKind::History => {
                         if let Some(label) = comp.accept() {
@@ -142,7 +146,11 @@ impl InputState {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             }) => {
-                let comp = self.completer.take().unwrap();
+                let session = self.completer.take().unwrap();
+                if let Some(win) = session.picker_win {
+                    self.pending_picker_close.push(win);
+                }
+                let comp = session.completer;
                 // Restore original theme/color on dismiss.
                 match comp.kind {
                     CompleterKind::Theme => {
@@ -188,7 +196,7 @@ impl InputState {
                 if comp.results.len() <= 1 && !is_picker {
                     return None;
                 }
-                comp.move_down();
+                comp.move_up();
                 self.live_preview_picker();
                 Some(Action::Redraw)
             }
@@ -205,14 +213,19 @@ impl InputState {
                 if comp.results.len() <= 1 && !is_picker {
                     return None;
                 }
-                comp.move_up();
+                comp.move_down();
                 self.live_preview_picker();
                 Some(Action::Redraw)
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Tab, ..
             }) => {
-                let comp = self.completer.take().unwrap();
+                let session = self.completer.take().unwrap();
+                let picker_win = session.picker_win;
+                let comp = session.completer;
+                // Settings puts the session back with its picker_win; every
+                // other arm ends the session, so push picker_win to the
+                // close queue after the match.
                 match comp.kind {
                     CompleterKind::History => {
                         if let Some(label) = comp.accept() {
@@ -222,12 +235,17 @@ impl InputState {
                         self.history_saved_buf = None;
                     }
                     CompleterKind::Settings => {
-                        // Put it back — settings toggle doesn't close the picker.
-                        self.completer = Some(comp);
+                        self.completer = Some(crate::completer::CompleterSession {
+                            completer: comp,
+                            picker_win,
+                        });
                         let c = self.completer.as_ref().unwrap();
                         return Some(self.toggle_selected_setting(c));
                     }
                     CompleterKind::Model | CompleterKind::Theme | CompleterKind::Color => {
+                        if let Some(win) = picker_win {
+                            self.pending_picker_close.push(win);
+                        }
                         return Some(self.accept_picker(comp));
                     }
                     _ => {
@@ -237,6 +255,9 @@ impl InputState {
                             self.sync_completer();
                         }
                     }
+                }
+                if let Some(win) = picker_win {
+                    self.pending_picker_close.push(win);
                 }
                 Some(Action::Redraw)
             }
@@ -291,7 +312,7 @@ impl InputState {
             let query = self.win.edit_buf.buf[1..self.win.cpos].to_string();
             self.set_or_update_completer(CompleterKind::Command, || Completer::commands(0), query);
         } else {
-            self.completer = None;
+            self.close_completer();
         }
     }
 
@@ -350,7 +371,7 @@ impl InputState {
             } else {
                 let mut comp = Completer::files(at_pos);
                 comp.update_query(query);
-                self.completer = Some(comp);
+                self.completer = Some(crate::completer::CompleterSession::new(comp));
             }
         } else if let Some((src_idx, arg_anchor)) = self.find_command_arg_zone() {
             let items = self.command_arg_sources[src_idx].1.clone();
@@ -367,7 +388,7 @@ impl InputState {
             let query = self.win.edit_buf.buf[1..end].to_string();
             self.set_or_update_completer(CompleterKind::Command, || Completer::commands(0), query);
         } else {
-            self.completer = None;
+            self.close_completer();
         }
     }
 
@@ -384,7 +405,7 @@ impl InputState {
         } else {
             let mut comp = make();
             comp.update_query(query);
-            self.completer = Some(comp);
+            self.completer = Some(crate::completer::CompleterSession::new(comp));
         }
     }
 

@@ -3,7 +3,7 @@ use super::*;
 use crate::keymap::{self, KeyAction};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, MouseEvent, MouseEventKind},
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
 use std::time::{Duration, Instant};
@@ -420,7 +420,7 @@ impl App {
                                 return EventOutcome::MenuResult(result);
                             }
                             if self.input.completer.is_some() {
-                                self.input.completer = None;
+                                self.input.close_completer();
                                 return EventOutcome::Redraw;
                             }
                             t.last_ctrlc = Some(Instant::now());
@@ -476,7 +476,7 @@ impl App {
                             return EventOutcome::MenuResult(result);
                         }
                         if self.input.completer.is_some() {
-                            self.input.completer = None;
+                            self.input.close_completer();
                             return EventOutcome::Noop;
                         }
                         self.queued_messages.clear();
@@ -488,7 +488,7 @@ impl App {
                             return EventOutcome::MenuResult(result);
                         }
                         if self.input.completer.is_some() {
-                            self.input.completer = None;
+                            self.input.close_completer();
                             return EventOutcome::Noop;
                         }
                         t.last_ctrlc = Some(Instant::now());
@@ -646,6 +646,7 @@ impl App {
 
         // Suspend TUI so the editor gets a normal terminal.
         let _ = io::stdout().execute(DisableMouseCapture);
+        let _ = io::stdout().execute(EnableLineWrap);
         let _ = io::stdout().execute(LeaveAlternateScreen);
         terminal::disable_raw_mode().ok();
 
@@ -654,6 +655,7 @@ impl App {
         // Resume TUI.
         terminal::enable_raw_mode().ok();
         let _ = io::stdout().execute(EnterAlternateScreen);
+        let _ = io::stdout().execute(DisableLineWrap);
         let _ = io::stdout().execute(EnableMouseCapture);
 
         match status {
@@ -1036,7 +1038,6 @@ impl App {
                     ..render::StyleState::default()
                 },
                 priority: 3,
-                truncatable: true,
                 align_right: true,
                 ..StatusSpan::default()
             });
@@ -1090,13 +1091,8 @@ impl App {
             && matches!(self.app_focus, crate::app::AppFocus::Content);
 
         // ── Compute layout ──
-        let natural_prompt_height = self.measure_prompt_height_pub(
-            &self.input,
-            width,
-            queued,
-            prediction,
-            self.notification.is_some(),
-        );
+        let natural_prompt_height =
+            self.measure_prompt_height_pub(&self.input, width, queued, prediction, false);
         self.layout = render::layout::LayoutState::compute(&render::layout::LayoutInput {
             term_width: term_w,
             term_height: term_h,
@@ -1154,7 +1150,6 @@ impl App {
         // ── Prompt ──
         // Extract all immutable data first, then take the mutable btw borrow.
         let prev_input_scroll = self.prompt_input_scroll;
-        let notification = self.notification.as_ref().cloned();
         let bar_info = render::prompt_data::BarInfo {
             model_label: Some(self.model.clone()),
             reasoning_effort: self.reasoning_effort,
@@ -1167,7 +1162,6 @@ impl App {
 
         let prompt_output = {
             let mut prompt_input = render::prompt_data::PromptInput {
-                notification: notification.as_ref(),
                 queued,
                 stash: &self.input.stash,
                 input: &self.input,
@@ -1261,10 +1255,166 @@ impl App {
             }
         }
 
+        self.sync_completer_float(prompt_rect);
+        self.sync_notification_float(prompt_rect);
+
         let mut stdout = std::io::stdout();
         let _ = self.ui.render(&mut stdout);
 
         // Clean up state.
+    }
+
+    // ── Completer float ────────────────────────────────────────────
+    //
+    // Mirrors the active `CompleterSession` into a `ui::Picker`
+    // compositor float. The session (`InputState.completer`) holds both
+    // the matcher model *and* the `picker_win: Option<WinId>` — one
+    // owner, one lifecycle. Matches the shape a future Lua completer
+    // plugin would hold in its own local state.
+    //
+    // `focusable = false` ensures keys keep flowing to the prompt,
+    // driving `completer_bridge::handle_completer_event`.
+    fn sync_completer_float(&mut self, prompt_rect: ui::Rect) {
+        // Drain any Picker floats that were orphaned when their session
+        // ended (session held the WinId; when it dropped, it queued the
+        // WinId here for out-of-band close).
+        for win in std::mem::take(&mut self.input.pending_picker_close) {
+            self.ui.win_close(win);
+        }
+
+        let (max_rows, n_results, selected, items, existing_win) =
+            match self.input.completer.as_ref() {
+                Some(session) => {
+                    let prefix = match session.kind {
+                        crate::completer::CompleterKind::Command => "/",
+                        crate::completer::CompleterKind::File => "./",
+                        _ => "",
+                    };
+                    let items: Vec<ui::PickerItem> = session
+                        .results
+                        .iter()
+                        .map(|r| {
+                            let mut it = ui::PickerItem::new(r.label.clone()).with_prefix(prefix);
+                            if let Some(desc) = r.description.as_deref() {
+                                it = it.with_description(desc);
+                            }
+                            it
+                        })
+                        .collect();
+                    (
+                        session.max_visible_rows(),
+                        session.results.len(),
+                        session.selected,
+                        items,
+                        session.picker_win,
+                    )
+                }
+                None => return,
+            };
+
+        let visible = n_results.min(max_rows).max(1);
+        let height = visible as u16;
+        let top = prompt_rect.top.saturating_sub(height);
+        let desired = ui::Rect::new(top, prompt_rect.left, prompt_rect.width, height);
+
+        // Close + forget the old Picker if the desired rect changed —
+        // reopening is how we reposition under Placement::Manual.
+        let mut open_win = existing_win;
+        if let Some(win) = open_win {
+            let same = match self.ui.float_config(win).map(|c| c.placement) {
+                Some(ui::Placement::Manual {
+                    row,
+                    col,
+                    width: w,
+                    height: h,
+                    ..
+                }) => {
+                    row == desired.top as i32
+                        && col == desired.left as i32
+                        && matches!(w, ui::Constraint::Fixed(v) if v == desired.width)
+                        && matches!(h, ui::Constraint::Fixed(v) if v == desired.height)
+                }
+                _ => false,
+            };
+            if !same {
+                self.ui.win_close(win);
+                open_win = None;
+            }
+        }
+
+        if open_win.is_none() {
+            let config = ui::FloatConfig {
+                placement: ui::Placement::Manual {
+                    anchor: ui::Anchor::NW,
+                    row: desired.top as i32,
+                    col: desired.left as i32,
+                    width: ui::Constraint::Fixed(desired.width),
+                    height: ui::Constraint::Fixed(desired.height),
+                },
+                border: ui::Border::None,
+                title: None,
+                zindex: 60,
+                focusable: false,
+                blocks_agent: false,
+            };
+            let style = ui::PickerStyle {
+                selected_fg: ui::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                },
+                unselected_fg: ui::Style::dim(),
+                description_fg: ui::Style::dim(),
+                background: ui::Style::default(),
+            };
+            open_win = self.ui.picker_open(config, items.clone(), selected, style);
+        }
+
+        if let Some(win) = open_win {
+            if let Some(p) = self.ui.picker_mut(win) {
+                p.set_items(items);
+                p.set_selected(selected);
+            }
+        }
+
+        // Persist the handle back onto the session so next frame finds it.
+        if let Some(session) = self.input.completer.as_mut() {
+            session.picker_win = open_win;
+        }
+    }
+
+    // ── Notification float ─────────────────────────────────────────
+    //
+    // The `ui::Notification` float (if open) is positioned one row
+    // above the prompt rect. Called each frame alongside
+    // `sync_completer_float`. Open/close is driven by `notify` /
+    // `notify_error` / `dismiss_notification`; this just keeps the
+    // rect current across terminal resizes.
+    fn sync_notification_float(&mut self, prompt_rect: ui::Rect) {
+        let Some(win) = self.notification else {
+            return;
+        };
+        let (tw, _th) = self.ui.terminal_size();
+        let desired_top = prompt_rect.top.saturating_sub(1) as i32;
+
+        let needs_update = match self.ui.float_config(win).map(|c| c.placement) {
+            Some(ui::Placement::Manual { row, width: w, .. }) => {
+                row != desired_top || !matches!(w, ui::Constraint::Fixed(v) if v == tw)
+            }
+            _ => true,
+        };
+
+        if needs_update {
+            if let Some(cfg) = self.ui.float_config_mut(win) {
+                cfg.placement = ui::Placement::Manual {
+                    anchor: ui::Anchor::NW,
+                    row: desired_top,
+                    col: 0,
+                    width: ui::Constraint::Fixed(tw),
+                    height: ui::Constraint::Fixed(1),
+                };
+            }
+            self.ui.refresh_float_rect(win);
+        }
     }
 
     // ── Content pane key handler — drives `Vim` over a readonly
@@ -1756,6 +1906,14 @@ impl App {
                     if let Err(e) = super::dialogs::lua_dialog::open(self, dialog_id, opts) {
                         self.notify_error(format!("dialog.open: {e}"));
                         self.lua.resolve_dialog(dialog_id, mlua::Value::Nil);
+                    }
+                }
+                crate::lua::TaskDriveOutput::OpenPicker {
+                    picker_id, opts, ..
+                } => {
+                    if let Err(e) = super::dialogs::lua_picker::open(self, picker_id, opts) {
+                        self.notify_error(format!("picker.open: {e}"));
+                        self.lua.resolve_picker(picker_id, mlua::Value::Nil);
                     }
                 }
                 crate::lua::TaskDriveOutput::Error(msg) => {

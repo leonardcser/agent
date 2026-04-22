@@ -36,10 +36,3 @@ pub enum ContentVisualKind {
     Char,
     Line,
 }
-
-/// A short ephemeral notification rendered above the prompt bar.
-#[derive(Clone)]
-pub struct Notification {
-    pub message: String,
-    pub is_error: bool,
-}

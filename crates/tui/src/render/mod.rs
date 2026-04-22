@@ -26,7 +26,7 @@ pub mod working;
 pub use cmdline::CmdlineState;
 pub(crate) use layout::HitRegion;
 pub(crate) use region::ViewportHit;
-pub use screen::{ContentVisualKind, ContentVisualRange, Notification};
+pub use screen::{ContentVisualKind, ContentVisualRange};
 pub use status::StatusItem;
 pub use transcript::{SnapshotCell, TranscriptSnapshot};
 pub use viewport::ViewportGeom;

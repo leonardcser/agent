@@ -39,8 +39,49 @@ use mlua::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// Process-global snapshot of Lua-registered `/command` names and their
+/// optional descriptions. Written by `smelt.api.cmd.register`, read by
+/// `Completer::commands` / `Completer::is_command` — same free-function
+/// pattern as `custom_commands::list` / `builtin_commands::list`.
+///
+/// We keep a separate string-only snapshot (instead of exposing
+/// `LuaShared` directly) because `LuaHandle` contains `!Send`
+/// `mlua::RegistryKey` and cannot live in a static, and because the
+/// completer only needs labels + descriptions.
+fn lua_commands_snapshot() -> &'static Mutex<HashMap<String, Option<String>>> {
+    static S: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// List all Lua-registered `/commands` as `(name, description)`.
+/// Sorted by name. Used by the `/` completer.
+pub fn list_commands() -> Vec<(String, Option<String>)> {
+    let mut items: Vec<(String, Option<String>)> = lua_commands_snapshot()
+        .lock()
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    items
+}
+
+/// True if `input` (e.g. `/pick-test` or `/pick-test arg`) matches a
+/// Lua-registered command name.
+pub fn is_lua_command(input: &str) -> bool {
+    let name = input
+        .strip_prefix('/')
+        .and_then(|s| s.split_whitespace().next())
+        .unwrap_or("");
+    if name.is_empty() {
+        return false;
+    }
+    lua_commands_snapshot()
+        .lock()
+        .map(|m| m.contains_key(name))
+        .unwrap_or(false)
+}
 
 /// Event kinds the app emits into the Lua autocmd dispatcher.
 ///
@@ -286,6 +327,18 @@ pub enum TaskEvent {
         selected_index: Option<usize>,
         inputs: Vec<(String, String)>,
     },
+    /// A picker opened via `smelt.api.picker.open` was resolved. The Lua
+    /// module looks up the stored items under `opts_key`, builds
+    /// `{ index = 1-based, item = <entry> }` (or `nil` on dismiss), and
+    /// resumes the parked task.
+    PickerResolved {
+        picker_id: u64,
+        /// 0-based index into the original items list. `None` on dismiss.
+        selected_index: Option<usize>,
+        /// Registry key for the original `opts.items` table so the
+        /// resolver can look up the picked entry by index.
+        opts: mlua::RegistryKey,
+    },
 }
 
 impl Default for LuaShared {
@@ -469,13 +522,26 @@ impl LuaRuntime {
             let s = shared.clone();
             cmd_tbl.set(
                 "register",
-                lua.create_function(move |lua, (name, handler): (String, mlua::Function)| {
-                    let key = lua.create_registry_value(handler)?;
-                    if let Ok(mut map) = s.commands.lock() {
-                        map.insert(name, LuaHandle { key, dead: false });
-                    }
-                    Ok(())
-                })?,
+                lua.create_function(
+                    move |lua,
+                          (name, handler, opts): (
+                        String,
+                        mlua::Function,
+                        Option<mlua::Table>,
+                    )| {
+                        let desc: Option<String> = opts
+                            .as_ref()
+                            .and_then(|t| t.get::<Option<String>>("desc").ok().flatten());
+                        let key = lua.create_registry_value(handler)?;
+                        if let Ok(mut map) = s.commands.lock() {
+                            map.insert(name.clone(), LuaHandle { key, dead: false });
+                        }
+                        if let Ok(mut snap) = lua_commands_snapshot().lock() {
+                            snap.insert(name, desc);
+                        }
+                        Ok(())
+                    },
+                )?,
             )?;
         }
         cmd_tbl.set(
@@ -1079,6 +1145,26 @@ impl LuaRuntime {
         }
         api.set("tools", tools_tbl)?;
 
+        // smelt.api.fuzzy.score(text, query) → number | nil
+        // Thin wrapper over crate::fuzzy::fuzzy_score. Lower = better.
+        // Returns nil when query does not match.
+        let fuzzy_tbl = lua.create_table()?;
+        fuzzy_tbl.set(
+            "score",
+            lua.create_function(
+                |_, (text, query): (String, String)| match crate::fuzzy::fuzzy_score(&text, &query)
+                {
+                    Some(s) => Ok(Some(s)),
+                    None => Ok(None),
+                },
+            )?,
+        )?;
+        api.set("fuzzy", fuzzy_tbl)?;
+
+        // smelt.api.picker placeholder — populated by TASK_YIELD_PRIMITIVES
+        // with `open(opts)`.
+        api.set("picker", lua.create_table()?)?;
+
         smelt.set("api", api)?;
 
         smelt.set(
@@ -1404,6 +1490,15 @@ impl LuaRuntime {
         rt.resolve_dialog(dialog_id, value)
     }
 
+    /// Satisfy a `smelt.api.picker.open` wait: hand the result back to
+    /// the parked task. Returns `true` if a matching task was found.
+    pub fn resolve_picker(&self, picker_id: u64, value: mlua::Value) -> bool {
+        let Ok(mut rt) = self.shared.tasks.lock() else {
+            return false;
+        };
+        rt.resolve_picker(picker_id, value)
+    }
+
     /// Drain the task-runtime inbox and apply each event. Dialog
     /// callbacks push here (instead of `AppOp`) so the reducer doesn't
     /// know about Lua-task lifecycle; the Lua module handles its own
@@ -1483,6 +1578,23 @@ impl LuaRuntime {
                             extra_ops.push(AppOp::NotifyError(format!("keymap ctx: {e}")));
                         }
                     }
+                }
+                TaskEvent::PickerResolved {
+                    picker_id,
+                    selected_index,
+                    opts,
+                } => {
+                    let value = match selected_index {
+                        None => mlua::Value::Nil,
+                        Some(idx0) => match build_picker_result(&self.lua, &opts, idx0) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                extra_ops.push(AppOp::NotifyError(format!("picker resolve: {e}")));
+                                mlua::Value::Nil
+                            }
+                        },
+                    };
+                    self.resolve_picker(picker_id, value);
                 }
             }
         }
@@ -1793,7 +1905,7 @@ impl LuaRuntime {
     /// and routes appropriately (e.g. opens the dialog).
     fn queue_task_output(&self, out: TaskDriveOutput) {
         match out {
-            TaskDriveOutput::OpenDialog { .. } => {
+            TaskDriveOutput::OpenDialog { .. } | TaskDriveOutput::OpenPicker { .. } => {
                 if let Ok(mut rt) = self.shared.tasks.lock() {
                     rt.defer_output(out);
                 }
@@ -2033,12 +2145,34 @@ fn lua_value_to_json(lua: &Lua, val: &mlua::Value) -> serde_json::Value {
     }
 }
 
+/// Build the resume value for a resolved picker. Looks up
+/// `opts.items[index0 + 1]` and returns `{ index = 1-based, item = <entry> }`.
+/// Returns an error if the opts key was stale or missing `items`.
+fn build_picker_result(
+    lua: &Lua,
+    opts_key: &mlua::RegistryKey,
+    index0: usize,
+) -> Result<mlua::Value, String> {
+    let opts: mlua::Table = lua
+        .registry_value(opts_key)
+        .map_err(|e| format!("opts: {e}"))?;
+    let items: mlua::Table = opts.get("items").map_err(|e| format!("items: {e}"))?;
+    let item: mlua::Value = items
+        .get(index0 + 1)
+        .map_err(|e| format!("item[{}]: {e}", index0 + 1))?;
+    let out = lua.create_table().map_err(|e| e.to_string())?;
+    out.set("index", index0 + 1).map_err(|e| e.to_string())?;
+    out.set("item", item).map_err(|e| e.to_string())?;
+    Ok(mlua::Value::Table(out))
+}
+
 /// Lua source injected at bootstrap to install the task-yielding
 /// primitives. Each checks `coroutine.isyieldable()` so calls from
 /// outside a task raise a clear error rather than failing later.
 const TASK_YIELD_PRIMITIVES: &str = r#"
 smelt.api = smelt.api or {}
 smelt.api.dialog = smelt.api.dialog or {}
+smelt.api.picker = smelt.api.picker or {}
 
 function smelt.api.sleep(ms)
   if not coroutine.isyieldable() then
@@ -2060,6 +2194,28 @@ function smelt.api.dialog.open(opts)
     error("smelt.api.dialog.open: expected table of options", 2)
   end
   return coroutine.yield({__yield = "dialog", opts = opts})
+end
+
+-- Open a focusable picker (single-column selection list) and wait for
+-- the user's choice. Blocks the task coroutine.
+-- opts = {
+--   items = { "str" | { label=..., description?=..., prefix?=... }, ... },
+--   title? = string,
+--   placement? = "center" | "cursor" | "bottom" (default "center"),
+-- }
+-- Returns { index = <1-based int>, item = <original entry> } on select,
+-- or nil on dismiss.
+function smelt.api.picker.open(opts)
+  if not coroutine.isyieldable() then
+    error("smelt.api.picker.open: call from inside smelt.task(fn) or tool.execute", 2)
+  end
+  if type(opts) ~= "table" then
+    error("smelt.api.picker.open: expected table of options", 2)
+  end
+  if type(opts.items) ~= "table" then
+    error("smelt.api.picker.open: opts.items must be a table", 2)
+  end
+  return coroutine.yield({__yield = "picker", opts = opts})
 end
 "#;
 

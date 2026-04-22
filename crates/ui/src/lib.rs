@@ -12,7 +12,9 @@ pub mod grid;
 pub mod kill_ring;
 pub mod layout;
 pub mod list_select;
+pub mod notification;
 pub mod option_list;
+pub mod picker;
 pub mod status_bar;
 pub mod style;
 pub mod text;
@@ -46,7 +48,9 @@ pub use id::{BufId, WinId};
 pub use kill_ring::KillRing;
 pub use layout::{Anchor, Border, Constraint, FloatRelative, Gutters, LayoutTree, Placement, Rect};
 pub use list_select::{ListItem, ListSelect};
+pub use notification::{Notification, NotificationLevel, NotificationStyle};
 pub use option_list::{OptionItem, OptionList};
+pub use picker::{Picker, PickerItem, PickerStyle};
 pub use status_bar::{StatusBar, StatusSegment};
 pub use style::{HlAttrs, HlGroup};
 pub use text_input::TextInput;
@@ -159,7 +163,9 @@ impl Ui {
         let layer_id = float_layer_id(id);
         self.compositor
             .add(&layer_id, Box::new(dialog), rect, zindex);
-        self.compositor.focus(&layer_id);
+        if focusable {
+            self.compositor.focus(&layer_id);
+        }
 
         Some(id)
     }
@@ -172,6 +178,106 @@ impl Ui {
         if self.current_win == Some(id) {
             self.current_win = self.wins.keys().next().copied();
         }
+    }
+
+    // ── Picker ───────────────────────────────────────────────────────
+    //
+    // Non-focusable dropdown component. One primitive reused by the
+    // prompt `/` completer, the cmdline `:` completer, and Lua
+    // `smelt.api.picker.open`. Mirrors Neovim's `pum_grid`: caller drives
+    // selection, component paints.
+
+    /// Open a `Picker` float. Accepts any `FloatConfig`; typically
+    /// callers pass `focusable: false` and a manually-positioned
+    /// `Placement`. Returns the new `WinId` for later updates via
+    /// `picker_mut` and eventual `win_close`.
+    pub fn picker_open(
+        &mut self,
+        config: FloatConfig,
+        items: Vec<picker::PickerItem>,
+        selected: usize,
+        style: picker::PickerStyle,
+    ) -> Option<WinId> {
+        let id = WinId(self.next_win_id);
+        self.next_win_id += 1;
+
+        let (tw, th) = self.terminal_size;
+        let rect = resolve_float_rect(&config, tw, th);
+        let zindex = config.zindex;
+
+        let mut p = picker::Picker::new().with_style(style);
+        p.set_items(items);
+        p.set_selected(selected);
+
+        // Pickers don't own a buffer; they render from internal state.
+        // Still register a placeholder window so focus / close / keymap
+        // paths stay uniform with other floats.
+        let placeholder_buf = BufId(0);
+        let focusable = config.focusable;
+        let mut win = Window::new(id, placeholder_buf, WinConfig::Float(config));
+        win.focusable = focusable;
+        self.wins.insert(id, win);
+
+        let layer_id = float_layer_id(id);
+        self.compositor.add(&layer_id, Box::new(p), rect, zindex);
+        if focusable {
+            self.compositor.focus(&layer_id);
+        }
+
+        Some(id)
+    }
+
+    /// Mutable access to an open `Picker` component. Used to update
+    /// items and selection as the caller's filter/selection state
+    /// changes.
+    pub fn picker_mut(&mut self, win_id: WinId) -> Option<&mut picker::Picker> {
+        let layer_id = float_layer_id(win_id);
+        let comp = self.compositor.component_mut(&layer_id)?;
+        comp.as_any_mut().downcast_mut::<picker::Picker>()
+    }
+
+    // ── Notification ─────────────────────────────────────────────────
+    //
+    // Non-focusable ephemeral toast. Sibling to `Picker` in the named-
+    // components family. Caller controls lifecycle (open / update /
+    // dismiss on key → `win_close`).
+
+    pub fn notification_open(
+        &mut self,
+        config: FloatConfig,
+        message: impl Into<String>,
+        level: notification::NotificationLevel,
+        style: notification::NotificationStyle,
+    ) -> Option<WinId> {
+        let id = WinId(self.next_win_id);
+        self.next_win_id += 1;
+
+        let (tw, th) = self.terminal_size;
+        let rect = resolve_float_rect(&config, tw, th);
+        let zindex = config.zindex;
+
+        let n = notification::Notification::new(message, level).with_style(style);
+
+        let placeholder_buf = BufId(0);
+        let focusable = config.focusable;
+        let mut win = Window::new(id, placeholder_buf, WinConfig::Float(config));
+        win.focusable = focusable;
+        self.wins.insert(id, win);
+
+        let layer_id = float_layer_id(id);
+        self.compositor.add(&layer_id, Box::new(n), rect, zindex);
+        if focusable {
+            self.compositor.focus(&layer_id);
+        }
+
+        Some(id)
+    }
+
+    pub fn notification_mut(&mut self, win_id: WinId) -> Option<&mut notification::Notification> {
+        let layer_id = float_layer_id(win_id);
+        let comp = self.compositor.component_mut(&layer_id)?;
+        comp.as_any_mut()
+            .downcast_mut::<notification::Notification>()
     }
 
     // ── Callbacks ────────────────────────────────────────────────────
@@ -547,6 +653,31 @@ impl Ui {
             WinConfig::Float(cfg) => Some(cfg),
             WinConfig::Split(_) => None,
         }
+    }
+
+    /// Mutable access to a float's `FloatConfig`. Used by callers that
+    /// need to reposition a float in response to layout changes
+    /// (resize, prompt height change) without closing + reopening.
+    /// After calling this, the caller should also `set_layer_rect` so
+    /// the compositor picks up the new rect this frame.
+    pub fn float_config_mut(&mut self, win: WinId) -> Option<&mut FloatConfig> {
+        match &mut self.wins.get_mut(&win)?.config {
+            WinConfig::Float(cfg) => Some(cfg),
+            WinConfig::Split(_) => None,
+        }
+    }
+
+    /// Recompute a float's rect from its current `FloatConfig` and push
+    /// it into the compositor. Use after mutating placement so the
+    /// float repositions without close + reopen.
+    pub fn refresh_float_rect(&mut self, win: WinId) {
+        let (tw, th) = self.terminal_size;
+        let Some(WinConfig::Float(cfg)) = self.wins.get(&win).map(|w| &w.config) else {
+            return;
+        };
+        let rect = resolve_float_rect(cfg, tw, th);
+        let layer_id = float_layer_id(win);
+        self.compositor.set_rect(&layer_id, rect);
     }
 
     pub fn float_dialog_mut(&mut self, win_id: WinId) -> Option<&mut FloatDialog> {

@@ -61,6 +61,8 @@ impl Default for StatusBar {
 
 impl Component for StatusBar {
     fn draw(&self, _area: Rect, grid: &mut GridSlice<'_>, _ctx: &DrawContext) {
+        use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
         let w = grid.width();
         if w == 0 || grid.height() == 0 {
             return;
@@ -68,43 +70,45 @@ impl Component for StatusBar {
 
         grid.fill(Rect::new(0, 0, w, 1), ' ', self.bg);
 
+        let seg_style = |seg: &StatusSegment| -> Style {
+            Style {
+                fg: seg.style.fg.or(self.bg.fg),
+                bg: seg.style.bg.or(self.bg.bg),
+                bold: seg.style.bold || self.bg.bold,
+                dim: seg.style.dim || self.bg.dim,
+                italic: seg.style.italic,
+                ..Style::default()
+            }
+        };
+
         let mut col = 0u16;
         for seg in &self.left {
+            let style = seg_style(seg);
             for ch in seg.text.chars() {
-                if col >= w {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
+                if col + cw > w {
                     break;
                 }
-                let style = Style {
-                    fg: seg.style.fg.or(self.bg.fg),
-                    bg: seg.style.bg.or(self.bg.bg),
-                    bold: seg.style.bold || self.bg.bold,
-                    dim: seg.style.dim || self.bg.dim,
-                    italic: seg.style.italic,
-                    ..Style::default()
-                };
                 grid.set(col, 0, ch, style);
-                col += 1;
+                col += cw;
             }
         }
 
-        let right_len: usize = self.right.iter().map(|s| s.text.chars().count()).sum();
-        let right_start = (w as usize).saturating_sub(right_len);
-        let mut col = right_start as u16;
+        let right_width: u16 = self
+            .right
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.text.as_str()) as u16)
+            .sum();
+        let mut col = w.saturating_sub(right_width);
         for seg in &self.right {
+            let style = seg_style(seg);
             for ch in seg.text.chars() {
-                if col >= w {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
+                if col + cw > w {
                     break;
                 }
-                let style = Style {
-                    fg: seg.style.fg.or(self.bg.fg),
-                    bg: seg.style.bg.or(self.bg.bg),
-                    bold: seg.style.bold || self.bg.bold,
-                    dim: seg.style.dim || self.bg.dim,
-                    italic: seg.style.italic,
-                    ..Style::default()
-                };
                 grid.set(col, 0, ch, style);
-                col += 1;
+                col += cw;
             }
         }
     }

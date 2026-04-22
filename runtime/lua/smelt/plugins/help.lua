@@ -44,4 +44,4 @@ smelt.api.cmd.register("help", function()
       },
     })
   end)
-end)
+end, { desc = "show keybindings" })

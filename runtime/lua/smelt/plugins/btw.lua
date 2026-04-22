@@ -45,4 +45,4 @@ smelt.api.cmd.register("btw", function(args)
       smelt.api.buf.set_lines(buf, lines)
     end,
   })
-end)
+end, { desc = "ask a side question" })

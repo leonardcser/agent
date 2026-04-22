@@ -210,6 +210,38 @@ impl Completer {
     }
 }
 
+/// Couples a `Completer` model with its `ui::Picker` float WinId.
+/// The two share a lifecycle — created when the user opens a
+/// completer, destroyed together when it closes — so they live in
+/// one owner. Matches the shape a future Lua completer plugin would
+/// hold locally (`{ completer, picker_win }`).
+pub struct CompleterSession {
+    pub completer: Completer,
+    pub picker_win: Option<ui::WinId>,
+}
+
+impl CompleterSession {
+    pub fn new(completer: Completer) -> Self {
+        Self {
+            completer,
+            picker_win: None,
+        }
+    }
+}
+
+impl std::ops::Deref for CompleterSession {
+    type Target = Completer;
+    fn deref(&self) -> &Completer {
+        &self.completer
+    }
+}
+
+impl std::ops::DerefMut for CompleterSession {
+    fn deref_mut(&mut self) -> &mut Completer {
+        &mut self.completer
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

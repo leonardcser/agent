@@ -23,7 +23,7 @@ use crossterm::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
         EnableFocusChange, EnableMouseCapture, EventStream, KeyCode, KeyEvent, KeyModifiers,
     },
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
 use std::collections::{HashMap, VecDeque};
@@ -119,8 +119,9 @@ pub struct App {
     /// Custom status items from a Lua provider. When `Some`, these
     /// replace the built-in status spans entirely.
     pub custom_status_items: Option<Vec<render::status::StatusItem>>,
-    /// Ephemeral notification shown above the prompt, dismissed on any key.
-    pub notification: Option<render::screen::Notification>,
+    /// Open `ui::Notification` float, if one is visible. Dismissed on
+    /// any key (see `handle_overlay_keys`). `None` when no toast.
+    pub notification: Option<ui::WinId>,
     /// Nvim-style `:` command line. When `active`, the status bar
     /// paints it in place of the usual status spans and keystrokes
     /// route through `handle_cmdline_key`.
@@ -736,22 +737,54 @@ impl App {
     }
 
     pub fn notify(&mut self, message: String) {
-        self.notification = Some(render::screen::Notification {
-            message,
-            is_error: false,
-        });
+        self.open_notification(message, ui::NotificationLevel::Info);
     }
 
     pub fn notify_error(&mut self, message: String) {
-        self.notification = Some(render::screen::Notification {
-            message,
-            is_error: true,
-        });
+        self.open_notification(message, ui::NotificationLevel::Error);
+    }
+
+    fn open_notification(&mut self, message: String, level: ui::NotificationLevel) {
+        // Replace any existing toast — one at a time.
+        if let Some(win) = self.notification.take() {
+            self.ui.win_close(win);
+        }
+        let style = ui::NotificationStyle {
+            info_label: ui::Style {
+                bold: true,
+                ..Default::default()
+            },
+            error_label: ui::Style {
+                fg: Some(crate::theme::ERROR),
+                bold: true,
+                ..Default::default()
+            },
+            message: ui::Style::dim(),
+            background: ui::Style::default(),
+        };
+        // Position: one row above the prompt, full width. Rect is
+        // refreshed each frame by `sync_notification_float`.
+        let (tw, _th) = self.ui.terminal_size();
+        let config = ui::FloatConfig {
+            placement: ui::Placement::Manual {
+                anchor: ui::Anchor::NW,
+                row: 0,
+                col: 0,
+                width: ui::Constraint::Fixed(tw),
+                height: ui::Constraint::Fixed(1),
+            },
+            border: ui::Border::None,
+            title: None,
+            zindex: 55,
+            focusable: false,
+            blocks_agent: false,
+        };
+        self.notification = self.ui.notification_open(config, message, level, style);
     }
 
     pub fn dismiss_notification(&mut self) {
-        if self.notification.is_some() {
-            self.notification = None;
+        if let Some(win) = self.notification.take() {
+            self.ui.win_close(win);
         }
     }
 
@@ -781,6 +814,11 @@ impl App {
         crate::theme::detect_background();
         terminal::enable_raw_mode().ok();
         let _ = io::stdout().execute(EnterAlternateScreen);
+        // Disable DECAWM so writing to the bottom-right cell doesn't
+        // trigger the terminal's auto-scroll (which would push a whole
+        // row up and break the status bar's last char — see "1:1 100%"
+        // wrapping regression).
+        let _ = io::stdout().execute(DisableLineWrap);
         let _ = io::stdout().execute(cursor::Hide);
         let _ = io::stdout().execute(EnableBracketedPaste);
         let _ = io::stdout().execute(EnableFocusChange);
@@ -1183,6 +1221,7 @@ impl App {
         self.save_session();
 
         let _ = io::stdout().execute(DisableMouseCapture);
+        let _ = io::stdout().execute(EnableLineWrap);
         let _ = io::stdout().execute(LeaveAlternateScreen);
         let _ = io::stdout().execute(cursor::Show);
         let _ = io::stdout().execute(DisableBracketedPaste);

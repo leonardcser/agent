@@ -99,22 +99,41 @@ impl Grid {
     }
 
     pub fn set(&mut self, x: u16, y: u16, symbol: char, style: Style) {
+        use unicode_width::UnicodeWidthChar;
         if x < self.width && y < self.height {
             let idx = self.idx(x, y);
             self.cells[idx] = Cell { symbol, style };
+            // Wide-char invariant: the cell immediately after a width-2
+            // glyph holds a `\0` continuation marker so the flush and
+            // diff paths can skip it (the terminal renders the wide
+            // glyph across both visual cells on its own). Marker
+            // inherits the wide char's style so inclusion in a styled
+            // pill stays visually consistent.
+            if UnicodeWidthChar::width(symbol).unwrap_or(1) == 2 && x + 1 < self.width {
+                let cont = self.idx(x + 1, y);
+                self.cells[cont] = Cell {
+                    symbol: '\0',
+                    style,
+                };
+            }
         }
     }
 
     pub fn put_str(&mut self, x: u16, y: u16, text: &str, style: Style) {
+        use unicode_width::UnicodeWidthChar;
+
         if y >= self.height {
             return;
         }
-        for (col, ch) in (x..).zip(text.chars()) {
-            if col >= self.width {
+        let mut col = x;
+        for ch in text.chars() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
+            if col + cw > self.width {
                 break;
             }
             let idx = self.idx(col, y);
             self.cells[idx] = Cell { symbol: ch, style };
+            col += cw;
         }
     }
 
@@ -149,6 +168,14 @@ impl Grid {
 
     pub fn diff<'a>(&'a self, prev: &'a Grid) -> impl Iterator<Item = CellUpdate<'a>> {
         self.cells.iter().enumerate().filter_map(move |(i, cell)| {
+            // Wide-char continuation cells (`\0` sentinel) are never
+            // flushed — the preceding wide glyph paints both visual
+            // columns. Emitting them would either overwrite the
+            // continuation (clobbering the glyph) or desync the
+            // terminal cursor.
+            if cell.symbol == '\0' {
+                return None;
+            }
             let prev_cell = prev.cells.get(i)?;
             if cell != prev_cell {
                 let x = (i % self.width as usize) as u16;
