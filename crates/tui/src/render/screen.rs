@@ -63,10 +63,10 @@ pub struct Screen {
     parser: super::stream_parser::StreamParser,
     dirty: bool,
     /// Plain-text snapshot of each visible row (top to bottom) captured
-    /// during `draw_viewport_frame`. Used by the content pane's motion
-    /// handlers and yank to reason over what the user actually sees.
+    /// during `project_transcript_buffer`. Read by
+    /// `compute_transcript_cursor` to look up the glyph under the soft
+    /// cursor.
     last_viewport_text: Vec<String>,
-    last_viewport_lines: Vec<super::display::DisplayLine>,
     /// Buffer-backed transcript projection — blocks projected at event time.
     pub(crate) transcript_projection: TranscriptProjection,
     /// Terminal I/O backend (real terminal or test buffer).
@@ -97,7 +97,6 @@ impl Screen {
             parser: super::stream_parser::StreamParser::new(),
             dirty: true,
             last_viewport_text: Vec::new(),
-            last_viewport_lines: Vec::new(),
             transcript_projection: TranscriptProjection::new(ui::buffer::Buffer::new(
                 ui::BufId(0),
                 ui::buffer::BufCreateOpts {
@@ -318,12 +317,6 @@ impl Screen {
         has_notification: bool,
     ) -> u16 {
         self.measure_prompt_height(state, width, queued, prediction, has_notification)
-    }
-
-    /// Plain-text rendering of the last-painted viewport rows (top to
-    /// bottom). Used by the content pane's vim-style motions and yank.
-    pub fn viewport_text_rows(&self) -> &[String] {
-        &self.last_viewport_text
     }
 
     /// Plain-text rendering of the full transcript (including any
@@ -820,14 +813,12 @@ impl Screen {
             _ => layer_w.saturating_sub(1),
         };
 
-        // Update viewport text and display lines for vim motions/yank/selection.
+        // Snapshot visible rows for the soft-cursor glyph lookup in
+        // `compute_transcript_cursor`.
         let buf = self.transcript_projection.buf();
         let start = clamped_scroll as usize;
         let end = (start + viewport_rows as usize).min(buf.line_count());
         self.last_viewport_text = buf.get_lines(start, end).to_vec();
-        self.last_viewport_lines = self
-            .transcript_projection
-            .viewport_display_lines(clamped_scroll, viewport_rows);
 
         let viewport = super::region::Viewport::new(
             ui::Rect::new(0, 0, tw as u16, viewport_rows),
