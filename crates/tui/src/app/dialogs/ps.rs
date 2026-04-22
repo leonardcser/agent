@@ -1,8 +1,11 @@
 use super::super::App;
-use super::DialogState;
+use crate::app::ops::AppOp;
 use crossterm::event::{KeyCode, KeyModifiers};
+use std::cell::RefCell;
+use std::rc::Rc;
+use ui::{Callback, CallbackResult, KeyBind, WinEvent};
 
-pub struct Ps {
+struct PsState {
     registry: engine::tools::ProcessRegistry,
     killed: Vec<String>,
     list_buf: ui::BufId,
@@ -39,7 +42,7 @@ pub(in crate::app) fn open(app: &mut App) {
         vec![(KeyCode::Char('q'), KeyModifiers::NONE)],
     );
 
-    let win_id = app.ui.dialog_open(
+    let Some(win_id) = app.ui.dialog_open(
         ui::FloatConfig {
             title: None,
             border: ui::Border::None,
@@ -51,55 +54,58 @@ pub(in crate::app) fn open(app: &mut App) {
             ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
             ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill),
         ],
-    );
+    ) else {
+        return;
+    };
 
-    if let Some(win_id) = win_id {
-        app.float_states.insert(
-            win_id,
-            Box::new(Ps {
-                registry,
-                killed: Vec::new(),
-                list_buf,
-            }),
-        );
-    }
-}
+    let state = Rc::new(RefCell::new(PsState {
+        registry,
+        killed: Vec::new(),
+        list_buf,
+    }));
 
-impl DialogState for Ps {
-    fn handle_key(
-        &mut self,
-        app: &mut App,
-        win: ui::WinId,
-        code: KeyCode,
-        _mods: KeyModifiers,
-    ) -> Option<ui::KeyResult> {
-        if code == KeyCode::Backspace {
-            let idx = app.ui.dialog_mut(win).and_then(|d| d.selected_index());
-            if let Some(idx) = idx {
-                let procs: Vec<_> = self
+    let state_backspace = state.clone();
+    app.ui.win_set_keymap(
+        win_id,
+        KeyBind::plain(KeyCode::Backspace),
+        Callback::Rust(Box::new(move |ctx| {
+            let idx = ctx.ui.dialog_mut(ctx.win).and_then(|d| d.selected_index());
+            let Some(idx) = idx else {
+                return CallbackResult::Consumed;
+            };
+            let mut s = state_backspace.borrow_mut();
+            let procs: Vec<_> = s
+                .registry
+                .list()
+                .into_iter()
+                .filter(|p| !s.killed.contains(&p.id))
+                .collect();
+            if let Some(p) = procs.get(idx) {
+                s.killed.push(p.id.clone());
+                let fresh: Vec<_> = s
                     .registry
                     .list()
                     .into_iter()
-                    .filter(|p| !self.killed.contains(&p.id))
+                    .filter(|p| !s.killed.contains(&p.id))
                     .collect();
-                if let Some(p) = procs.get(idx) {
-                    self.killed.push(p.id.clone());
-                    let fresh: Vec<_> = self
-                        .registry
-                        .list()
-                        .into_iter()
-                        .filter(|p| !self.killed.contains(&p.id))
-                        .collect();
-                    let lines: Vec<String> = fresh.iter().map(format_proc).collect();
-                    if let Some(buf) = app.ui.buf_mut(self.list_buf) {
-                        buf.set_all_lines(lines);
-                    }
+                let lines: Vec<String> = fresh.iter().map(format_proc).collect();
+                if let Some(buf) = ctx.ui.buf_mut(s.list_buf) {
+                    buf.set_all_lines(lines);
                 }
             }
-            return Some(ui::KeyResult::Consumed);
-        }
-        None
-    }
+            CallbackResult::Consumed
+        })),
+    );
+
+    let ops = app.lua.ops_handle();
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Dismiss,
+        Callback::Rust(Box::new(move |ctx| {
+            ops.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
+    );
 }
 
 fn format_proc(p: &engine::tools::ProcessInfo) -> String {

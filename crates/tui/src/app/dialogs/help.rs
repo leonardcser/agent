@@ -1,7 +1,6 @@
 use super::super::App;
-use super::DialogState;
-
-pub struct Help;
+use crate::app::ops::AppOp;
+use ui::{Callback, CallbackResult, WinEvent};
 
 pub(in crate::app) fn open(app: &mut App) {
     use crate::keymap::hints;
@@ -85,7 +84,7 @@ pub(in crate::app) fn open(app: &mut App) {
             .focusable(true),
     ];
 
-    let win_id = app.ui.dialog_open(
+    let Some(win_id) = app.ui.dialog_open(
         ui::FloatConfig {
             title: None,
             border: ui::Border::None,
@@ -94,11 +93,17 @@ pub(in crate::app) fn open(app: &mut App) {
         },
         dialog_config,
         panels,
+    ) else {
+        return;
+    };
+
+    let ops = app.lua.ops_handle();
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Dismiss,
+        Callback::Rust(Box::new(move |ctx| {
+            ops.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
     );
-
-    if let Some(win_id) = win_id {
-        app.float_states.insert(win_id, Box::new(Help));
-    }
 }
-
-impl DialogState for Help {}

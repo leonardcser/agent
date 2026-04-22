@@ -78,6 +78,9 @@ impl App {
                     let result = self.ui.handle_key(code, modifiers);
                     self.handle_float_action(result, agent);
                 }
+                // Drain any AppOps queued by Rust callbacks (migrated
+                // dialogs) or Lua handlers during dispatch.
+                self.apply_lua_ops();
             }
             return false;
         }
@@ -1702,7 +1705,6 @@ impl App {
         self.lua.remove_callback(dismiss_id);
         self.float_states.remove(&win_id);
         self.ui.win_close(win_id);
-        self.ui.buf_delete(ui::BufId(id));
     }
 
     fn handle_float_action(&mut self, result: ui::KeyResult, agent: &mut Option<TurnState>) {
@@ -1943,6 +1945,15 @@ impl App {
                 }
                 crate::app::ops::AppOp::SetPermissionOverrides(_overrides) => {
                     // TODO: store overrides and include in StartTurn
+                }
+                crate::app::ops::AppOp::CloseFloat(win_id) => {
+                    self.close_float(win_id);
+                }
+                crate::app::ops::AppOp::ExportClipboard => {
+                    self.export_to_clipboard();
+                }
+                crate::app::ops::AppOp::ExportFile => {
+                    self.export_to_file();
                 }
                 crate::app::ops::AppOp::BackgroundAsk {
                     id,

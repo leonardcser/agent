@@ -1,7 +1,6 @@
 use super::super::App;
-use super::{DialogState, TurnState};
-
-pub struct Export;
+use crate::app::ops::AppOp;
+use ui::{Callback, CallbackResult, Payload, WinEvent};
 
 pub(in crate::app) fn open(app: &mut App) {
     use crate::keymap::hints;
@@ -29,7 +28,7 @@ pub(in crate::app) fn open(app: &mut App) {
     let hint_text = hints::join(&[hints::SELECT, hints::CANCEL]);
     let dialog_config = app.builtin_dialog_config(Some(hint_text), vec![]);
 
-    let win_id = app.ui.dialog_open(
+    let Some(win_id) = app.ui.dialog_open(
         ui::FloatConfig {
             title: None,
             border: ui::Border::None,
@@ -41,25 +40,33 @@ pub(in crate::app) fn open(app: &mut App) {
             ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
             ui::PanelSpec::list(list_buf, ui::PanelHeight::Fit),
         ],
+    ) else {
+        return;
+    };
+
+    let ops = app.lua.ops_handle();
+    let ops_submit = ops.clone();
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Submit,
+        Callback::Rust(Box::new(move |ctx| {
+            if let Payload::Selection { index } = ctx.payload {
+                match index {
+                    0 => ops_submit.push(AppOp::ExportClipboard),
+                    1 => ops_submit.push(AppOp::ExportFile),
+                    _ => {}
+                }
+            }
+            ops_submit.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
     );
-
-    if let Some(win_id) = win_id {
-        app.float_states.insert(win_id, Box::new(Export));
-    }
-}
-
-impl DialogState for Export {
-    fn on_select(
-        &mut self,
-        app: &mut App,
-        _win: ui::WinId,
-        idx: usize,
-        _agent: &mut Option<TurnState>,
-    ) {
-        match idx {
-            0 => app.export_to_clipboard(),
-            1 => app.export_to_file(),
-            _ => {}
-        }
-    }
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Dismiss,
+        Callback::Rust(Box::new(move |ctx| {
+            ops.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
+    );
 }

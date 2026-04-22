@@ -161,7 +161,7 @@ pub(crate) struct LuaHandle {
     dead: bool,
 }
 
-pub use crate::app::ops::AppOp;
+pub use crate::app::ops::{AppOp, OpsHandle};
 
 /// Snapshot of engine-level state (model, mode, cost, tokens).
 /// Populated by `snapshot_engine_context` in the app loop.
@@ -1017,6 +1017,14 @@ impl LuaRuntime {
             return Vec::new();
         };
         o.drain()
+    }
+
+    /// Get a cloneable handle to the shared `AppOp` queue. Rust
+    /// dialog callbacks clone this and push typed effects from
+    /// inside their closures. Lua and Rust share the same channel
+    /// so the reducer in `App::apply_ops` drains them uniformly.
+    pub fn ops_handle(&self) -> OpsHandle {
+        OpsHandle(self.shared.clone())
     }
 
     /// Fire the `on_response` callback for a completed `engine.ask()` call.
