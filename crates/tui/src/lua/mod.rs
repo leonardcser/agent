@@ -830,6 +830,9 @@ impl LuaRuntime {
             if let Ok(modes) = def.get::<mlua::Table>("modes") {
                 meta.set("modes", modes)?;
             }
+            if let Ok(mode_str) = def.get::<String>("execution_mode") {
+                meta.set("execution_mode", mode_str)?;
+            }
             lua.set_named_registry_value(&format!("__pt_meta_{name}"), meta)?;
 
             if let Ok(mut map) = s.plugin_tools.lock() {
@@ -1341,11 +1344,21 @@ impl LuaRuntime {
                             .filter_map(|s| protocol::Mode::parse(&s))
                             .collect()
                     });
+                let execution_mode = meta_table
+                    .get::<String>("execution_mode")
+                    .ok()
+                    .and_then(|s| match s.as_str() {
+                        "sequential" => Some(protocol::ToolExecutionMode::Sequential),
+                        "concurrent" => Some(protocol::ToolExecutionMode::Concurrent),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
                 defs.push(protocol::PluginToolDef {
                     name: name.clone(),
                     description,
                     parameters,
                     modes,
+                    execution_mode,
                 });
             }
         }

@@ -21,6 +21,24 @@ pub enum AuxiliaryTask {
     Btw,
 }
 
+/// How a plugin tool interacts with concurrent tool execution.
+///
+/// `Concurrent` (default): runs alongside other tools via the engine's
+/// `pending_plugins` channel — good for pure data fetches with no UI.
+///
+/// `Sequential`: deferred until after every concurrent tool has
+/// finished, then dispatched one at a time. Used by tools that open a
+/// dialog and await a user reply — the user should see all other tool
+/// output before the prompt. `ask_user_question` is the canonical
+/// example.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionMode {
+    #[default]
+    Concurrent,
+    Sequential,
+}
+
 /// A tool defined by a Lua plugin. Sent from TUI to engine so the engine
 /// can include it in LLM tool definitions and proxy execution back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +49,8 @@ pub struct PluginToolDef {
     /// When set, the tool is only available in these modes.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub modes: Option<Vec<Mode>>,
+    #[serde(default)]
+    pub execution_mode: ToolExecutionMode,
 }
 
 /// Events emitted by the engine. The UI consumes these to update its display.

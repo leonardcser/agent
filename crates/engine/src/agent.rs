@@ -554,6 +554,10 @@ struct ToolExecutionPlan<'a> {
     sequential: Vec<usize>,
     /// Plugin tools awaiting execution by the TUI (request_id, call_id, start).
     pending_plugins: Vec<(u64, String, Instant)>,
+    /// Plugin tools that opted into sequential execution — deferred
+    /// until after the concurrent phase, then dispatched one at a time.
+    /// (tool_call, args, start)
+    sequential_plugins: Vec<(&'a protocol::ToolCall, HashMap<String, Value>, Instant)>,
 }
 
 /// Encapsulates the state of a single agent turn.
@@ -1097,10 +1101,11 @@ impl<'a> Turn<'a> {
             let mut plan = self.classify_tools(&tool_calls);
             let mut completed: Vec<Option<ToolResult>> =
                 (0..plan.slots.len()).map(|_| None).collect();
-            let (cancelled, deferred, plugin_results) =
+            let (cancelled, deferred, mut plugin_results) =
                 self.execute_concurrent(&mut plan, &mut completed).await;
             if !cancelled {
-                self.run_sequential(&plan, &mut completed).await;
+                let seq_plugin_results = self.run_sequential(&plan, &mut completed).await;
+                plugin_results.extend(seq_plugin_results);
             } else {
                 self.mark_unfinished_cancelled(&plan, &completed);
             }
@@ -1128,6 +1133,7 @@ impl<'a> Turn<'a> {
             pending_perms: Vec::new(),
             sequential: Vec::new(),
             pending_plugins: Vec::new(),
+            sequential_plugins: Vec::new(),
         };
 
         for tc in tool_calls {
@@ -1151,20 +1157,28 @@ impl<'a> Turn<'a> {
             let tool = match self.registry.get(&tc.function.name) {
                 Some(t) => t,
                 None => {
-                    if self
+                    if let Some(pt) = self
                         .plugin_tools
                         .iter()
-                        .any(|pt| pt.name == tc.function.name)
+                        .find(|pt| pt.name == tc.function.name)
                     {
-                        let request_id = next_request_id();
-                        self.emit(EngineEvent::ExecutePluginTool {
-                            request_id,
-                            call_id: tc.id.clone(),
-                            tool_name: tc.function.name.clone(),
-                            args: args.clone(),
-                        });
-                        plan.pending_plugins
-                            .push((request_id, tc.id.clone(), tool_start));
+                        match pt.execution_mode {
+                            protocol::ToolExecutionMode::Concurrent => {
+                                let request_id = next_request_id();
+                                self.emit(EngineEvent::ExecutePluginTool {
+                                    request_id,
+                                    call_id: tc.id.clone(),
+                                    tool_name: tc.function.name.clone(),
+                                    args: args.clone(),
+                                });
+                                plan.pending_plugins
+                                    .push((request_id, tc.id.clone(), tool_start));
+                            }
+                            protocol::ToolExecutionMode::Sequential => {
+                                plan.sequential_plugins
+                                    .push((tc, args.clone(), tool_start));
+                            }
+                        }
                         continue;
                     }
                     self.push_tool_result(
@@ -1418,11 +1432,40 @@ impl<'a> Turn<'a> {
         &mut self,
         plan: &ToolExecutionPlan<'_>,
         completed: &mut [Option<ToolResult>],
-    ) {
+    ) -> Vec<(String, String, bool)> {
         for &i in &plan.sequential {
             let result = self.ask_user(&plan.slots[i].args).await;
             completed[i] = Some(result);
         }
+
+        let mut plugin_results = Vec::new();
+        for (tc, args, start) in &plan.sequential_plugins {
+            if self.cancel.is_cancelled() {
+                break;
+            }
+            let request_id = next_request_id();
+            let _ = self.event_tx.send(EngineEvent::ExecutePluginTool {
+                request_id,
+                call_id: tc.id.clone(),
+                tool_name: tc.function.name.clone(),
+                args: args.clone(),
+            });
+            let Some((content, is_error)) = self.wait_for_plugin_result(request_id).await else {
+                break;
+            };
+            let elapsed_ms = Some(start.elapsed().as_millis() as u64);
+            let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                call_id: tc.id.clone(),
+                result: ToolOutcome {
+                    content: content.clone(),
+                    is_error,
+                    metadata: None,
+                },
+                elapsed_ms,
+            });
+            plugin_results.push((tc.id.clone(), content, is_error));
+        }
+        plugin_results
     }
 
     /// Phase 3: commit each tool's result to history, emit `ToolFinished`,
@@ -1608,6 +1651,52 @@ impl<'a> Turn<'a> {
         });
         let answer = self.wait_for_answer(request_id).await;
         ToolResult::ok(answer.unwrap_or_else(|| "no response".to_string()))
+    }
+
+    /// Wait for a PluginToolResult matching the given request_id.
+    /// Applies mid-wait mode/model/reasoning changes the same way
+    /// `wait_for_answer` does.
+    async fn wait_for_plugin_result(&mut self, request_id: u64) -> Option<(String, bool)> {
+        loop {
+            match self.cmd_rx.recv().await {
+                Some(UiCommand::PluginToolResult {
+                    request_id: id,
+                    content,
+                    is_error,
+                    ..
+                }) if id == request_id => return Some((content, is_error)),
+                Some(UiCommand::SetMode {
+                    mode,
+                    system_prompt,
+                    plugin_tools,
+                }) => {
+                    self.mode = mode;
+                    if let Some(p) = system_prompt {
+                        self.system_prompt = p;
+                    } else {
+                        self.regenerate_system_prompt();
+                    }
+                    if let Some(t) = plugin_tools {
+                        self.plugin_tools = t;
+                    }
+                }
+                Some(UiCommand::SetReasoningEffort { effort }) => self.reasoning_effort = effort,
+                Some(UiCommand::SetModel {
+                    model,
+                    api_base,
+                    api_key,
+                    provider_type,
+                }) => self.apply_model_change(model, api_base, api_key, provider_type),
+                Some(UiCommand::Cancel) => {
+                    self.cancel.cancel();
+                    return None;
+                }
+                None => return None,
+                Some(other) => {
+                    self.handle_background_cmd(other);
+                }
+            }
+        }
     }
 
     /// Wait for a QuestionAnswer matching the given request_id.

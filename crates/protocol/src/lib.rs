@@ -14,7 +14,7 @@ pub mod mode;
 pub mod usage;
 
 pub use content::{Content, ContentPart};
-pub use event::{AuxiliaryTask, EngineEvent, PluginToolDef, UiCommand};
+pub use event::{AuxiliaryTask, EngineEvent, PluginToolDef, ToolExecutionMode, UiCommand};
 pub use message::{FunctionCall, Message, Role, ToolCall, ToolOutcome};
 pub use mode::{Mode, ReasoningEffort};
 pub use usage::{
