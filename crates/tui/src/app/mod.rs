@@ -119,6 +119,15 @@ pub struct App {
     /// (it lives in the outer loop), so it flags here and the loop
     /// clears it on the next tick.
     pub(super) pending_agent_cancel: bool,
+    /// Set by `AppOp::ResolveQuestion` with `answer=None` to request
+    /// the outer loop clear `agent.pending` (queued tool calls) —
+    /// without dropping the turn itself. A lighter-touch signal than
+    /// `pending_agent_cancel`.
+    pub(super) pending_agent_clear_pending: bool,
+    /// Migrated float windows that block agent-event drain while
+    /// open. Replaces the legacy `DialogState::blocks_agent` path
+    /// for dialogs that no longer have a `DialogState` entry.
+    pub(super) blocking_wins: std::collections::HashSet<ui::WinId>,
     /// Ghost text prediction for the input field.
     pub input_prediction: Option<String>,
     /// Monotonic counter to discard stale predictions.
@@ -600,6 +609,8 @@ impl App {
             permissions,
             confirm_context: None,
             pending_agent_cancel: false,
+            pending_agent_clear_pending: false,
+            blocking_wins: std::collections::HashSet::new(),
             input_prediction: None,
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
@@ -772,6 +783,12 @@ impl App {
                 self.pending_agent_cancel = false;
                 if agent.is_some() {
                     agent = None;
+                }
+            }
+            if self.pending_agent_clear_pending {
+                self.pending_agent_clear_pending = false;
+                if let Some(ref mut a) = agent {
+                    a.pending.clear();
                 }
             }
             self.tick_focused_float();

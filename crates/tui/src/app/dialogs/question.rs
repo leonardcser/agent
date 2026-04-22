@@ -1,12 +1,11 @@
-//! `ask_user_question` dialog — migrated to the new `ui::Dialog` panel
-//! framework. A single `QuestionWidget` panels the tabs, question
-//! prompt, option list (single- or multi-select), and inline "Other"
-//! text area into one self-contained widget so state stays in one
-//! place. `Question` is the `DialogState` that resolves the request
-//! when the widget emits `submit` / `dismiss`.
+//! `ask_user_question` dialog. A single `QuestionWidget` panels the
+//! tabs, question prompt, option list (single- or multi-select), and
+//! inline "Other" text area into one self-contained widget so state
+//! stays in one place. Rust callbacks translate the widget's
+//! submit/dismiss events into `AppOp::ResolveQuestion`.
 
-use super::super::{App, TurnState};
-use super::{ActionResult, DialogState};
+use super::super::App;
+use crate::app::ops::AppOp;
 use crate::keymap::hints;
 use crate::render::{wrap_line, Question as QuestionDef};
 use crate::theme;
@@ -16,6 +15,7 @@ use ui::dialog::PanelWidget;
 use ui::grid::{GridSlice, Style};
 use ui::layout::Rect;
 use ui::text_input::TextInput;
+use ui::{Callback, CallbackResult, WinEvent};
 
 pub fn open(app: &mut App, questions: Vec<QuestionDef>, request_id: u64) {
     if questions.is_empty() {
@@ -23,7 +23,7 @@ pub fn open(app: &mut App, questions: Vec<QuestionDef>, request_id: u64) {
     }
     let dialog_config = app.builtin_dialog_config(None, vec![]);
     let widget = Box::new(QuestionWidget::new(questions));
-    let win_id = app.ui.dialog_open(
+    let Some(win_id) = app.ui.dialog_open(
         ui::FloatConfig {
             title: None,
             border: ui::Border::None,
@@ -32,46 +32,42 @@ pub fn open(app: &mut App, questions: Vec<QuestionDef>, request_id: u64) {
         },
         dialog_config,
         vec![ui::PanelSpec::widget(widget, ui::PanelHeight::Fill)],
+    ) else {
+        return;
+    };
+
+    // Question blocks the agent's event drain (it's a modal question
+    // the user must answer before the turn can continue).
+    app.blocking_wins.insert(win_id);
+
+    let ops = app.lua.ops_handle();
+    let ops_submit = ops.clone();
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Submit,
+        Callback::Rust(Box::new(move |ctx| {
+            let answer = ctx
+                .ui
+                .dialog_mut(ctx.win)
+                .and_then(|d| d.panel_widget_mut::<QuestionWidget>(0))
+                .map(|w| w.build_answer());
+            ops_submit.push(AppOp::ResolveQuestion { answer, request_id });
+            ops_submit.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
     );
-    if let Some(win_id) = win_id {
-        app.float_states
-            .insert(win_id, Box::new(Question { request_id }));
-    }
-}
-
-pub struct Question {
-    request_id: u64,
-}
-
-impl DialogState for Question {
-    fn blocks_agent(&self) -> bool {
-        true
-    }
-
-    fn on_action(
-        &mut self,
-        app: &mut App,
-        win: ui::WinId,
-        action: &str,
-        agent: &mut Option<TurnState>,
-    ) -> ActionResult {
-        match action {
-            "submit" => {
-                let answer = app
-                    .ui
-                    .dialog_mut(win)
-                    .and_then(|d| d.panel_widget_mut::<QuestionWidget>(0))
-                    .map(|w| w.build_answer());
-                app.resolve_question(answer, self.request_id, agent);
-                ActionResult::Close
-            }
-            "dismiss" => {
-                app.resolve_question(None, self.request_id, agent);
-                ActionResult::Close
-            }
-            _ => ActionResult::Pass,
-        }
-    }
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Dismiss,
+        Callback::Rust(Box::new(move |ctx| {
+            ops.push(AppOp::ResolveQuestion {
+                answer: None,
+                request_id,
+            });
+            ops.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
+    );
 }
 
 // ── Widget ─────────────────────────────────────────────────────────────

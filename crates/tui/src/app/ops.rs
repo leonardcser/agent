@@ -63,6 +63,13 @@ pub enum AppOp {
     },
     /// Load a saved session by id (Resume dialog).
     LoadSession(String),
+    /// Resolve an open `ask_user_question` dialog. `answer=None`
+    /// cancels (denial path clears queued tool calls via the
+    /// `pending_agent_clear_pending` flag).
+    ResolveQuestion {
+        answer: Option<String>,
+        request_id: u64,
+    },
     /// Background LLM call from a Lua plugin.
     BackgroundAsk {
         id: u64,

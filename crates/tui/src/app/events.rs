@@ -1704,6 +1704,7 @@ impl App {
         self.lua.remove_callback(id);
         self.lua.remove_callback(dismiss_id);
         self.float_states.remove(&win_id);
+        self.blocking_wins.remove(&win_id);
         self.ui.win_close(win_id);
     }
 
@@ -1794,16 +1795,35 @@ impl App {
         let Some(win) = self.ui.focused_float() else {
             return;
         };
-        let is_non_blocking = self
+        let blocked_via_state = self
             .float_states
             .get(&win)
-            .is_some_and(|s| !s.blocks_agent());
-        if is_non_blocking {
-            if let Some(mut state) = self.float_states.remove(&win) {
-                state.on_dismiss(self, win);
-            }
-            self.close_float(win);
+            .is_some_and(|s| s.blocks_agent());
+        let blocked_via_set = self.blocking_wins.contains(&win);
+        if blocked_via_state || blocked_via_set {
+            return;
         }
+
+        // Migrated dialogs: fire WinEvent::Dismiss so their callbacks
+        // run (e.g. Permissions syncs its edits before close).
+        if !self.float_states.contains_key(&win) {
+            let mut lua_invoke =
+                |_handle: ui::LuaHandle, _payload: &ui::Payload| -> Vec<String> { Vec::new() };
+            let _ = self.ui.dispatch_event(
+                win,
+                ui::WinEvent::Dismiss,
+                ui::Payload::None,
+                &mut lua_invoke,
+            );
+            self.apply_lua_ops();
+            return;
+        }
+
+        // Legacy DialogState path.
+        if let Some(mut state) = self.float_states.remove(&win) {
+            state.on_dismiss(self, win);
+        }
+        self.close_float(win);
     }
 
     /// True when the focused float dialog blocks agent-event drain
@@ -1812,6 +1832,9 @@ impl App {
         let Some(win) = self.ui.focused_float() else {
             return false;
         };
+        if self.blocking_wins.contains(&win) {
+            return true;
+        }
         self.float_states
             .get(&win)
             .is_some_and(|s| s.blocks_agent())
@@ -1960,6 +1983,13 @@ impl App {
                     workspace_rules,
                 } => {
                     self.sync_permissions(session_entries, workspace_rules);
+                }
+                crate::app::ops::AppOp::ResolveQuestion { answer, request_id } => {
+                    let was_cancel = answer.is_none();
+                    self.resolve_question(answer, request_id, &mut None);
+                    if was_cancel {
+                        self.pending_agent_clear_pending = true;
+                    }
                 }
                 crate::app::ops::AppOp::LoadSession(id) => {
                     if let Some(loaded) = crate::session::load(&id) {
