@@ -11,8 +11,7 @@ use super::blocks;
 use super::blocks::{gap_between, render_thinking_summary, thinking_summary, Element};
 use super::cache::{PersistedLayoutCache, RenderCache};
 use super::history::{
-    AgentBlockStatus, Block, BlockId, Status, Throbber, ToolOutputRef, ToolState, ToolStatus,
-    ViewState,
+    AgentBlockStatus, Block, BlockId, Status, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
 use super::transcript::Transcript;
 use super::transcript_buf::TranscriptProjection;
@@ -50,7 +49,6 @@ pub enum ContentVisualKind {
 use super::layout_out::{LayoutSink, SpanCollector};
 use super::prompt::PromptState;
 use super::selection::wrap_and_locate_cursor;
-use super::working::WorkingState;
 use super::{emit_newlines, Frame, StdioBackend, TerminalBackend, SPINNER_FRAMES};
 use crate::input::InputState;
 
@@ -63,7 +61,6 @@ pub struct Screen {
     parser: super::stream_parser::StreamParser,
     prompt: PromptState,
     dirty: bool,
-    working: WorkingState,
     /// Plain-text snapshot of each visible row (top to bottom) captured
     /// during `draw_viewport_frame`. Used by the content pane's motion
     /// handlers and yank to reason over what the user actually sees.
@@ -106,7 +103,6 @@ impl Screen {
             parser: super::stream_parser::StreamParser::new(),
             prompt: PromptState::new(),
             dirty: true,
-            working: WorkingState::new(),
             last_viewport_text: Vec::new(),
             last_viewport_lines: Vec::new(),
             transcript_gutters: crate::window::WindowGutters {
@@ -354,14 +350,6 @@ impl Screen {
         self.last_transcript_viewport = vp;
     }
 
-    pub(crate) fn spinner_char(&self) -> Option<&'static str> {
-        self.working.spinner_char()
-    }
-
-    pub(crate) fn throbber_spans(&self, show_tps: bool) -> Vec<super::status::BarSpan> {
-        self.working.throbber_spans(show_tps)
-    }
-
     pub(crate) fn mark_clean(&mut self) {
         self.dirty = false;
     }
@@ -562,34 +550,6 @@ impl Screen {
         snap.copy_byte_range(start, end)
     }
 
-    pub fn working_throbber(&self) -> Option<Throbber> {
-        self.working.throbber
-    }
-
-    pub fn set_throbber(&mut self, state: Throbber) {
-        self.working.set_throbber(state);
-        self.dirty = true;
-    }
-
-    pub fn record_tokens_per_sec(&mut self, tps: f64) {
-        self.working.record_tokens_per_sec(tps);
-        self.dirty = true;
-    }
-
-    pub fn turn_meta(&self) -> Option<protocol::TurnMeta> {
-        self.working.turn_meta()
-    }
-
-    pub fn restore_from_turn_meta(&mut self, meta: &protocol::TurnMeta) {
-        self.working.restore_from_turn_meta(meta);
-        self.dirty = true;
-    }
-
-    pub fn clear_throbber(&mut self) {
-        self.working.clear();
-        self.dirty = true;
-    }
-
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
@@ -701,7 +661,6 @@ impl Screen {
         self.transcript.history.clear();
         self.parser.clear();
         self.prompt = PromptState::new();
-        self.working.clear();
 
         let mut frame = Frame::begin(&*self.backend);
         let _ = frame.queue(cursor::MoveTo(0, 0));
@@ -862,18 +821,22 @@ impl Screen {
         self.redraw();
     }
 
-    /// Update spinner animation state. Call before rendering.
-    pub fn update_spinner(&mut self) {
-        if let Some(elapsed) = self.working.elapsed() {
+    /// Update spinner animation state. Call before rendering. Returns
+    /// `true` if the spinner frame changed and the caller should
+    /// redraw.
+    pub fn update_spinner(&mut self, working: &mut super::working::WorkingState) -> bool {
+        let mut changed = false;
+        if let Some(elapsed) = working.elapsed() {
             let frame = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
-            if frame != self.working.last_spinner_frame {
-                self.working.last_spinner_frame = frame;
-                self.dirty = true;
+            if frame != working.last_spinner_frame {
+                working.last_spinner_frame = frame;
+                changed = true;
             }
         }
         // Refresh live elapsed on any streaming agent blocks so their
         // duration ticks up without needing an explicit engine event.
         self.parser.tick_active_agents(&mut self.transcript.history);
+        changed
     }
 
     /// Returns true when there is content or prompt work to render.

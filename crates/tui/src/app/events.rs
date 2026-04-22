@@ -348,9 +348,12 @@ impl App {
                     let restore_mode = t.esc_vim_mode.take();
 
                     // Cancel in-flight compaction on double-Esc.
-                    if self.screen.working_throbber() == Some(render::Throbber::Compacting) {
+                    if self.working.throbber == Some(render::Throbber::Compacting) {
                         self.compact_epoch += 1;
-                        self.screen.set_throbber(render::Throbber::Interrupted);
+                        {
+                            self.working.set_throbber(render::Throbber::Interrupted);
+                            self.screen.mark_dirty();
+                        };
                         self.notify("compaction cancelled".into());
                         if restore_mode == Some(vim::ViMode::Insert) {
                             self.input.set_vim_mode(vim::ViMode::Insert);
@@ -861,7 +864,7 @@ impl App {
         let mut spans: Vec<StatusSpan> = Vec::with_capacity(16);
 
         // Slug pill: spinner + label.
-        let is_compacting = self.screen.working_throbber() == Some(render::Throbber::Compacting);
+        let is_compacting = self.working.throbber == Some(render::Throbber::Compacting);
         let pill_bg = if is_compacting {
             Color::White
         } else {
@@ -873,7 +876,7 @@ impl App {
             ..render::StyleState::default()
         };
 
-        let spinner_char = self.screen.spinner_char();
+        let spinner_char = self.working.spinner_char();
         if let Some(sp) = spinner_char {
             spans.push(StatusSpan {
                 text: format!(" {sp} "),
@@ -965,9 +968,9 @@ impl App {
         });
 
         // Throbber spans (timer, tok/s, etc.).
-        let throbber_spans = self.screen.throbber_spans(self.settings.show_tps);
+        let throbber_spans = self.working.throbber_spans(self.settings.show_tps);
         let is_active = matches!(
-            self.screen.working_throbber(),
+            self.working.throbber,
             Some(render::Throbber::Working)
                 | Some(render::Throbber::Compacting)
                 | Some(render::Throbber::Retrying { .. })
@@ -1083,7 +1086,9 @@ impl App {
     /// Render a full-mode frame using the compositor pipeline.
     pub(super) fn render_normal(&mut self, agent_running: bool) {
         let _perf = crate::perf::begin("app:tick_compositor");
-        self.screen.update_spinner();
+        if self.screen.update_spinner(&mut self.working) {
+            self.screen.mark_dirty();
+        }
         if !self.screen.needs_draw(false, self.settings.show_thinking) {
             return;
         }

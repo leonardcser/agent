@@ -5,7 +5,8 @@ use crossterm::style::Color;
 use protocol::TurnMeta;
 use std::time::{Duration, Instant};
 
-pub(super) struct WorkingState {
+#[derive(Default)]
+pub struct WorkingState {
     pub since: Option<Instant>,
     pub final_elapsed: Option<Duration>,
     pub throbber: Option<Throbber>,
@@ -88,7 +89,7 @@ impl WorkingState {
     }
 
     /// Elapsed time since the throbber started.
-    pub(super) fn elapsed(&self) -> Option<Duration> {
+    pub fn elapsed(&self) -> Option<Duration> {
         Some(self.since?.elapsed())
     }
 
@@ -112,7 +113,7 @@ impl WorkingState {
         }
     }
 
-    pub fn throbber_spans(&self, show_tps: bool) -> Vec<BarSpan> {
+    pub(crate) fn throbber_spans(&self, show_tps: bool) -> Vec<BarSpan> {
         let Some(state) = self.throbber else {
             return vec![];
         };

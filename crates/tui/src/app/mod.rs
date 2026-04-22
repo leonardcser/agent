@@ -118,6 +118,10 @@ pub struct App {
     /// when the terminal isn't focused, so input from other apps
     /// doesn't draw a stale cursor in our window.
     pub term_focused: bool,
+    /// Spinner + throbber state (active timer, TPS samples, elapsed).
+    /// Consulted by the status bar each frame; `set_throbber` is the
+    /// single write path, mirrored from engine lifecycle events.
+    pub working: render::working::WorkingState,
     pub settings: state::ResolvedSettings,
     pub multi_agent: bool,
     /// Human-readable name for this agent.
@@ -596,6 +600,7 @@ impl App {
             notification: None,
             cmdline: render::CmdlineState::new(),
             term_focused: true,
+            working: render::working::WorkingState::new(),
             settings,
             multi_agent,
             agent_id: String::new(),

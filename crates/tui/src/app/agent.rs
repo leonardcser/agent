@@ -55,7 +55,10 @@ impl App {
     /// current app state. Callers own any history/session prep before this.
     fn dispatch_turn(&mut self, content: Content) -> TurnState {
         let Some(api_key) = self.resolve_api_key() else {
-            self.screen.set_throbber(render::Throbber::Done);
+            {
+                self.working.set_throbber(render::Throbber::Done);
+                self.screen.mark_dirty();
+            };
             return TurnState {
                 turn_id: 0,
                 pending: Vec::new(),
@@ -63,7 +66,10 @@ impl App {
             };
         };
 
-        self.screen.set_throbber(render::Throbber::Working);
+        {
+            self.working.set_throbber(render::Throbber::Working);
+            self.screen.mark_dirty();
+        };
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
 
         self.snapshot_engine_context(true);
@@ -237,7 +243,10 @@ impl App {
             self.session.first_user_message = Some(display.clone());
         }
         self.maybe_generate_title(Some(&evaluated));
-        self.screen.set_throbber(render::Throbber::Working);
+        {
+            self.working.set_throbber(render::Throbber::Working);
+            self.screen.mark_dirty();
+        };
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
@@ -272,7 +281,10 @@ impl App {
     pub(super) fn cancel_agent(&mut self) {
         self.sleep_inhibit.release();
         self.engine.send(UiCommand::Cancel);
-        self.screen.set_throbber(render::Throbber::Interrupted);
+        {
+            self.working.set_throbber(render::Throbber::Interrupted);
+            self.screen.mark_dirty();
+        };
         self.queued_messages.clear();
     }
 
@@ -311,7 +323,10 @@ impl App {
         // synchronized update, avoiding a flash where the prompt disappears.
         self.screen.finalize_active_tools();
         if cancelled {
-            self.screen.set_throbber(render::Throbber::Interrupted);
+            {
+                self.working.set_throbber(render::Throbber::Interrupted);
+                self.screen.mark_dirty();
+            };
             // If a title/slug generation was in-flight, discard it so stale
             // TitleGenerated events don't update the session. But if a slug
             // was already set before this turn, keep it.
@@ -331,13 +346,16 @@ impl App {
                 crate::api::buf::replace(&mut self.input, combined, None);
             }
         } else {
-            self.screen.set_throbber(render::Throbber::Done);
+            {
+                self.working.set_throbber(render::Throbber::Done);
+                self.screen.mark_dirty();
+            };
             self.input_prediction = None;
         }
         let meta = self
             .pending_turn_meta
             .take()
-            .or_else(|| self.screen.turn_meta());
+            .or_else(|| self.working.turn_meta());
         if let Some(mut meta) = meta {
             for (agent_id, data) in self.pending_agent_blocks.drain(..) {
                 meta.agent_blocks.insert(agent_id, data);
@@ -374,9 +392,12 @@ impl App {
                         }
                     }
                     if let Some(tps) = tokens_per_sec {
-                        self.screen.record_tokens_per_sec(tps);
+                        self.working.record_tokens_per_sec(tps);
                     }
-                    self.screen.set_throbber(render::Throbber::Working);
+                    {
+                        self.working.set_throbber(render::Throbber::Working);
+                        self.screen.mark_dirty();
+                    };
                 }
                 let cost = cost_usd.unwrap_or(0.0);
                 self.session_cost_usd += cost;
@@ -576,10 +597,11 @@ impl App {
                 SessionControl::NeedsAskQuestion { args, request_id }
             }
             EngineEvent::Retrying { delay_ms, attempt } => {
-                self.screen.set_throbber(render::Throbber::Retrying {
+                self.working.set_throbber(render::Throbber::Retrying {
                     delay: Duration::from_millis(delay_ms),
                     attempt,
                 });
+                self.screen.mark_dirty();
                 SessionControl::Continue
             }
             EngineEvent::ProcessCompleted { id, exit_code } => {
@@ -588,7 +610,10 @@ impl App {
             }
             EngineEvent::CompactionComplete { messages } => {
                 if self.pending_compact_epoch != self.compact_epoch {
-                    self.screen.set_throbber(render::Throbber::Done);
+                    {
+                        self.working.set_throbber(render::Throbber::Done);
+                        self.screen.mark_dirty();
+                    };
                     return SessionControl::Continue;
                 }
                 self.apply_compaction(messages);
@@ -635,7 +660,10 @@ impl App {
                 SessionControl::Done
             }
             EngineEvent::TurnError { message } => {
-                self.screen.set_throbber(render::Throbber::Done);
+                {
+                    self.working.set_throbber(render::Throbber::Done);
+                    self.screen.mark_dirty();
+                };
                 self.notify_error(message);
                 SessionControl::Done
             }
@@ -739,7 +767,7 @@ impl App {
             }
             EngineEvent::CompactionComplete { messages } => {
                 if self.pending_compact_epoch != self.compact_epoch {
-                    self.screen.set_throbber(render::Throbber::Done);
+                    { self.working.set_throbber(render::Throbber::Done); self.screen.mark_dirty(); };
                     return;
                 }
                 self.apply_compaction(messages);
@@ -763,7 +791,7 @@ impl App {
                 self.handle_process_completed(id, exit_code);
             }
             EngineEvent::TurnError { message } => {
-                self.screen.set_throbber(render::Throbber::Done);
+                { self.working.set_throbber(render::Throbber::Done); self.screen.mark_dirty(); };
                 self.notify_error(message);
             }
             EngineEvent::AgentExited {

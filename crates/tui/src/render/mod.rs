@@ -22,7 +22,7 @@ pub(crate) mod transcript;
 pub(crate) mod transcript_buf;
 mod viewport;
 pub(crate) mod window_view;
-mod working;
+pub mod working;
 
 pub use cmdline::CmdlineState;
 pub(crate) use layout::HitRegion;

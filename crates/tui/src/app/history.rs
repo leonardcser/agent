@@ -88,6 +88,7 @@ impl App {
         self.queued_messages.clear();
         self.context_tokens = None;
         self.task_label = None;
+        self.working.clear();
         self.screen.clear();
         self.app_focus = crate::app::AppFocus::Prompt;
         self.input.clear();
@@ -403,7 +404,7 @@ impl App {
         }
 
         if let Some((_, meta)) = self.turn_metas.last() {
-            self.screen.restore_from_turn_meta(meta);
+            self.working.restore_from_turn_meta(meta);
         }
 
         // Reattach the persisted layout cache, if any. Must happen *after*
@@ -517,12 +518,15 @@ impl App {
     }
 
     pub fn is_compacting(&self) -> bool {
-        self.screen.working_throbber() == Some(render::Throbber::Compacting)
+        self.working.throbber == Some(render::Throbber::Compacting)
     }
 
     pub fn compact_history(&mut self, instructions: Option<String>) {
         self.pending_compact_epoch = self.compact_epoch;
-        self.screen.set_throbber(render::Throbber::Compacting);
+        {
+            self.working.set_throbber(render::Throbber::Compacting);
+            self.screen.mark_dirty();
+        };
         self.engine.send(UiCommand::Compact {
             history: self.history.clone(),
             instructions,
@@ -531,7 +535,10 @@ impl App {
 
     pub(super) fn apply_compaction(&mut self, messages: Vec<protocol::Message>) {
         if messages.is_empty() {
-            self.screen.set_throbber(render::Throbber::Done);
+            {
+                self.working.set_throbber(render::Throbber::Done);
+                self.screen.mark_dirty();
+            };
             return;
         }
 
@@ -547,7 +554,10 @@ impl App {
         self.context_tokens = None;
         self.screen.mark_dirty();
         self.save_session();
-        self.screen.set_throbber(render::Throbber::Done);
+        {
+            self.working.set_throbber(render::Throbber::Done);
+            self.screen.mark_dirty();
+        };
         self.transcript_window.scroll_top = u16::MAX;
     }
 
