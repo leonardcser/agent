@@ -131,14 +131,29 @@ entirely. Only then return to B2/B4/B6/B7.
   `prev_dialog_row`, `CursorOwner::Dialog`, `WorkingState::{pause,
   resume, paused_at, is_paused}`). Also dropped `DialogLayout`,
   `HitRegion::Dialog`, `LayoutInput::{dialog_height, constrain_dialog}`,
-  `FramePrompt::mode`. Net −870 lines. Status bar is now rendered
-  exclusively by the compositor `StatusBar` layer; the stale-pill
-  class of bug (B1) is impossible to recreate because the backing
-  cache field no longer exists.
+  `FramePrompt::mode`. Status bar is now rendered exclusively by the
+  compositor `StatusBar` layer; the stale-pill class of bug (B1) is
+  impossible to recreate because the backing cache field no longer
+  exists.
 
-- Phases 2–7 remaining: notification layer, queued-messages layer,
-  stash layer, prompt input window, cursor consolidation, delete
-  `Screen`.
+- Legacy draw path deletion ✅ commits `b22ceef`, `53d0ebd`. Removed
+  the entire `draw_prompt → draw_viewport_frame → draw_prompt_sections`
+  chain (startup-only). Cascading dead code swept: `render_notification`,
+  `render_stash`, `render_queued`, `paint_transcript`,
+  `paint_transcript_cursor`, `paint_prompt_region`, `paint_visual_range`,
+  `paint_completer_float`, entire `completions.rs` module,
+  `BlockHistory::paint_viewport`, `paint_line`, `apply_style`, `PAD_SPACES`,
+  `render_status_spans`, `draw_bar`, `Scrollbar::paint_column`,
+  `render_styled_chars`, `LayoutState::{push_float, floats, term_width, gap}`,
+  `HitRegion::Completer`, `PromptState::prev_prompt_ui_rows`, the
+  legacy test harness (`tests/harness/`), legacy status-bar tests.
+  `RenderOut::{init_cursor, move_to}` retired. Cumulative Phase 1+2
+  delta: **−3147 lines** across 4 commits.
+
+- Remaining phases: notification / queued / stash become their own
+  compositor layers instead of prompt-WindowView rows; prompt input
+  window (task #11); cursor consolidation (B8); final `Screen`
+  deletion (C1 / task #15).
 
 The `last_mode`
 cache was the canonical example: fixing it in isolation was
