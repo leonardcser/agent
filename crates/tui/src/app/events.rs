@@ -1157,6 +1157,7 @@ impl App {
             self.transcript_window.cursor_line,
             self.transcript_window.cursor_col,
             has_transcript_cursor,
+            Some(&tdata.viewport),
         );
         self.transcript_window.cursor_line = tcursor.clamped_line;
         self.transcript_window.cursor_col = tcursor.clamped_col;
@@ -1168,8 +1169,7 @@ impl App {
             tdata.clamped_scroll,
             ui::ScrollbarState::new(tdata.scrollbar_col + t_pad, tdata.total_rows, viewport_rows),
         );
-        self.screen
-            .set_transcript_viewport(Some(transcript_viewport));
+        self.transcript_viewport = Some(transcript_viewport);
 
         // Sync transcript WindowView from the projected buffer.
         if let Some(tv) = self
@@ -2225,8 +2225,7 @@ impl App {
                 }
                 self.drag_on_scrollbar = None;
                 match self
-                    .screen
-                    .transcript_viewport()
+                    .transcript_viewport
                     .and_then(|r| r.hit(me.row, me.column))
                 {
                     Some(render::ViewportHit::Scrollbar) => {
@@ -2374,7 +2373,7 @@ impl App {
         }
         match self.app_focus {
             crate::app::AppFocus::Content => {
-                if let Some(region) = self.screen.transcript_viewport() {
+                if let Some(region) = self.transcript_viewport {
                     let rel_row = row
                         .saturating_sub(region.rect.top)
                         .min(region.rect.height.saturating_sub(1));
@@ -2578,7 +2577,7 @@ impl App {
     /// Lookup the currently-painted viewport for a pane.
     fn viewport_for(&self, target: crate::app::AppFocus) -> Option<render::region::Viewport> {
         match target {
-            crate::app::AppFocus::Content => self.screen.transcript_viewport(),
+            crate::app::AppFocus::Content => self.transcript_viewport,
             crate::app::AppFocus::Prompt => self.prompt_viewport,
         }
     }
@@ -2597,7 +2596,7 @@ impl App {
             self.screen.mark_dirty();
             return;
         }
-        let Some(region) = self.screen.transcript_viewport() else {
+        let Some(region) = self.transcript_viewport else {
             return;
         };
         let pad_left = self.transcript_gutters.pad_left;

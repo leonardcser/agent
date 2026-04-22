@@ -91,6 +91,7 @@ impl App {
         self.working.clear();
         self.prompt_input_scroll = 0;
         self.prompt_viewport = None;
+        self.transcript_viewport = None;
         self.screen.clear();
         self.app_focus = crate::app::AppFocus::Prompt;
         self.input.clear();

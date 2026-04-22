@@ -137,6 +137,10 @@ pub struct App {
     /// paint. Used by scrollbar click/drag and input-focus mouse
     /// routing.
     pub(crate) prompt_viewport: Option<render::region::Viewport>,
+    /// Buffer viewport for the transcript window, recorded after each
+    /// render. Used by mouse hit-testing, transcript cursor positioning,
+    /// and focus-mouse routing.
+    pub(crate) transcript_viewport: Option<render::region::Viewport>,
     pub settings: state::ResolvedSettings,
     pub multi_agent: bool,
     /// Human-readable name for this agent.
@@ -624,6 +628,7 @@ impl App {
             }),
             prompt_input_scroll: 0,
             prompt_viewport: None,
+            transcript_viewport: None,
             settings,
             multi_agent,
             agent_id: String::new(),

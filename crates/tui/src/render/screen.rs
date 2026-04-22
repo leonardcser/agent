@@ -20,6 +20,9 @@ pub(crate) struct TranscriptData {
     pub clamped_scroll: u16,
     pub total_rows: u16,
     pub scrollbar_col: u16,
+    /// Inner viewport rect (0-based, pre-padding). Caller composes it
+    /// with `transcript_gutters.pad_left` when assembling the WindowView.
+    pub viewport: super::region::Viewport,
 }
 
 pub(crate) struct TranscriptCursor {
@@ -64,7 +67,6 @@ pub struct Screen {
     /// handlers and yank to reason over what the user actually sees.
     last_viewport_text: Vec<String>,
     last_viewport_lines: Vec<super::display::DisplayLine>,
-    last_transcript_viewport: Option<super::region::Viewport>,
     /// Buffer-backed transcript projection — blocks projected at event time.
     pub(crate) transcript_projection: TranscriptProjection,
     /// Terminal I/O backend (real terminal or test buffer).
@@ -96,7 +98,6 @@ impl Screen {
             dirty: true,
             last_viewport_text: Vec::new(),
             last_viewport_lines: Vec::new(),
-            last_transcript_viewport: None,
             transcript_projection: TranscriptProjection::new(ui::buffer::Buffer::new(
                 ui::BufId(0),
                 ui::buffer::BufCreateOpts {
@@ -304,10 +305,6 @@ impl Screen {
         self.dirty = true;
     }
 
-    pub(crate) fn set_transcript_viewport(&mut self, vp: Option<super::region::Viewport>) {
-        self.last_transcript_viewport = vp;
-    }
-
     pub(crate) fn mark_clean(&mut self) {
         self.dirty = false;
     }
@@ -321,10 +318,6 @@ impl Screen {
         has_notification: bool,
     ) -> u16 {
         self.measure_prompt_height(state, width, queued, prediction, has_notification)
-    }
-
-    pub(crate) fn transcript_viewport(&self) -> Option<super::region::Viewport> {
-        self.last_transcript_viewport
     }
 
     /// Plain-text rendering of the last-painted viewport rows (top to
@@ -836,18 +829,19 @@ impl Screen {
             .transcript_projection
             .viewport_display_lines(clamped_scroll, viewport_rows);
 
-        self.last_transcript_viewport = Some(super::region::Viewport::new(
+        let viewport = super::region::Viewport::new(
             ui::Rect::new(0, 0, tw as u16, viewport_rows),
             tw as u16,
             total_rows,
             clamped_scroll,
             ui::ScrollbarState::new(scrollbar_col, total_rows, viewport_rows),
-        ));
+        );
 
         TranscriptData {
             clamped_scroll,
             total_rows,
             scrollbar_col,
+            viewport,
         }
     }
 
@@ -859,6 +853,7 @@ impl Screen {
         history_cursor_line: u16,
         history_cursor_col: u16,
         transcript_owns_cursor: bool,
+        viewport: Option<&super::region::Viewport>,
     ) -> TranscriptCursor {
         let gutters = crate::window::TRANSCRIPT_GUTTERS;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
@@ -871,9 +866,7 @@ impl Screen {
             };
         }
 
-        let visible = self
-            .last_transcript_viewport
-            .as_ref()
+        let visible = viewport
             .map(|v| v.total_rows.min(viewport_rows))
             .unwrap_or(viewport_rows);
         let max_line = visible.saturating_sub(1);
