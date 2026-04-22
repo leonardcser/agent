@@ -212,6 +212,19 @@ B7. **Scrollbar is read-only.** The scrollbar rendered inside a
     mouse-routing-to-float needs to land first so the scrollbar
     even sees the click.
 
+B8. **Cursor is missing / inconsistent across dialogs.** The
+    input cursor is invisible in some focused panels and behaves
+    differently between widgets (TextInput in Confirm's Reason
+    panel vs. search field in Resume vs. prompt). Unify: a single
+    `CursorController` that (a) every focusable widget registers
+    its cursor cell with when it becomes focused, (b) the
+    compositor reads at flush time to emit one terminal-cursor
+    position + style per frame. No widget emits cursor bytes of
+    its own. Covers hard-block cursor for input panels, hidden
+    cursor for content-only panels, and removes the three parallel
+    cursor paths (prompt soft-cursor, TextInput DECSCUSR, vim
+    cursor).
+
 B3. **Prompt + status bar fade out over time.** The real cause is
     that the migration to the compositor-based diff renderer is
     incomplete: the transcript and floats are drawn via the
@@ -247,19 +260,37 @@ A1. ✅ **Global chord layer in `dispatch_terminal_event`** (commit
 A2. **Replace `lua_dialog.rs` with direct UI primitives in Lua.**
     The current shape (`Lua table {title, panels[{kind,...}]}` →
     Rust parser → `PanelSpec[]`) hard-codes a schema the plugin
-    author can't extend. Replace with:
-    - `smelt.api.ui.buf_create`, `buf_set_lines`, `buf_mut`
-    - `smelt.api.ui.win_open_float` (returns win id) / `win_close`
-    - `smelt.api.ui.dialog_open(panels, cfg)` where panels carry
-      opaque widget-handle userdata
-    - Widget constructors: `smelt.api.ui.option_list(items)`,
-      `text_input(opts)` — return userdata with `text()` / `cursor()`
-      / etc.
-    Then ship a thin Lua-side `smelt.dialog.open({...})` helper in
+    author can't extend. Worse, the *semantics* are also baked
+    in: options in `plan_mode.lua` carry `action = "approve"` /
+    `action = "deny"` strings that `resolve_confirm` pattern-matches
+    on. The plugin author can't express "approve *and* queue a
+    follow-up prompt", "deny but leave the turn running", or
+    "approve, then set a session rule only if X" without Rust-side
+    enum changes.
+
+    Replace with:
+    - **UI primitives:** `smelt.api.ui.buf_create`, `buf_set_lines`,
+      `buf_mut`; `win_open_float` / `win_close`; `dialog_open(panels,
+      cfg)` with opaque widget userdata.
+    - **Widget constructors:** `option_list(items)`, `text_input(opts)`
+      — return userdata with `text()` / `cursor()` / `selected()`.
+    - **Callback-based resolution:** no `action = "approve"` strings.
+      Each option is `{label = "...", on_select = function(ctx) ...
+      end}`. The callback receives a `ctx` with imperative primitives:
+      `ctx.approve_tool()`, `ctx.deny_tool()`, `ctx.add_rule{...}`,
+      `ctx.cancel_turn()`, `ctx.queue_message(text)`, `ctx.close()`.
+      Plugins compose these freely. Approve-and-continue,
+      deny-and-stop-turn, approve-and-open-another-dialog all fall
+      out without new Rust enums.
+
+    Ship a thin Lua-side `smelt.dialog.open({...})` helper in
     `runtime/lua/smelt/dialog.lua` that composes the primitives for
-    the 80% case. Delete `crates/tui/src/app/dialogs/lua_dialog.rs`.
-    The abstraction migrates from Rust (hard-coded enum of panel
-    kinds) to Lua (plugin-authored and forkable).
+    the 80% case. Delete `crates/tui/src/app/dialogs/lua_dialog.rs`
+    and the `ConfirmChoice` / action-string enums. The abstraction
+    migrates from Rust (hard-coded enum of panel kinds + actions)
+    to Lua (plugin-authored and forkable). This subsumes A4
+    (narrow App→dialog surface) — the `ctx` table *is* that narrow
+    surface, just exposed to Lua.
 
 A3. **Move `confirm_context` into the Confirm dialog state.**
     Currently `App::confirm_context: Option<ConfirmContext>` is
