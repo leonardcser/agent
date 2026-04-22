@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use score::{query_match_score, split_words};
 
 pub mod command;
@@ -7,12 +5,6 @@ pub mod file;
 pub mod history;
 pub mod pickers;
 mod score;
-
-static MULTI_AGENT_ENABLED: AtomicBool = AtomicBool::new(false);
-
-pub fn set_multi_agent(enabled: bool) {
-    MULTI_AGENT_ENABLED.store(enabled, Ordering::Relaxed);
-}
 
 #[derive(Clone, Default)]
 pub struct CompletionItem {

@@ -729,27 +729,33 @@ No new field on `InputState`, no per-tick snapshot sync, no
 `Arc<LuaShared>` leaking into the completer — Lua commands look
 exactly like any other command source.
 
-**F1.5b — collapse to one registry.** Next, when we want to delete
-duplication rather than parallel sources:
+**F1.5b — Rust command registry (shipped 2026-04-23).** Deleted
+the 17-entry `command_items()` slice in `completer/command.rs` and
+the 100-line `match` in `App::handle_command`. Replaced with a
+single `RUST_COMMANDS: &[RustCommand]` table in `app/commands.rs`
+holding `{ name, desc: Option<&str>, handler: fn(&mut App,
+Option<String>) -> CommandAction }` — each former match arm is now
+a top-level `cmd_*` function. The completer reads from the table
+via `rust_command_items()` (visible entries only); dispatch is
+`RUST_COMMANDS.iter().find(|c| c.name == name).map(|c|
+(c.handler)(app, arg))`. Hidden aliases (`/q`, `/qa`, `/wq`,
+`/wqa`) dispatch but don't show in completion. Dropped
+`permissions` + `agents` from the Rust list entirely (both own
+their own Lua-plugin completer entries). Killed the dead
+`MULTI_AGENT_ENABLED` static + `set_multi_agent` setter.
 
-- At startup, register every Rust built-in (`/quit`, `/clear`,
-  `/compact`, `/resume`, `/vim`, …) into the same registry with a
-  `Callback::Rust` handler. The `handle_command` match keeps the
-  bodies; registration just puts the *name + description + callback
-  id* in the registry.
-- Fold `builtin_commands::list()` (markdown templates) and
-  `custom_commands::list()` (user `.md` files) into the same
-  registry at load time — they're registered, not hardcoded lists.
-- Delete `command_items()`. `Completer::commands(anchor)` reads the
-  registry only.
+Markdown builtin/custom commands still load through their own
+`resolve()` path (`builtin_commands::list` / `custom_commands::list`
+merge into the completer in the same function, but dispatch routes
+through `begin_custom_command_turn` rather than a handler fn).
+Folding them into one registry would require unifying the two
+dispatch shapes (handler fn vs. "evaluate markdown body + start
+turn") — defer until there's a concrete consumer.
 
-Unblocks F2 — once `/model` etc. are Lua plugins, they appear in
-the completer the same way `/pick-test` does, with zero extra
-wiring.
-
-Net (F1.5b): deletes `command_items()` (~25 LOC) + collapses
-duplicate source walks (~30 LOC). Adds ~40 LOC registry-driven
-registration at startup.
+Net: −60 Rust LOC, +110 Rust LOC for the table boilerplate (could
+be tightened with a macro later). The win is not LOC — it's that
+the completer and dispatcher now read from **one source of truth**,
+and a new Rust command is one row instead of two match arms.
 
 **F2 · Tier 1 sweep — no new Rust APIs needed** (~650 Rust LOC
 replaced with ~200 Lua):
@@ -1552,8 +1558,24 @@ coherent arc because splitting them left two render engines coexisting.
   `/fuzzy-test` dispatches to the Lua handler instead of being sent
   to the agent as chat. No new field on `InputState`, no per-tick
   sync — mirrors the existing `custom_commands::list()` /
-  `builtin_commands::list()` pattern. F1.5b (collapse to single
-  registry) remains pending.
+  `builtin_commands::list()` pattern.
+- **2026-04-23** — Phase F1.5b shipped. Deleted the 17-entry
+  hardcoded `command_items()` slice in `completer/command.rs` and
+  the 100-line `match` in `App::handle_command`. Replaced with a
+  `RUST_COMMANDS: &[RustCommand { name, desc, handler }]` table in
+  `app/commands.rs` — each former match arm is a top-level
+  `cmd_*` fn; completer reads visible entries via
+  `rust_command_items()`; dispatch is table lookup. Hidden aliases
+  (`/q`, `/qa`, `/wq`, `/wqa`) dispatch but don't surface in
+  completion via `desc: None`. Dropped the stale `permissions` +
+  `agents` hardcoded entries (both are Lua plugins now) and the
+  dead `MULTI_AGENT_ENABLED` static + `set_multi_agent` setter.
+  Rust and completer now read from one source of truth; a new Rust
+  command is one table row instead of two parallel edits. Markdown
+  builtin/custom still load through `resolve()` + `begin_custom_command_turn`
+  — folding them into the same handler-fn registry would require
+  unifying two dispatch shapes (fn call vs. "evaluate markdown body
+  + start agent turn"); deferred until there's a concrete consumer.
 - **2026-04-22** — Phase F3 shipped. Exposed
   `smelt.api.session.{list, load, delete}`,
   `smelt.api.agent.{list, kill, peek}`,

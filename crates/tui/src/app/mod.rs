@@ -470,7 +470,6 @@ impl App {
         } else {
             reasoning_effort
         };
-        crate::completer::set_multi_agent(multi_agent);
 
         let cwd = std::env::current_dir()
             .ok()

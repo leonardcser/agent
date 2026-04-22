@@ -1,15 +1,12 @@
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
 
-use super::{Completer, CompleterKind, CompletionItem, MULTI_AGENT_ENABLED};
+use super::{Completer, CompleterKind, CompletionItem};
 
 impl Completer {
     pub fn is_command(s: &str) -> bool {
         let base = s.split_whitespace().next().unwrap_or(s);
         let slash_name = base.strip_prefix('/').unwrap_or("");
-        Self::command_items()
-            .iter()
-            .any(|(label, _)| *label == slash_name)
+        crate::app::commands::is_rust_command(slash_name)
             || crate::custom_commands::is_custom_command(s)
             || crate::lua::is_lua_command(s)
     }
@@ -44,38 +41,9 @@ impl Completer {
         }
     }
 
-    /// Built-in commands whose dispatch lives in `handle_command`.
-    /// Entries owned by Lua plugins (`btw`, `export`, `help`, `ps`,
-    /// `rewind`, `yank-block`) are *not* listed here — their metadata
-    /// comes from `crate::lua::list_commands()`.
-    fn command_items() -> &'static [(&'static str, &'static str)] {
-        &[
-            ("clear", "start new conversation"),
-            ("new", "start new conversation"),
-            ("vim", "toggle vim mode"),
-            ("thinking", "toggle thinking blocks"),
-            ("model", "switch model"),
-            ("settings", "open settings menu"),
-            ("compact", "compact conversation history"),
-            ("fork", "fork current session"),
-            ("branch", "fork current session"),
-            ("stats", "show token usage statistics"),
-            ("cost", "show session cost"),
-            ("theme", "change accent color"),
-            ("color", "set task slug color"),
-            ("permissions", "manage session permissions"),
-            ("agents", "manage running agents"),
-            ("exit", "exit the app"),
-            ("quit", "exit the app"),
-        ]
-    }
-
     pub fn commands(anchor: usize) -> Self {
-        let multi_agent = MULTI_AGENT_ENABLED.load(Ordering::Relaxed);
-        let mut all_items: Vec<CompletionItem> = Self::command_items()
-            .iter()
-            .filter(|&&(label, _)| label != "agents" || multi_agent)
-            .map(|&(label, desc)| CompletionItem {
+        let mut all_items: Vec<CompletionItem> = crate::app::commands::rust_command_items()
+            .map(|(label, desc)| CompletionItem {
                 label: label.into(),
                 description: Some(desc.into()),
                 ..Default::default()

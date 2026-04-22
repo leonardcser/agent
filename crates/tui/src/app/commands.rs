@@ -13,12 +13,13 @@ pub type CommandOutcome = CommandAction;
 
 /// Public command runner used by `crate::api::cmd::run`. Accepts raw
 /// command lines (`/quit`, `:q`, `/compact foo`, etc.) and dispatches
-/// through the existing `handle_command` match. When the command
-/// registry lands, this grows a lookup step *before* the legacy
-/// fallback — existing call sites don't need to change.
+/// Lua commands first (plugin-owned names take precedence, letting
+/// init.lua override built-ins), falling back to `handle_command` —
+/// which looks the name up in `RUST_COMMANDS` and invokes the entry's
+/// handler fn.
 ///
-/// Normalises a leading `:` to `/` so `/quit` and `:quit` hit the
-/// same match arm.
+/// Normalises a leading `:` to `/` so `/quit` and `:quit` dispatch
+/// identically.
 pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
     let line = line.trim();
     let normalized: String = if let Some(rest) = line.strip_prefix(':') {
@@ -50,118 +51,247 @@ pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
     outcome
 }
 
+/// One Rust-dispatched slash command. `desc = Some(_)` means the command
+/// surfaces in the `/` completer; `None` is a hidden alias (`/q`, `/qa`,
+/// …) dispatched but not shown.
+pub(crate) struct RustCommand {
+    pub name: &'static str,
+    pub desc: Option<&'static str>,
+    pub handler: fn(&mut App, Option<String>) -> CommandAction,
+}
+
+pub(crate) const RUST_COMMANDS: &[RustCommand] = &[
+    RustCommand {
+        name: "exit",
+        desc: Some("exit the app"),
+        handler: cmd_quit,
+    },
+    RustCommand {
+        name: "quit",
+        desc: Some("exit the app"),
+        handler: cmd_quit,
+    },
+    RustCommand {
+        name: "q",
+        desc: None,
+        handler: cmd_quit,
+    },
+    RustCommand {
+        name: "qa",
+        desc: None,
+        handler: cmd_quit,
+    },
+    RustCommand {
+        name: "wq",
+        desc: None,
+        handler: cmd_quit,
+    },
+    RustCommand {
+        name: "wqa",
+        desc: None,
+        handler: cmd_quit,
+    },
+    RustCommand {
+        name: "clear",
+        desc: Some("start new conversation"),
+        handler: cmd_clear,
+    },
+    RustCommand {
+        name: "new",
+        desc: Some("start new conversation"),
+        handler: cmd_clear,
+    },
+    RustCommand {
+        name: "compact",
+        desc: Some("compact conversation history"),
+        handler: cmd_compact,
+    },
+    RustCommand {
+        name: "vim",
+        desc: Some("toggle vim mode"),
+        handler: cmd_vim,
+    },
+    RustCommand {
+        name: "thinking",
+        desc: Some("toggle thinking blocks"),
+        handler: cmd_thinking,
+    },
+    RustCommand {
+        name: "fork",
+        desc: Some("fork current session"),
+        handler: cmd_fork,
+    },
+    RustCommand {
+        name: "branch",
+        desc: Some("fork current session"),
+        handler: cmd_fork,
+    },
+    RustCommand {
+        name: "model",
+        desc: Some("switch model"),
+        handler: cmd_model,
+    },
+    RustCommand {
+        name: "settings",
+        desc: Some("open settings menu"),
+        handler: cmd_settings,
+    },
+    RustCommand {
+        name: "theme",
+        desc: Some("change accent color"),
+        handler: cmd_theme,
+    },
+    RustCommand {
+        name: "color",
+        desc: Some("set task slug color"),
+        handler: cmd_color,
+    },
+    RustCommand {
+        name: "stats",
+        desc: Some("show token usage statistics"),
+        handler: cmd_stats,
+    },
+    RustCommand {
+        name: "cost",
+        desc: Some("show session cost"),
+        handler: cmd_cost,
+    },
+];
+
+/// Visible `(name, desc)` pairs for the `/` completer. Hidden aliases
+/// (`/q`, `/qa`, …) are filtered out.
+pub(crate) fn rust_command_items() -> impl Iterator<Item = (&'static str, &'static str)> {
+    RUST_COMMANDS
+        .iter()
+        .filter_map(|c| c.desc.map(|d| (c.name, d)))
+}
+
+/// True when `name` (without leading slash) is a registered Rust
+/// command. Aliases included.
+pub(crate) fn is_rust_command(name: &str) -> bool {
+    RUST_COMMANDS.iter().any(|c| c.name == name)
+}
+
+fn cmd_quit(_: &mut App, _: Option<String>) -> CommandAction {
+    CommandAction::Quit
+}
+
+fn cmd_clear(_: &mut App, _: Option<String>) -> CommandAction {
+    CommandAction::CancelAndClear
+}
+
+fn cmd_compact(_: &mut App, arg: Option<String>) -> CommandAction {
+    CommandAction::Compact {
+        instructions: arg.filter(|s| !s.is_empty()),
+    }
+}
+
+fn cmd_vim(app: &mut App, _: Option<String>) -> CommandAction {
+    app.update_settings(|s| s.vim = !s.vim);
+    CommandAction::Continue
+}
+
+fn cmd_thinking(app: &mut App, _: Option<String>) -> CommandAction {
+    app.update_settings(|s| s.show_thinking = !s.show_thinking);
+    CommandAction::Continue
+}
+
+fn cmd_fork(app: &mut App, _: Option<String>) -> CommandAction {
+    app.fork_session();
+    CommandAction::Continue
+}
+
+fn cmd_model(app: &mut App, arg: Option<String>) -> CommandAction {
+    if let Some(reference) = arg {
+        match crate::config::resolve_model_ref(&app.available_models, &reference) {
+            Ok(model) => {
+                let key = model.key.clone();
+                app.apply_model(&key);
+            }
+            Err(err) => app.notify_error(err.to_string()),
+        }
+    } else {
+        let models: Vec<(String, String, String)> = app
+            .available_models
+            .iter()
+            .map(|m| (m.key.clone(), m.model_name.clone(), m.provider_name.clone()))
+            .collect();
+        if !models.is_empty() {
+            app.input.open_model_completer(&models);
+        }
+    }
+    CommandAction::Continue
+}
+
+fn cmd_settings(app: &mut App, _: Option<String>) -> CommandAction {
+    app.input.open_settings(&app.settings_state());
+    CommandAction::Continue
+}
+
+fn cmd_theme(app: &mut App, arg: Option<String>) -> CommandAction {
+    if let Some(name) = arg {
+        if let Some(value) = crate::theme::preset_by_name(&name) {
+            app.apply_accent(value);
+        } else {
+            app.notify_error(format!("unknown theme: {name}"));
+        }
+    } else {
+        app.input.open_theme_completer();
+    }
+    CommandAction::Continue
+}
+
+fn cmd_color(app: &mut App, arg: Option<String>) -> CommandAction {
+    if let Some(name) = arg {
+        if let Some(value) = crate::theme::preset_by_name(&name) {
+            crate::theme::set_slug_color(value);
+        } else {
+            app.notify_error(format!("unknown color: {name}"));
+        }
+    } else {
+        app.input.open_color_completer();
+    }
+    CommandAction::Continue
+}
+
+fn cmd_stats(app: &mut App, _: Option<String>) -> CommandAction {
+    let entries = crate::metrics::load();
+    let stats = crate::metrics::render_stats(&entries);
+    app.input.open_stats(stats);
+    CommandAction::Continue
+}
+
+fn cmd_cost(app: &mut App, _: Option<String>) -> CommandAction {
+    let turns = app.user_turns().len();
+    let resolved = engine::pricing::resolve(&app.model, &app.provider_type, &app.model_config);
+    let lines =
+        crate::metrics::render_session_cost(app.session_cost_usd, &app.model, turns, &resolved);
+    app.input.open_cost(lines);
+    CommandAction::Continue
+}
+
 impl App {
     // ── Commands ─────────────────────────────────────────────────────────
 
     pub(super) fn handle_command(&mut self, input: &str) -> CommandAction {
-        match input {
-            "/exit" | "/quit" | ":q" | ":qa" | ":wq" | ":wqa" => CommandAction::Quit,
-            "/clear" | "/new" => CommandAction::CancelAndClear,
-            "/compact" => CommandAction::Compact { instructions: None },
-            _ if input.starts_with("/compact ") => {
-                let instructions = input.strip_prefix("/compact ").unwrap().trim().to_string();
-                CommandAction::Compact {
-                    instructions: if instructions.is_empty() {
-                        None
-                    } else {
-                        Some(instructions)
-                    },
-                }
+        if let Some(rest) = input.strip_prefix('!') {
+            if !self.input.skip_shell_escape() {
+                return match self.start_shell_escape(rest) {
+                    Some((rx, kill)) => CommandAction::Exec(rx, kill),
+                    None => CommandAction::Continue,
+                };
             }
-            "/vim" => {
-                self.update_settings(|s| s.vim = !s.vim);
-                CommandAction::Continue
-            }
-            "/thinking" => {
-                self.update_settings(|s| s.show_thinking = !s.show_thinking);
-                CommandAction::Continue
-            }
-            "/fork" | "/branch" => {
-                self.fork_session();
-                CommandAction::Continue
-            }
-            "/model" => {
-                let models: Vec<(String, String, String)> = self
-                    .available_models
-                    .iter()
-                    .map(|m| (m.key.clone(), m.model_name.clone(), m.provider_name.clone()))
-                    .collect();
-                if !models.is_empty() {
-                    self.input.open_model_completer(&models);
-                }
-                CommandAction::Continue
-            }
-            _ if input.starts_with("/model ") => {
-                let reference = input.strip_prefix("/model ").unwrap().trim();
-                match crate::config::resolve_model_ref(&self.available_models, reference) {
-                    Ok(model) => {
-                        let key = model.key.clone();
-                        self.apply_model(&key);
-                    }
-                    Err(err) => {
-                        self.notify_error(err.to_string());
-                    }
-                }
-                CommandAction::Continue
-            }
-            "/settings" => {
-                self.input.open_settings(&self.settings_state());
-                CommandAction::Continue
-            }
-            "/theme" => {
-                self.input.open_theme_completer();
-                CommandAction::Continue
-            }
-            "/color" => {
-                self.input.open_color_completer();
-                CommandAction::Continue
-            }
-            "/stats" => {
-                let entries = crate::metrics::load();
-                let stats = crate::metrics::render_stats(&entries);
-                self.input.open_stats(stats);
-                CommandAction::Continue
-            }
-            "/cost" => {
-                let turns = self.user_turns().len();
-                let resolved =
-                    engine::pricing::resolve(&self.model, &self.provider_type, &self.model_config);
-                let lines = crate::metrics::render_session_cost(
-                    self.session_cost_usd,
-                    &self.model,
-                    turns,
-                    &resolved,
-                );
-                self.input.open_cost(lines);
-                CommandAction::Continue
-            }
-            _ if input.starts_with("/theme ") => {
-                let name = input.strip_prefix("/theme ").unwrap().trim();
-                if let Some(value) = crate::theme::preset_by_name(name) {
-                    self.apply_accent(value);
-                } else {
-                    self.notify_error(format!("unknown theme: {}", name));
-                }
-                CommandAction::Continue
-            }
-            _ if input.starts_with("/color ") => {
-                let name = input.strip_prefix("/color ").unwrap().trim();
-                if let Some(value) = crate::theme::preset_by_name(name) {
-                    crate::theme::set_slug_color(value);
-                } else {
-                    self.notify_error(format!("unknown color: {}", name));
-                }
-                CommandAction::Continue
-            }
-            _ if input.starts_with('!') && !self.input.skip_shell_escape() => {
-                if let Some((rx, kill)) = self.start_shell_escape(input.strip_prefix('!').unwrap())
-                {
-                    CommandAction::Exec(rx, kill)
-                } else {
-                    CommandAction::Continue
-                }
-            }
-            _ => CommandAction::Continue,
+        }
+        let Some(body) = input.strip_prefix('/') else {
+            return CommandAction::Continue;
+        };
+        let (name, arg) = match body.find(char::is_whitespace) {
+            Some(idx) => (&body[..idx], Some(body[idx + 1..].trim().to_string())),
+            None => (body, None),
+        };
+        match RUST_COMMANDS.iter().find(|c| c.name == name) {
+            Some(cmd) => (cmd.handler)(self, arg.filter(|s| !s.is_empty())),
+            None => CommandAction::Continue,
         }
     }
 
