@@ -1138,7 +1138,7 @@ impl App {
         let prompt_height = prompt_rect.height;
 
         // ── Transcript ──
-        let t_pad = self.screen.transcript_gutters().pad_left;
+        let t_pad = self.transcript_gutters.pad_left;
         let transcript_rect = ui::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
         let tdata = self.screen.project_transcript_buffer(
             width,
@@ -1161,7 +1161,7 @@ impl App {
 
         let transcript_viewport = ui::WindowViewport::new(
             transcript_rect,
-            self.screen.transcript_gutters().content_width(term_w),
+            self.transcript_gutters.content_width(term_w),
             tdata.total_rows,
             tdata.clamped_scroll,
             ui::ScrollbarState::new(tdata.scrollbar_col + t_pad, tdata.total_rows, viewport_rows),
@@ -2598,7 +2598,7 @@ impl App {
         let Some(region) = self.screen.transcript_viewport() else {
             return;
         };
-        let pad_left = self.screen.transcript_gutters().pad_left;
+        let pad_left = self.transcript_gutters.pad_left;
         let display_col = abs_col.saturating_sub(pad_left) as usize;
         let viewport_rows = region.rect.height;
         let total = rows.len().min(u16::MAX as usize) as u16;
@@ -2703,7 +2703,7 @@ impl App {
     /// Derives the absolute row from `cpos` (byte offset in the display
     /// buffer), then looks up the snapshot's `block_of_row`.
     fn focused_block_id(&mut self) -> Option<render::BlockId> {
-        let tw = self.screen.transcript_width() as u16;
+        let tw = self.transcript_width() as u16;
         let snap = self
             .screen
             .transcript

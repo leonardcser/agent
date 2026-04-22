@@ -122,6 +122,9 @@ pub struct App {
     /// Consulted by the status bar each frame; `set_throbber` is the
     /// single write path, mirrored from engine lifecycle events.
     pub working: render::working::WorkingState,
+    /// Gutter reservation for the transcript window (left padding +
+    /// right scrollbar column).
+    pub transcript_gutters: crate::window::WindowGutters,
     pub settings: state::ResolvedSettings,
     pub multi_agent: bool,
     /// Human-readable name for this agent.
@@ -601,6 +604,7 @@ impl App {
             cmdline: render::CmdlineState::new(),
             term_focused: true,
             working: render::working::WorkingState::new(),
+            transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,
             settings,
             multi_agent,
             agent_id: String::new(),
@@ -682,6 +686,14 @@ impl App {
         let mut s = self.settings.clone();
         s.vim = self.input.vim_enabled();
         s
+    }
+
+    /// Width available for transcript content. Reserves the rightmost
+    /// column for the scrollbar track so the scrollbar never overpaints
+    /// rendered content and mouse hit-testing has a stable target.
+    pub fn transcript_width(&self) -> usize {
+        let (w, _) = self.screen.size();
+        (self.transcript_gutters.content_width(w) as usize).max(1)
     }
 
     pub fn notify(&mut self, message: String) {

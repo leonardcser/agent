@@ -10,6 +10,11 @@ pub struct WindowGutters {
     pub scrollbar: Option<GutterSide>,
 }
 
+pub const TRANSCRIPT_GUTTERS: WindowGutters = WindowGutters {
+    pad_left: 1,
+    scrollbar: Some(GutterSide::Right),
+};
+
 impl WindowGutters {
     pub fn scrollbar_width(&self) -> u16 {
         if self.scrollbar.is_some() {

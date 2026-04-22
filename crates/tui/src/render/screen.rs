@@ -66,10 +66,6 @@ pub struct Screen {
     /// handlers and yank to reason over what the user actually sees.
     last_viewport_text: Vec<String>,
     last_viewport_lines: Vec<super::display::DisplayLine>,
-    /// Gutter reservations for the transcript window (padding +
-    /// scrollbar column). Pushed from `App` so the paint path picks up
-    /// the authoritative source without a reverse dependency.
-    transcript_gutters: crate::window::WindowGutters,
     last_transcript_viewport: Option<super::region::Viewport>,
     /// Centralized layout state computed at the start of each frame.
     pub(crate) layout: super::layout::LayoutState,
@@ -105,10 +101,6 @@ impl Screen {
             dirty: true,
             last_viewport_text: Vec::new(),
             last_viewport_lines: Vec::new(),
-            transcript_gutters: crate::window::WindowGutters {
-                pad_left: 1,
-                scrollbar: Some(crate::window::GutterSide::Right),
-            },
             last_transcript_viewport: None,
             layout: super::layout::LayoutState::compute(&super::layout::LayoutInput {
                 term_width: 80,
@@ -130,16 +122,9 @@ impl Screen {
         self.backend.size()
     }
 
-    /// Width available for transcript content. Reserves the rightmost
-    /// column for the scrollbar track so the scrollbar never overpaints
-    /// rendered content and mouse hit-testing has a stable target.
-    pub fn transcript_gutters(&self) -> &crate::window::WindowGutters {
-        &self.transcript_gutters
-    }
-
-    pub fn transcript_width(&self) -> usize {
+    fn transcript_width(&self) -> usize {
         let (w, _) = self.backend.size();
-        (self.transcript_gutters.content_width(w) as usize).max(1)
+        (crate::window::TRANSCRIPT_GUTTERS.content_width(w) as usize).max(1)
     }
 
     /// Expose the backend for dialogs that need output + size.
@@ -858,7 +843,7 @@ impl Screen {
         scroll_top: u16,
         show_thinking: bool,
     ) -> TranscriptData {
-        let gutters = self.transcript_gutters;
+        let gutters = crate::window::TRANSCRIPT_GUTTERS;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
         let theme = crate::theme::snapshot();
 
@@ -923,7 +908,7 @@ impl Screen {
         history_cursor_col: u16,
         transcript_owns_cursor: bool,
     ) -> TranscriptCursor {
-        let gutters = self.transcript_gutters;
+        let gutters = crate::window::TRANSCRIPT_GUTTERS;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
 
         if !transcript_owns_cursor || viewport_rows == 0 {
