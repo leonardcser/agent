@@ -47,16 +47,6 @@ pub enum ContentVisualKind {
     Line,
 }
 
-/// Who owns the soft cursor this frame. Set once at the start of each
-/// paint so individual draw sites just check `cursor_owner` instead of
-/// testing mode flags independently.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CursorOwner {
-    Prompt,
-    Transcript,
-    Cmdline,
-    None,
-}
 use super::layout_out::{LayoutSink, SpanCollector};
 use super::prompt::PromptState;
 use super::selection::wrap_and_locate_cursor;
@@ -74,8 +64,6 @@ pub struct Screen {
     prompt: PromptState,
     dirty: bool,
     working: WorkingState,
-    /// App-level focus (Prompt / History). Driven by App::app_focus.
-    last_app_focus: crate::app::AppFocus,
     /// Plain-text snapshot of each visible row (top to bottom) captured
     /// during `draw_viewport_frame`. Used by the content pane's motion
     /// handlers and yank to reason over what the user actually sees.
@@ -90,12 +78,8 @@ pub struct Screen {
     pub(crate) layout: super::layout::LayoutState,
     /// Buffer-backed transcript projection — blocks projected at event time.
     pub(crate) transcript_projection: TranscriptProjection,
-    /// Who owns the soft cursor this frame. Recomputed at the start of
-    /// each paint via `refresh_cursor_owner`.
-    cursor_owner: CursorOwner,
     /// Terminal I/O backend (real terminal or test buffer).
     backend: Box<dyn TerminalBackend>,
-    focused: bool,
 }
 
 /// A short ephemeral notification rendered above the prompt bar.
@@ -123,7 +107,6 @@ impl Screen {
             prompt: PromptState::new(),
             dirty: true,
             working: WorkingState::new(),
-            last_app_focus: crate::app::AppFocus::Prompt,
             last_viewport_text: Vec::new(),
             last_viewport_lines: Vec::new(),
             transcript_gutters: crate::window::WindowGutters {
@@ -143,9 +126,7 @@ impl Screen {
                     buftype: ui::buffer::BufType::Nofile,
                 },
             )),
-            cursor_owner: CursorOwner::Prompt,
             backend,
-            focused: true,
         }
     }
 
@@ -168,14 +149,6 @@ impl Screen {
     /// Expose the backend for dialogs that need output + size.
     pub fn backend(&self) -> &dyn TerminalBackend {
         &*self.backend
-    }
-
-    pub fn set_focused(&mut self, focused: bool) {
-        if self.focused == focused {
-            return;
-        }
-        self.focused = focused;
-        self.dirty = true;
     }
 
     pub fn block_count(&self) -> usize {
@@ -365,30 +338,6 @@ impl Screen {
         self.dirty = true;
     }
 
-    pub fn set_app_focus(&mut self, focus: crate::app::AppFocus) {
-        if self.last_app_focus != focus {
-            self.last_app_focus = focus;
-            self.dirty = true;
-        }
-    }
-
-    fn refresh_cursor_owner(&mut self, cmdline_active: bool) {
-        self.cursor_owner = if cmdline_active {
-            CursorOwner::Cmdline
-        } else if !self.focused {
-            CursorOwner::None
-        } else {
-            match self.last_app_focus {
-                crate::app::AppFocus::Content => CursorOwner::Transcript,
-                crate::app::AppFocus::Prompt => CursorOwner::Prompt,
-            }
-        };
-    }
-
-    pub(crate) fn cursor_owner(&self) -> CursorOwner {
-        self.cursor_owner
-    }
-
     pub(crate) fn prompt_input_scroll(&self) -> usize {
         self.prompt.input_scroll
     }
@@ -415,10 +364,6 @@ impl Screen {
 
     pub(crate) fn mark_clean(&mut self) {
         self.dirty = false;
-    }
-
-    pub(crate) fn refresh_cursor_owner_pub(&mut self, cmdline_active: bool) {
-        self.refresh_cursor_owner(cmdline_active);
     }
 
     pub(crate) fn measure_prompt_height_pub(
@@ -1013,11 +958,12 @@ impl Screen {
         viewport_rows: u16,
         history_cursor_line: u16,
         history_cursor_col: u16,
+        transcript_owns_cursor: bool,
     ) -> TranscriptCursor {
         let gutters = self.transcript_gutters;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
 
-        if self.cursor_owner != CursorOwner::Transcript || viewport_rows == 0 {
+        if !transcript_owns_cursor || viewport_rows == 0 {
             return TranscriptCursor {
                 clamped_line: history_cursor_line,
                 clamped_col: history_cursor_col,

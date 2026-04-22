@@ -38,6 +38,13 @@ These directives govern how this plan is executed. They override defaults.
 - **No dead code annotations.** Never add `#[allow(dead_code)]`. Use it,
   remove it, or leave the compiler warning as a tracking marker.
 
+- **Session boundaries are not scope boundaries.** Don't stop work or
+  advise the user to "pick up next session" because a task feels big.
+  If the refactor is multi-hour, break it down internally and keep
+  going, committing meaningful green checkpoints. The only reasons to
+  stop are (a) the user asks you to, or (b) a hard blocker that
+  requires their input. "Needs more time" is not a blocker.
+
 - **Format, lint, test at the end of each logical commit.**
   `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings &&
   cargo nextest run --workspace`. (Use `cargo-nextest` — it parallelises

@@ -114,6 +114,10 @@ pub struct App {
     /// paints it in place of the usual status spans and keystrokes
     /// route through `handle_cmdline_key`.
     pub cmdline: render::CmdlineState,
+    /// Terminal focus (FocusGained / FocusLost). Cursor is suppressed
+    /// when the terminal isn't focused, so input from other apps
+    /// doesn't draw a stale cursor in our window.
+    pub term_focused: bool,
     pub settings: state::ResolvedSettings,
     pub multi_agent: bool,
     /// Human-readable name for this agent.
@@ -591,6 +595,7 @@ impl App {
             custom_status_items: None,
             notification: None,
             cmdline: render::CmdlineState::new(),
+            term_focused: true,
             settings,
             multi_agent,
             agent_id: String::new(),

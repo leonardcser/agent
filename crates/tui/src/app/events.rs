@@ -19,7 +19,11 @@ impl App {
     /// Returns `true` if the app should quit.
     pub(super) fn dispatch_terminal_event(&mut self, ev: Event, t: &mut Timers) -> bool {
         if matches!(ev, Event::FocusGained | Event::FocusLost) {
-            self.screen.set_focused(matches!(ev, Event::FocusGained));
+            let focused = matches!(ev, Event::FocusGained);
+            if self.term_focused != focused {
+                self.term_focused = focused;
+                self.screen.mark_dirty();
+            }
             return false;
         }
 
@@ -1087,7 +1091,6 @@ impl App {
         let (term_w, term_h) = self.screen.size();
         let width = term_w as usize;
         let show_queued = agent_running || self.is_compacting();
-        self.screen.set_app_focus(self.app_focus);
 
         self.sync_transcript_pin();
         if self.transcript_window.is_pinned() {
@@ -1102,8 +1105,15 @@ impl App {
             (&[], self.input_prediction.as_deref())
         };
 
-        // Refresh cursor ownership.
-        self.screen.refresh_cursor_owner_pub(self.cmdline.active);
+        // Compute cursor ownership for this frame. Cmdline steals the
+        // cursor; terminal-unfocused suppresses it; otherwise app_focus
+        // decides prompt-vs-transcript.
+        let has_prompt_cursor = !self.cmdline.active
+            && self.term_focused
+            && matches!(self.app_focus, crate::app::AppFocus::Prompt);
+        let has_transcript_cursor = !self.cmdline.active
+            && self.term_focused
+            && matches!(self.app_focus, crate::app::AppFocus::Content);
 
         // ── Compute layout ──
         let natural_prompt_height = self.screen.measure_prompt_height_pub(
@@ -1139,6 +1149,7 @@ impl App {
             viewport_rows,
             self.transcript_window.cursor_line,
             self.transcript_window.cursor_col,
+            has_transcript_cursor,
         );
         self.transcript_window.cursor_line = tcursor.clamped_line;
         self.transcript_window.cursor_col = tcursor.clamped_col;
@@ -1168,7 +1179,6 @@ impl App {
 
         // ── Prompt ──
         // Extract all immutable data first, then take the mutable btw borrow.
-        let has_prompt_cursor = self.screen.cursor_owner() == render::screen::CursorOwner::Prompt;
         let prev_input_scroll = self.screen.prompt_input_scroll();
         let notification = self.notification.as_ref().cloned();
         let bar_info = render::prompt_data::BarInfo {
