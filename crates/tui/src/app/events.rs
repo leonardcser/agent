@@ -35,27 +35,28 @@ impl App {
             code, modifiers, ..
         }) = &ev
         {
-            match (*code, *modifiers) {
-                (KeyCode::BackTab, _) => {
-                    if self.confirm_context.is_some() && self.ui.focused_float().is_some() {
-                        self.handle_confirm_backtab(agent);
-                    } else {
+            // Global shortcuts only fire when no float is focused —
+            // otherwise the float's keymap (e.g. Confirm's BackTab
+            // handler) gets first dibs.
+            if self.ui.focused_float().is_none() {
+                match (*code, *modifiers) {
+                    (KeyCode::BackTab, _) => {
                         self.toggle_mode();
                         self.screen.mark_dirty();
+                        return false;
                     }
-                    return false;
+                    (KeyCode::Char('t'), m) if m.contains(KeyModifiers::CONTROL) => {
+                        self.cycle_reasoning();
+                        self.screen.mark_dirty();
+                        return false;
+                    }
+                    (KeyCode::Char('l'), m) if m.contains(KeyModifiers::CONTROL) => {
+                        self.screen.redraw();
+                        self.ui.force_redraw();
+                        return false;
+                    }
+                    _ => {}
                 }
-                (KeyCode::Char('t'), m) if m.contains(KeyModifiers::CONTROL) => {
-                    self.cycle_reasoning();
-                    self.screen.mark_dirty();
-                    return false;
-                }
-                (KeyCode::Char('l'), m) if m.contains(KeyModifiers::CONTROL) => {
-                    self.screen.redraw();
-                    self.ui.force_redraw();
-                    return false;
-                }
-                _ => {}
             }
         }
 
@@ -992,7 +993,7 @@ impl App {
         }
 
         // Permission pending (no Confirm float is showing yet).
-        if self.screen.pending_dialog() && self.confirm_context.is_none() {
+        if self.screen.pending_dialog() && !self.focused_float_blocks_agent() {
             spans.push(StatusSpan {
                 text: "permission pending".into(),
                 style: render::StyleState {
@@ -1694,31 +1695,6 @@ impl App {
         self.ui.win_close(win_id);
     }
 
-    /// BackTab (shift-tab) on an open Confirm float: toggle app mode,
-    /// and if the new mode auto-allows the pending tool call, resolve
-    /// the confirm with approval and close the float.
-    fn handle_confirm_backtab(&mut self, _agent: &mut Option<super::TurnState>) {
-        self.toggle_mode();
-        let Some(ctx) = self.confirm_context.take() else {
-            return;
-        };
-        if self
-            .permissions
-            .decide(self.mode, &ctx.tool_name, &ctx.args, false)
-            == Decision::Allow
-        {
-            if let Some(win) = self.ui.focused_float() {
-                self.close_float(win);
-            }
-            self.screen
-                .set_active_status(&ctx.call_id, ToolStatus::Pending);
-            self.send_permission_decision(ctx.request_id, true, None);
-        } else {
-            // Mode changed but still needs confirmation — keep dialog open.
-            self.confirm_context = Some(ctx);
-        }
-    }
-
     /// Close the focused float if it doesn't block the agent (e.g. Ps,
     /// Permissions, Resume). Used before opening a blocking dialog so
     /// only one float is visible at a time. Fires `WinEvent::Dismiss`
@@ -1889,7 +1865,6 @@ impl App {
                     call_id,
                     tool_name,
                 } => {
-                    let _ = self.confirm_context.take();
                     let should_cancel = self.resolve_confirm(
                         (choice, message),
                         &call_id,
@@ -1905,6 +1880,25 @@ impl App {
                         self.finish_turn(true);
                         self.pending_agent_cancel = true;
                     }
+                }
+                crate::app::ops::AppOp::ConfirmBackTab {
+                    win,
+                    request_id,
+                    call_id,
+                    tool_name,
+                    args,
+                } => {
+                    self.toggle_mode();
+                    if self.permissions.decide(self.mode, &tool_name, &args, false)
+                        == Decision::Allow
+                    {
+                        self.close_float(win);
+                        self.screen
+                            .set_active_status(&call_id, ToolStatus::Pending);
+                        self.send_permission_decision(request_id, true, None);
+                    }
+                    // Otherwise: mode changed but dialog stays open so
+                    // the user can still choose manually.
                 }
                 crate::app::ops::AppOp::LoadSession(id) => {
                     if let Some(loaded) = crate::session::load(&id) {

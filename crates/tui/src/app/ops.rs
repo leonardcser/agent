@@ -96,6 +96,17 @@ pub enum AppOp {
         call_id: String,
         tool_name: String,
     },
+    /// BackTab pressed on an open Confirm dialog. Toggles the app
+    /// mode and, if the new mode auto-allows the pending tool call,
+    /// sends approval + closes the dialog. Otherwise the dialog stays
+    /// open so the user can still choose manually.
+    ConfirmBackTab {
+        win: ui::WinId,
+        request_id: u64,
+        call_id: String,
+        tool_name: String,
+        args: std::collections::HashMap<String, serde_json::Value>,
+    },
     /// One-shot LLM call initiated by a Lua plugin
     /// (`smelt.api.engine.ask`). Applied by sending a matching
     /// `UiCommand::EngineAsk` to the engine.

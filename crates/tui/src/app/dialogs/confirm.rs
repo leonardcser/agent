@@ -49,6 +49,7 @@ struct ConfirmState {
     request_id: u64,
     call_id: String,
     tool_name: String,
+    args: std::collections::HashMap<String, serde_json::Value>,
     choices: Vec<ConfirmChoice>,
 }
 
@@ -108,6 +109,7 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
         request_id: req.request_id,
         call_id: req.call_id.clone(),
         tool_name: req.tool_name.clone(),
+        args: req.args.clone(),
         choices,
     }));
 
@@ -145,6 +147,27 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
                 }
             }
             CallbackResult::Pass
+        })),
+    );
+
+    // BackTab (shift-tab): toggle app mode and, if the new mode
+    // auto-allows this tool call, approve + close. The reducer runs
+    // the permission check so the closure stays pure.
+    let state_backtab = state.clone();
+    let ops_backtab = ops.clone();
+    app.ui.win_set_keymap(
+        win_id,
+        KeyBind::plain(KeyCode::BackTab),
+        Callback::Rust(Box::new(move |ctx| {
+            let s = state_backtab.borrow();
+            ops_backtab.push(AppOp::ConfirmBackTab {
+                win: ctx.win,
+                request_id: s.request_id,
+                call_id: s.call_id.clone(),
+                tool_name: s.tool_name.clone(),
+                args: s.args.clone(),
+            });
+            CallbackResult::Consumed
         })),
     );
 

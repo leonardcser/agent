@@ -110,9 +110,6 @@ pub struct App {
     pub available_models: Vec<crate::config::ResolvedModel>,
     pub engine: EngineHandle,
     permissions: Arc<Permissions>,
-    /// Context for the currently-open confirm dialog, used to re-check
-    /// permissions when the user toggles mode.
-    confirm_context: Option<ConfirmContext>,
     /// Set by `AppOp::RewindToBlock` (and future ops) to signal the
     /// main event loop that the active turn should be dropped. The
     /// reducer can't mutate `agent: &mut Option<TurnState>` directly
@@ -218,14 +215,6 @@ pub struct App {
 pub enum AppFocus {
     Prompt,
     Content,
-}
-
-/// Retained subset of the confirm request for mode-toggle re-checks.
-struct ConfirmContext {
-    call_id: String,
-    tool_name: String,
-    args: HashMap<String, serde_json::Value>,
-    request_id: u64,
 }
 
 pub(super) struct TurnState {
@@ -598,7 +587,6 @@ impl App {
             available_models,
             engine,
             permissions,
-            confirm_context: None,
             pending_agent_cancel: false,
             pending_agent_clear_pending: false,
             input_prediction: None,

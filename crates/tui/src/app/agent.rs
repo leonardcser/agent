@@ -1396,12 +1396,6 @@ impl App {
 
                 // Close any non-blocking float (e.g. Ps) to make room.
                 self.close_focused_non_blocking_float();
-                self.confirm_context = Some(ConfirmContext {
-                    call_id: req.call_id.clone(),
-                    tool_name: req.tool_name.clone(),
-                    args: req.args.clone(),
-                    request_id: req.request_id,
-                });
                 self.screen
                     .set_active_status(&req.call_id, ToolStatus::Confirm);
                 crate::app::dialogs::confirm::open(self, &req);
