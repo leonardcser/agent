@@ -1893,7 +1893,14 @@ impl App {
     /// `ToolComplete` (tool-as-task results) and `OpenDialog` (step
     /// iv) need app-side routing.
     pub(super) fn drive_lua_tasks(&mut self) {
+        self.apply_lua_ops();
         let outs = self.lua.drive_tasks();
+        // Drain the ops pushed by the coroutine *before* it yielded —
+        // `ui::dialog_open` silently drops a dialog whose buffers
+        // aren't registered, so a task that calls `buf.create` +
+        // `buf.set_lines` right before `dialog.open` needs those ops
+        // applied now, not after the `for out in outs` loop.
+        self.apply_lua_ops();
         for out in outs {
             match out {
                 crate::lua::TaskDriveOutput::ToolComplete {
@@ -2098,17 +2105,39 @@ impl App {
                     self.input_prediction = None;
                 }
                 crate::app::ops::AppOp::BufCreate { id } => {
-                    self.ui.buf_create_with_id(
+                    // A BufCreate for an id that already exists means
+                    // the allocator aliased into another buffer's id
+                    // space. Loud notify instead of silently stomping.
+                    if let Err(clash) = self.ui.buf_create_with_id(
                         ui::BufId(id),
                         ui::buffer::BufCreateOpts {
                             buftype: ui::buffer::BufType::Scratch,
                             ..Default::default()
                         },
-                    );
+                    ) {
+                        self.notify_error(format!("buf.create: id {} already in use", clash.0));
+                    }
                 }
                 crate::app::ops::AppOp::BufSetLines { id, lines } => {
                     if let Some(buf) = self.ui.buf_mut(ui::BufId(id)) {
                         buf.set_all_lines(lines);
+                    }
+                }
+                crate::app::ops::AppOp::BufAddDim {
+                    id,
+                    line,
+                    col_start,
+                    col_end,
+                } => {
+                    if let Some(buf) = self.ui.buf_mut(ui::BufId(id)) {
+                        if line < buf.line_count() {
+                            buf.add_highlight(
+                                line,
+                                col_start,
+                                col_end,
+                                ui::buffer::SpanStyle::dim(),
+                            );
+                        }
                     }
                 }
                 crate::app::ops::AppOp::WinOpenFloat {
@@ -2207,7 +2236,28 @@ impl App {
 
     // ── Mouse event dispatch ─────────────────────────────────────────────
     fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
-        use crossterm::event::MouseButton;
+        use crossterm::event::{KeyCode, KeyModifiers, MouseButton};
+        // A focused float (Lua dialog, confirm, picker, etc.) captures
+        // wheel events as list-nav keys — until compositor hit-testing
+        // for floats lands in phase E2, this keeps pickers scrollable
+        // without waiting on the full mouse→float routing rewrite.
+        if self.ui.focused_float().is_some() {
+            let step = match me.kind {
+                MouseEventKind::ScrollUp => -1isize,
+                MouseEventKind::ScrollDown => 1,
+                _ => return EventOutcome::Noop,
+            };
+            let (code, mods) = if step < 0 {
+                (KeyCode::Up, KeyModifiers::NONE)
+            } else {
+                (KeyCode::Down, KeyModifiers::NONE)
+            };
+            for _ in 0..3 {
+                let _ = self.ui.handle_key(code, mods);
+            }
+            self.apply_lua_ops();
+            return EventOutcome::Redraw;
+        }
         if self.layout.hit_test(me.row, me.column) == render::HitRegion::Status {
             return EventOutcome::Noop;
         }

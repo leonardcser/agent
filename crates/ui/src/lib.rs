@@ -44,7 +44,7 @@ pub use edit_buffer::EditBuffer;
 pub use float_dialog::{FloatDialog, FloatDialogConfig};
 pub use flush::flush_diff;
 pub use grid::{Cell, Grid, GridSlice, Style};
-pub use id::{BufId, WinId};
+pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
 pub use kill_ring::KillRing;
 pub use layout::{Anchor, Border, Constraint, FloatRelative, Gutters, LayoutTree, Placement, Rect};
 pub use list_select::{ListItem, ListSelect};
@@ -98,13 +98,25 @@ impl Ui {
         id
     }
 
-    pub fn buf_create_with_id(&mut self, id: BufId, opts: buffer::BufCreateOpts) -> BufId {
+    /// Create a buffer at an explicit id. Returns `Err` if a buffer
+    /// with that id already exists — callers should mint a fresh id
+    /// via `buf_create`. Plugin-facing IDs (Lua `smelt.api.buf.create`)
+    /// live above `LUA_BUF_ID_BASE` so they can't collide with
+    /// sequentially-allocated Rust buffers.
+    pub fn buf_create_with_id(
+        &mut self,
+        id: BufId,
+        opts: buffer::BufCreateOpts,
+    ) -> Result<BufId, BufId> {
+        if self.bufs.contains_key(&id) {
+            return Err(id);
+        }
         let buf = Buffer::new(id, opts);
         self.bufs.insert(id, buf);
         if id.0 >= self.next_buf_id {
             self.next_buf_id = id.0 + 1;
         }
-        id
+        Ok(id)
     }
 
     pub fn buf_delete(&mut self, id: BufId) {

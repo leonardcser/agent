@@ -307,8 +307,6 @@ impl Dialog {
                         panel.line_count = b.line_count();
                         view.sync_from_buffer(b);
                     }
-                    // Inherit the dialog's background so content cells
-                    // keep the bg fill after the view paints glyphs.
                     view.set_default_style(default_style);
                 }
                 DialogPanelContent::Widget(widget) => {
@@ -623,7 +621,15 @@ impl Dialog {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let Some(panel) = self.panels.get_mut(self.focused) else {
+        self.move_selection_at(self.focused, delta);
+    }
+
+    /// Move the selection of the List panel at `panel_idx` by `delta`
+    /// rows. Used by the fzf-style fallback — when an input widget
+    /// ignores a nav key, route it to the first List panel instead of
+    /// the focused one.
+    fn move_selection_at(&mut self, panel_idx: usize, delta: isize) {
+        let Some(panel) = self.panels.get_mut(panel_idx) else {
             return;
         };
         if !matches!(panel.kind, PanelKind::List { .. }) {
@@ -647,6 +653,59 @@ impl Dialog {
         } else {
             win.cursor_line = (new - scroll) as u16;
         }
+    }
+
+    /// Handle a navigation key against the List panel at `panel_idx`.
+    /// Mirrors the keys the `PanelKind::List` arm accepts in
+    /// `handle_key`, but scoped to an arbitrary panel — used to route
+    /// Up/Down/Enter through to a list when the focused widget panel
+    /// (TextInput) ignores them.
+    fn list_nav_on(&mut self, panel_idx: usize, code: KeyCode, mods: KeyModifiers) -> KeyResult {
+        let height = self
+            .panels
+            .get(panel_idx)
+            .map(|p| p.rect.height.max(1) as isize)
+            .unwrap_or(1);
+        match (code, mods) {
+            (KeyCode::Up, _) => {
+                self.move_selection_at(panel_idx, -1);
+                KeyResult::Consumed
+            }
+            (KeyCode::Down, _) => {
+                self.move_selection_at(panel_idx, 1);
+                KeyResult::Consumed
+            }
+            (KeyCode::PageUp, _) => {
+                self.move_selection_at(panel_idx, -(height / 2));
+                KeyResult::Consumed
+            }
+            (KeyCode::PageDown, _) => {
+                self.move_selection_at(panel_idx, height / 2);
+                KeyResult::Consumed
+            }
+            (KeyCode::Home, _) => {
+                self.move_selection_at(panel_idx, isize::MIN / 2);
+                KeyResult::Consumed
+            }
+            (KeyCode::End, _) => {
+                self.move_selection_at(panel_idx, isize::MAX / 2);
+                KeyResult::Consumed
+            }
+            (KeyCode::Enter, _) => self
+                .selected_index_at(panel_idx)
+                .map(|idx| KeyResult::Action(format!("select:{idx}")))
+                .unwrap_or(KeyResult::Ignored),
+            _ => KeyResult::Ignored,
+        }
+    }
+
+    pub(crate) fn selected_index_at(&self, panel_idx: usize) -> Option<usize> {
+        let panel = self.panels.get(panel_idx)?;
+        if !matches!(panel.kind, PanelKind::List { .. }) {
+            return None;
+        }
+        let win = panel.win()?;
+        Some(win.scroll_top as usize + win.cursor_line as usize)
     }
 
     /// Scroll the buffer-backed panel at `panel_idx` by `delta` rows.
@@ -706,12 +765,19 @@ impl Dialog {
     }
 
     pub fn selected_index(&self) -> Option<usize> {
-        let panel = self.panels.get(self.focused)?;
-        if !matches!(panel.kind, PanelKind::List { .. }) {
-            return None;
+        // Prefer the focused panel's selection. If the focused panel
+        // isn't a list (e.g. a search-style input above a results
+        // list), fall back to the first list panel's selection so the
+        // user's "what would Enter pick" intent is preserved across
+        // focus.
+        if let Some(idx) = self.selected_index_at(self.focused) {
+            return Some(idx);
         }
-        let win = panel.win()?;
-        Some(win.scroll_top as usize + win.cursor_line as usize)
+        let list_idx = self
+            .panels
+            .iter()
+            .position(|p| matches!(p.kind, PanelKind::List { .. }))?;
+        self.selected_index_at(list_idx)
     }
 }
 
@@ -795,58 +861,112 @@ impl Component for Dialog {
             _ => {}
         }
 
-        // Widget panels: route directly to widget.
+        // Widget panels: route directly to widget. If the widget
+        // doesn't handle it (e.g. TextInput ignores Up/Down), fall
+        // through to list-panel nav below so the list behaves like a
+        // passive picker under the input — fzf-style.
         if let Some(panel) = self.panels.get_mut(self.focused) {
             if let DialogPanelContent::Widget(widget) = &mut panel.content {
-                return widget.handle_key(code, mods);
+                let r = widget.handle_key(code, mods);
+                let list_idx = self
+                    .panels
+                    .iter()
+                    .position(|p| matches!(p.kind, PanelKind::List { .. }));
+                // Rewrite a widget `submit` into `select:{list_row}` so
+                // Enter on an input panel picks the currently-selected
+                // list row instead of falling back to option 0.
+                if let (KeyResult::Action(a), Some(list_idx)) = (&r, list_idx) {
+                    if a == "submit" {
+                        if let Some(idx) = self.selected_index_at(list_idx) {
+                            return KeyResult::Action(format!("select:{idx}"));
+                        }
+                    }
+                }
+                if !matches!(r, KeyResult::Ignored) {
+                    return r;
+                }
+                if let Some(list_idx) = list_idx {
+                    return self.list_nav_on(list_idx, code, mods);
+                }
+                return r;
             }
         }
 
         // Focused-panel-specific routing.
-        let Some(panel) = self.panels.get(self.focused) else {
-            return KeyResult::Ignored;
+        let (focused_kind, focused_height) = {
+            let Some(panel) = self.panels.get(self.focused) else {
+                return KeyResult::Ignored;
+            };
+            (panel.kind, panel.rect.height)
         };
-        match panel.kind {
-            PanelKind::List { .. } => match (code, mods) {
-                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                    self.move_selection(-1);
-                    KeyResult::Consumed
+        match focused_kind {
+            PanelKind::List { .. } => {
+                let nav = match (code, mods) {
+                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                        self.move_selection(-1);
+                        Some(KeyResult::Consumed)
+                    }
+                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                        self.move_selection(1);
+                        Some(KeyResult::Consumed)
+                    }
+                    (KeyCode::PageUp, _) | (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                        let page = focused_height.max(1) as isize / 2;
+                        self.move_selection(-page);
+                        Some(KeyResult::Consumed)
+                    }
+                    (KeyCode::PageDown, _) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                        let page = focused_height.max(1) as isize / 2;
+                        self.move_selection(page);
+                        Some(KeyResult::Consumed)
+                    }
+                    (KeyCode::Home, _) | (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                        self.move_selection(isize::MIN / 2);
+                        Some(KeyResult::Consumed)
+                    }
+                    (KeyCode::End, _) => {
+                        self.move_selection(isize::MAX / 2);
+                        Some(KeyResult::Consumed)
+                    }
+                    (KeyCode::Enter, _) => Some(
+                        self.selected_index()
+                            .map(|idx| KeyResult::Action(format!("select:{idx}")))
+                            .unwrap_or(KeyResult::Ignored),
+                    ),
+                    _ => None,
+                };
+                if let Some(r) = nav {
+                    return r;
                 }
-                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                    self.move_selection(1);
-                    KeyResult::Consumed
-                }
-                (KeyCode::PageUp, _) | (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                    let page = panel.rect.height.max(1) as isize / 2;
-                    self.move_selection(-page);
-                    KeyResult::Consumed
-                }
-                (KeyCode::PageDown, _) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                    let page = panel.rect.height.max(1) as isize / 2;
-                    self.move_selection(page);
-                    KeyResult::Consumed
-                }
-                (KeyCode::Home, _) | (KeyCode::Char('g'), KeyModifiers::NONE) => {
-                    self.move_selection(isize::MIN / 2);
-                    KeyResult::Consumed
-                }
-                (KeyCode::End, _) => {
-                    self.move_selection(isize::MAX / 2);
-                    KeyResult::Consumed
-                }
-                (KeyCode::Enter, _) => {
-                    if let Some(idx) = self.selected_index() {
-                        KeyResult::Action(format!("select:{idx}"))
-                    } else {
-                        KeyResult::Ignored
+                // Picker-style fall-through: any key the list didn't
+                // claim gets forwarded to the first sibling Widget
+                // panel — for a dialog with `TextInput` above the
+                // list, this lets typing update a live filter while
+                // the list keeps nav focus (fzf UX).
+                let widget_idx = self
+                    .panels
+                    .iter()
+                    .position(|p| matches!(p.content, DialogPanelContent::Widget(_)));
+                if let Some(idx) = widget_idx {
+                    if let Some(panel) = self.panels.get_mut(idx) {
+                        if let DialogPanelContent::Widget(w) = &mut panel.content {
+                            let r = w.handle_key(code, mods);
+                            if !matches!(r, KeyResult::Ignored) {
+                                return r;
+                            }
+                        }
                     }
                 }
-                (KeyCode::Char(c), KeyModifiers::NONE) if c.is_ascii_digit() => {
-                    let idx = (c as u8 - b'1') as usize;
-                    KeyResult::Action(format!("select:{idx}"))
+                // No typing sink: preserve the digit-shortcut for
+                // options-style list dialogs.
+                if let (KeyCode::Char(c), KeyModifiers::NONE) = (code, mods) {
+                    if c.is_ascii_digit() {
+                        let idx = (c as u8 - b'1') as usize;
+                        return KeyResult::Action(format!("select:{idx}"));
+                    }
                 }
-                _ => KeyResult::Ignored,
-            },
+                KeyResult::Ignored
+            }
             PanelKind::Content => match (code, mods) {
                 (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
                     self.scroll_focused(-1);
@@ -857,12 +977,12 @@ impl Component for Dialog {
                     KeyResult::Consumed
                 }
                 (KeyCode::PageUp, _) | (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                    let page = panel.rect.height.max(1) as isize / 2;
+                    let page = focused_height.max(1) as isize / 2;
                     self.scroll_focused(-page);
                     KeyResult::Consumed
                 }
                 (KeyCode::PageDown, _) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                    let page = panel.rect.height.max(1) as isize / 2;
+                    let page = focused_height.max(1) as isize / 2;
                     self.scroll_focused(page);
                     KeyResult::Consumed
                 }

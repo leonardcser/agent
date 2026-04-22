@@ -292,6 +292,11 @@ pub(crate) struct LuaShared {
     pub(crate) plugin_tools: Mutex<HashMap<String, LuaHandle>>,
     pub(crate) callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub(crate) next_id: AtomicU64,
+    /// Separate counter for buffer IDs minted by `smelt.api.buf.create`.
+    /// Starts at `1 << 32` so Lua-allocated `BufId`s never collide with
+    /// Rust-side buffers (prompt input, scratch, etc.) that are minted
+    /// by `ui.buf_create` from 1.
+    pub(crate) next_buf_id: AtomicU64,
     pub(crate) history: Mutex<Arc<Vec<protocol::Message>>>,
     pub(crate) tasks: Mutex<LuaTaskRuntime>,
     /// Background process registry. Installed by `App::new` so Lua
@@ -381,6 +386,7 @@ impl Default for LuaShared {
             plugin_tools: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            next_buf_id: AtomicU64::new(ui::LUA_BUF_ID_BASE),
             history: Mutex::new(Arc::new(Vec::new())),
             tasks: Mutex::new(LuaTaskRuntime::new()),
             processes: Mutex::new(None),
@@ -990,10 +996,7 @@ impl LuaRuntime {
                         let Some(ref shared_snaps) = *guard else {
                             return lua.create_table();
                         };
-                        shared_snaps
-                            .lock()
-                            .map(|v| v.clone())
-                            .unwrap_or_default()
+                        shared_snaps.lock().map(|v| v.clone()).unwrap_or_default()
                     };
                     let out = lua.create_table()?;
                     for (i, snap) in snaps.into_iter().enumerate() {
@@ -1052,11 +1055,7 @@ impl LuaRuntime {
                     None => return lua.create_table(),
                 };
                 let dir = crate::session::dir_for(&session);
-                let lines = engine::registry::read_agent_logs(
-                    &dir,
-                    pid,
-                    max_lines.unwrap_or(200),
-                );
+                let lines = engine::registry::read_agent_logs(&dir, pid, max_lines.unwrap_or(200));
                 let out = lua.create_table()?;
                 for (i, line) in lines.into_iter().enumerate() {
                     out.set(i + 1, line)?;
@@ -1253,7 +1252,9 @@ impl LuaRuntime {
             buf_tbl.set(
                 "create",
                 lua.create_function(move |_, ()| {
-                    let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let id = s
+                        .next_buf_id
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if let Ok(mut o) = s.ops.lock() {
                         o.ops.push(AppOp::BufCreate { id });
                     }
@@ -1276,6 +1277,37 @@ impl LuaRuntime {
                     }
                     Ok(())
                 })?,
+            )?;
+        }
+        // smelt.api.buf.add_dim(buf_id, line_1_based, col_start, col_end)
+        // Paints a dim span over the given column range on `line`. The
+        // line index is 1-based to match Lua's table conventions; the
+        // column range is 0-based cell columns and [start, end)
+        // half-open. Useful for dim metadata columns (size, timestamp,
+        // …) next to bright content.
+        {
+            let s = shared.clone();
+            buf_tbl.set(
+                "add_dim",
+                lua.create_function(
+                    move |_, (id, line, col_start, col_end): (u64, u64, u64, u64)| {
+                        let Some(line0) = line.checked_sub(1) else {
+                            return Ok(());
+                        };
+                        if col_end <= col_start {
+                            return Ok(());
+                        }
+                        if let Ok(mut o) = s.ops.lock() {
+                            o.ops.push(AppOp::BufAddDim {
+                                id,
+                                line: line0 as usize,
+                                col_start: col_start.min(u16::MAX as u64) as u16,
+                                col_end: col_end.min(u16::MAX as u64) as u16,
+                            });
+                        }
+                        Ok(())
+                    },
+                )?,
             )?;
         }
         api.set("buf", buf_tbl)?;
@@ -1970,8 +2002,7 @@ impl LuaRuntime {
                     ) {
                         Ok(ctx) => {
                             if let Err(e) = func.call::<()>(ctx) {
-                                extra_ops
-                                    .push(AppOp::NotifyError(format!("dialog callback: {e}")));
+                                extra_ops.push(AppOp::NotifyError(format!("dialog callback: {e}")));
                             }
                         }
                         Err(e) => {
@@ -2650,6 +2681,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.plugins.permissions",
         include_str!("../../../../runtime/lua/smelt/plugins/permissions.lua"),
     ),
+    (
+        "smelt.plugins.resume",
+        include_str!("../../../../runtime/lua/smelt/plugins/resume.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -2663,6 +2698,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.help",
     "smelt.plugins.yank_block",
     "smelt.plugins.permissions",
+    "smelt.plugins.resume",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

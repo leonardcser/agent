@@ -158,27 +158,6 @@ impl App {
         while self.engine.try_recv().is_ok() {}
     }
 
-    pub(super) fn resume_entries(&self) -> Vec<ResumeEntry> {
-        let sessions = session::list_sessions();
-        let current_id = &self.session.id;
-        let flat: Vec<ResumeEntry> = sessions
-            .into_iter()
-            .filter(|s| s.id != *current_id)
-            .map(|s| ResumeEntry {
-                id: s.id,
-                title: s.title.unwrap_or_default(),
-                subtitle: s.first_user_message,
-                updated_at_ms: s.updated_at_ms,
-                created_at_ms: s.created_at_ms,
-                cwd: s.cwd,
-                parent_id: s.parent_id,
-                depth: 0,
-                size_bytes: s.text_bytes,
-            })
-            .collect();
-        super::build_session_tree(flat)
-    }
-
     // ── History / session ────────────────────────────────────────────────
 
     /// Rebuild the screen from session history and import persisted render cache.

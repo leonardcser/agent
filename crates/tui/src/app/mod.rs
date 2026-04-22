@@ -9,8 +9,7 @@ pub mod ops;
 
 use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, MenuResult};
 use crate::render::{
-    tool_arg_summary, ApprovalScope, Block, ConfirmChoice, ConfirmRequest, ResumeEntry, ToolOutput,
-    ToolStatus,
+    tool_arg_summary, ApprovalScope, Block, ConfirmChoice, ConfirmRequest, ToolOutput, ToolStatus,
 };
 use crate::session::Session;
 use crate::{render, session, state, vim};
@@ -302,65 +301,6 @@ pub enum CommandAction {
         tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
         std::sync::Arc<tokio::sync::Notify>,
     ),
-}
-
-/// Arrange flat session entries into a tree: roots first (sorted by
-/// updated_at descending), each followed by its forks (also sorted).
-fn build_session_tree(mut flat: Vec<ResumeEntry>) -> Vec<ResumeEntry> {
-    use std::collections::HashMap;
-
-    // Index children by parent_id.
-    let mut children: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, entry) in flat.iter().enumerate() {
-        if let Some(ref pid) = entry.parent_id {
-            children.entry(pid.clone()).or_default().push(i);
-        }
-    }
-
-    // Collect root indices (no parent, or parent doesn't exist in the set).
-    let ids: std::collections::HashSet<&str> = flat.iter().map(|e| e.id.as_str()).collect();
-    let root_indices: Vec<usize> = flat
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| {
-            e.parent_id
-                .as_ref()
-                .is_none_or(|pid| !ids.contains(pid.as_str()))
-        })
-        .map(|(i, _)| i)
-        .collect();
-
-    // Recursively emit entries with depth.
-    let mut result = Vec::with_capacity(flat.len());
-    fn emit(
-        idx: usize,
-        depth: usize,
-        flat: &mut Vec<ResumeEntry>,
-        children: &HashMap<String, Vec<usize>>,
-        result: &mut Vec<ResumeEntry>,
-    ) {
-        let mut entry = flat[idx].clone();
-        entry.depth = depth;
-        let id = entry.id.clone();
-        result.push(entry);
-        if let Some(child_indices) = children.get(&id) {
-            let mut sorted: Vec<usize> = child_indices.clone();
-            sorted.sort_by(|a, b| {
-                let ta = flat[*b].updated_at_ms;
-                let tb = flat[*a].updated_at_ms;
-                ta.cmp(&tb)
-            });
-            for ci in sorted {
-                emit(ci, depth + 1, flat, children, result);
-            }
-        }
-    }
-
-    for ri in root_indices {
-        emit(ri, 0, &mut flat, &children, &mut result);
-    }
-
-    result
 }
 
 /// Check whether a command is allowed while the agent is running.

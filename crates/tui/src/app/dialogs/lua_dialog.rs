@@ -152,6 +152,17 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
                     on_change,
                 });
             }
+            "list" => {
+                // Buffer-backed selectable list. Plugin pre-creates a
+                // buf via `smelt.api.buf.create` + `set_lines`, then
+                // mutates it from `on_change` / `on_tick` callbacks.
+                // Enter on a list panel submits with the row index.
+                let buf_id: u64 = panel.get("buf").map_err(|e| format!("list.buf: {e}"))?;
+                panel_specs.push(PanelSpec::list(
+                    BufId(buf_id),
+                    height.unwrap_or(PanelHeight::Fill),
+                ));
+            }
             other => return Err(format!("unknown panel kind: {other}")),
         }
     }
@@ -212,8 +223,7 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
         .ok_or_else(|| "failed to open dialog window".to_string())?;
 
     // Harvest on_change callback ids for cleanup on close.
-    let input_change_callback_ids: Vec<u64> =
-        inputs.iter().filter_map(|i| i.on_change).collect();
+    let input_change_callback_ids: Vec<u64> = inputs.iter().filter_map(|i| i.on_change).collect();
 
     // Optional top-level `on_tick = fn(ctx)` — fired every engine tick
     // while the dialog is open. Lets plugins refresh from live

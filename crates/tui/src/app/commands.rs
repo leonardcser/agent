@@ -68,15 +68,6 @@ impl App {
                     },
                 }
             }
-            "/resume" => {
-                let entries = self.resume_entries();
-                if entries.is_empty() {
-                    self.notify_error("no saved sessions".into());
-                } else {
-                    super::dialogs::resume::open(self, entries);
-                }
-                CommandAction::Continue
-            }
             "/vim" => {
                 self.update_settings(|s| s.vim = !s.vim);
                 CommandAction::Continue

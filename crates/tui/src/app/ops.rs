@@ -147,6 +147,16 @@ pub enum AppOp {
         id: u64,
         lines: Vec<String>,
     },
+    /// Paint a `SpanStyle::dim()` highlight over `[col_start, col_end)`
+    /// on `line`. Out-of-range line indices are silently dropped — the
+    /// buffer may have shrunk between the plugin's queue and the op's
+    /// apply.
+    BufAddDim {
+        id: u64,
+        line: usize,
+        col_start: u16,
+        col_end: u16,
+    },
     WinOpenFloat {
         buf_id: u64,
         title: String,

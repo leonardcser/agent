@@ -52,7 +52,6 @@ impl Completer {
         &[
             ("clear", "start new conversation"),
             ("new", "start new conversation"),
-            ("resume", "resume saved session"),
             ("vim", "toggle vim mode"),
             ("thinking", "toggle thinking blocks"),
             ("model", "switch model"),
