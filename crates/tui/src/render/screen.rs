@@ -10,44 +10,12 @@
 use super::blocks;
 use super::blocks::{gap_between, render_thinking_summary, thinking_summary, Element};
 use super::cache::{PersistedLayoutCache, RenderCache};
-use super::completions::{completion_actual_rows, draw_completions, draw_menu};
 use super::history::{
     AgentBlockStatus, Block, BlockId, Status, Throbber, ToolOutputRef, ToolState, ToolStatus,
     ViewState,
 };
 use super::transcript::Transcript;
 use super::transcript_buf::TranscriptProjection;
-
-#[allow(clippy::too_many_arguments)]
-fn paint_completer_float(
-    out: &mut super::RenderOut,
-    layout: &mut super::layout::LayoutState,
-    completer: Option<&crate::completer::Completer>,
-    actual_rows: usize,
-    anchor_row: u16,
-    z: u8,
-    vim_enabled: bool,
-    style: &super::completions::CompletionStyle<'_>,
-) {
-    if actual_rows == 0 {
-        return;
-    }
-    let avail = actual_rows.min(anchor_row as usize);
-    if avail == 0 {
-        return;
-    }
-    let overlay_top = anchor_row.saturating_sub(avail as u16);
-    out.move_to(0, overlay_top);
-    out.row = Some(overlay_top);
-    let drawn = draw_completions(out, completer, avail, vim_enabled, style);
-    if drawn > 0 {
-        layout.push_float(
-            super::layout::Rect::new(overlay_top, 0, layout.term_width, drawn as u16),
-            z,
-            super::layout::HitRegion::Completer,
-        );
-    }
-}
 
 pub(crate) struct TranscriptData {
     pub clamped_scroll: u16,
@@ -91,22 +59,17 @@ pub(crate) enum CursorOwner {
 }
 use super::layout_out::{LayoutSink, SpanCollector};
 use super::prompt::PromptState;
-use super::selection::{
-    build_char_kinds, build_display_spans, compute_visual_line_offsets, map_cursor,
-    render_styled_chars, spans_to_string, wrap_and_locate_cursor, wrap_line, SpanKind,
-};
-use super::status::{draw_bar, BarSpan, StatusItem};
+use super::selection::wrap_and_locate_cursor;
+use super::status::StatusItem;
 use super::working::WorkingState;
 use super::{
-    cursor_colors, draw_soft_cursor, emit_newlines, format_tokens, reasoning_color, Frame,
-    FramePrompt, RenderOut, StdioBackend, StyleState, TerminalBackend, SPINNER_FRAMES,
+    emit_newlines, Frame, StdioBackend, TerminalBackend, SPINNER_FRAMES,
 };
-use crate::input::{InputSnapshot, InputState};
-use crate::theme;
+use crate::input::InputState;
 
 use crossterm::{
     cursor,
-    style::{Color, Print, ResetColor},
+    style::{Print, ResetColor},
     terminal, QueueableCommand,
 };
 use std::collections::HashMap;
@@ -729,137 +692,6 @@ impl Screen {
     /// bottom). Used by the content pane's vim-style motions and yank.
     pub fn viewport_text_rows(&self) -> &[String] {
         &self.last_viewport_text
-    }
-
-    /// Overlay a reverse-video highlight for the given visual selection
-    /// on top of the already-painted transcript. Ranges are expressed
-    /// in absolute buffer (line_from_top, col) coordinates; the viewport
-    /// draws lines top-to-bottom so the mapping is direct.
-    fn paint_visual_range(
-        &self,
-        out: &mut RenderOut,
-        viewport_rows: u16,
-        width: u16,
-        range: &ContentVisualRange,
-    ) {
-        let rows = &self.last_viewport_text;
-        if rows.is_empty() || viewport_rows == 0 {
-            return;
-        }
-        use unicode_width::UnicodeWidthStr;
-        let sel_bg = theme::selection_bg();
-        let theme = crate::theme::snapshot();
-        for line_idx in range.start_line..=range.end_line.min(rows.len().saturating_sub(1)) {
-            if line_idx >= rows.len() || (line_idx as u16) >= viewport_rows {
-                break;
-            }
-            let line = &rows[line_idx];
-            let line_cells = UnicodeWidthStr::width(line.as_str());
-            let (sel_start, sel_end) = match range.kind {
-                ContentVisualKind::Char => {
-                    let start = if line_idx == range.start_line {
-                        range.start_col
-                    } else {
-                        0
-                    };
-                    let end = if line_idx == range.end_line {
-                        range.end_col.min(line_cells)
-                    } else {
-                        line_cells
-                    };
-                    (start, end)
-                }
-                ContentVisualKind::Line => (0, line_cells),
-            };
-            if line_cells == 0 {
-                let is_interior = line_idx > range.start_line && line_idx < range.end_line;
-                let is_line_mode = matches!(range.kind, ContentVisualKind::Line);
-                if is_interior || is_line_mode {
-                    let col0 = self.transcript_gutters.pad_left;
-                    out.move_to(col0, line_idx as u16);
-                    out.set_state(StyleState {
-                        bg: Some(sel_bg),
-                        ..StyleState::default()
-                    });
-                    for _ in 0..width {
-                        out.print(" ");
-                    }
-                }
-                continue;
-            }
-            if sel_end <= sel_start {
-                continue;
-            }
-            let is_line_mode = matches!(range.kind, ContentVisualKind::Line);
-            if let Some(dline) = self.last_viewport_lines.get(line_idx) {
-                let pad = self.transcript_gutters.pad_left;
-                let mut col: usize = 0;
-                for span in &dline.spans {
-                    let span_w = UnicodeWidthStr::width(span.text.as_str());
-                    let span_end = col + span_w;
-                    if span_end <= sel_start || col >= sel_end {
-                        col = span_end;
-                        continue;
-                    }
-                    if !span.meta.selectable && !is_line_mode {
-                        col = span_end;
-                        continue;
-                    }
-                    let clip_start = sel_start.saturating_sub(col);
-                    let clip_end = sel_end.min(span_end) - col;
-                    out.move_to((col + clip_start) as u16 + pad, line_idx as u16);
-                    let byte_start = crate::text_utils::cell_to_byte(&span.text, clip_start);
-                    let byte_end = crate::text_utils::cell_to_byte(&span.text, clip_end);
-                    let sub = &span.text[byte_start..byte_end];
-                    let style = StyleState {
-                        fg: span
-                            .style
-                            .fg
-                            .map(|c| super::paint::resolve(c, &theme, false)),
-                        bg: Some(sel_bg),
-                        bold: span.style.bold,
-                        dim: span.style.dim,
-                        italic: span.style.italic,
-                        crossedout: span.style.crossedout,
-                        underline: span.style.underline,
-                    };
-                    out.set_state(style);
-                    out.print(sub);
-                    col = span_end;
-                }
-                if is_line_mode {
-                    out.set_state(StyleState {
-                        bg: Some(sel_bg),
-                        ..StyleState::default()
-                    });
-                    let remaining = width.saturating_sub(col as u16);
-                    out.move_to(col as u16 + pad, line_idx as u16);
-                    for _ in 0..remaining {
-                        out.print(" ");
-                    }
-                }
-            } else {
-                let byte_start = crate::text_utils::cell_to_byte(line, sel_start);
-                let byte_end = crate::text_utils::cell_to_byte(line, sel_end);
-                let sub = &line[byte_start..byte_end];
-                out.push_style(StyleState {
-                    bg: Some(sel_bg),
-                    ..StyleState::default()
-                });
-                out.print(sub);
-                out.pop_style();
-                if is_line_mode {
-                    out.set_state(StyleState {
-                        bg: Some(sel_bg),
-                        ..StyleState::default()
-                    });
-                    let remaining = width.saturating_sub(sel_end as u16);
-                    for _ in 0..remaining {
-                        out.print(" ");
-                    }
-                }
-            }
-        }
     }
 
     /// Plain-text rendering of the full transcript (including any
@@ -1508,23 +1340,8 @@ impl Screen {
         }
     }
 
-    /// Paint the transcript region: history blocks, ephemeral tail,
-    /// scrollbar, viewport text capture. Shared between the normal
-    /// viewport frame and the dialog frame.
-
-    /// Paint the transcript cursor (block cursor in content pane) and
-    /// visual selection overlay.
-
-    /// Paint the prompt stack (input lines + status bar) and any
-    /// cmdline completer overlay.
-
     /// Flat-line viewport draw path. Paints transcript in the top
-    /// region, prompt stack at the bottom. Returns `(clamped_scroll,
-    /// cursor_line, cursor_col)`.
-    #[allow(clippy::too_many_arguments)]
-
-    /// Measure prompt height without painting. Used by `draw_frame` to
-    /// compute ScrollUp before entering overlay mode.
+    /// Measure prompt height without painting.
     fn measure_prompt_height(
         &self,
         state: &InputState,
@@ -1574,33 +1391,6 @@ impl Screen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{FramePrompt, StdioBackend};
-
-    #[test]
-    fn prompt_sections_reset_terminal_style_before_rendering() {
-        let mut screen = Screen::with_backend(Box::new(StdioBackend));
-        screen.set_anchor_row(0);
-        let input = crate::input::InputState::default();
-        let mut out = RenderOut::buffer();
-        screen.draw_viewport_frame(
-            &mut out,
-            40,
-            FramePrompt {
-                state: &input,
-                queued: &[],
-                prediction: None,
-            },
-            0,
-            0,
-            0,
-            None,
-        );
-        let rendered = String::from_utf8(out.into_bytes()).unwrap();
-        assert!(
-            rendered.contains("\u{1b}[0m\u{1b}[0m"),
-            "rendered: {rendered:?}"
-        );
-    }
 
     #[test]
     fn export_render_cache_skips_blocks_without_ir() {

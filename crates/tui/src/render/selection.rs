@@ -5,10 +5,8 @@
 //! wrapping text into visual lines while tracking the cursor column,
 //! and painting those lines with selection + cursor highlighting.
 
-use super::{cursor_colors, RenderOut};
 use crate::attachment::{AttachmentId, AttachmentStore};
 use crate::input::ATTACHMENT_MARKER;
-use crate::theme;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(crate) fn truncate_str(s: &str, max: usize) -> String {
@@ -421,77 +419,6 @@ pub(super) fn map_cursor(raw_cursor: usize, raw_buf: &str, spans: &[Span]) -> us
     }
     let _ = raw_buf;
     display_pos
-}
-
-/// Render a line using pre-computed per-character span kinds.
-/// `selection` is an optional (start_char, end_char) range within this line.
-/// `cursor_pos` is an optional char index within this line to render as a
-/// software block cursor (white bg, black fg).
-pub(super) fn render_styled_chars(
-    out: &mut RenderOut,
-    line: &str,
-    kinds: &[SpanKind],
-    selection: Option<(usize, usize)>,
-    cursor_pos: Option<usize>,
-) {
-    let mut current = SpanKind::Plain;
-    let mut in_sel = false;
-    let mut in_cursor = false;
-    let char_count = line.chars().count();
-    for (i, ch) in line.chars().enumerate() {
-        let kind = kinds.get(i).copied().unwrap_or(SpanKind::Plain);
-        let want_sel = selection.is_some_and(|(s, e)| i >= s && i < e);
-        let want_cursor = cursor_pos == Some(i);
-
-        if kind != current || want_sel != in_sel || want_cursor != in_cursor {
-            // Reset previous styling before applying new.
-            if in_sel || in_cursor || current != SpanKind::Plain {
-                out.reset_style();
-            }
-            if want_cursor {
-                let (fg, bg) = cursor_colors();
-                out.set_fg(fg);
-                out.set_bg(bg);
-            } else {
-                if want_sel {
-                    out.set_bg(theme::selection_bg());
-                }
-                if kind == SpanKind::AtRef || kind == SpanKind::Attachment {
-                    out.set_fg(theme::accent());
-                }
-            }
-            current = kind;
-            in_sel = want_sel;
-            in_cursor = want_cursor;
-        }
-        out.print(ch.encode_utf8(&mut [0u8; 4]));
-    }
-    // Render a cursor block past the end of the line.
-    if cursor_pos == Some(char_count) {
-        if in_sel || in_cursor || current != SpanKind::Plain {
-            out.reset_style();
-        }
-        let (fg, bg) = cursor_colors();
-        out.set_fg(fg);
-        out.set_bg(bg);
-        out.print(" ");
-        out.reset_style();
-        return;
-    }
-    // Render a highlighted space for empty lines within a selection.
-    if let Some((s, e)) = selection {
-        if e > char_count && s <= char_count {
-            if !in_sel {
-                out.set_bg(theme::selection_bg());
-            }
-            out.print(" ");
-            out.reset_style();
-            return;
-        }
-    }
-    if in_sel || in_cursor || current != SpanKind::Plain {
-        out.reset_style();
-    }
 }
 
 #[cfg(test)]

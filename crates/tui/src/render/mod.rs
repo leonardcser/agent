@@ -1,7 +1,6 @@
 pub(crate) mod blocks;
 mod cache;
 pub(crate) mod cmdline;
-mod completions;
 mod context;
 pub(crate) mod dialogs;
 pub(crate) mod display;
@@ -457,22 +456,6 @@ impl RenderOut {
             let _ = self.queue(ResetColor);
             self.current = clean;
         }
-    }
-
-    // ── Cursor-tracking helpers ───────────────────────────────────
-
-    /// Initialize cursor tracking at the start of a frame.
-    pub(super) fn init_cursor(&mut self, row: u16, term_width: u16, term_height: u16) {
-        self.cursor_row = row;
-        self.term_width = term_width;
-        self.term_height = term_height;
-    }
-
-    /// Queue a MoveTo and update the tracked cursor row.
-    pub(super) fn move_to(&mut self, col: u16, row: u16) {
-        let _ = self.queue(cursor::MoveTo(col, row));
-        self.cursor_row = row;
-        self.line_cols = col;
     }
 
     /// Emit visible text and keep `line_cols` in sync. This is the sole

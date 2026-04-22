@@ -9,8 +9,6 @@ use super::blocks::{gap_between, layout_block, Element};
 use super::cache::ToolOutputRenderCache;
 use super::context::LayoutContext;
 use super::display::DisplayBlock;
-use super::RenderOut;
-use crossterm::QueueableCommand;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -738,127 +736,6 @@ impl BlockHistory {
         total.min(u16::MAX as u32) as u16
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn paint_viewport(
-        &mut self,
-        out: &mut RenderOut,
-        width: usize,
-        show_thinking: bool,
-        top_row: u16,
-        viewport_rows: u16,
-        scroll_top: u16,
-        extra_lines: &[super::display::DisplayLine],
-        pad_left: u16,
-        viewport_lines_out: &mut Vec<super::display::DisplayLine>,
-    ) -> u16 {
-        let _perf = crate::perf::begin("history:paint_viewport");
-        if viewport_rows == 0 {
-            return 0;
-        }
-        if width != self.cache_width {
-            self.invalidate_for_width(width);
-            self.cache_width = width;
-        }
-        let key = LayoutKey {
-            view_state: super::history::ViewState::Expanded,
-            width: width as u16,
-            show_thinking,
-            content_hash: 0,
-        };
-        let mut per_block: Vec<(u16, u16)> = Vec::with_capacity(self.order.len());
-        let mut total: u32 = 0;
-        for i in 0..self.order.len() {
-            let rows = self.ensure_rows(i, key);
-            let gap = if rows == 0 { 0 } else { self.block_gap(i) };
-            total += gap as u32 + rows as u32;
-            per_block.push((gap, rows));
-        }
-        total += extra_lines.len() as u32;
-        let total = total.min(u16::MAX as u32) as u16;
-
-        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_top);
-        let scroll = geom.clamped_scroll();
-        let skip = geom.skip_from_top();
-
-        let theme = crate::theme::snapshot();
-        let pctx = super::context::PaintContext {
-            theme: &theme,
-            term_width: width as u16,
-        };
-
-        out.row = Some(top_row);
-        out.move_to(0, top_row);
-
-        let mut remaining_skip = skip as u32;
-        let mut painted: u16 = 0;
-
-        viewport_lines_out.clear();
-        viewport_lines_out.reserve(viewport_rows as usize);
-
-        'blocks: for (i, (gap, _rows)) in per_block.iter().enumerate() {
-            // Gap lines (blank rows).
-            for _ in 0..*gap {
-                if remaining_skip > 0 {
-                    remaining_skip -= 1;
-                    continue;
-                }
-                if painted >= viewport_rows {
-                    break 'blocks;
-                }
-                let _ = out.queue(crossterm::terminal::Clear(
-                    crossterm::terminal::ClearType::CurrentLine,
-                ));
-                out.newline();
-                viewport_lines_out.push(super::display::DisplayLine::default());
-                painted += 1;
-            }
-            let id = self.order[i];
-            let bkey = self.resolve_key(id, key);
-            let display = self.artifacts.get(&id).and_then(|a| a.get(bkey));
-            let Some(display) = display else { continue };
-            for line in &display.lines {
-                if remaining_skip > 0 {
-                    remaining_skip -= 1;
-                    continue;
-                }
-                if painted >= viewport_rows {
-                    break 'blocks;
-                }
-                super::paint::paint_line(out, line, &pctx, pad_left);
-                viewport_lines_out.push(line.clone());
-                painted += 1;
-            }
-        }
-
-        // Paint ephemeral tail after committed blocks.
-        for line in extra_lines {
-            if remaining_skip > 0 {
-                remaining_skip -= 1;
-                continue;
-            }
-            if painted >= viewport_rows {
-                break;
-            }
-            super::paint::paint_line(out, line, &pctx, pad_left);
-            viewport_lines_out.push(line.clone());
-            painted += 1;
-        }
-
-        // Blank-fill any remaining viewport rows so leftover content from
-        // previous frames is cleanly overwritten without a full-screen
-        // Clear::All (which causes visible flicker on terminals that
-        // don't support synchronized update).
-        while painted < viewport_rows {
-            let _ = out.queue(crossterm::terminal::Clear(
-                crossterm::terminal::ClearType::CurrentLine,
-            ));
-            out.newline();
-            viewport_lines_out.push(super::display::DisplayLine::default());
-            painted += 1;
-        }
-
-        scroll
-    }
 }
 
 /// Streaming state for incremental thinking output.
@@ -896,23 +773,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hidden_thinking_keeps_gap_above_summary() {
-        let mut history = BlockHistory::new();
-        history.push(Block::Text {
-            content: "hello".into(),
-        });
-        history.push(Block::Thinking {
-            content: "alpha\nbeta".into(),
-        });
-
-        let mut out = RenderOut::buffer();
-        history.paint_viewport(&mut out, 80, false, 0, 50, 0, &[], 0, &mut Vec::new());
-        let rendered = String::from_utf8(out.into_bytes()).unwrap();
-        assert!(rendered.contains("hello"));
-        assert!(rendered.contains("thinking (2 lines)"));
-    }
-
-    #[test]
     fn block_artifact_bounded_lru_roundtrip() {
         // Resize cycle 100 → 80 → 100 → 80 must hit cache on every repeat
         // step, because the bounded LRU keeps both widths resident.
@@ -921,14 +781,13 @@ mod tests {
             content: "the quick brown fox jumps over the lazy dog".into(),
         });
 
-        let mut sink = RenderOut::buffer();
-        history.paint_viewport(&mut sink, 100, true, 0, 50, 0, &[], 0, &mut Vec::new());
+        let _ = history.total_rows(100, true);
         history.flushed = 0;
-        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0, &mut Vec::new());
+        let _ = history.total_rows(80, true);
         history.flushed = 0;
-        history.paint_viewport(&mut sink, 100, true, 0, 50, 0, &[], 0, &mut Vec::new());
+        let _ = history.total_rows(100, true);
         history.flushed = 0;
-        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0, &mut Vec::new());
+        let _ = history.total_rows(80, true);
 
         let content_hash = history.content_hash(id);
         let keys: Vec<LayoutKey> = history
@@ -963,8 +822,7 @@ mod tests {
             content: "hello".into(),
         });
 
-        let mut sink = RenderOut::buffer();
-        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0, &mut Vec::new());
+        let _ = history.total_rows(80, true);
         let h0 = history.content_hash(id);
         assert!(!history.artifacts.get(&id).unwrap().is_empty());
 
@@ -983,7 +841,7 @@ mod tests {
         );
 
         history.flushed = 0;
-        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[], 0, &mut Vec::new());
+        let _ = history.total_rows(80, true);
         let keys: Vec<u64> = history
             .artifacts
             .get(&id)

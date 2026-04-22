@@ -2,18 +2,8 @@ pub use ui::Rect;
 
 #[derive(Clone, Debug)]
 pub struct LayoutState {
-    pub term_width: u16,
     pub transcript: Rect,
-    pub gap: u16,
     pub prompt: Rect,
-    pub floats: Vec<FloatEntry>,
-}
-
-#[derive(Clone, Debug)]
-pub struct FloatEntry {
-    pub rect: Rect,
-    pub z: u8,
-    pub region: HitRegion,
 }
 
 #[derive(Debug)]
@@ -58,18 +48,7 @@ impl LayoutState {
         let transcript = regions.get("transcript").copied().unwrap_or_default();
         let prompt = regions.get("prompt").copied().unwrap_or_default();
 
-        LayoutState {
-            term_width,
-            transcript,
-            gap: 1,
-            prompt,
-            floats: Vec::new(),
-        }
-    }
-
-    pub fn push_float(&mut self, rect: Rect, z: u8, region: HitRegion) {
-        self.floats.push(FloatEntry { rect, z, region });
-        self.floats.sort_by_key(|f| f.z);
+        LayoutState { transcript, prompt }
     }
 
     pub fn viewport_rows(&self) -> u16 {
@@ -77,13 +56,7 @@ impl LayoutState {
     }
 
     pub fn hit_test(&self, row: u16, col: u16) -> HitRegion {
-        for f in self.floats.iter().rev() {
-            if f.rect.contains(row, col) {
-                return f.region;
-            }
-        }
         if self.prompt.height > 0 {
-            // Status bar is the last row of the prompt area.
             if row == self.prompt.bottom().saturating_sub(1) {
                 return HitRegion::Status;
             }
@@ -102,7 +75,6 @@ impl LayoutState {
 pub enum HitRegion {
     Transcript,
     Prompt,
-    Completer,
     Status,
     Outside,
 }
@@ -120,7 +92,6 @@ mod tests {
         });
         assert_eq!(layout.transcript.top, 0);
         assert_eq!(layout.transcript.height, 34);
-        assert_eq!(layout.gap, 1);
         assert_eq!(layout.prompt.top, 35);
         assert_eq!(layout.prompt.height, 5);
     }
@@ -160,18 +131,5 @@ mod tests {
         });
         assert!(layout.transcript.height <= 3);
         assert!(layout.prompt.height <= 3);
-    }
-
-    #[test]
-    fn float_takes_precedence_over_docked() {
-        let mut layout = LayoutState::compute(&LayoutInput {
-            term_width: 80,
-            term_height: 40,
-            prompt_height: 5,
-        });
-        assert_eq!(layout.hit_test(10, 20), HitRegion::Transcript);
-        layout.push_float(Rect::new(5, 10, 30, 10), 1, HitRegion::Completer);
-        assert_eq!(layout.hit_test(10, 20), HitRegion::Completer);
-        assert_eq!(layout.hit_test(10, 5), HitRegion::Transcript);
     }
 }

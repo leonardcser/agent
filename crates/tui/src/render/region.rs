@@ -1,14 +1,13 @@
-pub(crate) type ScrollbarGeom = ui::ScrollbarState;
 pub(crate) type Viewport = ui::WindowViewport;
 pub(crate) type ViewportHit = ui::ViewportHit;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ui::Rect;
+    use ui::{Rect, ScrollbarState};
 
-    fn bar(col: u16, rows: u16, total: u16) -> ScrollbarGeom {
-        ScrollbarGeom::new(col, total, rows)
+    fn bar(col: u16, rows: u16, total: u16) -> ScrollbarState {
+        ScrollbarState::new(col, total, rows)
             .expect("scrollbar should exist when content overflows viewport")
     }
 
@@ -41,7 +40,7 @@ mod tests {
 
     #[test]
     fn no_overflow_disables_bar_math() {
-        let b = ScrollbarGeom::new(0, 10, 10);
+        let b = ScrollbarState::new(0, 10, 10);
         assert!(b.is_none());
     }
 
@@ -52,7 +51,7 @@ mod tests {
             78,
             50,
             0,
-            ScrollbarGeom::new(79, 50, 10),
+            ScrollbarState::new(79, 50, 10),
         );
         assert!(vp.hit(3, 0).is_none());
         assert!(matches!(

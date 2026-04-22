@@ -3,10 +3,6 @@
 //! prompt input buffer and the content pane so both panes look and
 //! behave identically.
 
-use super::RenderOut;
-use crate::theme;
-use crossterm::{cursor, QueueableCommand};
-
 /// Thumb geometry for a single-column scrollbar over `visible_rows`
 /// rows showing `total_rows` of content, scrolled by `scroll_offset`
 /// rows from the top.
@@ -47,28 +43,3 @@ impl Scrollbar {
     }
 }
 
-/// Paint the scrollbar as a single column at `col`, drawing `rows`
-/// rows starting at screen row `top_row`. No-op when the scrollbar
-/// is not needed.
-pub(super) fn paint_column(
-    out: &mut RenderOut,
-    col: u16,
-    top_row: u16,
-    rows: u16,
-    bar: &Scrollbar,
-) {
-    if !bar.visible {
-        return;
-    }
-    for i in 0..rows {
-        let bg = if bar.is_thumb(i as usize) {
-            theme::scrollbar_thumb()
-        } else {
-            theme::scrollbar_track()
-        };
-        let _ = out.queue(cursor::MoveTo(col, top_row + i));
-        out.push_bg(bg);
-        out.print(" ");
-        out.pop_style();
-    }
-}
