@@ -651,9 +651,9 @@ impl Dialog {
 
     /// Scroll the buffer-backed panel at `panel_idx` by `delta` rows.
     /// No-op for widget-backed panels or invalid indices. Used by
-    /// `DialogState` implementations to scroll a non-focused content
-    /// panel (e.g. Confirm forwards PageUp/PageDown to its preview
-    /// while focus stays on the options widget).
+    /// dialog keymap callbacks to scroll a non-focused content panel
+    /// (e.g. Confirm forwards PageUp/PageDown to its preview while
+    /// focus stays on the options widget).
     pub fn scroll_panel(&mut self, panel_idx: usize, delta: isize) {
         let Some(panel) = self.panels.get_mut(panel_idx) else {
             return;

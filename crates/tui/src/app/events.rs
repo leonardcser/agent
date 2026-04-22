@@ -60,7 +60,10 @@ impl App {
         }
 
         // Compositor float: when a float window is focused, route keys
-        // through the compositor.
+        // through the compositor. The Callbacks registry handles
+        // per-window keymaps, auto-dispatches widget actions into
+        // `WinEvent::Submit/Dismiss`, and any Rust callbacks queue
+        // `AppOp`s drained below.
         if self.ui.focused_float().is_some() {
             if let Event::Resize(w, h) = ev {
                 self.handle_resize(w, h);
@@ -70,16 +73,7 @@ impl App {
                 code, modifiers, ..
             }) = ev
             {
-                if let Some(result) = self.intercept_float_key(code, modifiers, agent) {
-                    if let ui::KeyResult::Action(_) = &result {
-                        self.handle_float_action(result, agent);
-                    }
-                } else {
-                    let result = self.ui.handle_key(code, modifiers);
-                    self.handle_float_action(result, agent);
-                }
-                // Drain any AppOps queued by Rust callbacks (migrated
-                // dialogs) or Lua handlers during dispatch.
+                let _ = self.ui.handle_key(code, modifiers);
                 self.apply_lua_ops();
             }
             return false;
@@ -1697,69 +1691,8 @@ impl App {
     }
 
     fn close_float(&mut self, win_id: ui::WinId) {
-        let id = win_id.0;
-        let dismiss_id = id | (1 << 63);
-        let ops = self.lua.fire_callback(dismiss_id, "");
-        self.apply_ops(ops);
-        self.lua.remove_callback(id);
-        self.lua.remove_callback(dismiss_id);
-        self.float_states.remove(&win_id);
         self.blocking_wins.remove(&win_id);
         self.ui.win_close(win_id);
-    }
-
-    fn handle_float_action(&mut self, result: ui::KeyResult, agent: &mut Option<TurnState>) {
-        let ui::KeyResult::Action(action) = result else {
-            return;
-        };
-        let Some(win_id) = self.ui.focused_float() else {
-            return;
-        };
-
-        // First, give the DialogState a chance to handle arbitrary
-        // custom actions (submit, shortcut:X, etc.).
-        use crate::app::dialogs::ActionResult;
-        if let Some(mut state) = self.float_states.remove(&win_id) {
-            let disposition = state.on_action(self, win_id, &action, agent);
-            match disposition {
-                ActionResult::Close => {
-                    self.close_float(win_id);
-                    return;
-                }
-                ActionResult::Keep => {
-                    if self.ui.dialog_mut(win_id).is_some() {
-                        self.float_states.insert(win_id, state);
-                    }
-                    return;
-                }
-                ActionResult::Pass => {
-                    if self.ui.dialog_mut(win_id).is_some() {
-                        self.float_states.insert(win_id, state);
-                    }
-                }
-            }
-        }
-
-        // Fall through to built-in dispatch.
-        if action == "dismiss" {
-            if let Some(mut state) = self.float_states.remove(&win_id) {
-                state.on_dismiss(self, win_id);
-            }
-            self.close_float(win_id);
-        } else if let Some(idx_str) = action.strip_prefix("select:") {
-            // Dispatch to Lua callbacks (no-op for builtin floats).
-            let id = win_id.0;
-            let ops = self.lua.fire_callback(id, idx_str);
-            self.apply_ops(ops);
-
-            // Dispatch to the builtin DialogState handler.
-            if let Some(mut state) = self.float_states.remove(&win_id) {
-                if let Ok(idx) = idx_str.parse::<usize>() {
-                    state.on_select(self, win_id, idx, agent);
-                }
-                self.close_float(win_id);
-            }
-        }
     }
 
     /// BackTab (shift-tab) on an open Confirm float: toggle app mode,
@@ -1776,7 +1709,6 @@ impl App {
             == Decision::Allow
         {
             if let Some(win) = self.ui.focused_float() {
-                self.float_states.remove(&win);
                 self.close_float(win);
             }
             self.screen
@@ -1790,90 +1722,30 @@ impl App {
 
     /// Close the focused float if it doesn't block the agent (e.g. Ps,
     /// Permissions, Resume). Used before opening a blocking dialog so
-    /// only one float is visible at a time.
+    /// only one float is visible at a time. Fires `WinEvent::Dismiss`
+    /// so the dialog's callbacks can flush any pending state (e.g.
+    /// Permissions syncs its edits before close).
     pub(super) fn close_focused_non_blocking_float(&mut self) {
         let Some(win) = self.ui.focused_float() else {
             return;
         };
-        let blocked_via_state = self
-            .float_states
-            .get(&win)
-            .is_some_and(|s| s.blocks_agent());
-        let blocked_via_set = self.blocking_wins.contains(&win);
-        if blocked_via_state || blocked_via_set {
-            return;
-        }
-
-        // Migrated dialogs: fire WinEvent::Dismiss so their callbacks
-        // run (e.g. Permissions syncs its edits before close).
-        if !self.float_states.contains_key(&win) {
-            let mut lua_invoke =
-                |_handle: ui::LuaHandle, _payload: &ui::Payload| -> Vec<String> { Vec::new() };
-            let _ = self.ui.dispatch_event(
-                win,
-                ui::WinEvent::Dismiss,
-                ui::Payload::None,
-                &mut lua_invoke,
-            );
-            self.apply_lua_ops();
-            return;
-        }
-
-        // Legacy DialogState path.
-        if let Some(mut state) = self.float_states.remove(&win) {
-            state.on_dismiss(self, win);
-        }
-        self.close_float(win);
-    }
-
-    /// True when the focused float dialog blocks agent-event drain
-    /// (Confirm / Question gate tool-call permission).
-    pub(super) fn focused_float_blocks_agent(&self) -> bool {
-        let Some(win) = self.ui.focused_float() else {
-            return false;
-        };
         if self.blocking_wins.contains(&win) {
-            return true;
+            return;
         }
-        self.float_states
-            .get(&win)
-            .is_some_and(|s| s.blocks_agent())
+        let mut lua_invoke =
+            |_handle: ui::LuaHandle, _payload: &ui::Payload| -> Vec<String> { Vec::new() };
+        let _ = self
+            .ui
+            .dispatch_event(win, ui::WinEvent::Dismiss, ui::Payload::None, &mut lua_invoke);
+        self.apply_lua_ops();
     }
 
-    /// Drive per-tick refresh for the focused builtin float (e.g.
-    /// agents dialog syncing live subagent snapshots into its buffer).
-    pub(super) fn tick_focused_float(&mut self) {
-        let Some(win_id) = self.ui.focused_float() else {
-            return;
-        };
-        let Some(mut state) = self.float_states.remove(&win_id) else {
-            return;
-        };
-        state.tick(self, win_id);
-        if self.ui.dialog_mut(win_id).is_some() {
-            self.float_states.insert(win_id, state);
-        }
-    }
-
-    /// Intercept a key for the focused builtin float. Returns
-    /// `Some(result)` to short-circuit the default dialog handling.
-    /// Uses a take/put-back pattern so the state method can borrow
-    /// `&mut self` without conflicting with `self.float_states`.
-    fn intercept_float_key(
-        &mut self,
-        code: KeyCode,
-        mods: KeyModifiers,
-        _agent: &mut Option<TurnState>,
-    ) -> Option<ui::KeyResult> {
-        let win_id = self.ui.focused_float()?;
-        let mut state = self.float_states.remove(&win_id)?;
-        let result = state.handle_key(self, win_id, code, mods);
-        // Put back only if the dialog is still open (handle_key may
-        // have closed it directly, e.g. on Enter to load a session).
-        if self.ui.dialog_mut(win_id).is_some() {
-            self.float_states.insert(win_id, state);
-        }
-        result
+    /// True when the focused float pauses engine-event drain
+    /// (Confirm / Question / Lua dialogs gate a pending tool call).
+    pub(super) fn focused_float_blocks_agent(&self) -> bool {
+        self.ui
+            .focused_float()
+            .is_some_and(|win| self.blocking_wins.contains(&win))
     }
 
     /// Drain and apply all pending Lua ops (notifications, errors,

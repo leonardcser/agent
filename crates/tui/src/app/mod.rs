@@ -124,9 +124,10 @@ pub struct App {
     /// without dropping the turn itself. A lighter-touch signal than
     /// `pending_agent_cancel`.
     pub(super) pending_agent_clear_pending: bool,
-    /// Migrated float windows that block agent-event drain while
-    /// open. Replaces the legacy `DialogState::blocks_agent` path
-    /// for dialogs that no longer have a `DialogState` entry.
+    /// Float windows that pause the engine-event drain while open.
+    /// Confirm / Question / Lua dialogs insert themselves here —
+    /// everything else is non-blocking (keys still route to the
+    /// focused float, but agent events keep flowing).
     pub(super) blocking_wins: std::collections::HashSet<ui::WinId>,
     /// Ghost text prediction for the input field.
     pub input_prediction: Option<String>,
@@ -210,11 +211,6 @@ pub struct App {
     /// Populated each frame by `compute_prompt` and read by the
     /// `prompt_input` WindowView layer.
     pub(super) input_display_buf: ui::BufId,
-    /// Per-window dialog state, dispatched through `DialogState` on
-    /// every intercepted key / select / dismiss. Each entry owns the
-    /// domain state (e.g. resume filter, permission items, kill set)
-    /// and its associated buffer ids.
-    pub(super) float_states: HashMap<ui::WinId, Box<dyn dialogs::DialogState>>,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -661,7 +657,6 @@ impl App {
             prompt_sections: crate::prompt_sections::PromptSections::default(),
             ui,
             input_display_buf,
-            float_states: HashMap::new(),
         }
     }
 
@@ -791,9 +786,9 @@ impl App {
                     a.pending.clear();
                 }
             }
-            self.tick_focused_float();
-            // Dispatch WinEvent::Tick to migrated dialogs (e.g. Agents
-            // refreshes subagent state here).
+            // Fire `WinEvent::Tick` on every window with a registered
+            // Tick callback — e.g. Agents pulls a fresh subagent
+            // snapshot here each frame.
             {
                 let mut lua_invoke =
                     |_h: ui::LuaHandle, _p: &ui::Payload| -> Vec<String> { Vec::new() };

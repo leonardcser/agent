@@ -76,9 +76,8 @@ pub enum WinEvent {
     /// User triggered dismissal (Esc or a configured dismiss key).
     Dismiss,
     /// Fired once per event-loop iteration on each registered window.
-    /// Replaces the legacy `DialogState::tick` slot; used by floats
-    /// that need to refresh their content from live external state
-    /// (subagent registry, process list, etc.).
+    /// Used by floats that need to refresh their content from live
+    /// external state (subagent registry, process list, etc.).
     Tick,
 }
 

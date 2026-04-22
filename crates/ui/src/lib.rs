@@ -521,8 +521,7 @@ impl Ui {
     /// Fire `WinEvent::Tick` on every window that has a registered
     /// Tick callback. Used by the app event loop to drive per-frame
     /// refresh of dialogs with live external state (subagent list,
-    /// process registry, …). Replaces the legacy
-    /// `DialogState::tick` slot.
+    /// process registry, …).
     pub fn dispatch_tick(
         &mut self,
         lua_invoke: &mut dyn FnMut(LuaHandle, &Payload) -> Vec<String>,
