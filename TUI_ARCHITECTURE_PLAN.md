@@ -125,6 +125,50 @@ B2. **Permission-gated tools (e.g. `rm -rf`) ran without a prompt.**
     mode flipped to Apply silently, (iv) `runtime_approvals` carries
     state from a previous session. Reproduce, then bisect.
 
+B4. **Dialog max-height convention.** All dialogs should cap at
+    `max(terminal_height / 2, min_fit)` and scroll their content
+    past that limit. Only the Permissions dialog should be allowed
+    to consume up to full screen height. Today Rewind and Resume
+    both just grow to fit all entries. Fix in the panel framework:
+    `DialogConfig` gains a `height_limit: HeightLimit` field
+    (`HalfScreen` default, `FullScreen` opt-in) and
+    `Dialog::resolve_panel_rects` clamps `area.height` against it
+    before distributing to `Fixed`/`Fit`/`Fill`. Rewind/Resume
+    get `HalfScreen`; Permissions gets `FullScreen`.
+
+B5. **Transcript status/indicator disappears while a dialog is
+    open.** User-reported: the transcript's overlay indicator
+    (scroll-percent or scrollbar or status row, ambiguous from the
+    bug report) vanishes when a float is layered on top. Likely
+    cause: the compositor only repaints the transcript region below
+    the float's rect when the float is dirty, but the transcript
+    layer's own status painting assumes a full-width redraw. Verify
+    with the repro, then either (a) paint transcript status into the
+    status bar layer (which is a dedicated row) or (b) force a full
+    transcript repaint on any float layer change.
+
+B6. **Mouse wheel over a dialog scrolls the transcript beneath it.**
+    Wheel events on rows inside the float's rect should be routed to
+    the float, not the layer beneath. Today
+    `Compositor::handle_mouse` is still pending (task #7 in the
+    tracker). The scroll-under-mouse path in
+    `app/mod.rs::scroll_under_mouse` hit-tests against the
+    transcript/prompt but ignores float rects. Fix: add
+    `Compositor::hit_test(col, row) -> Option<WinId>` and route
+    wheel events to the topmost layer at that cell; fall through to
+    the compositor's default scroll-focused only when no float
+    covers the row.
+
+B7. **Scrollbar is read-only.** The scrollbar rendered inside a
+    panel shows the thumb but doesn't respond to clicks or drags.
+    Expected: (a) click-and-drag the thumb to scroll, (b) click on
+    the track to page or center the thumb on the click point.
+    Infrastructure: `ui::ScrollbarState` already tracks thumb
+    geometry; needs a `handle_mouse(col, row, kind)` that translates
+    track clicks into a target `scroll_top`. Ties into B6 —
+    mouse-routing-to-float needs to land first so the scrollbar
+    even sees the click.
+
 B3. **Prompt + status bar fade out over time after clear.** Likely
     cause: the `render_frame` branch used to call `d.mark_dirty()` in
     the timer-tick path on each frame. With legacy dialogs gone, only
