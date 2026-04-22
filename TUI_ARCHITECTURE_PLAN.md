@@ -125,16 +125,36 @@ B2. **Permission-gated tools (e.g. `rm -rf`) ran without a prompt.**
     mode flipped to Apply silently, (iv) `runtime_approvals` carries
     state from a previous session. Reproduce, then bisect.
 
-B4. **Dialog max-height convention.** All dialogs should cap at
-    `max(terminal_height / 2, min_fit)` and scroll their content
-    past that limit. Only the Permissions dialog should be allowed
-    to consume up to full screen height. Today Rewind and Resume
-    both just grow to fit all entries. Fix in the panel framework:
-    `DialogConfig` gains a `height_limit: HeightLimit` field
-    (`HalfScreen` default, `FullScreen` opt-in) and
-    `Dialog::resolve_panel_rects` clamps `area.height` against it
-    before distributing to `Fixed`/`Fit`/`Fill`. Rewind/Resume
-    get `HalfScreen`; Permissions gets `FullScreen`.
+B4. **Dialog height is caller-fixed, not "fit up to half-screen".**
+    The bug isn't that dialogs "grow to fit" — it's that every
+    dialog picks a placement constraint that's *independent* of
+    actual content:
+    - `rewind.rs:48` uses `Constraint::Fixed(footer_h + 4)` with
+      `footer_h = total.min(10)` → clipped at 14 rows regardless of
+      terminal size; doesn't grow for long lists.
+    - `resume.rs:58` uses `Constraint::Pct(60)` → always 60% of
+      terminal height, so 3 entries end up in an oversized float
+      whose inner list still reports scrollable (likely a Fill-panel
+      line-count vs. viewport mismatch, because the Fill panel is
+      sized from the 60% envelope rather than from `line_count`).
+    - Other dialogs use their own ad-hoc constants.
+
+    Desired convention: **content drives height, capped at
+    `terminal_height / 2`**. Only Permissions opts into full height.
+    Two changes:
+    1. `Placement` gains a `FitContent { max: HeightLimit }` variant
+       (or `Constraint::Fit`). The compositor computes the float's
+       intrinsic height by asking `Dialog` for `content_rows()`
+       (sum of resolved panel heights + chrome), then clamps against
+       `HalfScreen` / `FullScreen`.
+    2. Fix the Fill-vs-Fit behaviour in `resolve_panel_rects` so a
+       List panel with `PanelHeight::Fit` scrolls internally past
+       the cap instead of being over-allocated rows. Resume's list
+       panel should be `Fit`, not `Fill`, once (1) lands.
+
+    Migration: Rewind/Resume → `FitContent { max: HalfScreen }`;
+    Permissions → `FitContent { max: FullScreen }`; other builtin
+    dialogs audited case-by-case.
 
 B5. **Transcript status/indicator disappears while a dialog is
     open.** User-reported: the transcript's overlay indicator
@@ -169,15 +189,26 @@ B7. **Scrollbar is read-only.** The scrollbar rendered inside a
     mouse-routing-to-float needs to land first so the scrollbar
     even sees the click.
 
-B3. **Prompt + status bar fade out over time after clear.** Likely
-    cause: the `render_frame` branch used to call `d.mark_dirty()` in
-    the timer-tick path on each frame. With legacy dialogs gone, only
-    `screen.is_dirty()` gates a redraw — animations that tick silently
-    (spinner, throbber, status) can let the compositor skip frames
-    while the terminal drifts. Fix: have `Screen::update_spinner` and
-    status-time ticks set `dirty` whenever they mutate visible state,
-    or mark dirty unconditionally when `has_active_exec` /
-    working-agent is running.
+B3. **Prompt + status bar fade out over time.** The real cause is
+    that the migration to the compositor-based diff renderer is
+    incomplete: the transcript and floats are drawn via the
+    compositor (grid-diff, no dirty flag), but the prompt and status
+    bar are still painted through the legacy `render::Screen` path,
+    which emits ANSI bytes *outside* the compositor's grid. Any
+    time the compositor repaints (float open/close, transcript
+    scroll, spinner tick on another layer) those bytes leak into a
+    region the compositor thinks it owns, and subsequent frames
+    overwrite the prompt without restoring it. The old fix was
+    `Screen::dirty = true` on every tick; with legacy dialogs gone
+    there's no longer a tick path that does that.
+
+    Proper fix (ties into pending task #11, *Pin prompt window to
+    terminal bottom*): move the prompt + status bar onto their own
+    compositor layers so everything goes through one grid. Quick
+    stopgap while that lands: mark `Screen` dirty whenever the
+    compositor draws a frame (e.g. call `screen.mark_dirty()` after
+    `compositor.draw()`), so the prompt is always repainted in
+    lockstep.
 
 **Architectural follow-ups:**
 
