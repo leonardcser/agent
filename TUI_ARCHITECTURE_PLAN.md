@@ -332,6 +332,65 @@ Net: ~−250 LOC and one uniform dispatch path for every float window
 in the app.
 
 
+### Phase B.cleanup — Consolidate seams exposed by Phase B
+
+Phase B landed the unification but Phase B's *transition mechanisms*
+left residue. Each sub-commit here deletes scaffolding or untangles
+a seam. In order of smallest-impact-first:
+
+- **B.cleanup.1 · `blocks_agent` on `FloatConfig`.** `App::blocking_wins:
+  HashSet<WinId>` is runtime state that belongs on the float's config.
+  Move to `FloatConfig.blocks_agent: bool`; derive
+  `focused_float_blocks_agent` by looking up the focused float's
+  config. Kills the per-dialog `blocking_wins.insert(win_id)` call
+  and the matching `close_float` removal.
+- **B.cleanup.2 · Confirm BackTab as keymap callback.** Delete
+  `handle_confirm_backtab` and the early BackTab branch in
+  `handle_event` that routes to it. Register BackTab directly on the
+  Confirm dialog window via `win_set_keymap`; emit a new
+  `AppOp::ToggleModeAndMaybeApprove { request_id, call_id, tool_name,
+  args }` so the mode-check + approve-or-keep-open logic moves back
+  into the reducer.
+- **B.cleanup.3 · Agents list↔detail navigation.** Replace the
+  `CloseFloat` + `RefreshAgentCounts` + `OpenAgentsList/Detail`
+  three-op ping-pong with a single `AppOp::SwitchToAgentsList {
+  selected }` / `SwitchToAgentsDetail { agent_id, parent_selected }`.
+  Reducer owns the close-before-open sequence.
+- **B.cleanup.4 · Fold `TurnState` onto `App`.** Move `agent:
+  Option<TurnState>` from the `run()` local onto `App.agent`. Delete
+  `pending_agent_cancel` and `pending_agent_clear_pending` bool
+  flags plus the main-loop drain block. `apply_ops` mutates
+  `self.agent` directly. Thread everywhere `agent: &mut
+  Option<TurnState>` was a function argument.
+- **B.cleanup.5 · Split `AppOp` into `DomainOp` + `UiOp`.** `AppOp`
+  mixes three abstraction levels in one 28-variant enum:
+  primitives (`BufCreate`, `WinOpenFloat`, `WinClose`, `BufSetLines`,
+  `WinUpdate`), UI orchestration (`CloseFloat`, `OpenAgentsList`,
+  `SetGhostText`, `ClearGhostText`), and domain effects
+  (`ResolveConfirm`, `LoadSession`, `Compact`, `RunCommand`). Split
+  into `ops::Domain` (app-state mutations, engine commands) and
+  `ops::Ui` (pure compositor/window/buffer primitives). A handler
+  decides which bucket it belongs to.
+- **B.cleanup.6 · `OpsHandle` rename + decouple from `LuaShared`.**
+  `OpsHandle` wraps `Arc<LuaShared>` but nothing about it is
+  Lua-specific. Move the op channel to its own `Arc<Mutex<OpQueue>>`;
+  give Rust callbacks and the Lua runtime independent handles.
+  Rename to `OpSender` / `OpReceiver`.
+- **B.cleanup.7 · Unify Lua callback storage.** `LuaShared.callbacks:
+  HashMap<u64, LuaHandle>` accessed via `fire_callback` is used by
+  exactly one consumer now: `EngineAskResponse`. Either fold the
+  continuation into an entry in `ui::Callbacks` keyed by a synthetic
+  `WinId`, or replace the `u64` keyspace with something narrower.
+  Goal: one Lua-callback surface, not two parallel ones.
+- **B.cleanup.8 · Typed widget events (deferred).** Replace the
+  `KeyResult::Action(String)` protocol with a typed `WidgetEvent`
+  enum returned from `Component::handle_key`. Widgets stop
+  formatting `"select:N"` / `"submit:T"`; `classify_widget_action`
+  deletes itself. Larger touch; rebuild across every widget. Tracked
+  here; execute after Phase C is on the table so the ui crate's
+  public surface settles once.
+
+
 ### Phase C — Rendering: kill Screen (2–3 commits)
 
 **C1 · Notification + queued + stash + status metadata → compositor.**
