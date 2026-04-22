@@ -1691,7 +1691,6 @@ impl App {
     }
 
     fn close_float(&mut self, win_id: ui::WinId) {
-        self.blocking_wins.remove(&win_id);
         self.ui.win_close(win_id);
     }
 
@@ -1729,7 +1728,11 @@ impl App {
         let Some(win) = self.ui.focused_float() else {
             return;
         };
-        if self.blocking_wins.contains(&win) {
+        if self
+            .ui
+            .float_config(win)
+            .is_some_and(|c| c.blocks_agent)
+        {
             return;
         }
         let mut lua_invoke =
@@ -1746,9 +1749,10 @@ impl App {
     /// True when the focused float pauses engine-event drain
     /// (Confirm / Question / Lua dialogs gate a pending tool call).
     pub(super) fn focused_float_blocks_agent(&self) -> bool {
-        self.ui
-            .focused_float()
-            .is_some_and(|win| self.blocking_wins.contains(&win))
+        let Some(win) = self.ui.focused_float() else {
+            return false;
+        };
+        self.ui.float_config(win).is_some_and(|c| c.blocks_agent)
     }
 
     /// Drain and apply all pending Lua ops (notifications, errors,

@@ -540,6 +540,15 @@ impl Ui {
         parse_float_layer_id(focused)
     }
 
+    /// Look up the `FloatConfig` for a window, if it's a float.
+    /// Non-float windows (splits) return `None`.
+    pub fn float_config(&self, win: WinId) -> Option<&FloatConfig> {
+        match &self.wins.get(&win)?.config {
+            WinConfig::Float(cfg) => Some(cfg),
+            WinConfig::Split(_) => None,
+        }
+    }
+
     pub fn float_dialog_mut(&mut self, win_id: WinId) -> Option<&mut FloatDialog> {
         let layer_id = float_layer_id(win_id);
         let comp = self.compositor.component_mut(&layer_id)?;

@@ -137,6 +137,7 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
 
     let dialog_config =
         app.builtin_dialog_config(Some(hints::join(&[hints::CONFIRM, hints::CANCEL])), vec![]);
+    // Lua dialogs block the agent event drain until the task resumes.
     let win_id = app
         .ui
         .dialog_open(
@@ -144,15 +145,13 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
                 title,
                 border: ui::Border::None,
                 placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(60)),
+                blocks_agent: true,
                 ..Default::default()
             },
             dialog_config,
             panel_specs,
         )
         .ok_or_else(|| "failed to open dialog window".to_string())?;
-
-    // Lua dialogs block the agent event drain until the task resumes.
-    app.blocking_wins.insert(win_id);
 
     let state = Rc::new(RefCell::new(LuaDialogState {
         dialog_id,

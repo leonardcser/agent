@@ -87,11 +87,15 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
         },
     ];
 
+    // Confirm blocks the engine-event drain — it gates a pending
+    // tool call's approval. No further engine events are applied
+    // until the user answers.
     let Some(win_id) = app.ui.dialog_open(
         ui::FloatConfig {
             title: None,
             border: ui::Border::None,
             placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(60)),
+            blocks_agent: true,
             ..Default::default()
         },
         dialog_config,
@@ -99,11 +103,6 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
     ) else {
         return;
     };
-
-    // Confirm blocks the agent event drain — it gates a pending tool
-    // call's approval. No further engine events are applied until
-    // the user answers.
-    app.blocking_wins.insert(win_id);
 
     let state = Rc::new(RefCell::new(ConfirmState {
         request_id: req.request_id,

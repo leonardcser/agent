@@ -125,6 +125,12 @@ pub struct FloatConfig {
     /// here. `false` for popups (completer, notification) that should
     /// never steal cursor. Modeled on Neovim's `WinConfig.focusable`.
     pub focusable: bool,
+    /// Whether the host should pause engine-event drain while this
+    /// float is focused. True for modal permission prompts (Confirm,
+    /// Question, Lua dialogs gating a parked task); false for
+    /// read-only viewers (Help, Ps, Resume) that can coexist with a
+    /// running turn.
+    pub blocks_agent: bool,
 }
 
 impl Default for FloatConfig {
@@ -138,6 +144,7 @@ impl Default for FloatConfig {
             title: None,
             zindex: 50,
             focusable: true,
+            blocks_agent: false,
         }
     }
 }

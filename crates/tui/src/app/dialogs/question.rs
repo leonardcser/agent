@@ -23,11 +23,14 @@ pub fn open(app: &mut App, questions: Vec<QuestionDef>, request_id: u64) {
     }
     let dialog_config = app.builtin_dialog_config(None, vec![]);
     let widget = Box::new(QuestionWidget::new(questions));
+    // Question blocks the agent's event drain (it's a modal question
+    // the user must answer before the turn can continue).
     let Some(win_id) = app.ui.dialog_open(
         ui::FloatConfig {
             title: None,
             border: ui::Border::None,
             placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(60)),
+            blocks_agent: true,
             ..Default::default()
         },
         dialog_config,
@@ -35,10 +38,6 @@ pub fn open(app: &mut App, questions: Vec<QuestionDef>, request_id: u64) {
     ) else {
         return;
     };
-
-    // Question blocks the agent's event drain (it's a modal question
-    // the user must answer before the turn can continue).
-    app.blocking_wins.insert(win_id);
 
     let ops = app.lua.ops_handle();
     let ops_submit = ops.clone();

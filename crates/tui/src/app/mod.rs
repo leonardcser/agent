@@ -124,11 +124,6 @@ pub struct App {
     /// without dropping the turn itself. A lighter-touch signal than
     /// `pending_agent_cancel`.
     pub(super) pending_agent_clear_pending: bool,
-    /// Float windows that pause the engine-event drain while open.
-    /// Confirm / Question / Lua dialogs insert themselves here —
-    /// everything else is non-blocking (keys still route to the
-    /// focused float, but agent events keep flowing).
-    pub(super) blocking_wins: std::collections::HashSet<ui::WinId>,
     /// Ghost text prediction for the input field.
     pub input_prediction: Option<String>,
     /// Monotonic counter to discard stale predictions.
@@ -606,7 +601,6 @@ impl App {
             confirm_context: None,
             pending_agent_cancel: false,
             pending_agent_clear_pending: false,
-            blocking_wins: std::collections::HashSet::new(),
             input_prediction: None,
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
