@@ -181,6 +181,8 @@ pub struct EngineSnapshot {
     pub session_created_at_ms: u64,
     /// User turn positions: `(block_idx, text)` for each `Block::User`.
     pub session_turns: Vec<(usize, String)>,
+    /// Vim emulation setting (from settings, not the current vim mode).
+    pub vim_enabled: bool,
 }
 
 /// Shared state between Lua closures and the app loop.
@@ -250,6 +252,28 @@ pub(crate) struct LuaShared {
     /// Background process registry. Installed by `App::new` so Lua
     /// plugins (e.g. `/ps`) can enumerate and kill procs.
     pub(crate) processes: Mutex<Option<engine::tools::ProcessRegistry>>,
+    /// Task-runtime inbox. Dialog callbacks / other UI events that need
+    /// to *resume a Lua coroutine* push here instead of through `ops`.
+    /// Keeps the reducer's `AppOp` enum free of Lua-task variants; the
+    /// Lua module pumps its own inbox each tick.
+    pub(crate) task_inbox: Mutex<Vec<TaskEvent>>,
+}
+
+/// Events that drive the Lua task runtime — dialog resolutions,
+/// keymap-fired callbacks, anything that resumes or invokes a Lua
+/// coroutine / handler. Lives on [`LuaShared::task_inbox`].
+pub enum TaskEvent {
+    /// A compositor dialog was submitted or dismissed. The Lua module
+    /// fires the optional per-option `on_select` (consuming its key)
+    /// and resumes the parked task with `{action, option_index,
+    /// inputs}`.
+    DialogResolved {
+        dialog_id: u64,
+        action: String,
+        option_index: Option<usize>,
+        inputs: Vec<(String, String)>,
+        on_select: Option<mlua::RegistryKey>,
+    },
 }
 
 impl Default for LuaShared {
@@ -267,6 +291,7 @@ impl Default for LuaShared {
             history: Mutex::new(Arc::new(Vec::new())),
             tasks: Mutex::new(LuaTaskRuntime::new()),
             processes: Mutex::new(None),
+            task_inbox: Mutex::new(Vec::new()),
         }
     }
 }
@@ -713,6 +738,37 @@ impl LuaRuntime {
             )?;
         }
         api.set("process", process_tbl)?;
+
+        // smelt.api.keymap.help_sections() → [{title, entries: [{label, detail}]}]
+        // Pure lookup over the built-in hint tables; toggles the vim row
+        // based on the current `vim_enabled` setting.
+        let keymap_tbl = lua.create_table()?;
+        {
+            let s = shared.clone();
+            keymap_tbl.set(
+                "help_sections",
+                lua.create_function(move |lua, ()| {
+                    let vim_enabled = s.ops.lock().map(|o| o.engine.vim_enabled).unwrap_or(false);
+                    let sections = crate::keymap::hints::help_sections(vim_enabled);
+                    let out = lua.create_table()?;
+                    for (i, (title, entries)) in sections.into_iter().enumerate() {
+                        let row = lua.create_table()?;
+                        row.set("title", title)?;
+                        let entries_tbl = lua.create_table()?;
+                        for (j, (label, detail)) in entries.into_iter().enumerate() {
+                            let entry = lua.create_table()?;
+                            entry.set("label", label)?;
+                            entry.set("detail", detail)?;
+                            entries_tbl.set(j + 1, entry)?;
+                        }
+                        row.set("entries", entries_tbl)?;
+                        out.set(i + 1, row)?;
+                    }
+                    Ok(out)
+                })?,
+            )?;
+        }
+        api.set("keymap", keymap_tbl)?;
 
         // smelt.api.ui
         let ui_tbl = lua.create_table()?;
@@ -1330,6 +1386,57 @@ impl LuaRuntime {
             return false;
         };
         rt.resolve_dialog(dialog_id, value)
+    }
+
+    /// Drain the task-runtime inbox and apply each event. Dialog
+    /// callbacks push here (instead of `AppOp`) so the reducer doesn't
+    /// know about Lua-task lifecycle; the Lua module handles its own
+    /// resumption. Returns the list of `AppOp`s produced by firing
+    /// `on_select` callbacks (notifications etc.) so the caller can
+    /// drain them into the main op queue.
+    pub fn pump_task_events(&self) -> Vec<AppOp> {
+        let events: Vec<TaskEvent> = {
+            let Ok(mut inbox) = self.shared.task_inbox.lock() else {
+                return Vec::new();
+            };
+            std::mem::take(&mut *inbox)
+        };
+        let mut extra_ops = Vec::new();
+        for ev in events {
+            match ev {
+                TaskEvent::DialogResolved {
+                    dialog_id,
+                    action,
+                    option_index,
+                    inputs,
+                    on_select,
+                } => {
+                    if let Some(key) = on_select {
+                        if let Ok(func) = self.lua.registry_value::<mlua::Function>(&key) {
+                            if let Err(e) = func.call::<()>(()) {
+                                extra_ops
+                                    .push(AppOp::NotifyError(format!("dialog on_select: {e}")));
+                            }
+                        }
+                    }
+                    match crate::app::dialogs::lua_dialog::build_result(
+                        &self.lua,
+                        &action,
+                        option_index,
+                        inputs,
+                    ) {
+                        Ok(v) => {
+                            self.resolve_dialog(dialog_id, v);
+                        }
+                        Err(e) => {
+                            extra_ops.push(AppOp::NotifyError(format!("dialog resolve: {e}")));
+                            self.resolve_dialog(dialog_id, mlua::Value::Nil);
+                        }
+                    }
+                }
+            }
+        }
+        extra_ops
     }
 
     /// Access the underlying Lua state so callers can build result

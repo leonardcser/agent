@@ -13,6 +13,7 @@
 use super::super::App;
 use crate::app::ops::AppOp;
 use crate::keymap::hints;
+use crate::lua::TaskEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
 use mlua::prelude::*;
 use std::cell::RefCell;
@@ -25,9 +26,10 @@ use ui::{
 };
 
 /// Per-option data consumed when the task resumes. Drained out of
-/// `LuaDialogState` into the [`AppOp::ResolveLuaDialog`] payload when
+/// `LuaDialogState` into the [`TaskEvent::DialogResolved`] payload when
 /// the user selects an option, so the RegistryKey (which isn't Clone)
-/// moves cleanly from the dialog's state to the reducer.
+/// moves cleanly from the dialog's state to the Lua task-runtime
+/// inbox.
 struct OptionEntry {
     /// Action string reported back to the task (`result.action`).
     /// Defaults to `"select"` when the plugin didn't specify one.
@@ -73,16 +75,17 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
         let panel = pair.map_err(|e| format!("dialog panel entry: {e}"))?;
         let kind: String = panel.get("kind").map_err(|e| format!("panel.kind: {e}"))?;
         let panel_index = panel_specs.len();
+        let height = parse_height(&panel)?;
         match kind.as_str() {
             "content" => {
                 let text: String = panel.get("text").unwrap_or_default();
                 let buf = make_text_buffer(app, &text);
-                panel_specs.push(PanelSpec::content(buf, PanelHeight::Fit));
+                panel_specs.push(PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit)));
             }
             "markdown" => {
                 let text: String = panel.get("text").unwrap_or_default();
                 let buf = make_markdown_buffer(app, &text);
-                panel_specs.push(PanelSpec::content(buf, PanelHeight::Fit));
+                panel_specs.push(PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit)));
             }
             "options" => {
                 let items_tbl: mlua::Table = panel
@@ -201,7 +204,7 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
                 None => ("select".to_string(), None),
             };
             let inputs = collect_inputs(ctx.ui, ctx.win, &s.inputs);
-            ops_submit.push(AppOp::ResolveLuaDialog {
+            ops_submit.push_task_event(TaskEvent::DialogResolved {
                 dialog_id: s.dialog_id,
                 action,
                 option_index: Some(idx + 1),
@@ -226,7 +229,7 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
                 let idx = ctx.ui.dialog_mut(ctx.win).and_then(|d| d.selected_index());
                 let s = state_k.borrow();
                 let inputs = collect_inputs(ctx.ui, ctx.win, &s.inputs);
-                ops_k.push(AppOp::ResolveLuaDialog {
+                ops_k.push_task_event(TaskEvent::DialogResolved {
                     dialog_id: s.dialog_id,
                     action: action.clone(),
                     option_index: idx.map(|i| i + 1),
@@ -245,7 +248,7 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
         WinEvent::Dismiss,
         Callback::Rust(Box::new(move |ctx| {
             let s = state_dismiss.borrow();
-            ops.push(AppOp::ResolveLuaDialog {
+            ops.push_task_event(TaskEvent::DialogResolved {
                 dialog_id: s.dialog_id,
                 action: "dismiss".into(),
                 option_index: None,
@@ -258,6 +261,24 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
     );
 
     Ok(())
+}
+
+/// Parse the per-panel `height` option. `"fit"` → Fit (auto-shrink),
+/// `"fill"` → Fill (stretch + scroll), an integer → Fixed rows. Absent
+/// → Ok(None) so the caller can pick a kind-appropriate default.
+fn parse_height(panel: &mlua::Table) -> Result<Option<PanelHeight>, String> {
+    match panel.get::<mlua::Value>("height").ok() {
+        None | Some(mlua::Value::Nil) => Ok(None),
+        Some(mlua::Value::String(s)) => match s.to_str().map_err(|e| e.to_string())?.as_ref() {
+            "fit" => Ok(Some(PanelHeight::Fit)),
+            "fill" => Ok(Some(PanelHeight::Fill)),
+            other => Err(format!("panel.height: unknown value '{other}'")),
+        },
+        Some(mlua::Value::Integer(n)) if n > 0 => Ok(Some(PanelHeight::Fixed(n as u16))),
+        Some(other) => Err(format!(
+            "panel.height: expected 'fit' | 'fill' | int, got {other:?}"
+        )),
+    }
 }
 
 /// Parse a plugin-facing key string like `"bs"`, `"tab"`, `"ctrl-x"`,
@@ -323,7 +344,8 @@ fn collect_inputs(ui: &mut ui::Ui, win: WinId, entries: &[InputEntry]) -> Vec<(S
 }
 
 /// Build the result table the Lua task resumes with. Called by
-/// `apply_ops` when handling [`AppOp::ResolveLuaDialog`].
+/// `LuaRuntime::pump_task_events` when handling
+/// [`crate::lua::TaskEvent::DialogResolved`].
 pub(crate) fn build_result(
     lua: &Lua,
     action: &str,

@@ -523,7 +523,22 @@ open a UI dialog, (d) await the user's reply, (e) return the reply
 as the tool's result. `plan_mode.lua`'s `exit_plan_mode` tool is a
 working proof.
 
-Phase D now reduces to three focused commits:
+Phase D now reduces to four focused commits:
+
+**D0 · Split task-runtime events off `AppOp`.** `AppOp::ResolveLuaDialog`
+is a leaky abstraction — the reducer shouldn't know that "a compositor
+dialog submitted" and "the Lua coroutine that opened it needs resuming"
+are the same event. Introduce a task-runtime inbox owned by the Lua
+module (`LuaShared.task_inbox: Mutex<Vec<TaskEvent>>`) with variants
+like `DialogResolved { dialog_id, action, option_index, inputs,
+on_select }` and `KeymapFired { callback_id, win_id, selected_index,
+inputs }`. Rust callbacks in `lua_dialog.rs` push `TaskEvent`, *not*
+`AppOp`. Main loop calls `lua.pump_task_events()` each tick; the Lua
+runtime resolves its own parked tasks and fires its own on_press
+callbacks. The reducer loses `ResolveLuaDialog` entirely. Prereq for
+the callback-first keymap model (plugins write `on_press =
+function(ctx) ... end` instead of dispatching on an action string),
+which `/ps` + `/help` + every Tier-2 dialog needs.
 
 **D1 · `execution_mode` on plugin tools.** Add
 `ToolExecutionMode::{Concurrent, Sequential}` to `PluginToolDef`. The

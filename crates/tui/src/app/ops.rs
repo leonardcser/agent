@@ -22,6 +22,16 @@ impl OpsHandle {
             o.ops.push(op);
         }
     }
+
+    /// Push a task-runtime event (dialog resolution, keymap-fired
+    /// callback, …). These drain through `LuaRuntime::pump_task_events`
+    /// each tick, *not* through the `AppOp` reducer — the reducer
+    /// doesn't need to know about Lua-task lifecycle.
+    pub fn push_task_event(&self, ev: crate::lua::TaskEvent) {
+        if let Ok(mut inbox) = self.0.task_inbox.lock() {
+            inbox.push(ev);
+        }
+    }
 }
 
 /// Deferred mutation queued by a handler. Applied by the app loop
@@ -144,14 +154,4 @@ pub enum AppOp {
     /// Kill a background process by id (e.g. from `/ps`). The actual
     /// `ProcessRegistry::stop` runs on the tokio runtime, fire-and-forget.
     KillProcess(String),
-    /// Resolve a Lua-driven dialog opened via `smelt.api.dialog.open`.
-    /// Fires the optional per-option `on_select` callback, then resumes
-    /// the parked task with a `{action, option_index, inputs}` table.
-    ResolveLuaDialog {
-        dialog_id: u64,
-        action: String,
-        option_index: Option<usize>,
-        inputs: Vec<(String, String)>,
-        on_select: Option<mlua::RegistryKey>,
-    },
 }

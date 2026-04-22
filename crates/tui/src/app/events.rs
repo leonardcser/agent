@@ -1633,6 +1633,7 @@ impl App {
             session_cwd: self.cwd.clone(),
             session_created_at_ms: self.session.created_at_ms,
             session_turns: self.user_turns(),
+            vim_enabled: self.input.vim_enabled(),
         });
         self.lua.set_history(self.history.clone());
     }
@@ -1718,8 +1719,12 @@ impl App {
     }
 
     /// Drain and apply all pending Lua ops (notifications, errors,
-    /// commands, engine mutations). Call after any Lua handler dispatch.
+    /// commands, engine mutations). Also pumps the task-runtime inbox
+    /// (dialog resolutions etc.) so resumption side-effects become ops.
+    /// Call after any Lua handler dispatch.
     pub(super) fn apply_lua_ops(&mut self) {
+        let extra = self.lua.pump_task_events();
+        self.apply_ops(extra);
         let ops = self.lua.drain_ops();
         self.apply_ops(ops);
     }
@@ -2004,36 +2009,6 @@ impl App {
                     tokio::spawn(async move {
                         let _ = registry.stop(&id).await;
                     });
-                }
-                crate::app::ops::AppOp::ResolveLuaDialog {
-                    dialog_id,
-                    action,
-                    option_index,
-                    inputs,
-                    on_select,
-                } => {
-                    if let Some(key) = on_select {
-                        if let Ok(func) = self.lua.lua().registry_value::<mlua::Function>(&key) {
-                            if let Err(e) = func.call::<()>(()) {
-                                self.notify_error(format!("dialog on_select: {e}"));
-                            }
-                        }
-                    }
-                    let result = super::dialogs::lua_dialog::build_result(
-                        self.lua.lua(),
-                        &action,
-                        option_index,
-                        inputs,
-                    );
-                    match result {
-                        Ok(v) => {
-                            self.lua.resolve_dialog(dialog_id, v);
-                        }
-                        Err(e) => {
-                            self.notify_error(format!("dialog resolve: {e}"));
-                            self.lua.resolve_dialog(dialog_id, mlua::Value::Nil);
-                        }
-                    }
                 }
             }
         }
