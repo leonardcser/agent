@@ -835,7 +835,7 @@ impl App {
         use render::status::{spans_to_segments, StatusSpan};
         use ui::grid::Style;
 
-        let (term_w, _) = self.screen.size();
+        let (term_w, _) = self.ui.terminal_size();
         let width = term_w as usize;
         let status_bg = Color::AnsiValue(233);
 
@@ -1095,7 +1095,7 @@ impl App {
             return;
         }
 
-        let (term_w, term_h) = self.screen.size();
+        let (term_w, term_h) = self.ui.terminal_size();
         let width = term_w as usize;
         let show_queued = agent_running || self.is_compacting();
 

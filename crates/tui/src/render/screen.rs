@@ -108,18 +108,13 @@ impl Screen {
         }
     }
 
-    pub fn size(&self) -> (u16, u16) {
+    fn size(&self) -> (u16, u16) {
         self.backend.size()
     }
 
     fn transcript_width(&self) -> usize {
         let (w, _) = self.backend.size();
         (crate::window::TRANSCRIPT_GUTTERS.content_width(w) as usize).max(1)
-    }
-
-    /// Expose the backend for dialogs that need output + size.
-    pub fn backend(&self) -> &dyn TerminalBackend {
-        &*self.backend
     }
 
     pub fn block_count(&self) -> usize {

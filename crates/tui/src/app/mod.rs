@@ -711,7 +711,7 @@ impl App {
     /// column for the scrollbar track so the scrollbar never overpaints
     /// rendered content and mouse hit-testing has a stable target.
     pub fn transcript_width(&self) -> usize {
-        let (w, _) = self.screen.size();
+        let (w, _) = self.ui.terminal_size();
         (self.transcript_gutters.content_width(w) as usize).max(1)
     }
 
