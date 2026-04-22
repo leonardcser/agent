@@ -98,6 +98,268 @@ capture the screen.
 - **Gap above the hints row.** Every dialog reserves one blank row
   between panel content and the hints so the layout breathes.
 
+### Post-9.5b review (2026-04-22) — bugs, architecture, cleanup
+
+After landing Steps 9.5b items 9–12 (all dialogs on the panel framework,
+legacy `Dialog`/`DialogResult`/`ConfirmDialog`/`QuestionDialog` deleted),
+a review surfaced these follow-ups. They're grouped so the ordering can
+be picked per session.
+
+**Bugs to fix on the compositor path:**
+
+B1. **Shift+Tab no longer toggles mode.** Routing regression from the
+    legacy-dialog removal. Root cause: mode-toggle was implicit in the
+    legacy Confirm key handling and in the input layer's own BackTab
+    path. On the compositor path the Confirm float intercepts BackTab
+    via `handle_confirm_backtab`, but Shift+Tab pressed outside a
+    blocking float (e.g. focus on transcript / prompt without a
+    pending permission) is no longer wired to `App::toggle_mode`. See
+    **A1** below for the fix shape.
+
+B2. **Permission-gated tools (e.g. `rm -rf`) ran without a prompt.**
+    A real regression, not cosmetic. Possible causes to check in
+    order: (i) `resolve_confirm` accidentally treats a dismiss as
+    approve, (ii) the Confirm float fails to open (e.g. empty panels
+    after `collapse_when_empty` clamps everything to 0 rows) so the
+    engine request times out and something auto-approves, (iii) the
+    mode flipped to Apply silently, (iv) `runtime_approvals` carries
+    state from a previous session. Reproduce, then bisect.
+
+B3. **Prompt + status bar fade out over time after clear.** Likely
+    cause: the `render_frame` branch used to call `d.mark_dirty()` in
+    the timer-tick path on each frame. With legacy dialogs gone, only
+    `screen.is_dirty()` gates a redraw — animations that tick silently
+    (spinner, throbber, status) can let the compositor skip frames
+    while the terminal drifts. Fix: have `Screen::update_spinner` and
+    status-time ticks set `dirty` whenever they mutate visible state,
+    or mark dirty unconditionally when `has_active_exec` /
+    working-agent is running.
+
+**Architectural follow-ups:**
+
+A1. **Global chord layer in `dispatch_terminal_event`.** Add a small
+    pre-route map that fires regardless of focus: `Shift+Tab` →
+    toggle mode, `Ctrl+T` → toggle thinking, `Ctrl+L` → redraw.
+    Runs *before* float/cmdline/prompt dispatch. Also has the nice
+    side effect of letting `handle_confirm_backtab` go away —
+    instead, the Confirm dialog's `tick` observes `mode` changes and
+    resolves the request if the new mode auto-allows.
+
+A2. **Replace `lua_dialog.rs` with direct UI primitives in Lua.**
+    The current shape (`Lua table {title, panels[{kind,...}]}` →
+    Rust parser → `PanelSpec[]`) hard-codes a schema the plugin
+    author can't extend. Replace with:
+    - `smelt.api.ui.buf_create`, `buf_set_lines`, `buf_mut`
+    - `smelt.api.ui.win_open_float` (returns win id) / `win_close`
+    - `smelt.api.ui.dialog_open(panels, cfg)` where panels carry
+      opaque widget-handle userdata
+    - Widget constructors: `smelt.api.ui.option_list(items)`,
+      `text_input(opts)` — return userdata with `text()` / `cursor()`
+      / etc.
+    Then ship a thin Lua-side `smelt.dialog.open({...})` helper in
+    `runtime/lua/smelt/dialog.lua` that composes the primitives for
+    the 80% case. Delete `crates/tui/src/app/dialogs/lua_dialog.rs`.
+    The abstraction migrates from Rust (hard-coded enum of panel
+    kinds) to Lua (plugin-authored and forkable).
+
+A3. **Move `confirm_context` into the Confirm dialog state.**
+    Currently `App::confirm_context: Option<ConfirmContext>` is
+    read/written only by the Confirm flow. Move it into
+    `app::dialogs::confirm::Confirm` as a field. App only needs to
+    know there's a pending permission request at the `request_id`
+    level.
+
+A4. **Narrow the `App → dialog` surface to `approve_tool`,
+    `deny_tool`, `add_session_rule`, `add_workspace_rule`.**
+    Today `App::resolve_confirm` carries the full `ConfirmChoice`
+    enum and branches on every variant. Push the branching into
+    the dialog; App exposes minimal verbs. Same for
+    `resolve_question`. Drops ~150 lines of glue and makes it
+    obvious what a dialog can do to the app.
+
+A5. **Consider a smaller `DialogCtx` instead of `&mut App`.**
+    `DialogState::on_action(&mut self, app: &mut App, …)` gives
+    dialogs the entire app. A typed context (`ui`, `lua`,
+    `screen`, `approve_tool`, `notify_error`) makes the surface
+    legible and the coupling intentional. Lower priority — the
+    current coupling isn't actually causing bugs, just making
+    the code harder to read.
+
+A6. **Queue permission requests in the compositor, not the main
+    loop.** `pending_dialogs: VecDeque<DeferredDialog>` still lives
+    in the main loop even though `Ui` has proper layer stacking.
+    Could move into `Ui` as a "permission requests pending user
+    attention" channel that surfaces when no blocking float is
+    focused. Ties into B1 (global chord layer picks up mode
+    toggles regardless of queue state).
+
+**Cleanup sweep (four buckets):**
+
+Every file that touches the rendering / dialog path should be audited
+against these four buckets. A small `CLEANUP.md` doubles as the tracker
+so nothing slips.
+
+C1. **Legacy code (marked as legacy, no callers).** `Frame`,
+    `RenderOut`, `StyleState`, `paint_line`, `queue_status_line`,
+    `queue_dialog_gap` — still referenced but only from the prompt
+    path that Step 9.6/9.7 will also replace. Count references; mark
+    `#[allow(dead_code)]` with a reason comment; delete once 9.6
+    lands.
+
+C2. **Abandoned migrations (started, never finished).** Anything that
+    was "migrate X to Y" but X and Y coexist. Candidates:
+    - Prompt rendering: `PromptRow` / `StyledSegment` /
+      `prompt_data.rs` coexist with the buffer-backed `WindowView`
+      input path (Step 6i/6j partial).
+    - `render/transcript.rs` vs `render/transcript_buf.rs` — we
+      projected into a buffer but the nav-text functions in
+      `transcript.rs` are still alive "until 6i lands."
+    - `Screen::clear_dialog_area`, `Screen::set_dialog_open`,
+      `Screen::set_constrain_dialog` — no longer meaningful since
+      the dialog-mode frame is gone; likely stale flags kept for
+      legacy render.
+
+C3. **Intermediary transition scaffolding (still live).** Code
+    that was added *because* a migration was in flight and now has
+    no reason to exist:
+    - `render_dialog` / `draw_viewport_dialog_frame` — deleted in
+      Step 12, but audit for any remaining dialog-mode toggles on
+      `Screen` (`set_dialog_open`, `set_constrain_dialog`,
+      `prev_dialog_row`).
+    - `layout::LayoutState.dialog` — the old legacy-dialog layout
+      slot; if unreferenced after Step 12 it can go.
+    - `ActionResult::Keep` carried a `#[allow(dead_code)]` comment
+      — is it actually used now?
+    - `PromptState.prev_dialog_row` (kept, but verify it's still
+      read).
+
+C4. **`#[allow(dead_code)]` audit.** Every `#[allow(dead_code)]` is
+    either (a) a genuine abandoned migration (move to C2), (b) a
+    legitimate seam we plan to use soon (keep with a TODO and a
+    step reference), or (c) obsolete and deletable.
+
+**Suggested order for the next session:** B3 (visible regression) →
+B1 + A1 (small, unlocks mode toggle) → B2 (needs reproduction) →
+C1/C2/C3/C4 sweep → A3/A4 (mechanical cleanup) → A2 (big, do last).
+A5/A6 are backlog.
+
+#### Concrete audit findings (2026-04-22)
+
+After grepping the current tree, here's the state of each cleanup
+bucket. Line/symbol counts reflect what will be touched.
+
+**B1 diagnosis (Shift+Tab routing).** The input keymap at
+`crates/tui/src/keymap.rs:272` binds `BackTab` → `Action::ToggleMode`,
+but only the prompt focus reaches that lookup. `AppFocus::Content`
+goes through `handle_event_app_history` at `app/events.rs:1268` and
+never consults the input keymap. Confirmed: Shift+Tab is dead when
+the transcript is focused. Fix shape is **A1** (global chord layer
+at top of `dispatch_common` running before float/cmdline/prompt
+dispatch).
+
+**B2 diagnosis (`rm` allowed).** Two plausible paths:
+(i) the Confirm float opened but wasn't visibly rendered (see B3
+regression) and the user hit Enter on the pre-selected "yes" option;
+(ii) `permissions::decide(Mode::Normal, "bash", {"command":"rm..."})`
+returned `Decision::Allow`. The engine side already gates `Mode::Yolo`
+→ `check_bash("rm -rf /") = Allow`, so if mode flipped to Yolo
+silently (shift+tab lost, but cycled into Yolo via another path),
+that explains it. Reproduce first: confirm mode indicator + whether
+the float appeared.
+
+**B3 diagnosis (fade-out).** Root causes layered:
+1. `render_normal` early-returns when `!screen.needs_draw(false)`.
+   `needs_draw` is `has_unflushed || dirty`. If nothing sets `dirty`
+   (no streaming, no typing, no engine events) and the spinner
+   frame hasn't advanced, the compositor never redraws.
+2. `screen.update_spinner` only sets `dirty` when the spinner
+   *frame index* changes (every 150ms while working). When
+   `working.elapsed()` is `None` (idle), nothing dirties.
+3. Terminal emissions from anything outside the compositor
+   (spawned subprocess, engine-side logging, Lua plugin output)
+   can push the cursor and scroll the alt buffer — the compositor
+   doesn't redraw to overwrite because `dirty == false`.
+
+Fix: either (a) always repaint on the timer tick at a low frequency
+(≥1 Hz), or (b) surface any byte written outside the compositor by
+making the only write path go through `Ui::render`. (a) is a
+one-liner; (b) is the correct long-term answer and ties into the
+"no more RenderOut" Step 9.7.
+
+**C1 — Legacy code with no callers:**
+- `Screen::pause_spinner` / `resume_spinner` — called from nothing
+  after `open_dialog` / `finalize_dialog_close` were deleted. Safe
+  to remove.
+- `Screen::clear_dialog_area` — only caller was the deleted
+  `finalize_dialog_close`. Safe to remove.
+- `Screen::set_constrain_dialog` — no callers. Safe to remove.
+- `Screen::set_dialog_open` — only caller is `render_normal` at
+  `app/events.rs:1078` calling `set_dialog_open(false)`; the `true`
+  setter went away. Delete the call + the state + the method.
+- `Screen::queue_dialog_gap` at `render/screen.rs:434` — zero
+  callers after Step 12. Delete.
+- `Screen::dialog_row()` / `prev_dialog_row` field — used to be
+  read back by `handle_float_action`'s legacy prompt-clear logic.
+  Verify no readers remain; delete.
+
+**C2 — Abandoned migrations:**
+- `render/transcript.rs::nav_col_to_display_col` and
+  `full_transcript_nav_text` — the Step 6h comment says "Nav-text
+  functions still exist in transcript.rs but have no callers from
+  events.rs — will be deleted once prompt migration (6i) is
+  complete." 6i is partial. Audit today's callers.
+- `render/prompt_data.rs` (1074 lines) — the declared step-9.6/9.9
+  deletion target. `PromptRow`, `StyledSegment`, bar_row helpers
+  all live here. `render_normal` still calls into it. Half-migrated
+  to `WindowView` per Step 6i.
+- `render/completions.rs` (415 lines) — completer popup still drawn
+  via this module instead of the compositor (Step 9.6 target).
+- `render/cmdline.rs` (226 lines) — cmdline overlay still legacy
+  (Step 9.6 target).
+- `render/dialogs/confirm.rs` internals: `render_notebook_preview`
+  takes `&mut S: LayoutSink` and is called from `ConfirmPreview::
+  render_into_buffer` via `SpanCollector`. Fine. But the module
+  has a `_count_rows_unused` `#[allow(dead_code)]` stub left from
+  the old `total_rows` API — delete.
+- `render/to_buffer.rs::render_into_buffer` still `#[allow(dead_code)]`
+  at the top even though it has real callers now. Drop the attr.
+
+**C3 — Intermediary transition scaffolding:**
+- `PromptState.prev_dialog_row` at `render/prompt.rs:16` — written
+  by `render_normal` at `screen.rs:2125` and read back by the
+  (now-deleted) dialog-frame path. Trace who still reads it; likely
+  dead.
+- `layout::LayoutState.dialog` — was the legacy dialog layout slot.
+  After Step 12, `render_normal` always passes `dialog_height:
+  None`. Delete the field.
+- `Screen.constrain_dialog` / `Screen::dialog_open` fields if they
+  persist — dead state.
+- `ActionResult::Keep` at `app/dialogs/mod.rs:26` carries a
+  `#[allow(dead_code)]` comment "used by Confirm's Always-menu
+  expansion (next step)" — Confirm migration landed, no
+  Always-menu expansion. Drop `Keep` or make it live.
+- `app/dialogs/confirm.rs` has a `"// Match the legacy App::
+  handle_dialog_result Confirm arm."` and `"Mirrors legacy."`
+  comments — references deleted code. Clean up.
+- `render/dialogs/mod.rs` is now a ~30-line shim holding only
+  `AgentSnapshot` + `parse_questions` re-exports. Move these up
+  to `render/mod.rs` or a dedicated `render/snapshots.rs` +
+  `render/question.rs` and delete the `dialogs/` directory.
+
+**C4 — `#[allow(dead_code)]` audit (7 sites):**
+- `app/dialogs/mod.rs:26` `ActionResult::Keep` → C3 resolution.
+- `render/to_buffer.rs:25` `render_into_buffer` → drop the attr.
+- `render/dialogs/confirm.rs:305` `_count_rows_unused` → delete.
+- `lua/task.rs:43, 54, 73, 80, 148, 275` (6 sites) — all tagged
+  with "wired in step (iv)". Step (iv) landed. Either remove the
+  attrs or delete unused fields/methods.
+
+This gives the next session a ~30-minute mechanical sweep (C1/C3/C4)
+that drops several hundred lines of dead code before the bigger
+work (A1/A2/A3/A4) begins.
+
+---
+
 ### Known bugs to address during Step 9.4 / 9.5
 
 Stashed here as the migration uncovers them; each gets fixed inside
