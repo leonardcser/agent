@@ -118,10 +118,32 @@ drift.
 migration (task #11 "Pin prompt window to terminal bottom" + the
 C1 `Screen` deletion sweep) so there is a single grid, single
 source of truth per field, and the dirty flag can be deleted
-entirely. Only then return to B2/B4/B6/B7. The `last_mode`
-cache is the canonical example of why: fixing it in isolation
-is trivial, but the class of bug only disappears when the cache
-is gone.
+entirely. Only then return to B2/B4/B6/B7.
+
+**Keystone progress (2026-04-22):**
+
+- Phase 1 (status bar) ✅ commits `9b25449`, `66002e8`. Deleted
+  `Screen::{render_status_line, queue_status_line, dialog_row,
+  queue_dialog_gap, clear_dialog_area, set_dialog_open,
+  set_constrain_dialog, pause_spinner, resume_spinner, dialog_open}`
+  plus cached state (`last_mode`, `last_vim_*`, `last_status_position`,
+  `dialog_open`, `constrain_dialog`, `defer_pending_render`,
+  `prev_dialog_row`, `CursorOwner::Dialog`, `WorkingState::{pause,
+  resume, paused_at, is_paused}`). Also dropped `DialogLayout`,
+  `HitRegion::Dialog`, `LayoutInput::{dialog_height, constrain_dialog}`,
+  `FramePrompt::mode`. Net −870 lines. Status bar is now rendered
+  exclusively by the compositor `StatusBar` layer; the stale-pill
+  class of bug (B1) is impossible to recreate because the backing
+  cache field no longer exists.
+
+- Phases 2–7 remaining: notification layer, queued-messages layer,
+  stash layer, prompt input window, cursor consolidation, delete
+  `Screen`.
+
+The `last_mode`
+cache was the canonical example: fixing it in isolation was
+trivial, but the class of bug only disappears when the cache is
+gone — which it now is.
 
 **Bugs to fix on the compositor path:**
 
