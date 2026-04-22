@@ -2045,6 +2045,11 @@ impl App {
                         self.transcript_window.scroll_top = u16::MAX;
                     }
                 }
+                crate::app::ops::AppOp::DeleteSession(id) => {
+                    if id != self.session.id {
+                        crate::session::delete(&id);
+                    }
+                }
                 crate::app::ops::AppOp::RewindToBlock {
                     block_idx,
                     restore_vim_insert,

@@ -664,6 +664,58 @@ impl LuaRuntime {
                 )?,
             )?;
         }
+        // smelt.api.session.list() → [{id, title, subtitle, cwd,
+        //   parent_id, updated_at_ms, created_at_ms, size_bytes?}]
+        // Every session on disk except the current one, oldest first in
+        // the raw list — plugins can sort. Reads straight off disk via
+        // `crate::session::list_sessions`.
+        {
+            let s = shared.clone();
+            session_tbl.set(
+                "list",
+                lua.create_function(move |lua, ()| {
+                    let current_id = s
+                        .ops
+                        .lock()
+                        .map(|o| o.engine.session_id.clone())
+                        .unwrap_or_default();
+                    let sessions = crate::session::list_sessions();
+                    let out = lua.create_table()?;
+                    let mut idx = 1;
+                    for meta in sessions {
+                        if meta.id == current_id {
+                            continue;
+                        }
+                        let row = lua.create_table()?;
+                        row.set("id", meta.id)?;
+                        row.set("title", meta.title.unwrap_or_default())?;
+                        row.set("subtitle", meta.first_user_message.unwrap_or_default())?;
+                        row.set("cwd", meta.cwd.unwrap_or_default())?;
+                        row.set("parent_id", meta.parent_id.unwrap_or_default())?;
+                        row.set("updated_at_ms", meta.updated_at_ms)?;
+                        row.set("created_at_ms", meta.created_at_ms)?;
+                        if let Some(size) = meta.text_bytes {
+                            row.set("size_bytes", size)?;
+                        }
+                        out.set(idx, row)?;
+                        idx += 1;
+                    }
+                    Ok(out)
+                })?,
+            )?;
+        }
+        // smelt.api.session.load(id) — swap the running session to the
+        // one stored on disk at `id` (accepts full id or a prefix).
+        session_tbl.set(
+            "load",
+            push_op!(lua, shared, |id: String| AppOp::LoadSession(id)),
+        )?;
+        // smelt.api.session.delete(id) — remove a session from disk.
+        // No-op when `id` matches the running session.
+        session_tbl.set(
+            "delete",
+            push_op!(lua, shared, |id: String| AppOp::DeleteSession(id)),
+        )?;
         api.set("session", session_tbl)?;
 
         engine_tbl.set(

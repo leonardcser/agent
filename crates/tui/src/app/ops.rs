@@ -76,8 +76,11 @@ pub enum AppOp {
         session_entries: Vec<crate::render::PermissionEntry>,
         workspace_rules: Vec<crate::workspace_permissions::Rule>,
     },
-    /// Load a saved session by id (Resume dialog).
+    /// Load a saved session by id (Resume dialog, `smelt.api.session.load`).
     LoadSession(String),
+    /// Delete a saved session by id (`smelt.api.session.delete`). No-op
+    /// if the session is the active one.
+    DeleteSession(String),
     /// Back-nav from the Agents detail view to the list: close the
     /// detail window and open the list positioned on the row we came
     /// from.
