@@ -212,18 +212,21 @@ B7. **Scrollbar is read-only.** The scrollbar rendered inside a
     mouse-routing-to-float needs to land first so the scrollbar
     even sees the click.
 
-B8. **Cursor is missing / inconsistent across dialogs.** The
-    input cursor is invisible in some focused panels and behaves
-    differently between widgets (TextInput in Confirm's Reason
-    panel vs. search field in Resume vs. prompt). Unify: a single
-    `CursorController` that (a) every focusable widget registers
-    its cursor cell with when it becomes focused, (b) the
-    compositor reads at flush time to emit one terminal-cursor
-    position + style per frame. No widget emits cursor bytes of
-    its own. Covers hard-block cursor for input panels, hidden
-    cursor for content-only panels, and removes the three parallel
-    cursor paths (prompt soft-cursor, TextInput DECSCUSR, vim
-    cursor).
+B8. **Text-input widgets are inconsistent across dialogs.**
+    Resume's filter field and Confirm's Reason field are both
+    "single-line text input inside a dialog panel", but they render
+    and behave differently — cursor visible in one, invisible in
+    the other, likely different keymaps / edit behaviour / styling.
+    They should both be the same `ui::TextInput` widget used as a
+    panel, with one code path for cursor placement, editing, and
+    focus styling. Audit each dialog that accepts text input
+    (Resume filter, Confirm reason, Agents search, Help search,
+    any future Lua dialog) and migrate them all to the shared
+    widget. Related but separate: the cursor itself should be
+    emitted by one place (the compositor at flush time, based on
+    the focused widget's reported cursor cell) rather than by each
+    widget's draw path — retires the three parallel cursor paths
+    (prompt soft-cursor, TextInput DECSCUSR, vim cursor).
 
 B3. **Prompt + status bar fade out over time.** The real cause is
     that the migration to the compositor-based diff renderer is
