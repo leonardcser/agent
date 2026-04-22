@@ -42,4 +42,3 @@ impl Scrollbar {
         self.visible && i >= self.thumb_start && i < self.thumb_end
     }
 }
-

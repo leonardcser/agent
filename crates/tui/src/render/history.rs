@@ -735,7 +735,6 @@ impl BlockHistory {
         }
         total.min(u16::MAX as u32) as u16
     }
-
 }
 
 /// Streaming state for incremental thinking output.

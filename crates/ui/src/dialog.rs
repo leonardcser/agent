@@ -270,11 +270,7 @@ impl Dialog {
     /// Set focus to `panel_idx`. No-op if the index is out of range or
     /// the panel is not focusable.
     pub fn focus_panel(&mut self, panel_idx: usize) {
-        if self
-            .panels
-            .get(panel_idx)
-            .is_some_and(|p| p.focusable)
-        {
+        if self.panels.get(panel_idx).is_some_and(|p| p.focusable) {
             self.focused = panel_idx;
         }
     }

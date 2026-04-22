@@ -41,7 +41,6 @@ pub(crate) struct PromptOutput {
     pub cursor: Option<(u16, u16)>,
     pub cursor_style: Option<(Style, char)>,
     pub input_scroll: usize,
-    pub soft_cursor: Option<(u16, u16)>,
     pub input_viewport: Option<InputViewport>,
 }
 
@@ -121,7 +120,6 @@ pub(crate) fn compute_prompt(input: &mut PromptInput<'_>) -> PromptOutput {
         cursor: input_area.cursor_info.cursor_pos,
         cursor_style: input_area.cursor_info.cursor_style,
         input_scroll: input_area.scroll_info.scroll_offset,
-        soft_cursor: input_area.cursor_info.soft_cursor,
         input_viewport: if input_row_count > 0 {
             Some(InputViewport {
                 top_row: input_area_start,
@@ -497,7 +495,6 @@ fn build_top_bar_right(info: &BarInfo) -> Vec<BarSpan> {
 struct CursorInfo {
     cursor_pos: Option<(u16, u16)>,
     cursor_style: Option<(Style, char)>,
-    soft_cursor: Option<(u16, u16)>,
 }
 
 struct ScrollInfo {
@@ -566,7 +563,6 @@ fn compute_input_area(input: &PromptInput<'_>, usable: usize, row_offset: u16) -
     let mut cursor_info = CursorInfo {
         cursor_pos: None,
         cursor_style: None,
-        soft_cursor: None,
     };
     let mut buf = Buffer::new(
         BufId(0),
@@ -738,7 +734,6 @@ fn compute_input_area(input: &PromptInput<'_>, usable: usize, row_offset: u16) -
         if line_cursor.is_some() {
             let cursor_col = 1 + cursor_char_in_line as u16;
             cursor_info.cursor_pos = Some((cursor_col, li as u16));
-            cursor_info.soft_cursor = Some((cursor_col, li as u16));
         }
     }
 

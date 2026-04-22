@@ -192,4 +192,3 @@ pub(crate) fn spans_to_segments(
 
     (left, right)
 }
-

@@ -251,15 +251,15 @@ impl App {
     ) -> bool {
         match outcome {
             InputOutcome::StartAgent => {
-                self.screen.erase_prompt();
+                self.screen.mark_dirty();
                 *agent = Some(self.begin_agent_turn(display, content));
             }
             InputOutcome::CustomCommand(cmd) => {
-                self.screen.erase_prompt();
+                self.screen.mark_dirty();
                 *agent = Some(self.begin_custom_command_turn(*cmd));
             }
             InputOutcome::Compact { instructions } => {
-                self.screen.erase_prompt();
+                self.screen.mark_dirty();
                 if self.history.is_empty() {
                     self.screen.notify_error("nothing to compact".into());
                 } else {
@@ -267,12 +267,12 @@ impl App {
                 }
             }
             InputOutcome::Exec(rx, kill) => {
-                self.screen.erase_prompt();
+                self.screen.mark_dirty();
                 self.exec_rx = Some(rx);
                 self.exec_kill = Some(kill);
             }
             InputOutcome::CancelAndClear => {
-                self.screen.erase_prompt();
+                self.screen.mark_dirty();
                 self.reset_session();
                 *agent = None;
             }

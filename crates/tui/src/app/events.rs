@@ -175,7 +175,7 @@ impl App {
                     }
                     MenuResult::ModelSelect(ref key) => {
                         self.apply_model(key);
-                        self.screen.erase_prompt();
+                        self.screen.mark_dirty();
                     }
                     MenuResult::ThemeSelect(value) => {
                         // Live preview already set the in-memory accent;
@@ -197,7 +197,7 @@ impl App {
                 false
             }
             EventOutcome::Exec(rx, kill) => {
-                self.screen.erase_prompt();
+                self.screen.mark_dirty();
                 self.exec_rx = Some(rx);
                 self.exec_kill = Some(kill);
                 false
@@ -215,7 +215,6 @@ impl App {
                     let text = content.text_content();
                     if !text.is_empty() {
                         self.queued_messages.push(text);
-                        self.screen.erase_prompt();
                         self.screen.mark_dirty();
                     }
                 } else {
@@ -237,7 +236,7 @@ impl App {
                         if let Some(cmd) =
                             crate::custom_commands::resolve(queued.trim(), self.multi_agent)
                         {
-                            self.screen.erase_prompt();
+                            self.screen.mark_dirty();
                             *agent = Some(self.begin_custom_command_turn(cmd));
                         } else {
                             let outcome = self.process_input(&queued);
@@ -1199,11 +1198,9 @@ impl App {
         let cursor = prompt_output.cursor;
         let cursor_style = prompt_output.cursor_style;
         let input_scroll = prompt_output.input_scroll;
-        let soft_cursor = prompt_output.soft_cursor;
         let input_viewport_data = prompt_output.input_viewport;
 
         self.screen.set_prompt_input_scroll(input_scroll);
-        self.screen.set_prompt_soft_cursor(soft_cursor);
 
         let (prompt_input_rect, prompt_viewport) = if let Some(ref ivp) = input_viewport_data {
             let input_rect = ui::Rect::new(
@@ -2670,11 +2667,7 @@ impl App {
         self.screen.mark_dirty();
     }
 
-    fn handle_cmdline_key(
-        &mut self,
-        k: KeyEvent,
-        agent: &mut Option<super::TurnState>,
-    ) -> bool {
+    fn handle_cmdline_key(&mut self, k: KeyEvent, agent: &mut Option<super::TurnState>) -> bool {
         use crossterm::event::KeyModifiers as M;
         if !self.screen.cmdline.active {
             return false;

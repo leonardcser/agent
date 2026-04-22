@@ -62,18 +62,11 @@ use super::prompt::PromptState;
 use super::selection::wrap_and_locate_cursor;
 use super::status::StatusItem;
 use super::working::WorkingState;
-use super::{
-    emit_newlines, Frame, StdioBackend, TerminalBackend, SPINNER_FRAMES,
-};
+use super::{emit_newlines, Frame, StdioBackend, TerminalBackend, SPINNER_FRAMES};
 use crate::input::InputState;
 
-use crossterm::{
-    cursor,
-    style::{Print, ResetColor},
-    terminal, QueueableCommand,
-};
+use crossterm::{cursor, terminal, QueueableCommand};
 use std::collections::HashMap;
-use std::io::Write;
 use std::time::Duration;
 
 pub struct Screen {
@@ -235,11 +228,6 @@ impl Screen {
         self.dirty = true;
     }
 
-    /// Set the prompt anchor row explicitly (used by test harness).
-    pub fn set_anchor_row(&mut self, row: u16) {
-        self.prompt.anchor_row = Some(row);
-    }
-
     pub fn block_count(&self) -> usize {
         self.transcript.block_count()
     }
@@ -341,31 +329,6 @@ impl Screen {
         self.parser
             .finish_all_active_agents(&mut self.transcript.history);
         self.dirty = true;
-    }
-
-    /// Move the cursor to the line after the prompt so the shell resumes cleanly.
-    /// When `clear_below` is true, clears remaining rows (completions).
-    pub fn move_cursor_past_prompt(&self, clear_below: bool) {
-        if !self.prompt.drawn {
-            return;
-        }
-        let anchor = self.prompt.anchor_row.unwrap_or(0);
-        let last_row = anchor + self.prompt.prev_rows.saturating_sub(1);
-        let height = self.size().1;
-        let mut out = self.backend.make_output();
-        // Erase the software block cursor so it doesn't linger on exit.
-        if let Some((col, row)) = self.prompt.soft_cursor {
-            let _ = out.queue(cursor::MoveTo(col, row));
-            let _ = out.queue(ResetColor);
-            out.print(" ");
-        }
-        let _ = out.queue(cursor::MoveTo(0, last_row.min(height.saturating_sub(1))));
-        let _ = out.queue(Print("\r\n\r\n"));
-        out.line_cols = 0;
-        if clear_below {
-            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-        }
-        let _ = out.flush();
     }
 
     pub fn begin_turn(&mut self) {
@@ -585,10 +548,6 @@ impl Screen {
 
     pub(crate) fn set_prompt_input_scroll(&mut self, scroll: usize) {
         self.prompt.input_scroll = scroll;
-    }
-
-    pub(crate) fn set_prompt_soft_cursor(&mut self, pos: Option<(u16, u16)>) {
-        self.prompt.soft_cursor = pos;
     }
 
     pub(crate) fn set_prompt_viewport(&mut self, vp: Option<super::region::Viewport>) {
@@ -973,38 +932,20 @@ impl Screen {
         self.dirty = true;
     }
 
-    /// Mark the prompt as needing a full redraw.  Does NOT perform any
-    /// terminal I/O — the next `draw_frame` will clear stale rows and
-    /// repaint atomically within a single synchronized-update frame,
-    /// preventing the flash that occurred when erasure was flushed as a
-    /// separate frame.
-    pub fn erase_prompt(&mut self) {
-        if self.prompt.drawn {
-            self.prompt.drawn = false;
-            self.dirty = true;
-        }
-    }
-
-    /// Force a full repaint on the next tick. Under the flat-line
-    /// viewport model this just clears the current screen and marks
-    /// the prompt dirty — the next `draw_viewport_frame` will rebuild
-    /// everything from scratch.
+    /// Force a full repaint on the next tick.
     pub fn redraw(&mut self) {
         let _perf = crate::perf::begin("redraw");
         let (w, _) = self.size();
         if w as usize != self.transcript.history.cache_width {
             self.transcript.history.invalidate_for_width(w as usize);
         }
-        self.prompt.drawn = false;
         self.dirty = true;
-        self.prompt.prev_rows = 0;
     }
 
     pub fn clear(&mut self) {
         self.transcript.history.clear();
         self.parser.clear();
         self.prompt = PromptState::new();
-        self.prompt.anchor_row = Some(0);
         self.working.clear();
         self.context_tokens = None;
         self.session_cost_usd = 0.0;
@@ -1382,11 +1323,7 @@ impl Screen {
             + 1 // bottom bar
             + 1 // status line (always present)
     }
-
 }
-
-
-
 
 #[cfg(test)]
 mod tests {

@@ -722,7 +722,7 @@ impl App {
                 self.screen
                     .notify_error(format!("\"{}\" {}", trimmed, reason));
             } else {
-                self.screen.erase_prompt();
+                self.screen.mark_dirty();
                 let content = Content::text(msg.clone());
                 agent = Some(self.begin_agent_turn(&msg, content));
             }
@@ -812,7 +812,7 @@ impl App {
             if agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
                 let text = self.queued_messages.remove(0);
                 if let Some(cmd) = crate::custom_commands::resolve(text.trim(), self.multi_agent) {
-                    self.screen.erase_prompt();
+                    self.screen.mark_dirty();
                     agent = Some(self.begin_custom_command_turn(cmd));
                 } else if !text.is_empty() {
                     let outcome = self.process_input(&text);
@@ -827,7 +827,7 @@ impl App {
             if agent.is_none() && !self.pending_agent_messages.is_empty() {
                 let msgs = std::mem::take(&mut self.pending_agent_messages);
                 self.history.extend(msgs);
-                self.screen.erase_prompt();
+                self.screen.mark_dirty();
                 agent = Some(self.begin_agent_message_turn());
             }
 
@@ -867,12 +867,8 @@ impl App {
                     request_id,
                 }));
                 let pending = agent.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
-                let action = self.dispatch_control(
-                    ctrl,
-                    pending,
-                    &mut pending_dialogs,
-                    t.last_keypress,
-                );
+                let action =
+                    self.dispatch_control(ctrl, pending, &mut pending_dialogs, t.last_keypress);
                 match action {
                     LoopAction::Continue => {}
                     LoopAction::Done => {
@@ -890,9 +886,7 @@ impl App {
             }
             // Re-dispatch queued dialogs.  Each goes through dispatch_control
             // so auto-approval checks re-run ("always allow" → auto-approve rest).
-            if !pending_dialogs.is_empty()
-                && !self.focused_float_blocks_agent()
-                && agent.is_some()
+            if !pending_dialogs.is_empty() && !self.focused_float_blocks_agent() && agent.is_some()
             {
                 let idle = t
                     .last_keypress
@@ -911,12 +905,8 @@ impl App {
                         }
                     };
                     let pending = agent.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
-                    let action = self.dispatch_control(
-                        ctrl,
-                        pending,
-                        &mut pending_dialogs,
-                        t.last_keypress,
-                    );
+                    let action =
+                        self.dispatch_control(ctrl, pending, &mut pending_dialogs, t.last_keypress);
                     match action {
                         LoopAction::Continue => {}
                         LoopAction::Done => {
@@ -1085,10 +1075,6 @@ impl App {
         self.lua.emit(crate::lua::AutocmdEvent::Shutdown);
         self.save_session();
 
-        // If no messages were ever sent, preserve the final prompt/tab bar on exit.
-        // When there is session history, clear below for a clean resume hint area.
-        let clear_below = !self.session.messages.is_empty();
-        self.screen.move_cursor_past_prompt(clear_below);
         let _ = io::stdout().execute(DisableMouseCapture);
         let _ = io::stdout().execute(LeaveAlternateScreen);
         let _ = io::stdout().execute(cursor::Show);
@@ -1586,7 +1572,6 @@ impl App {
         }
         engine::registry::update_status(my_pid, engine::registry::AgentStatus::Idle);
     }
-
 }
 
 /// Poll one item from a `futures_core::Stream`, equivalent to `StreamExt::next`.

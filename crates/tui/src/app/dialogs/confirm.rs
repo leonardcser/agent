@@ -201,18 +201,8 @@ impl Confirm {
         }
     }
 
-    fn resolve(
-        &self,
-        app: &mut App,
-        win: WinId,
-        idx: usize,
-        agent: &mut Option<TurnState>,
-    ) {
-        let choice = self
-            .choices
-            .get(idx)
-            .cloned()
-            .unwrap_or(ConfirmChoice::No);
+    fn resolve(&self, app: &mut App, win: WinId, idx: usize, agent: &mut Option<TurnState>) {
+        let choice = self.choices.get(idx).cloned().unwrap_or(ConfirmChoice::No);
         let message = self.reason_text(app, win);
         // Match the legacy App::handle_dialog_result Confirm arm.
         let ctx = app.confirm_context.take();
