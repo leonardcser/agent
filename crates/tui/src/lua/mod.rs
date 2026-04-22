@@ -1673,18 +1673,53 @@ pub fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {
 
 /// Convert a Lua table to a `serde_json::Value`.
 fn lua_table_to_json(lua: &Lua, table: &mlua::Table) -> serde_json::Value {
-    let _ = lua;
-    let mut map = serde_json::Map::new();
+    // Treat tables with contiguous 1..N integer keys as JSON arrays;
+    // anything else (string keys, gaps, mixed) becomes a JSON object.
+    // Matches Lua convention where `{ "a", "b" }` is a sequence and
+    // `{ k = v }` is a map. Empty tables serialize as empty arrays,
+    // which is the safer default for JSON-schema fields like `required`.
+    let mut pairs: Vec<(mlua::Value, mlua::Value)> = Vec::new();
     for pair in table.pairs::<mlua::Value, mlua::Value>() {
-        let Ok((key, val)) = pair else { continue };
-        let key_str = match &key {
-            mlua::Value::String(s) => s.to_string_lossy().to_string(),
-            mlua::Value::Integer(i) => i.to_string(),
-            _ => continue,
-        };
-        map.insert(key_str, lua_value_to_json(lua, &val));
+        let Ok(kv) = pair else { continue };
+        pairs.push(kv);
     }
-    serde_json::Value::Object(map)
+
+    let is_array = !pairs.is_empty()
+        && pairs
+            .iter()
+            .all(|(k, _)| matches!(k, mlua::Value::Integer(_)))
+        && {
+            let mut ints: Vec<i64> = pairs
+                .iter()
+                .filter_map(|(k, _)| match k {
+                    mlua::Value::Integer(i) => Some(*i),
+                    _ => None,
+                })
+                .collect();
+            ints.sort_unstable();
+            ints.first().copied() == Some(1) && ints.windows(2).all(|w| w[1] == w[0] + 1)
+        };
+
+    if is_array || pairs.is_empty() {
+        let len = table.raw_len();
+        let mut arr = Vec::with_capacity(len);
+        for i in 1..=len {
+            let val: mlua::Value = table.raw_get(i).unwrap_or(mlua::Value::Nil);
+            arr.push(lua_value_to_json(lua, &val));
+        }
+        serde_json::Value::Array(arr)
+    } else {
+        let mut map = serde_json::Map::new();
+        for (key, val) in pairs {
+            let key_str = match &key {
+                mlua::Value::String(s) => s.to_string_lossy().to_string(),
+                mlua::Value::Integer(i) => i.to_string(),
+                _ => continue,
+            };
+            map.insert(key_str, lua_value_to_json(lua, &val));
+        }
+        serde_json::Value::Object(map)
+    }
 }
 
 fn lua_value_to_json(lua: &Lua, val: &mlua::Value) -> serde_json::Value {
@@ -1930,6 +1965,28 @@ mod tests {
             .eval()
             .expect("eval");
         assert_eq!(version, crate::api::VERSION);
+    }
+
+    #[test]
+    fn lua_sequence_tables_serialize_as_json_arrays() {
+        let lua = Lua::new();
+        let tbl: mlua::Table = lua
+            .load(r#"return { "label", "description" }"#)
+            .eval()
+            .expect("eval");
+        let json = lua_table_to_json(&lua, &tbl);
+        assert_eq!(
+            json,
+            serde_json::json!(["label", "description"]),
+            "1..N integer keys must become JSON array"
+        );
+
+        let obj: mlua::Table = lua
+            .load(r#"return { type = "object", properties = {} }"#)
+            .eval()
+            .expect("eval");
+        let json2 = lua_table_to_json(&lua, &obj);
+        assert_eq!(json2["type"], serde_json::json!("object"));
     }
 
     #[test]
