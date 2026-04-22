@@ -533,11 +533,14 @@ impl App {
                 ui::Rect::new(0, 0, w, 1),
                 2,
             );
+            // Status bar rides above all floats (default float zindex = 50;
+            // completer float uses 60). Picking 500 leaves headroom for any
+            // future always-above-status overlay without another collision.
             ui.add_layer(
                 "status",
                 Box::new(status_bar),
                 ui::Rect::new(h.saturating_sub(1), 0, w, 1),
-                3,
+                500,
             );
             ui.focus_layer("prompt_input");
             (ui, input_display_buf)

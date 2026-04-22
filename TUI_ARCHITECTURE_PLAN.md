@@ -886,10 +886,14 @@ being migrated". Every commit closes a chapter.
 
 ## Open UX bugs (fall out of the above)
 
-- **B5 — transcript status under float.** Status row disappears when a
-  float docks bottom; should layer above the float's gutter. Fixes
-  itself once the status bar is a top-level compositor layer rather than
-  painted-by-Screen.
+- **B5 — transcript status under float.** ✓ Shipped 2026-04-23. The
+  status bar is already a top-level compositor layer, but sat at
+  `zindex = 3` against floats at 50–60, so any bottom-docked or tall
+  centered float obliterated the status row. Bumped the status layer to
+  `zindex = 500` in `App::new`. `FitContent` / `dock_bottom_full_width`
+  already reserve `above_rows = 1`; the zindex bump only matters for
+  centered/manual floats that happen to reach the last row, and now
+  the status row wins that collision.
 - **B6 — mouse wheel routing to floats** (task #7). Currently scrolls
   transcript even when a float is focused. Add `Compositor::hit_test
   (col, row) -> Option<WinId>` and route wheel events to topmost layer.
