@@ -44,10 +44,6 @@ pub enum AppOp {
     /// legacy `close_float`: fires any Lua dismiss callback, removes
     /// the window from the compositor, deletes the primary buf.
     CloseFloat(ui::WinId),
-    /// Export transcript to clipboard (Export dialog).
-    ExportClipboard,
-    /// Export transcript to file (Export dialog).
-    ExportFile,
     /// Rewind to a transcript block (Rewind dialog). `block_idx=None`
     /// means "kept at current"; `restore_vim_insert` re-enters Insert
     /// mode when the dialog was opened from there.

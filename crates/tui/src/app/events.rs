@@ -1629,6 +1629,9 @@ impl App {
             context_window: self.context_window,
             session_dir: session_dir.display().to_string(),
             session_id: self.session.id.clone(),
+            session_title: self.session.title.clone(),
+            session_cwd: self.cwd.clone(),
+            session_created_at_ms: self.session.created_at_ms,
         });
         self.lua.set_history(self.history.clone());
     }
@@ -1806,12 +1809,6 @@ impl App {
                 }
                 crate::app::ops::AppOp::CloseFloat(win_id) => {
                     self.close_float(win_id);
-                }
-                crate::app::ops::AppOp::ExportClipboard => {
-                    self.export_to_clipboard();
-                }
-                crate::app::ops::AppOp::ExportFile => {
-                    self.export_to_file();
                 }
                 crate::app::ops::AppOp::SyncPermissions {
                     session_entries,

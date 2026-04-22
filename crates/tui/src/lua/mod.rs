@@ -176,6 +176,9 @@ pub struct EngineSnapshot {
     pub context_window: Option<u32>,
     pub session_dir: String,
     pub session_id: String,
+    pub session_title: Option<String>,
+    pub session_cwd: String,
+    pub session_created_at_ms: u64,
 }
 
 /// Shared state between Lua closures and the app loop.
@@ -479,6 +482,31 @@ impl LuaRuntime {
             "session_id",
             snap_read!(lua, shared, |o| o.engine.session_id.clone()),
         )?;
+
+        // smelt.api.session.* — current session metadata. Primitives only;
+        // plugins compose features (export, rewind-list etc.) on top.
+        let session_tbl = lua.create_table()?;
+        session_tbl.set(
+            "title",
+            snap_read!(lua, shared, |o| o.engine.session_title.clone()),
+        )?;
+        session_tbl.set(
+            "cwd",
+            snap_read!(lua, shared, |o| o.engine.session_cwd.clone()),
+        )?;
+        session_tbl.set(
+            "created_at_ms",
+            snap_read!(lua, shared, |o| o.engine.session_created_at_ms),
+        )?;
+        session_tbl.set(
+            "id",
+            snap_read!(lua, shared, |o| o.engine.session_id.clone()),
+        )?;
+        session_tbl.set(
+            "dir",
+            snap_read!(lua, shared, |o| o.engine.session_dir.clone()),
+        )?;
+        api.set("session", session_tbl)?;
 
         engine_tbl.set(
             "set_model",
@@ -1788,12 +1816,19 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.plugins.ask_user_question",
         include_str!("../../../../runtime/lua/smelt/plugins/ask_user_question.lua"),
     ),
+    (
+        "smelt.plugins.export",
+        include_str!("../../../../runtime/lua/smelt/plugins/export.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
 /// init.lua). These are former Rust built-ins migrated to Lua. Required
 /// after the embedded searcher is set up, before user init.lua runs.
-const AUTOLOAD_MODULES: &[&str] = &["smelt.plugins.ask_user_question"];
+const AUTOLOAD_MODULES: &[&str] = &[
+    "smelt.plugins.ask_user_question",
+    "smelt.plugins.export",
+];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`
 /// from modules embedded in the binary. Falls back to the default searchers
@@ -1987,6 +2022,16 @@ mod tests {
             .expect("eval");
         let json2 = lua_table_to_json(&lua, &obj);
         assert_eq!(json2["type"], serde_json::json!("object"));
+    }
+
+    #[test]
+    fn autoload_registers_export_command() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        assert!(
+            rt.has_command("export"),
+            "/export should be registered by the autoloaded plugin"
+        );
     }
 
     #[test]
