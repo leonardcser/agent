@@ -1734,9 +1734,12 @@ impl App {
         }
         let mut lua_invoke =
             |_handle: ui::LuaHandle, _payload: &ui::Payload| -> Vec<String> { Vec::new() };
-        let _ = self
-            .ui
-            .dispatch_event(win, ui::WinEvent::Dismiss, ui::Payload::None, &mut lua_invoke);
+        let _ = self.ui.dispatch_event(
+            win,
+            ui::WinEvent::Dismiss,
+            ui::Payload::None,
+            &mut lua_invoke,
+        );
         self.apply_lua_ops();
     }
 
@@ -2037,9 +2040,7 @@ impl App {
                     on_select,
                 } => {
                     if let Some(key) = on_select {
-                        if let Ok(func) =
-                            self.lua.lua().registry_value::<mlua::Function>(&key)
-                        {
+                        if let Ok(func) = self.lua.lua().registry_value::<mlua::Function>(&key) {
                             if let Err(e) = func.call::<()>(()) {
                                 self.screen.notify_error(format!("dialog on_select: {e}"));
                             }
