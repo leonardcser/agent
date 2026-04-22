@@ -2,11 +2,37 @@ use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
 use crossterm::event::{KeyCode, KeyModifiers};
 
+/// Semantic events emitted by widgets when a key resolves into a
+/// high-level action. Replaces the old stringly-typed
+/// `KeyResult::Action(String)` dispatch. The enum lives in `component`
+/// so every widget and the dispatcher (`Dialog`, `FloatDialog`,
+/// `Ui::handle_key_with_actions`) can match on it without string
+/// parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WidgetEvent {
+    /// User confirmed with no text payload (Enter on a list, etc.).
+    Submit,
+    /// User confirmed from a text widget; carries the final text.
+    SubmitText(String),
+    /// User cancelled (Esc on a TextInput). Distinct from `Dismiss`
+    /// so callers can choose whether to treat a text-widget Esc as
+    /// "close the dialog" or "clear the field".
+    Cancel,
+    /// User dismissed the surrounding container (Esc on a Dialog).
+    Dismiss,
+    /// User selected a specific row by index.
+    Select(usize),
+    /// User selected without an explicit index (cursor position wins).
+    SelectDefault,
+    /// Text content changed (per keystroke on TextInput).
+    TextChanged,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyResult {
     Consumed,
     Ignored,
-    Action(String),
+    Action(WidgetEvent),
 }
 
 pub struct DrawContext {

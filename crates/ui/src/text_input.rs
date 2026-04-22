@@ -1,4 +1,4 @@
-use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
+use crate::component::{Component, CursorInfo, DrawContext, KeyResult, WidgetEvent};
 use crate::dialog::PanelWidget;
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
@@ -199,15 +199,15 @@ impl Component for TextInput {
         match (code, mods) {
             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                 self.insert_char(c);
-                KeyResult::Action("text_changed".into())
+                KeyResult::Action(WidgetEvent::TextChanged)
             }
             (KeyCode::Backspace, _) => {
                 self.delete_back();
-                KeyResult::Action("text_changed".into())
+                KeyResult::Action(WidgetEvent::TextChanged)
             }
             (KeyCode::Delete, _) => {
                 self.delete_forward();
-                KeyResult::Action("text_changed".into())
+                KeyResult::Action(WidgetEvent::TextChanged)
             }
             (KeyCode::Left, KeyModifiers::NONE) => {
                 self.move_left();
@@ -227,14 +227,14 @@ impl Component for TextInput {
             }
             (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
                 self.delete_word_back();
-                KeyResult::Action("text_changed".into())
+                KeyResult::Action(WidgetEvent::TextChanged)
             }
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                 self.clear();
-                KeyResult::Action("text_changed".into())
+                KeyResult::Action(WidgetEvent::TextChanged)
             }
-            (KeyCode::Enter, _) => KeyResult::Action("submit".into()),
-            (KeyCode::Esc, _) => KeyResult::Action("cancel".into()),
+            (KeyCode::Enter, _) => KeyResult::Action(WidgetEvent::Submit),
+            (KeyCode::Esc, _) => KeyResult::Action(WidgetEvent::Cancel),
             _ => KeyResult::Ignored,
         }
     }
@@ -315,7 +315,7 @@ mod tests {
         let mut ti = input();
         ti.set_text("some text");
         let result = Component::handle_key(&mut ti, KeyCode::Char('u'), KeyModifiers::CONTROL);
-        assert_eq!(result, KeyResult::Action("text_changed".into()));
+        assert_eq!(result, KeyResult::Action(WidgetEvent::TextChanged));
         assert_eq!(ti.text(), "");
     }
 
@@ -323,7 +323,7 @@ mod tests {
     fn enter_submits() {
         let mut ti = input();
         let result = Component::handle_key(&mut ti, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(result, KeyResult::Action("submit".into()));
+        assert_eq!(result, KeyResult::Action(WidgetEvent::Submit));
     }
 
     #[test]

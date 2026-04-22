@@ -5,7 +5,7 @@
 //! shortcut keys (Confirm's `a` / `n` / `e` / `l`), and
 //! widget-managed cursor state.
 
-use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
+use crate::component::{Component, CursorInfo, DrawContext, KeyResult, WidgetEvent};
 use crate::dialog::PanelWidget;
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
@@ -272,7 +272,7 @@ impl Component for OptionList {
             if let KeyCode::Char(c) = code {
                 if let Some(idx) = self.items.iter().position(|it| it.shortcut == Some(c)) {
                     self.cursor = idx;
-                    return KeyResult::Action(format!("select:{idx}"));
+                    return KeyResult::Action(WidgetEvent::Select(idx));
                 }
             }
         }
@@ -309,15 +309,15 @@ impl Component for OptionList {
             }
             (KeyCode::Enter, _) => {
                 if self.multi {
-                    KeyResult::Action("submit".into())
+                    KeyResult::Action(WidgetEvent::Submit)
                 } else {
-                    KeyResult::Action(format!("select:{}", self.cursor))
+                    KeyResult::Action(WidgetEvent::Select(self.cursor))
                 }
             }
             (KeyCode::Char(c), KeyModifiers::NONE) if c.is_ascii_digit() && c != '0' => {
                 let idx = (c as u8 - b'1') as usize;
                 if idx < self.items.len() {
-                    KeyResult::Action(format!("select:{idx}"))
+                    KeyResult::Action(WidgetEvent::Select(idx))
                 } else {
                     KeyResult::Ignored
                 }
@@ -386,14 +386,14 @@ mod tests {
         let mut ol = OptionList::new(items3());
         ol.handle_key(KeyCode::Down, KeyModifiers::NONE);
         let r = ol.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(r, KeyResult::Action("select:1".into()));
+        assert_eq!(r, KeyResult::Action(WidgetEvent::Select(1)));
     }
 
     #[test]
     fn shortcut_char_selects_matched_item() {
         let mut ol = OptionList::new(items3());
         let r = ol.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert_eq!(r, KeyResult::Action("select:2".into()));
+        assert_eq!(r, KeyResult::Action(WidgetEvent::Select(2)));
         assert_eq!(ol.cursor(), 2);
     }
 
@@ -401,7 +401,7 @@ mod tests {
     fn digit_selects_by_index() {
         let mut ol = OptionList::new(items3());
         let r = ol.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
-        assert_eq!(r, KeyResult::Action("select:1".into()));
+        assert_eq!(r, KeyResult::Action(WidgetEvent::Select(1)));
     }
 
     #[test]
@@ -412,7 +412,7 @@ mod tests {
         ol.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
         assert_eq!(ol.toggled_indices(), vec![0, 1]);
         let r = ol.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(r, KeyResult::Action("submit".into()));
+        assert_eq!(r, KeyResult::Action(WidgetEvent::Submit));
     }
 
     #[test]

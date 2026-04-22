@@ -1,4 +1,4 @@
-use crate::component::{Component, DrawContext, KeyResult};
+use crate::component::{Component, DrawContext, KeyResult, WidgetEvent};
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -166,15 +166,15 @@ impl Component for ListSelect {
                 }
                 KeyResult::Consumed
             }
-            (KeyCode::Enter, _) => KeyResult::Action("select".into()),
+            (KeyCode::Enter, _) => KeyResult::Action(WidgetEvent::SelectDefault),
             (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
-                KeyResult::Action("dismiss".into())
+                KeyResult::Action(WidgetEvent::Dismiss)
             }
             (KeyCode::Char(c), KeyModifiers::NONE) if c.is_ascii_digit() => {
                 let idx = c as usize - '0' as usize;
                 if idx > 0 && idx <= self.items.len() {
                     self.select(idx - 1);
-                    KeyResult::Action("select".into())
+                    KeyResult::Action(WidgetEvent::SelectDefault)
                 } else {
                     KeyResult::Ignored
                 }
@@ -229,7 +229,7 @@ mod tests {
         let mut list = make_list(&["a", "b"]);
         list.move_down();
         let result = list.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(result, KeyResult::Action("select".into()));
+        assert_eq!(result, KeyResult::Action(WidgetEvent::SelectDefault));
         assert_eq!(list.selected(), 1);
     }
 
@@ -237,14 +237,14 @@ mod tests {
     fn esc_returns_dismiss_action() {
         let mut list = make_list(&["a"]);
         let result = list.handle_key(KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(result, KeyResult::Action("dismiss".into()));
+        assert_eq!(result, KeyResult::Action(WidgetEvent::Dismiss));
     }
 
     #[test]
     fn numeric_selection() {
         let mut list = make_list(&["a", "b", "c"]);
         let result = list.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
-        assert_eq!(result, KeyResult::Action("select".into()));
+        assert_eq!(result, KeyResult::Action(WidgetEvent::SelectDefault));
         assert_eq!(list.selected(), 1);
     }
 }

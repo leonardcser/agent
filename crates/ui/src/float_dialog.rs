@@ -1,6 +1,6 @@
 use crate::buffer::Buffer;
 use crate::buffer_view::BufferView;
-use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
+use crate::component::{Component, CursorInfo, DrawContext, KeyResult, WidgetEvent};
 use crate::grid::{GridSlice, Style};
 use crate::layout::{Border, Rect};
 use crate::list_select::{ListItem, ListSelect};
@@ -407,7 +407,7 @@ impl Component for FloatDialog {
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult {
         // Global dismiss
         if matches!(code, KeyCode::Esc) && mods == KeyModifiers::NONE {
-            return KeyResult::Action("dismiss".into());
+            return KeyResult::Action(WidgetEvent::Dismiss);
         }
         if self
             .config
@@ -415,7 +415,7 @@ impl Component for FloatDialog {
             .iter()
             .any(|&(k, m)| k == code && m == mods)
         {
-            return KeyResult::Action("dismiss".into());
+            return KeyResult::Action(WidgetEvent::Dismiss);
         }
 
         // Route to focused sub-component first
@@ -424,12 +424,12 @@ impl Component for FloatDialog {
                 if let Some(ref mut input) = self.input {
                     let result = input.handle_key(code, mods);
                     match &result {
-                        KeyResult::Action(a) if a == "submit" => {
+                        KeyResult::Action(WidgetEvent::Submit) => {
                             let text = input.text().to_string();
-                            return KeyResult::Action(format!("submit:{text}"));
+                            return KeyResult::Action(WidgetEvent::SubmitText(text));
                         }
-                        KeyResult::Action(a) if a == "cancel" => {
-                            return KeyResult::Action("dismiss".into());
+                        KeyResult::Action(WidgetEvent::Cancel) => {
+                            return KeyResult::Action(WidgetEvent::Dismiss);
                         }
                         KeyResult::Consumed => {
                             return KeyResult::Consumed;
@@ -442,12 +442,12 @@ impl Component for FloatDialog {
                 if let Some(ref mut footer) = self.footer {
                     let result = footer.handle_key(code, mods);
                     match &result {
-                        KeyResult::Action(a) if a == "select" => {
+                        KeyResult::Action(WidgetEvent::SelectDefault) => {
                             let idx = footer.selected();
-                            return KeyResult::Action(format!("select:{idx}"));
+                            return KeyResult::Action(WidgetEvent::Select(idx));
                         }
-                        KeyResult::Action(a) if a == "dismiss" => {
-                            return KeyResult::Action("dismiss".into());
+                        KeyResult::Action(WidgetEvent::Dismiss) => {
+                            return KeyResult::Action(WidgetEvent::Dismiss);
                         }
                         KeyResult::Consumed => {
                             return KeyResult::Consumed;
@@ -693,7 +693,7 @@ mod tests {
     fn esc_dismisses() {
         let mut dialog = FloatDialog::new(FloatDialogConfig::default());
         let result = dialog.handle_key(KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(result, KeyResult::Action("dismiss".into()));
+        assert_eq!(result, KeyResult::Action(WidgetEvent::Dismiss));
     }
 
     #[test]
@@ -711,7 +711,7 @@ mod tests {
         // Move down then enter
         dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
         let result = dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(result, KeyResult::Action("select:1".into()));
+        assert_eq!(result, KeyResult::Action(WidgetEvent::Select(1)));
     }
 
     #[test]
@@ -721,7 +721,10 @@ mod tests {
         dialog.handle_key(KeyCode::Char('h'), KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Char('i'), KeyModifiers::NONE);
         let result = dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(result, KeyResult::Action("submit:hi".into()));
+        assert_eq!(
+            result,
+            KeyResult::Action(WidgetEvent::SubmitText("hi".into()))
+        );
     }
 
     #[test]
@@ -773,7 +776,7 @@ mod tests {
         ]);
 
         let result = dialog.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
-        assert_eq!(result, KeyResult::Action("select:1".into()));
+        assert_eq!(result, KeyResult::Action(WidgetEvent::Select(1)));
     }
 
     #[test]

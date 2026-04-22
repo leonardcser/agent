@@ -622,10 +622,15 @@ After D3, the LuaTask runtime's remaining wait kinds are
 `Ready` + `Sleep` only — every UI-blocking call becomes a raw
 coroutine yield/resume pair owned by a Lua runtime file.
 
-**D4 · (optional, standalone) Typed widget events.** B.cleanup.8
-item. Widgets return `WidgetEvent` enum instead of
-`KeyResult::Action(String)`. Not required for plugin-migration; can
-ship alongside or after Phase F.
+**D4 · Typed widget events.** **Shipped 2026-04-23.** Widgets now
+return `KeyResult::Action(WidgetEvent)` where `WidgetEvent` is
+`Submit | SubmitText(String) | Cancel | Dismiss | Select(usize) |
+SelectDefault | TextChanged`. Replaces the stringly-typed
+`Action(String)` dispatch that threaded through `OptionList`,
+`TextInput`, `ListSelect`, `Dialog`, and `FloatDialog` — every emit
+site and every intercept in dialog chrome is now a direct enum
+match. `classify_widget_action` reduces to a single `match`; no more
+`strip_prefix("select:")` / `format!("select:{idx}")` round-trips.
 
 Expected LOC: net −400..−600.
 
@@ -1434,6 +1439,19 @@ coherent arc because splitting them left two render engines coexisting.
 
 ## Progress log
 
+- **2026-04-23** — Phase D4 shipped: typed `WidgetEvent` enum replaces
+  the stringly-typed `KeyResult::Action(String)` bus. One enum
+  (`Submit | SubmitText(String) | Cancel | Dismiss | Select(usize) |
+  SelectDefault | TextChanged`) carries every widget-to-dialog signal
+  that used to flow through `format!("select:{idx}")` /
+  `strip_prefix("submit:")` round-trips. Emitters: `OptionList`,
+  `TextInput`, `ListSelect`, `Dialog`, `FloatDialog`. Consumers:
+  `classify_widget_action` — now a single `match` — plus the inline
+  rewrites in `Dialog::handle_key` (input-widget Submit → list
+  `Select(idx)`) and `FloatDialog::handle_key` (TextInput Submit →
+  `SubmitText(text)` with the final buffer). No behavior change;
+  purely cuts the string-parsing cost and makes widget events a
+  closed algebra enforced by the compiler.
 - **2026-04-23** — Phase E2a: `Compositor::hit_test(row, col)` +
   `Ui::float_at(row, col)`. The interim "focused float captures the
   wheel" hack from the /resume port is gone — wheel events now

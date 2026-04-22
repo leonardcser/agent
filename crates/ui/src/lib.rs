@@ -34,7 +34,7 @@ pub use callback::{
     Callback, CallbackCtx, CallbackResult, Callbacks, KeyBind, LuaHandle, Payload, RustCallback,
     WinEvent,
 };
-pub use component::{Component, CursorInfo, CursorStyle, DrawContext, KeyResult};
+pub use component::{Component, CursorInfo, CursorStyle, DrawContext, KeyResult, WidgetEvent};
 pub use compositor::Compositor;
 pub use dialog::{
     Dialog, DialogConfig, PanelContent, PanelHeight, PanelKind, PanelSpec, PanelWidget,
@@ -645,12 +645,12 @@ impl Ui {
             self.compositor.handle_key(code, mods)
         };
 
-        // Auto-translate widget action strings into typed events when
-        // the focused window has a matching callback registered. This
-        // is the glue that lets widgets (OptionList, TextInput, …)
-        // stay pure `KeyResult::Action(…)` emitters while dialogs
-        // behave via typed `WinEvent` callbacks. Unregistered windows
-        // still see the raw `Action(…)` bubble up.
+        // Auto-translate widget events into typed `WinEvent` callbacks
+        // when the focused window has a matching callback registered.
+        // This is the glue that lets widgets (OptionList, TextInput, …)
+        // emit typed `WidgetEvent` values while dialogs subscribe via
+        // `WinEvent::Submit` / `Dismiss` / `TextChanged`. Unregistered
+        // windows still see the raw `Action(…)` bubble up.
         if let KeyResult::Action(action) = &result {
             if let Some((ev, payload)) = classify_widget_action(action) {
                 if self.callbacks.has_event(win, ev) {
@@ -802,36 +802,25 @@ impl Ui {
     }
 }
 
-/// Map widget-emitted action strings (produced by `OptionList`,
-/// `TextInput`, `Dialog`, `FloatDialog`) into a typed
-/// `(WinEvent, Payload)` pair for auto-dispatch. Returns `None`
-/// for actions that don't have a semantic event mapping — those
-/// keep bubbling as `KeyResult::Action(…)` so existing host-side
-/// string matching (legacy dialogs) still works.
-fn classify_widget_action(action: &str) -> Option<(WinEvent, Payload)> {
-    if action == "dismiss" {
-        return Some((WinEvent::Dismiss, Payload::None));
-    }
-    if action == "submit" {
-        return Some((WinEvent::Submit, Payload::None));
-    }
-    if action == "text_changed" {
-        return Some((WinEvent::TextChanged, Payload::None));
-    }
-    if let Some(idx) = action.strip_prefix("select:") {
-        if let Ok(index) = idx.parse::<usize>() {
-            return Some((WinEvent::Submit, Payload::Selection { index }));
-        }
-    }
-    if let Some(text) = action.strip_prefix("submit:") {
-        return Some((
+/// Map a widget-emitted `WidgetEvent` to a `(WinEvent, Payload)` pair
+/// for auto-dispatch. Widgets (`OptionList`, `TextInput`, `Dialog`,
+/// `FloatDialog`) return typed events; this just fans them out to the
+/// callback system's event names.
+fn classify_widget_action(ev: &WidgetEvent) -> Option<(WinEvent, Payload)> {
+    use WidgetEvent::*;
+    Some(match ev {
+        Dismiss => (WinEvent::Dismiss, Payload::None),
+        Cancel => (WinEvent::Dismiss, Payload::None),
+        Submit | SelectDefault => (WinEvent::Submit, Payload::None),
+        TextChanged => (WinEvent::TextChanged, Payload::None),
+        Select(index) => (WinEvent::Submit, Payload::Selection { index: *index }),
+        SubmitText(content) => (
             WinEvent::Submit,
             Payload::Text {
-                content: text.to_string(),
+                content: content.clone(),
             },
-        ));
-    }
-    None
+        ),
+    })
 }
 
 fn resolve_constraint_dim(c: Constraint, total: u16) -> u16 {

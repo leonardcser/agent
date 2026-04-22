@@ -16,7 +16,7 @@
 
 use crate::buffer::{Buffer, LineDecoration};
 use crate::buffer_view::BufferView;
-use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
+use crate::component::{Component, CursorInfo, DrawContext, KeyResult, WidgetEvent};
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
 use crate::status_bar::StatusBar;
@@ -723,7 +723,7 @@ impl Dialog {
             }
             (KeyCode::Enter, _) => self
                 .selected_index_at(panel_idx)
-                .map(|idx| KeyResult::Action(format!("select:{idx}")))
+                .map(|idx| KeyResult::Action(WidgetEvent::Select(idx)))
                 .unwrap_or(KeyResult::Ignored),
             _ => KeyResult::Ignored,
         }
@@ -864,11 +864,11 @@ impl Component for Dialog {
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult {
         if matches!(code, KeyCode::Esc) && mods == KeyModifiers::NONE {
-            return KeyResult::Action("dismiss".into());
+            return KeyResult::Action(WidgetEvent::Dismiss);
         }
         // Ctrl+C always dismisses a dialog (matches legacy behavior).
         if matches!(code, KeyCode::Char('c')) && mods == KeyModifiers::CONTROL {
-            return KeyResult::Action("dismiss".into());
+            return KeyResult::Action(WidgetEvent::Dismiss);
         }
         if self
             .config
@@ -876,7 +876,7 @@ impl Component for Dialog {
             .iter()
             .any(|&(k, m)| k == code && m == mods)
         {
-            return KeyResult::Action("dismiss".into());
+            return KeyResult::Action(WidgetEvent::Dismiss);
         }
 
         match (code, mods) {
@@ -902,14 +902,12 @@ impl Component for Dialog {
                     .panels
                     .iter()
                     .position(|p| matches!(p.kind, PanelKind::List { .. }));
-                // Rewrite a widget `submit` into `select:{list_row}` so
+                // Rewrite a widget `Submit` into `Select(list_row)` so
                 // Enter on an input panel picks the currently-selected
                 // list row instead of falling back to option 0.
-                if let (KeyResult::Action(a), Some(list_idx)) = (&r, list_idx) {
-                    if a == "submit" {
-                        if let Some(idx) = self.selected_index_at(list_idx) {
-                            return KeyResult::Action(format!("select:{idx}"));
-                        }
+                if let (KeyResult::Action(WidgetEvent::Submit), Some(list_idx)) = (&r, list_idx) {
+                    if let Some(idx) = self.selected_index_at(list_idx) {
+                        return KeyResult::Action(WidgetEvent::Select(idx));
                     }
                 }
                 if !matches!(r, KeyResult::Ignored) {
@@ -960,7 +958,7 @@ impl Component for Dialog {
                     }
                     (KeyCode::Enter, _) => Some(
                         self.selected_index()
-                            .map(|idx| KeyResult::Action(format!("select:{idx}")))
+                            .map(|idx| KeyResult::Action(WidgetEvent::Select(idx)))
                             .unwrap_or(KeyResult::Ignored),
                     ),
                     _ => None,
@@ -992,7 +990,7 @@ impl Component for Dialog {
                 if let (KeyCode::Char(c), KeyModifiers::NONE) = (code, mods) {
                     if c.is_ascii_digit() {
                         let idx = (c as u8 - b'1') as usize;
-                        return KeyResult::Action(format!("select:{idx}"));
+                        return KeyResult::Action(WidgetEvent::Select(idx));
                     }
                 }
                 KeyResult::Ignored
@@ -1221,7 +1219,7 @@ mod tests {
         let panels = build_panels(vec![], &std::collections::HashMap::new());
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         let r = dlg.handle_key(KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(r, KeyResult::Action("dismiss".into()));
+        assert_eq!(r, KeyResult::Action(WidgetEvent::Dismiss));
     }
 
     #[test]
@@ -1233,7 +1231,7 @@ mod tests {
         dlg.resolve_panel_rects(Rect::new(0, 0, 20, 10));
         dlg.move_selection(1);
         let r = dlg.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(r, KeyResult::Action("select:1".into()));
+        assert_eq!(r, KeyResult::Action(WidgetEvent::Select(1)));
     }
 
     #[test]
@@ -1293,7 +1291,7 @@ mod tests {
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         dlg.resolve_panel_rects(Rect::new(0, 0, 20, 10));
         let r = dlg.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
-        assert_eq!(r, KeyResult::Action("select:1".into()));
+        assert_eq!(r, KeyResult::Action(WidgetEvent::Select(1)));
     }
 
     #[test]
@@ -1314,11 +1312,11 @@ mod tests {
         // can subscribe to `WinEvent::TextChanged`.
         assert_eq!(
             dlg.handle_key(KeyCode::Char('h'), KeyModifiers::NONE),
-            KeyResult::Action("text_changed".into())
+            KeyResult::Action(WidgetEvent::TextChanged)
         );
         assert_eq!(
             dlg.handle_key(KeyCode::Char('i'), KeyModifiers::NONE),
-            KeyResult::Action("text_changed".into())
+            KeyResult::Action(WidgetEvent::TextChanged)
         );
         // Widget draws the typed text.
         let mut grid = Grid::new(20, 3);
