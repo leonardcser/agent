@@ -85,6 +85,17 @@ pub enum AppOp {
     /// Refresh the cached subagent counts on the status bar — fires
     /// when the Agents list is dismissed.
     RefreshAgentCounts,
+    /// Resolve an open Confirm dialog with the user's choice. Drives
+    /// the same logic as the legacy `App::resolve_confirm`. Sets
+    /// `pending_agent_cancel` internally when the resolution asks
+    /// the turn to cancel.
+    ResolveConfirm {
+        choice: crate::render::ConfirmChoice,
+        message: Option<String>,
+        request_id: u64,
+        call_id: String,
+        tool_name: String,
+    },
     /// Background LLM call from a Lua plugin.
     BackgroundAsk {
         id: u64,

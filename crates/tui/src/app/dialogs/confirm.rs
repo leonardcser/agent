@@ -1,6 +1,5 @@
-//! Confirm dialog — migrated to the panel framework. Handles built-in
-//! tool approvals only; plugin tools drive their own dialogs through
-//! `smelt.api.dialog.open`.
+//! Confirm dialog — built-in tool approvals. Plugin tools drive their
+//! own dialogs through `smelt.api.dialog.open`.
 //!
 //! Panels (top to bottom):
 //! - 0 `Title` (Content, Fit) — ` tool: desc` (bash-syntax-highlighted
@@ -24,27 +23,32 @@
 //! - Enter → resolve with the currently-selected option + the reason text
 //! - Esc → clear reason and re-focus Options
 
-use super::super::{App, TurnState};
-use super::{ActionResult, DialogState};
+use super::super::App;
+use crate::app::ops::AppOp;
 use crate::keymap::hints;
 use crate::render::dialogs::confirm::ConfirmPreview;
 use crate::render::display::{ColorRole, ColorValue};
 use crate::render::layout_out::{LayoutSink, SpanCollector};
 use crate::render::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 use crate::theme;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::KeyCode;
+use std::cell::RefCell;
+use std::rc::Rc;
 use ui::buffer::BufCreateOpts;
 use ui::text_input::TextInput;
-use ui::{BufId, OptionItem, OptionList, PanelHeight, PanelSpec, SeparatorStyle, WinId};
+use ui::{
+    BufId, Callback, CallbackResult, KeyBind, OptionItem, OptionList, PanelHeight, PanelSpec,
+    Payload, SeparatorStyle, WinEvent, WinId,
+};
 
 const PANEL_PREVIEW: usize = 2;
 const PANEL_OPTIONS: usize = 3;
 const PANEL_REASON: usize = 4;
 
-pub struct Confirm {
+struct ConfirmState {
     request_id: u64,
+    call_id: String,
     tool_name: String,
-    /// Option index → ConfirmChoice mapping. Mirrors legacy.
     choices: Vec<ConfirmChoice>,
 }
 
@@ -83,7 +87,7 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
         },
     ];
 
-    let win_id = app.ui.dialog_open(
+    let Some(win_id) = app.ui.dialog_open(
         ui::FloatConfig {
             title: None,
             border: ui::Border::None,
@@ -92,148 +96,121 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
         },
         dialog_config,
         panels,
-    );
-    let Some(win_id) = win_id else { return };
+    ) else {
+        return;
+    };
 
-    app.float_states.insert(
+    // Confirm blocks the agent event drain — it gates a pending tool
+    // call's approval. No further engine events are applied until
+    // the user answers.
+    app.blocking_wins.insert(win_id);
+
+    let state = Rc::new(RefCell::new(ConfirmState {
+        request_id: req.request_id,
+        call_id: req.call_id.clone(),
+        tool_name: req.tool_name.clone(),
+        choices,
+    }));
+
+    let ops = app.lua.ops_handle();
+
+    // PageUp / PageDown: scroll the Preview panel regardless of focus.
+    for key in [
+        KeyBind::plain(KeyCode::PageUp),
+        KeyBind::plain(KeyCode::PageDown),
+    ] {
+        let up = matches!(key.code, KeyCode::PageUp);
+        app.ui.win_set_keymap(
+            win_id,
+            key,
+            Callback::Rust(Box::new(move |ctx| {
+                if let Some(dialog) = ctx.ui.dialog_mut(ctx.win) {
+                    let page = (dialog.panel_rect_height(PANEL_PREVIEW).max(1) as isize) / 2;
+                    let dir = if up { -1 } else { 1 };
+                    dialog.scroll_panel(PANEL_PREVIEW, dir * page);
+                }
+                CallbackResult::Consumed
+            })),
+        );
+    }
+
+    // 'e' when focus is on Options: jump to the Reason input.
+    app.ui.win_set_keymap(
         win_id,
-        Box::new(Confirm {
-            request_id: req.request_id,
-            tool_name: req.tool_name.clone(),
-            choices,
-        }),
-    );
-}
-
-impl DialogState for Confirm {
-    fn blocks_agent(&self) -> bool {
-        true
-    }
-
-    fn handle_key(
-        &mut self,
-        app: &mut App,
-        win: WinId,
-        code: KeyCode,
-        mods: KeyModifiers,
-    ) -> Option<ui::KeyResult> {
-        // PageUp / PageDown scroll the preview regardless of focus.
-        match (code, mods) {
-            (KeyCode::PageUp, _) => {
-                self.scroll_preview(app, win, -1);
-                return Some(ui::KeyResult::Consumed);
-            }
-            (KeyCode::PageDown, _) => {
-                self.scroll_preview(app, win, 1);
-                return Some(ui::KeyResult::Consumed);
-            }
-            _ => {}
-        }
-
-        // When focus is on Options, 'e' jumps to the Reason input.
-        if mods == KeyModifiers::NONE && code == KeyCode::Char('e') {
-            let dialog = app.ui.dialog_mut(win)?;
-            if dialog.focused_panel() == PANEL_OPTIONS {
-                dialog.focus_panel(PANEL_REASON);
-                return Some(ui::KeyResult::Consumed);
-            }
-        }
-
-        None
-    }
-
-    fn on_action(
-        &mut self,
-        app: &mut App,
-        win: WinId,
-        action: &str,
-        agent: &mut Option<TurnState>,
-    ) -> ActionResult {
-        if let Some(idx_str) = action.strip_prefix("select:") {
-            if let Ok(idx) = idx_str.parse::<usize>() {
-                if idx < self.choices.len() {
-                    self.resolve(app, win, idx, agent);
-                    return ActionResult::Close;
+        KeyBind::char('e'),
+        Callback::Rust(Box::new(move |ctx| {
+            if let Some(dialog) = ctx.ui.dialog_mut(ctx.win) {
+                if dialog.focused_panel() == PANEL_OPTIONS {
+                    dialog.focus_panel(PANEL_REASON);
+                    return CallbackResult::Consumed;
                 }
             }
-        }
-        if action == "submit" {
-            // TextInput Enter: use the current option selection + reason text.
-            let idx = self.selected_option(app, win).unwrap_or(0);
-            self.resolve(app, win, idx, agent);
-            return ActionResult::Close;
-        }
-        if action == "dismiss" {
-            self.resolve_denied(app, agent);
-            return ActionResult::Close;
-        }
-        ActionResult::Pass
-    }
+            CallbackResult::Pass
+        })),
+    );
 
-    fn on_dismiss(&mut self, app: &mut App, _win: WinId) {
-        let mut agent = None;
-        self.resolve_denied(app, &mut agent);
-    }
+    // Submit: two code paths —
+    //   Payload::Selection{index} from the OptionList → options[index]
+    //   Payload::None from TextInput Enter → selected option + reason text
+    let state_submit = state.clone();
+    let ops_submit = ops.clone();
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Submit,
+        Callback::Rust(Box::new(move |ctx| {
+            let idx = match ctx.payload {
+                Payload::Selection { index } => index,
+                _ => selected_option(ctx.ui, ctx.win).unwrap_or(0),
+            };
+            let s = state_submit.borrow();
+            let choice = s.choices.get(idx).cloned().unwrap_or(ConfirmChoice::No);
+            let message = reason_text(ctx.ui, ctx.win);
+            ops_submit.push(AppOp::ResolveConfirm {
+                choice,
+                message,
+                request_id: s.request_id,
+                call_id: s.call_id.clone(),
+                tool_name: s.tool_name.clone(),
+            });
+            ops_submit.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
+    );
+
+    // Dismiss: resolve as denied (No).
+    let state_dismiss = state;
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Dismiss,
+        Callback::Rust(Box::new(move |ctx| {
+            let s = state_dismiss.borrow();
+            ops.push(AppOp::ResolveConfirm {
+                choice: ConfirmChoice::No,
+                message: None,
+                request_id: s.request_id,
+                call_id: s.call_id.clone(),
+                tool_name: s.tool_name.clone(),
+            });
+            ops.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
+    );
 }
 
-impl Confirm {
-    fn scroll_preview(&self, app: &mut App, win: WinId, direction: isize) {
-        if let Some(dialog) = app.ui.dialog_mut(win) {
-            let page = (dialog.panel_rect_height(PANEL_PREVIEW).max(1) as isize) / 2;
-            dialog.scroll_panel(PANEL_PREVIEW, direction * page);
-        }
-    }
+fn selected_option(ui: &mut ui::Ui, win: WinId) -> Option<usize> {
+    let dialog = ui.dialog_mut(win)?;
+    let widget = dialog.panel_widget_mut::<OptionList>(PANEL_OPTIONS)?;
+    Some(widget.cursor())
+}
 
-    fn selected_option(&self, app: &mut App, win: WinId) -> Option<usize> {
-        let dialog = app.ui.dialog_mut(win)?;
-        let widget = dialog.panel_widget_mut::<OptionList>(PANEL_OPTIONS)?;
-        Some(widget.cursor())
-    }
-
-    fn reason_text(&self, app: &mut App, win: WinId) -> Option<String> {
-        let dialog = app.ui.dialog_mut(win)?;
-        let widget = dialog.panel_widget_mut::<TextInput>(PANEL_REASON)?;
-        let text = widget.text().to_string();
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
-    }
-
-    fn resolve(&self, app: &mut App, win: WinId, idx: usize, agent: &mut Option<TurnState>) {
-        let choice = self.choices.get(idx).cloned().unwrap_or(ConfirmChoice::No);
-        let message = self.reason_text(app, win);
-        // Match the legacy App::handle_dialog_result Confirm arm.
-        let ctx = app.confirm_context.take();
-        let call_id = ctx.as_ref().map(|c| c.call_id.clone()).unwrap_or_default();
-        let should_cancel = app.resolve_confirm(
-            (choice, message),
-            &call_id,
-            self.request_id,
-            &self.tool_name,
-            agent,
-        );
-        if should_cancel && agent.is_some() {
-            app.finish_turn(true);
-            *agent = None;
-        }
-    }
-
-    fn resolve_denied(&self, app: &mut App, agent: &mut Option<TurnState>) {
-        let ctx = app.confirm_context.take();
-        let call_id = ctx.as_ref().map(|c| c.call_id.clone()).unwrap_or_default();
-        let should_cancel = app.resolve_confirm(
-            (ConfirmChoice::No, None),
-            &call_id,
-            self.request_id,
-            &self.tool_name,
-            agent,
-        );
-        if should_cancel && agent.is_some() {
-            app.finish_turn(true);
-            *agent = None;
-        }
+fn reason_text(ui: &mut ui::Ui, win: WinId) -> Option<String> {
+    let dialog = ui.dialog_mut(win)?;
+    let widget = dialog.panel_widget_mut::<TextInput>(PANEL_REASON)?;
+    let text = widget.text().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
     }
 }
 

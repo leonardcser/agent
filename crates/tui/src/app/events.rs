@@ -2003,6 +2003,30 @@ impl App {
                 crate::app::ops::AppOp::RefreshAgentCounts => {
                     self.refresh_agent_counts();
                 }
+                crate::app::ops::AppOp::ResolveConfirm {
+                    choice,
+                    message,
+                    request_id,
+                    call_id,
+                    tool_name,
+                } => {
+                    let _ = self.confirm_context.take();
+                    let should_cancel = self.resolve_confirm(
+                        (choice, message),
+                        &call_id,
+                        request_id,
+                        &tool_name,
+                        &mut None,
+                    );
+                    if should_cancel {
+                        // Mirror the legacy confirm.rs::resolve path:
+                        // `app.finish_turn(true); *agent = None;`. Heavy
+                        // cancel — flushes engine events, kills blocking
+                        // subagents, emits TurnEnd.
+                        self.finish_turn(true);
+                        self.pending_agent_cancel = true;
+                    }
+                }
                 crate::app::ops::AppOp::LoadSession(id) => {
                     if let Some(loaded) = crate::session::load(&id) {
                         self.load_session(loaded);
