@@ -44,27 +44,27 @@ impl Completer {
         }
     }
 
+    /// Built-in commands whose dispatch lives in `handle_command`.
+    /// Entries owned by Lua plugins (`btw`, `export`, `help`, `ps`,
+    /// `rewind`, `yank-block`) are *not* listed here — their metadata
+    /// comes from `crate::lua::list_commands()`.
     fn command_items() -> &'static [(&'static str, &'static str)] {
         &[
             ("clear", "start new conversation"),
             ("new", "start new conversation"),
             ("resume", "resume saved session"),
-            ("rewind", "rewind to a previous turn"),
             ("vim", "toggle vim mode"),
             ("thinking", "toggle thinking blocks"),
             ("model", "switch model"),
             ("settings", "open settings menu"),
             ("compact", "compact conversation history"),
-            ("export", "copy conversation to clipboard"),
             ("fork", "fork current session"),
             ("branch", "fork current session"),
             ("stats", "show token usage statistics"),
             ("cost", "show session cost"),
             ("theme", "change accent color"),
             ("color", "set task slug color"),
-            ("btw", "ask a side question"),
             ("permissions", "manage session permissions"),
-            ("ps", "manage background processes"),
             ("agents", "manage running agents"),
             ("exit", "exit the app"),
             ("quit", "exit the app"),
