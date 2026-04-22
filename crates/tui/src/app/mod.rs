@@ -690,13 +690,6 @@ impl App {
             self.screen.finish_turn();
             self.transcript_window.scroll_top = u16::MAX;
         }
-        let clamped = self.screen.draw_prompt(
-            &self.input,
-            render::term_width(),
-            self.transcript_window.scroll_top,
-        );
-        self.transcript_window.scroll_top = clamped;
-
         if let Some(message) = self.startup_auth_error.take() {
             self.screen.notify_error(message);
         }
