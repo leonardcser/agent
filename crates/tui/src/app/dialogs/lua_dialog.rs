@@ -14,7 +14,6 @@ use super::super::App;
 use crate::app::ops::UiOp;
 use crate::keymap::hints;
 use crate::lua::TaskEvent;
-use crossterm::event::{KeyCode, KeyModifiers};
 use mlua::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -212,7 +211,9 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
                 .lua
                 .register_callback(on_press)
                 .map_err(|e| format!("keymap register: {e}"))?;
-            keymaps.push((parse_key(&key_str)?, callback_id));
+            let key = crate::lua::parse_keybind(&key_str)
+                .ok_or_else(|| format!("keymap: unknown key '{key_str}'"))?;
+            keymaps.push((key, callback_id));
             keymap_callback_ids.push(callback_id);
         }
     }
@@ -426,55 +427,6 @@ fn parse_height(panel: &mlua::Table) -> Result<Option<PanelHeight>, String> {
             "panel.height: expected 'fit' | 'fill' | int, got {other:?}"
         )),
     }
-}
-
-/// Parse a plugin-facing key string like `"bs"`, `"tab"`, `"ctrl-x"`,
-/// `"shift-tab"` into a [`KeyBind`]. Case-insensitive for named keys;
-/// single characters are taken verbatim.
-fn parse_key(spec: &str) -> Result<KeyBind, String> {
-    let raw = spec.trim();
-    if raw.is_empty() {
-        return Err("keymap.key: empty string".into());
-    }
-    let (mods, name) = match raw.rsplit_once('-') {
-        Some((prefix, name)) => {
-            let mut mods = KeyModifiers::NONE;
-            for part in prefix.split('-') {
-                match part.to_ascii_lowercase().as_str() {
-                    "ctrl" | "c" => mods |= KeyModifiers::CONTROL,
-                    "alt" | "a" | "meta" | "m" => mods |= KeyModifiers::ALT,
-                    "shift" | "s" => mods |= KeyModifiers::SHIFT,
-                    other => return Err(format!("keymap: unknown modifier '{other}'")),
-                }
-            }
-            (mods, name)
-        }
-        None => (KeyModifiers::NONE, raw),
-    };
-    let code = match name.to_ascii_lowercase().as_str() {
-        "bs" | "backspace" => KeyCode::Backspace,
-        "tab" => {
-            if mods.contains(KeyModifiers::SHIFT) {
-                return Ok(KeyBind::new(KeyCode::BackTab, mods - KeyModifiers::SHIFT));
-            }
-            KeyCode::Tab
-        }
-        "del" | "delete" => KeyCode::Delete,
-        "enter" | "return" => KeyCode::Enter,
-        "esc" | "escape" => KeyCode::Esc,
-        "space" => KeyCode::Char(' '),
-        "up" => KeyCode::Up,
-        "down" => KeyCode::Down,
-        "left" => KeyCode::Left,
-        "right" => KeyCode::Right,
-        "home" => KeyCode::Home,
-        "end" => KeyCode::End,
-        "pageup" | "pgup" => KeyCode::PageUp,
-        "pagedown" | "pgdn" => KeyCode::PageDown,
-        s if s.chars().count() == 1 => KeyCode::Char(name.chars().next().unwrap()),
-        other => return Err(format!("keymap: unknown key '{other}'")),
-    };
-    Ok(KeyBind::new(code, mods))
 }
 
 fn collect_inputs(ui: &mut ui::Ui, win: WinId, entries: &[InputEntry]) -> Vec<(String, String)> {
