@@ -95,16 +95,6 @@ impl App {
                 }
                 CommandAction::Continue
             }
-            "/permissions" => {
-                let session_entries = self.session_permission_entries();
-                let workspace_rules = crate::workspace_permissions::load(&self.cwd);
-                if session_entries.is_empty() && workspace_rules.is_empty() {
-                    self.notify_error("no permissions".into());
-                } else {
-                    super::dialogs::permissions::open(self);
-                }
-                CommandAction::Continue
-            }
             "/fork" | "/branch" => {
                 self.fork_session();
                 CommandAction::Continue

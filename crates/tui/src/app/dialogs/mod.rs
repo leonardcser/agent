@@ -8,5 +8,4 @@ pub mod agents;
 pub mod confirm;
 pub mod lua_dialog;
 pub mod lua_picker;
-pub mod permissions;
 pub mod resume;

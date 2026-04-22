@@ -2508,6 +2508,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.plugins.yank_block",
         include_str!("../../../../runtime/lua/smelt/plugins/yank_block.lua"),
     ),
+    (
+        "smelt.plugins.permissions",
+        include_str!("../../../../runtime/lua/smelt/plugins/permissions.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -2520,6 +2524,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.ps",
     "smelt.plugins.help",
     "smelt.plugins.yank_block",
+    "smelt.plugins.permissions",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`
