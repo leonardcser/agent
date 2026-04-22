@@ -38,13 +38,34 @@ These directives govern how this plan is executed. They override defaults.
 - **No dead code annotations.** Never add `#[allow(dead_code)]`. Use it,
   remove it, or leave the compiler warning as a tracking marker.
 
-- **Format, lint, test, commit as you go.** After each coherent change:
+- **Format, lint, test at the end of each logical commit.**
   `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings &&
-  cargo test --workspace`. Update the plan, then commit. Small clean
-  commits that each pass CI.
+  cargo test --workspace`. Update the plan, then commit.
 
-- **No throwaway work.** Every step is a subset of the final state, not a
-  detour.
+- **Atomic rewrites over incremental scaffolding.** Some refactors
+  cannot be split into a chain of always-green small commits without
+  inserting intermediary shims (parallel trait impls, stringly-typed
+  bridges, "kept for now" stubs) that get deleted a commit later. Do
+  not add that scaffolding. If the refactor is genuinely atomic —
+  e.g. deleting `DialogState` alongside all 9 dialog conversions —
+  land it as one commit. A larger diff that leaves the tree
+  *correct* is preferable to a chain of small diffs that leave the
+  tree *working via temporary duplication*. Many small steps can
+  still be done internally and reviewed as one patch; what matters
+  is that the committed history reflects real architectural moves,
+  not transient compromises.
+
+- **Unit of commit = unit of architectural change.** A commit
+  answers "what moved to its final home in this change?" A dialog
+  migration that deletes its `DialogState` impl, registers its
+  `Callbacks`, and removes the host-side string matching is one
+  commit. A migration that adds Callbacks alongside a still-present
+  `DialogState` is incomplete — don't ship it.
+
+- **No throwaway work.** Every step is a subset of the final state,
+  not a detour. If you find yourself writing code you know you'll
+  delete in the next commit, stop and roll that deletion into the
+  current commit.
 
 - **Present multiple approaches.** Include the bold option (clean rewrite).
   Let the user choose.
@@ -166,9 +187,17 @@ callers today — only tests exercise it.
 Only the first survives. The second collapses into `ui.dialog_open` with
 userdata constructors.
 
-## The refactoring arc
+## The full rewrite
 
-Nine ordered steps. Each leaves the tree green.
+**Scope**: collapse the three parallel dispatch systems, migrate the
+last of rendering off `render::Screen`, and unify the Lua FFI with the
+internal API. All done as atomic commits that each delete what they
+replace — no intermediary shims, no "works for now" scaffolding.
+
+**Ordering**: phases are read top-to-bottom. Within a phase, the listed
+commits are ordered such that each commit is *independently landable*
+without leaving the tree in a split-architecture state. Some phases are
+a single commit because they can't be split without intermediaries.
 
 ### Foundation: the typed effect op enum
 
@@ -213,131 +242,140 @@ pub enum AppOp {
 **Why this works for both Rust and Lua.** A Rust-side Resume callback
 pushes `AppOp::LoadSession(id)`. A Lua-side `plan_mode` callback pushes
 `AppOp::ApproveTool { scope }`. The reducer doesn't know or care which
-language wrote it. The ops ARE the narrow App→dialog surface (subsumes
-old A4). The ops ARE the Lua plugin API (subsumes old A2's "ctx table").
+language wrote it. The ops ARE the narrow App→dialog surface. The ops
+ARE the Lua plugin API.
 
-### 1. Design + land the `AppOp` enum
+### Phase A — AppOp foundation (1 commit)
 
-Enumerate every effect every dialog performs on `App` today. Grep
-`DialogState::on_select` / `on_dismiss` / `on_action` / `handle_key`
-bodies across all nine builtins. For each mutation of `App`, add an
-`AppOp` variant. Write the reducer as `App::apply_ops(&mut self, ops:
-Vec<AppOp>)`. Wire `CallbackCtx.actions` to be `Vec<AppOp>`.
+**A1 · AppOp enum + reducer + CallbackCtx rewire.** Single commit:
+grep every `&mut App.*` mutation triggered by a UI event across
+`InputOutcome`, `MenuResult`, `DialogState::{on_select, on_dismiss,
+on_action, handle_key}`, `handle_float_action`, `CommandAction`. Draft
+`AppOp` variants. Land `App::apply_ops(Vec<AppOp>)` reducer. Change
+`CallbackCtx.actions: Vec<String>` → `Vec<AppOp>`. Tests update for any
+trivial existing callback consumers (only tests reference this today).
+No production callers yet — vocabulary only. Tree is green.
 
-At this point nothing *uses* the new path — DialogState still rules.
-But the vocabulary exists.
+### Phase B — Dispatch unification (1 atomic commit)
 
-### 2. Resume on `Callbacks` + `WinEvent` + `AppOp`
+**B1 · All 9 dialogs + `DialogState` deletion + `KeyResult::Action`
+deletion.** Atomic because splitting it per dialog forces DialogState
++ Callbacks to coexist — exactly the scaffolding we're avoiding.
 
-Pattern proof on a mid-complexity dialog:
-- Delete `impl DialogState for Resume`.
-- `WinEvent::Submit` callback pushes `AppOp::LoadSession(id)`.
-- `WinEvent::Dismiss` callback pushes `AppOp::CloseFloat(win)`.
-- Per-chord keymap callbacks for filter typing, `ctrl+w` workspace
-  toggle, `d`/`dd` delete, Delete — push `AppOp` or directly mutate
-  `ui` buffers (filter text is `ui`-only state).
-- Resume's own state (filter, workspace_only, content_cache) moves into
-  an `Rc<RefCell<ResumeState>>` captured by the closures. It never
-  needs `App`; it only needs `Ui` + its own state.
+Inside the commit (done in order but shipped together):
+1. Help, Export, Ps — trivial list+select+dismiss via
+   `WinEvent::{Submit, Dismiss}` callbacks pushing `AppOp`.
+2. Rewind, Permissions — list+delete via `WinEvent::Submit` + per-chord
+   keymap callbacks.
+3. Resume — filter (keymap callbacks typing into a ui buffer),
+   workspace toggle (ctrl+w keymap callback), `d`/`dd` delete
+   (custom keymap). State lives in `Rc<RefCell<ResumeState>>`.
+4. Question — multi-step wizard (state machine inside one closure set).
+5. Agents — list↔detail swap (close + open pattern via ops).
+6. Confirm — `blocks_agent`, `ApprovalScope` submenu, deferred
+   `pending_dialogs` queue. Hardest; landing last.
+7. Delete `DialogState` trait, `ActionResult`, `App::float_states`
+   HashMap, take/put-back dance in `events.rs`.
+8. Delete `KeyResult::Action(String)` and host string matching.
+   Widgets fire events through `Callbacks` directly; `OptionList`
+   emits `WinEvent::Submit(index)` via its configured callback.
 
-Goal: no host-side `on_action(&str)` path exercised for Resume, no
-`DialogState` impl.
+Expected LOC: net −400..−600 lines.
 
-### 3. The rest of the builtins
+### Phase C — Rendering: kill Screen (2–3 commits)
 
-Same treatment for Help, Export, Ps, Rewind, Permissions, Question,
-Agents, Confirm. Order by difficulty:
-- **Trivial** (no selection semantics, ~50–80 lines): Help, Export, Ps.
-- **Medium**: Rewind, Permissions.
-- **Hard**: Question (multi-step wizard), Agents (list↔detail swap with
-  tick hook), Confirm (ApprovalScope sub-menu, `blocks_agent`, deferred
-  queue via `pending_dialogs`).
+**C1 · Notification + queued + stash + status metadata → compositor.**
+Single commit. These share the notification / status routing surface;
+splitting leaves parallel paths.
+- Notification becomes a compositor float (`focusable=false`, ephemeral).
+- Queued messages become a compositor float above the prompt.
+- Stash indicator becomes a compositor float / single-row layer.
+- Status bar segments read directly from App fields. Delete
+  `Screen::{show_tokens, show_cost, show_slug, show_thinking, show_tps,
+  task_label, custom_status_items, model_label, reasoning_effort,
+  context_tokens, context_window, session_cost_usd, notification,
+  running_procs, running_agents, pending_dialog, has_scrollback}` —
+  move each to App or delete if already duplicated.
 
-### 4. Delete the old dispatch
+**C2 · Cmdline as float window.** Self-contained commit. Cmdline
+becomes a single-panel `Input` dialog, focusable, `DockBottom`.
 
-Once nothing implements `DialogState`:
-- Remove the trait, `ActionResult`, `App::float_states`, the
-  take-out/put-back dance in `events.rs`.
-- Remove `KeyResult::Action(String)` and host string-matching. Widgets
-  emit events through `Callbacks` directly — or their key closures call
-  `ui.dialog_submit(win, idx)` / `ui.dialog_dismiss(win)` which fire
-  registered callbacks.
+**C3 · Prompt + Transcript as real `ui::Window`s + Screen deletion.**
+The big atomic commit:
+- `InputState` holds `win_id: WinId`; the `Window` lives in `ui.wins`.
+  All 122 sites of `self.input.win.{cpos, edit_buf, win_cursor,
+  kill_ring}` migrate to `self.ui.win_mut(self.input.win_id).unwrap().
+  <field>`.
+- `transcript_window` likewise becomes a `WinId` pointing into
+  `ui.wins`.
+- Route prompt keys through `ui.handle_key()` when focused (uses
+  `Callbacks` registry populated at startup — typing keys, submit,
+  Ctrl+S stash, etc.).
+- Delete `render::Screen` entirely. `BlockHistory`, `StreamParser`,
+  `TranscriptProjection`, `WorkingState`, `CursorOwner`, `layout` move
+  to App.
+- Delete `dirty` flag + `needs_draw` / `mark_dirty` / `mark_clean`.
+  Compositor grid-diff is the sole change-detection mechanism.
+- Delete `last_viewport_text` / `last_viewport_lines` /
+  `last_transcript_viewport` / `transcript_gutters` caches (read from
+  live Window state).
 
-### 5. ConfirmChoice via `AppOp`
+Splitting this is counterproductive — the Screen struct is the glue
+holding all these fields together, and every partial extraction leaves
+a shrunken-but-still-alive Screen with progressively weirder invariants.
+One atomic move.
 
-Today `plan_mode.lua` writes `action = "approve"` / `"deny"` strings;
-Rust's `resolve_confirm` matches back to `ConfirmChoice` / `ApprovalScope`
-enums. Rust enums disguised as plugin values.
+Expected LOC: net −800..−1200 lines.
 
-Replace with per-option callbacks pushing `AppOp::ApproveTool { scope }`
-/ `AppOp::DenyTool { reason }`. The Lua plugin gets `smelt.api.agent.
-approve(scope)` which is a thin wrapper that pushes the same op.
-Delete `action` strings from `OptionEntry`.
+### Phase D — Lua FFI unification (1 commit)
 
-### 6. Expose `PanelSpec` to Lua, 1:1
+**D1 · PanelSpec + widgets exposed to Lua, plugins rewritten,
+`lua_dialog.rs` deleted, `LuaTask` suspension reshaped.** Atomic
+because partial exposure (e.g. expose PanelSpec but keep the old
+schema parser) leaves two APIs for the same thing.
 
-Userdata wrappers with the same constructors Rust uses:
-- `ui.panel_content(buf, height)`, `ui.panel_list(buf, height)`,
-  `ui.panel_widget(widget, height)`.
-- `ui.option_list(options)`, `ui.text_input(opts)`.
-- Builder methods: `:focusable(false)`, `:separator(style)`,
-  `:pad_left(n)`, `:collapse_when_empty(true)`.
-- `PanelHeight::{Fixed, Fit, Fill}` exposed verbatim.
+Inside:
+1. Userdata constructors: `ui.panel_content(buf, height)`,
+   `ui.panel_list(buf, height)`, `ui.panel_widget(widget, height)`,
+   `ui.option_list(options)`, `ui.text_input(opts)`. Builder methods
+   for focusable/separator/pad_left/collapse_when_empty. `PanelHeight`
+   variants exposed verbatim.
+2. Rewrite `plan_mode.lua` on `ui.dialog_open(float_cfg, dialog_cfg,
+   panels)` with callbacks pushing `AppOp::{ApproveTool, DenyTool}`
+   via `smelt.api.agent.approve/deny` wrappers.
+3. Delete `crates/tui/src/app/dialogs/lua_dialog.rs` (~360 lines).
+4. Delete `smelt.api.dialog.open` schema parser and
+   `{action, option_index, inputs}` result table.
+5. Reshape `LuaTask::OpenDialog` → `TaskWait::AwaitEvent { win, event }`
+   returning `Payload`. Lua side: `ui.await_event(win, "submit"):
+   as_selection()`.
+6. `btw.lua` verified unchanged (already on primitives).
 
-### 7. Rewrite plugins on the unified API
+Expected LOC: net −600..−800 lines.
 
-`plan_mode.lua` uses `ui.dialog_open(float_cfg, dialog_cfg, panels)` with
-callback options. `btw.lua` already uses the primitive path — verify no
-drift.
+### Phase E — UX polish (3 small commits, can each stand alone)
 
-### 8. Delete `lua_dialog.rs`
+**E1 · `Placement::FitContent { max: HalfScreen | FullScreen }`** +
+Rewind/Resume/Permissions migrations. Fix Fill-vs-Fit in
+`resolve_panel_rects` so List panels with `Fit` scroll internally past
+the cap. (B4)
 
-~360 lines. Along with it: `smelt.api.dialog.open`'s schema-parsing
-wrapper and the `{action, option_index, inputs}` result table.
+**E2 · `Compositor::hit_test` + mouse routing to focused float +
+scrollbar click-drag.** (B6 + B7) Single commit — mouse routing
+enables both.
 
-### 9. Reshape `LuaTask` suspension
+**E3 · TextInput as the blessed input widget** — Confirm's reason,
+Resume's filter, Agents' search all use the same `TextInput` with
+identical cursor / vim / keymap behavior. (B8)
 
-Replace `TaskWait::Dialog` with `await_event(win, event)` returning the
-`Payload`:
-```lua
-local idx = ui.await_event(win, "submit"):as_selection()
-```
-One primitive covers text input, dismissal, focus, anything in
-`WinEvent`. Future interactive APIs (input prompt, picker, file select,
-wizard) add zero architecture.
+---
 
-**Estimated net change: −800..−1200 lines** (after +100–200 for the
-`AppOp` enum + reducer).
+**Total estimated net change across all phases**: **−2500..−3500
+lines** after Phase A's +200–300.
 
-## Remaining keystone work (rendering)
-
-These can interleave with the dispatch arc; none are critical path.
-
-- **Prompt input → compositor window** (task #11, in progress). Last
-  major non-dialog consumer of the Screen paint path. Breaks into four
-  commits:
-  - **Commit 1 ✅** — delete dead `PromptState::{drawn, prev_rows,
-    anchor_row, soft_cursor}` + `move_cursor_past_prompt` +
-    `erase_prompt` (no-op since legacy draw path deletion). Replace
-    `erase_prompt()` callsites with `mark_dirty()`.
-  - **Commit 2 ✅** — prompt input `Buffer` has a stable `BufId`
-    owned by `ui.bufs`. Created once at `App::new`, mutated in place
-    by `compute_prompt(&mut PromptInput, &mut Buffer)`. The ad-hoc
-    `Buffer::new(BufId(0), …)` inside `compute_input_area` is gone.
-  - **Commit 3** — register `InputState.win` in `ui.wins` so it's a
-    real window (stop here for tmux smoke test).
-  - **Commit 4** — route prompt keys through `ui.handle_key()` when
-    focused. Delete short-circuits in `handle_event_idle`/`_running`.
-  Once migrated, `render::Screen` shrinks to a coordination struct,
-  then to nothing.
-- **Notification / queued / stash as compositor layers** (task #9). Each
-  becomes a normal window with lifetime tied to its content.
-- **Cursor ownership consolidation (B8).** Resume-filter and Confirm-reason
-  inputs diverge because they use different widgets with different
-  cursor-visibility defaults. Fix by making `TextInput` the one input
-  widget and having both dialogs use it with identical config.
-- **Delete `render::Screen`** (task #15). Final step; unblocked once
-  prompt + notif + queued + stash are windows.
+**Atomic commit boundary = no intermediary scaffolding exists**. At no
+point between commits does the tree contain parallel systems with "one
+being migrated". Every commit closes a chapter.
 
 ## Open UX bugs (fall out of the above)
 
