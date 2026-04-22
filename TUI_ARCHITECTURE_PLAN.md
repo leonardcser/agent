@@ -140,14 +140,13 @@ B1. ✅ **Shift+Tab toggles mode globally.** Fixed by landing A1
     legacy `draw_prompt` status code (screen.rs:550) is removed as
     part of the compositor migration (B3 / task #11).
 
-B2. **Permission-gated tools (e.g. `rm -rf`) ran without a prompt.**
-    A real regression, not cosmetic. Possible causes to check in
-    order: (i) `resolve_confirm` accidentally treats a dismiss as
-    approve, (ii) the Confirm float fails to open (e.g. empty panels
-    after `collapse_when_empty` clamps everything to 0 rows) so the
-    engine request times out and something auto-approves, (iii) the
-    mode flipped to Apply silently, (iv) `runtime_approvals` carries
-    state from a previous session. Reproduce, then bisect.
+B2. ✅ **Permission-gated tools prompt correctly.** Was a symptom of
+    B1: the status-bar mode pill was stale (`screen.last_mode`
+    cache), so the user was actually in Yolo mode without knowing
+    it — `rm` was allowed by policy, not a Confirm-dialog bug. Fixed
+    transitively when the mode pill was rewired to read `self.mode`
+    directly. Reinforces the keystone decision above: duplicated
+    state doesn't just hide visually, it hides *decisions*.
 
 B4. **Dialog height is caller-fixed, not "fit up to half-screen".**
     The bug isn't that dialogs "grow to fit" — it's that every
