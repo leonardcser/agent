@@ -608,6 +608,20 @@ change today since no Rust code registers `Callback::Lua`, but the
 plumbing is the prereq for `smelt.api.win.set_keymap(id, key,
 lua_fn)` in the D2b picker-first migration.
 
+**D3 primitives · `smelt.api.win.on_event`** (shipped 2026-04-23).
+Lua-facing event binding counterpart to `set_keymap`:
+```lua
+smelt.api.win.on_event(win, "submit" | "dismiss" | "text_changed"
+  | "tick" | "focus" | "blur" | …, function(ctx) … end)
+```
+Pushes `UiOp::WinBindLuaEvent`; reducer calls
+`ui.win_on_event(win, ev, Callback::Lua(LuaHandle(id)))`. `parse_win_event`
+maps Lua names to `ui::WinEvent`. With this plus `ctx.panels` pull-read
+plus `set_keymap`, every callback Rust-side `lua_dialog.rs` currently
+registers (Submit, Dismiss, custom keymaps, `on_change`, `on_tick`)
+can be registered directly from Lua — the D3 port no longer needs any
+new plumbing, just the Lua runtime file and the deletion.
+
 **D3 primitives · `ctx.panels` pull-read + `ctx.win`**
 (shipped 2026-04-23). Prereq for the dialog port. When a
 `Callback::Lua` fires, the ctx passed in now carries

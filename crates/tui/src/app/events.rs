@@ -2078,6 +2078,14 @@ impl App {
                 self.ui
                     .win_set_keymap(win, key, ui::Callback::Lua(ui::LuaHandle(callback_id)));
             }
+            UiOp::WinBindLuaEvent {
+                win,
+                event,
+                callback_id,
+            } => {
+                self.ui
+                    .win_on_event(win, event, ui::Callback::Lua(ui::LuaHandle(callback_id)));
+            }
         }
     }
 

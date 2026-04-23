@@ -210,6 +210,25 @@ pub(crate) fn parse_keybind(spec: &str) -> Option<ui::KeyBind> {
     Some(ui::KeyBind::new(code, mods))
 }
 
+/// Parse a Lua-facing window-event name into a [`ui::WinEvent`]. Names
+/// match the Neovim-adjacent naming Lua plugins use for autocmd-style
+/// hooks. Returns `None` for unknown names so the caller surfaces a
+/// Lua error.
+pub(crate) fn parse_win_event(name: &str) -> Option<ui::WinEvent> {
+    Some(match name {
+        "open" => ui::WinEvent::Open,
+        "close" => ui::WinEvent::Close,
+        "focus" | "focus_gained" => ui::WinEvent::FocusGained,
+        "blur" | "focus_lost" => ui::WinEvent::FocusLost,
+        "selection_changed" | "select_changed" => ui::WinEvent::SelectionChanged,
+        "submit" => ui::WinEvent::Submit,
+        "text_changed" | "change" => ui::WinEvent::TextChanged,
+        "dismiss" | "cancel" => ui::WinEvent::Dismiss,
+        "tick" => ui::WinEvent::Tick,
+        _ => return None,
+    })
+}
+
 impl AutocmdEvent {
     pub fn lua_name(&self) -> &'static str {
         match self {
@@ -1582,6 +1601,49 @@ impl LuaRuntime {
                             o.push(UiOp::WinBindLuaKeymap {
                                 win: ui::WinId(win_id),
                                 key,
+                                callback_id: id,
+                            });
+                        }
+                        Ok(())
+                    },
+                )?,
+            )?;
+        }
+        // smelt.api.win.on_event(win_id, event_name, fn)
+        //
+        // Bind a Lua fn as a `Callback::Lua` on a window lifecycle
+        // event. `event_name` is one of `"open" | "close" | "focus" |
+        // "blur" | "selection_changed" | "submit" | "text_changed" |
+        // "dismiss" | "tick"`. The fn is invoked with the same
+        // `ctx.panels` / `ctx.win` payload as keymap callbacks — Lua
+        // runtime files use this to observe dialog state changes
+        // without polling.
+        {
+            let s = shared.clone();
+            win_tbl.set(
+                "on_event",
+                lua.create_function(
+                    move |lua, (win_id, ev_str, func): (u64, String, mlua::Function)| {
+                        let Some(event) = parse_win_event(&ev_str) else {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "win.on_event: unknown event `{ev_str}`"
+                            )));
+                        };
+                        let registry_key = lua.create_registry_value(func)?;
+                        let id = s.next_id.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(mut cbs) = s.callbacks.lock() {
+                            cbs.insert(
+                                id,
+                                LuaHandle {
+                                    key: registry_key,
+                                    dead: false,
+                                },
+                            );
+                        }
+                        if let Ok(mut o) = s.ops.lock() {
+                            o.push(UiOp::WinBindLuaEvent {
+                                win: ui::WinId(win_id),
+                                event,
                                 callback_id: id,
                             });
                         }
@@ -3184,6 +3246,32 @@ mod tests {
         let rt = LuaRuntime::new();
         // Nothing registered under id 9999 — should silently succeed.
         rt.invoke_callback(ui::LuaHandle(9999), ui::WinId(0), &ui::Payload::None, &[]);
+    }
+
+    #[test]
+    fn parse_win_event_covers_common_names() {
+        assert!(matches!(
+            parse_win_event("submit"),
+            Some(ui::WinEvent::Submit)
+        ));
+        assert!(matches!(
+            parse_win_event("text_changed"),
+            Some(ui::WinEvent::TextChanged)
+        ));
+        assert!(matches!(
+            parse_win_event("change"),
+            Some(ui::WinEvent::TextChanged)
+        ));
+        assert!(matches!(
+            parse_win_event("dismiss"),
+            Some(ui::WinEvent::Dismiss)
+        ));
+        assert!(matches!(parse_win_event("tick"), Some(ui::WinEvent::Tick)));
+        assert!(matches!(
+            parse_win_event("focus"),
+            Some(ui::WinEvent::FocusGained)
+        ));
+        assert!(parse_win_event("bogus").is_none());
     }
 
     #[test]

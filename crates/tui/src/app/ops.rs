@@ -143,6 +143,14 @@ pub enum UiOp {
         key: ui::KeyBind,
         callback_id: u64,
     },
+    /// Register a Lua fn as a `Callback::Lua` lifecycle event handler on
+    /// `win`. Pushed by `smelt.api.win.on_event`; the reducer calls
+    /// `ui.win_on_event(win, event, Callback::Lua(LuaHandle(id)))`.
+    WinBindLuaEvent {
+        win: ui::WinId,
+        event: ui::WinEvent,
+        callback_id: u64,
+    },
 }
 
 /// App-state mutations, engine commands, and session/agent/permission

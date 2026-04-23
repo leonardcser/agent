@@ -701,10 +701,7 @@ impl Ui {
     /// Tick callback. Used by the app event loop to drive per-frame
     /// refresh of dialogs with live external state (subagent list,
     /// process registry, …).
-    pub fn dispatch_tick(
-        &mut self,
-        lua_invoke: &mut LuaInvoke,
-    ) {
+    pub fn dispatch_tick(&mut self, lua_invoke: &mut LuaInvoke) {
         let wins: Vec<WinId> = self.callbacks.wins_with_event(WinEvent::Tick);
         for win in wins {
             self.dispatch_event(win, WinEvent::Tick, Payload::None, lua_invoke);
