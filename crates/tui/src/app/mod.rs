@@ -740,7 +740,9 @@ impl App {
     fn open_notification(&mut self, message: String, level: ui::NotificationLevel) {
         // Replace any existing toast — one at a time.
         if let Some(win) = self.notification.take() {
-            self.ui.win_close(win);
+            for id in self.ui.win_close(win) {
+                self.lua.remove_callback(id);
+            }
         }
         let style = ui::NotificationStyle {
             info_label: ui::Style {
@@ -777,7 +779,9 @@ impl App {
 
     pub fn dismiss_notification(&mut self) {
         if let Some(win) = self.notification.take() {
-            self.ui.win_close(win);
+            for id in self.ui.win_close(win) {
+                self.lua.remove_callback(id);
+            }
         }
     }
 

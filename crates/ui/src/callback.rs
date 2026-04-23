@@ -185,14 +185,16 @@ impl Callbacks {
         Self::default()
     }
 
-    pub fn set_keymap(&mut self, win: WinId, key: KeyBind, cb: Callback) {
-        self.keymaps.entry(win).or_default().insert(key, cb);
+    /// Install a (win, key) keymap. Returns the displaced `Callback`
+    /// (if any), so callers with `Callback::Lua` bindings can drop the
+    /// stale `LuaHandle` from their side registry.
+    #[must_use]
+    pub fn set_keymap(&mut self, win: WinId, key: KeyBind, cb: Callback) -> Option<Callback> {
+        self.keymaps.entry(win).or_default().insert(key, cb)
     }
 
-    pub fn clear_keymap(&mut self, win: WinId, key: KeyBind) {
-        if let Some(table) = self.keymaps.get_mut(&win) {
-            table.remove(&key);
-        }
+    pub fn clear_keymap(&mut self, win: WinId, key: KeyBind) -> Option<Callback> {
+        self.keymaps.get_mut(&win).and_then(|t| t.remove(&key))
     }
 
     pub fn on_event(&mut self, win: WinId, ev: WinEvent, cb: Callback) {
@@ -204,17 +206,41 @@ impl Callbacks {
             .push(cb);
     }
 
-    pub fn clear_all(&mut self, win: WinId) {
-        self.keymaps.remove(&win);
-        self.events.remove(&win);
-        self.key_fallback.remove(&win);
+    /// Remove every binding for `win`. Returns the IDs of all
+    /// `Callback::Lua` handles that were attached, so the caller can
+    /// drop them from the Lua-side registry.
+    #[must_use]
+    pub fn clear_all(&mut self, win: WinId) -> Vec<u64> {
+        let mut lua_ids = Vec::new();
+        if let Some(table) = self.keymaps.remove(&win) {
+            for cb in table.into_values() {
+                if let Callback::Lua(LuaHandle(id)) = cb {
+                    lua_ids.push(id);
+                }
+            }
+        }
+        if let Some(events) = self.events.remove(&win) {
+            for cbs in events.into_values() {
+                for cb in cbs {
+                    if let Callback::Lua(LuaHandle(id)) = cb {
+                        lua_ids.push(id);
+                    }
+                }
+            }
+        }
+        if let Some(Callback::Lua(LuaHandle(id))) = self.key_fallback.remove(&win) {
+            lua_ids.push(id);
+        }
+        lua_ids
     }
 
     /// Register a per-window fallback key handler. Runs after
     /// specific `keymaps` miss and before `Component::handle_key`.
-    /// Replaces any existing fallback for the window.
-    pub fn set_key_fallback(&mut self, win: WinId, cb: Callback) {
-        self.key_fallback.insert(win, cb);
+    /// Returns the displaced `Callback` (if any) so Lua-side handles
+    /// can be cleaned up.
+    #[must_use]
+    pub fn set_key_fallback(&mut self, win: WinId, cb: Callback) -> Option<Callback> {
+        self.key_fallback.insert(win, cb)
     }
 
     pub(crate) fn take_key_fallback(&mut self, win: WinId) -> Option<Callback> {
@@ -280,7 +306,7 @@ mod tests {
     fn set_and_take_keymap() {
         let mut cbs = Callbacks::new();
         let key = KeyBind::plain(KeyCode::Enter);
-        cbs.set_keymap(wid(1), key, Callback::Lua(LuaHandle(42)));
+        let _ = cbs.set_keymap(wid(1), key, Callback::Lua(LuaHandle(42)));
         let taken = cbs.take_keymap(wid(1), key);
         assert!(matches!(taken, Some(Callback::Lua(LuaHandle(42)))));
         assert!(cbs.take_keymap(wid(1), key).is_none());
@@ -289,9 +315,9 @@ mod tests {
     #[test]
     fn clear_all_removes_both_tables() {
         let mut cbs = Callbacks::new();
-        cbs.set_keymap(wid(1), KeyBind::char('q'), Callback::Lua(LuaHandle(1)));
+        let _ = cbs.set_keymap(wid(1), KeyBind::char('q'), Callback::Lua(LuaHandle(1)));
         cbs.on_event(wid(1), WinEvent::Submit, Callback::Lua(LuaHandle(2)));
-        cbs.clear_all(wid(1));
+        let _ = cbs.clear_all(wid(1));
         assert!(cbs.take_keymap(wid(1), KeyBind::char('q')).is_none());
         assert!(cbs.take_event(wid(1), WinEvent::Submit).is_none());
     }

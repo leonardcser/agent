@@ -79,8 +79,12 @@ impl App {
                 key,
                 callback_id,
             } => {
-                self.ui
-                    .win_set_keymap(win, key, ui::Callback::Lua(ui::LuaHandle(callback_id)));
+                if let Some(ui::Callback::Lua(ui::LuaHandle(old))) =
+                    self.ui
+                        .win_set_keymap(win, key, ui::Callback::Lua(ui::LuaHandle(callback_id)))
+                {
+                    self.lua.remove_callback(old);
+                }
             }
             UiOp::WinBindLuaEvent {
                 win,

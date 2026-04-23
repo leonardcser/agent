@@ -903,7 +903,9 @@ impl App {
     }
 
     pub(super) fn close_float(&mut self, win_id: ui::WinId) {
-        self.ui.win_close(win_id);
+        for id in self.ui.win_close(win_id) {
+            self.lua.remove_callback(id);
+        }
     }
 
     /// Close the focused float if it doesn't block the agent (e.g. Ps,

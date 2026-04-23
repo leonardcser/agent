@@ -121,7 +121,7 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
         KeyBind::plain(KeyCode::PageDown),
     ] {
         let up = matches!(key.code, KeyCode::PageUp);
-        app.ui.win_set_keymap(
+        let _ = app.ui.win_set_keymap(
             win_id,
             key,
             Callback::Rust(Box::new(move |ctx| {
@@ -136,7 +136,7 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
     }
 
     // 'e' when focus is on Options: jump to the Reason input.
-    app.ui.win_set_keymap(
+    let _ = app.ui.win_set_keymap(
         win_id,
         KeyBind::char('e'),
         Callback::Rust(Box::new(move |ctx| {
@@ -155,7 +155,7 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
     // the permission check so the closure stays pure.
     let state_backtab = state.clone();
     let ops_backtab = ops.clone();
-    app.ui.win_set_keymap(
+    let _ = app.ui.win_set_keymap(
         win_id,
         KeyBind::plain(KeyCode::BackTab),
         Callback::Rust(Box::new(move |ctx| {

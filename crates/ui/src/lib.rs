@@ -153,14 +153,19 @@ impl Ui {
         Some(id)
     }
 
-    pub fn win_close(&mut self, id: WinId) {
+    /// Close a float window. Returns the Lua callback IDs that were
+    /// attached (keymaps, events, fallback) so the caller can drop
+    /// them from the Lua-side registry.
+    #[must_use]
+    pub fn win_close(&mut self, id: WinId) -> Vec<u64> {
         let layer_id = float_layer_id(id);
         self.compositor.remove(&layer_id);
         self.wins.remove(&id);
-        self.callbacks.clear_all(id);
+        let lua_ids = self.callbacks.clear_all(id);
         if self.current_win == Some(id) {
             self.current_win = self.wins.keys().next().copied();
         }
+        lua_ids
     }
 
     // ── Picker ───────────────────────────────────────────────────────
@@ -321,21 +326,26 @@ impl Ui {
     // Per-window keymap + event callbacks. The registry is the single
     // behavior mechanism shared by Rust and Lua.
 
-    /// Bind a key chord on a specific window to a callback.
-    pub fn win_set_keymap(&mut self, win: WinId, key: KeyBind, cb: Callback) {
-        self.callbacks.set_keymap(win, key, cb);
+    /// Bind a key chord on a specific window to a callback. Returns
+    /// the displaced callback (if any) so Lua-side handles can be
+    /// cleaned up by the caller.
+    #[must_use]
+    pub fn win_set_keymap(&mut self, win: WinId, key: KeyBind, cb: Callback) -> Option<Callback> {
+        self.callbacks.set_keymap(win, key, cb)
     }
 
-    /// Remove a keymap binding. No-op if not set.
-    pub fn win_clear_keymap(&mut self, win: WinId, key: KeyBind) {
-        self.callbacks.clear_keymap(win, key);
+    /// Remove a keymap binding. Returns the removed callback, if any.
+    #[must_use]
+    pub fn win_clear_keymap(&mut self, win: WinId, key: KeyBind) -> Option<Callback> {
+        self.callbacks.clear_keymap(win, key)
     }
 
     /// Register a catch-all key handler for a window. Runs after
     /// specific keymaps miss and before `Component::handle_key`.
-    /// Replaces any existing fallback.
-    pub fn win_set_key_fallback(&mut self, win: WinId, cb: Callback) {
-        self.callbacks.set_key_fallback(win, cb);
+    /// Returns the displaced callback (if any).
+    #[must_use]
+    pub fn win_set_key_fallback(&mut self, win: WinId, cb: Callback) -> Option<Callback> {
+        self.callbacks.set_key_fallback(win, cb)
     }
 
     /// Register a callback for a window lifecycle / semantic event.
