@@ -130,6 +130,7 @@ local function activate()
       -- `{ action, option_index, inputs }`.
       local result = smelt.api.dialog.open({
         title  = "plan",
+        blocks_agent = true,
         panels = {
           { kind = "markdown", text = summary },
           { kind = "options", items = {

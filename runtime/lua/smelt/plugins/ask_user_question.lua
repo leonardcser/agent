@@ -91,6 +91,7 @@ smelt.api.tools.register({
 
       local result = smelt.api.dialog.open({
         title = title,
+        blocks_agent = true,
         panels = {
           { kind = "markdown", text = q.question or "" },
           { kind = "options",  items = items },

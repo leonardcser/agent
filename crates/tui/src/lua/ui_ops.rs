@@ -143,13 +143,19 @@ pub fn open_dialog(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, 
     let dialog_config =
         app.builtin_dialog_config(Some(crate::keymap::hints::join(&hint_parts)), vec![]);
 
+    // `blocks_agent` gates engine-event drain + queues new user input. Only
+    // dialogs that gate an agent decision (permission prompts,
+    // `ask_user_question`, `exit_plan_mode`) should opt in — passive viewers
+    // like `/help`, `/btw`, `/ps` must let engine responses flow through.
+    let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
+
     app.ui
         .dialog_open(
             FloatConfig {
                 title,
                 border: ui::Border::None,
                 placement: Placement::fit_content(FitMax::HalfScreen),
-                blocks_agent: true,
+                blocks_agent,
                 ..Default::default()
             },
             dialog_config,
