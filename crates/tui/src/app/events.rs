@@ -1434,7 +1434,6 @@ impl App {
                     height: ui::Constraint::Fixed(1),
                 };
             }
-            self.ui.refresh_float_rect(win);
         }
     }
 

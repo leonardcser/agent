@@ -608,6 +608,7 @@ impl Ui {
 
     pub fn render<W: std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
         self.sync_float_content();
+        self.sync_float_rects();
         self.compositor.render(w)
     }
 
@@ -734,29 +735,14 @@ impl Ui {
     }
 
     /// Mutable access to a float's `FloatConfig`. Used by callers that
-    /// need to reposition a float in response to layout changes
-    /// (resize, prompt height change) without closing + reopening.
-    /// After calling this, the caller should also `set_layer_rect` so
-    /// the compositor picks up the new rect this frame.
+    /// need to reposition a float in response to layout changes (e.g.
+    /// the completer follows the prompt's top row). The next `render`
+    /// call re-resolves the `Placement` automatically.
     pub fn float_config_mut(&mut self, win: WinId) -> Option<&mut FloatConfig> {
         match &mut self.wins.get_mut(&win)?.config {
             WinConfig::Float(cfg) => Some(cfg),
             WinConfig::Split(_) => None,
         }
-    }
-
-    /// Recompute a float's rect from its current `FloatConfig` and push
-    /// it into the compositor. Use after mutating placement so the
-    /// float repositions without close + reopen.
-    pub fn refresh_float_rect(&mut self, win: WinId) {
-        let (tw, th) = self.terminal_size;
-        let natural_h = self.natural_dialog_height(win);
-        let Some(WinConfig::Float(cfg)) = self.wins.get(&win).map(|w| &w.config) else {
-            return;
-        };
-        let rect = resolve_float_rect(cfg, tw, th, natural_h);
-        let layer_id = float_layer_id(win);
-        self.compositor.set_rect(&layer_id, rect);
     }
 
     pub fn force_redraw(&mut self) {
@@ -776,6 +762,19 @@ impl Ui {
                     dlg.sync_from_bufs(|bid| self.bufs.get(&bid));
                 }
             }
+        }
+    }
+
+    /// Re-resolve every float's rect from its `Placement` against the
+    /// current terminal size and push it into the compositor. Called
+    /// each frame from `render`, so floats track terminal resizes,
+    /// prompt geometry changes, and dialog natural-height changes
+    /// without any per-component wiring. Order matters: must run after
+    /// `sync_float_content` so `Dialog::natural_height` reflects the
+    /// current panel contents.
+    fn sync_float_rects(&mut self) {
+        for (id, rect) in self.resolve_float_rects() {
+            self.compositor.set_rect(&float_layer_id(id), rect);
         }
     }
 }
