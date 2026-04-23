@@ -3,18 +3,15 @@
 Drop any of these files into `~/.config/smelt/init.lua` (or `dofile` them from your own `init.lua`) to try them out.
 
 - **per_project.lua** — auto-load `$PWD/.smelt/init.lua` on top of the user config.
-- **mode_keybinds.lua** — `<C-y>` copies transcript or prompt depending on focused window, demonstrating `smelt.api.win.focus()` for context-aware keybinds.
+- **mode_keybinds.lua** — `<C-y>` copies transcript or prompt depending on focused window, demonstrating `smelt.win.focus()` for context-aware keybinds.
 - **yank_block.lua** — `<Space>y` yanks the block under the cursor using `/yank-block`.
 - **statusline.lua** — custom status bar showing the current directory path, git branch, and clock via `smelt.statusline(fn)`.
 - **override.lua** — register a custom command (`/hello`) and remap a keybind (`<C-s>` to `/fork`).
 
 ## API surface
 
-The full Lua API is documented in `crates/tui/src/lua.rs`.
-
-The API is split into two namespaces: **feature APIs** live on `smelt.*`
-(transcript, cmd, engine, session, …) and **low-level primitives** live on
-`smelt.api.*` (buf, win, task, theme, fuzzy) — the Neovim-style layering.
+The full Lua API is documented in `crates/tui/src/lua.rs`. Everything
+hangs off `smelt.*` — flat namespace, Neovim-style.
 
 ### Core
 
@@ -38,9 +35,9 @@ The API is split into two namespaces: **feature APIs** live on `smelt.*`
 
 - `smelt.transcript.text()` — transcript content (snapshot)
 - `smelt.transcript.yank_block()` — copy the block under the cursor
-- `smelt.api.buf.text()` — prompt buffer content (snapshot)
-- `smelt.api.win.focus()` — `"transcript"` or `"prompt"`
-- `smelt.api.win.mode()` — vim mode string (`"Normal"`, `"Insert"`, `"Visual"`)
+- `smelt.buf.text()` — prompt buffer content (snapshot)
+- `smelt.win.focus()` — `"transcript"` or `"prompt"`
+- `smelt.win.mode()` — vim mode string (`"Normal"`, `"Insert"`, `"Visual"`)
 
 ### UI primitives
 
@@ -76,13 +73,14 @@ The API is split into two namespaces: **feature APIs** live on `smelt.*`
 - `smelt.tools.unregister(name)` / `smelt.tools.resolve(request_id, call_id, result)`
 - `smelt.prompt.set_section(name, content)` / `remove_section(name)` — custom prompt chrome
 
-### Low-level primitives (`smelt.api.*`)
+### Buffers / Windows / Tasks / Theme / Fuzzy
 
-- `smelt.api.buf.{create, set_lines, add_highlight, add_dim, text}`
-- `smelt.api.win.{focus, mode, close, set_keymap, on_event}`
-- `smelt.api.task.{alloc, resume}` — external task ids for Lua coroutine plumbing
-- `smelt.api.theme.{accent, get, set, snapshot, is_light}`
-- `smelt.api.fuzzy.score(text, query)`
+- `smelt.buf.{create, set_lines, add_highlight, add_dim, text}`
+- `smelt.win.{focus, mode, close, set_keymap, on_event}`
+- `smelt.task.{alloc, resume}` — external task ids for Lua coroutine plumbing
+- `smelt.sleep(ms)` — yields the current task
+- `smelt.theme.{accent, get, set, snapshot, is_light}`
+- `smelt.fuzzy.score(text, query)`
 
 ### Events
 

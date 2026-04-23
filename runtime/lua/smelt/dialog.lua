@@ -14,9 +14,9 @@
 --      `UiOp::OpenLuaDialog`), yield External — reducer opens the
 --      float and resolves with `{win_id = <u64>}`.
 --   2. Alloc a second id for the final result. Register
---      `smelt.api.win.on_event(win, "submit"|"dismiss", …)` handlers
+--      `smelt.win.on_event(win, "submit"|"dismiss", …)` handlers
 --      that build the result, close the float, and resume via
---      `smelt.api.task.resume(result_id, result)`.
+--      `smelt.task.resume(result_id, result)`.
 --   3. Register any user-provided keymaps (`opts.keymaps`), the
 --      `on_tick` handler, and per-input `on_change` handlers.
 --   4. Yield `{__yield = "external", id = result_id}` and return the
@@ -44,8 +44,8 @@ local function build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input
     end
   end
   ctx.close = function()
-    smelt.api.win.close(win_id)
-    smelt.api.task.resume(task_id, {
+    smelt.win.close(win_id)
+    smelt.task.resume(task_id, {
       action = "dismiss",
       inputs = {},
     })
@@ -106,7 +106,7 @@ function smelt.ui.dialog.open(opts)
 
   -- Step 1: queue a dialog-open op and park the task. The reducer
   -- opens the float + panels and resolves us with `{win_id = <u64>}`.
-  local open_id = smelt.api.task.alloc()
+  local open_id = smelt.task.alloc()
   smelt.ui.dialog._request_open(open_id, opts)
   local opened = coroutine.yield({__yield = "external", id = open_id})
   if type(opened) ~= "table" or type(opened.win_id) ~= "number" then
@@ -115,12 +115,12 @@ function smelt.ui.dialog.open(opts)
   local win_id = opened.win_id
 
   -- Step 2: mint a task id for the final resume.
-  local task_id = smelt.api.task.alloc()
+  local task_id = smelt.task.alloc()
 
   -- Step 3: Submit handler. Fires when the focused options/list panel
   -- sees Enter (via `WidgetEvent::Submit` auto-translation) or an
   -- input panel submits its text. Build the result and resume.
-  smelt.api.win.on_event(win_id, "submit", function(raw_ctx)
+  smelt.win.on_event(win_id, "submit", function(raw_ctx)
     local idx1 = nil
     if option_panel_idx then
       local p = raw_ctx.panels and raw_ctx.panels[option_panel_idx]
@@ -141,8 +141,8 @@ function smelt.ui.dialog.open(opts)
         smelt.notify_error("dialog on_select: " .. tostring(err))
       end
     end
-    smelt.api.win.close(win_id)
-    smelt.api.task.resume(task_id, {
+    smelt.win.close(win_id)
+    smelt.task.resume(task_id, {
       action = action,
       option_index = idx1,
       inputs = inputs,
@@ -150,9 +150,9 @@ function smelt.ui.dialog.open(opts)
   end)
 
   -- Step 4: Dismiss handler. Fires on Esc or a configured dismiss key.
-  smelt.api.win.on_event(win_id, "dismiss", function(raw_ctx)
-    smelt.api.win.close(win_id)
-    smelt.api.task.resume(task_id, {
+  smelt.win.on_event(win_id, "dismiss", function(raw_ctx)
+    smelt.win.close(win_id)
+    smelt.task.resume(task_id, {
       action = "dismiss",
       inputs = collect_inputs(raw_ctx, input_panels),
     })
@@ -164,7 +164,7 @@ function smelt.ui.dialog.open(opts)
     for _, km in ipairs(opts.keymaps) do
       if type(km) == "table" and km.key and type(km.on_press) == "function" then
         local on_press = km.on_press
-        smelt.api.win.set_keymap(win_id, km.key, function(raw_ctx)
+        smelt.win.set_keymap(win_id, km.key, function(raw_ctx)
           local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels)
           local ok, err = pcall(on_press, ctx)
           if not ok then
@@ -179,7 +179,7 @@ function smelt.ui.dialog.open(opts)
   -- fires for the whole dialog; fan out to each registered input
   -- (there's usually one, but the dispatch handles many).
   if next(input_on_change) ~= nil then
-    smelt.api.win.on_event(win_id, "text_changed", function(raw_ctx)
+    smelt.win.on_event(win_id, "text_changed", function(raw_ctx)
       local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels)
       for _, fn in pairs(input_on_change) do
         local ok, err = pcall(fn, ctx)
@@ -194,7 +194,7 @@ function smelt.ui.dialog.open(opts)
   -- dialogs (agents list, process registry, session cache).
   if type(opts.on_tick) == "function" then
     local on_tick = opts.on_tick
-    smelt.api.win.on_event(win_id, "tick", function(raw_ctx)
+    smelt.win.on_event(win_id, "tick", function(raw_ctx)
       local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels)
       local ok, err = pcall(on_tick, ctx)
       if not ok then

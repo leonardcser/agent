@@ -40,7 +40,7 @@ function smelt.ui.picker.open(opts)
 
   -- Step 1: queue a picker-open op and park the task. The reducer
   -- opens the focusable float and resolves us with `{win_id = <u64>}`.
-  local open_id = smelt.api.task.alloc()
+  local open_id = smelt.task.alloc()
   smelt.ui.picker._request_open(open_id, opts)
   local opened = coroutine.yield({__yield = "external", id = open_id})
   if type(opened) ~= "table" or type(opened.win_id) ~= "number" then
@@ -49,7 +49,7 @@ function smelt.ui.picker.open(opts)
   local win_id = opened.win_id
 
   -- Step 2: task id for the final resume.
-  local task_id = smelt.api.task.alloc()
+  local task_id = smelt.task.alloc()
 
   -- Local selection state; kept in sync with the Rust `ui::Picker`
   -- through `set_selected` (0-based on the Rust side, 1-based here to
@@ -62,24 +62,24 @@ function smelt.ui.picker.open(opts)
   end
 
   -- Step 3: navigation keymaps — don't resolve, just move + sync.
-  smelt.api.win.set_keymap(win_id, "up",   function() move(-1) end)
-  smelt.api.win.set_keymap(win_id, "down", function() move(1)  end)
-  smelt.api.win.set_keymap(win_id, "c-k",  function() move(-1) end)
-  smelt.api.win.set_keymap(win_id, "c-j",  function() move(1)  end)
-  smelt.api.win.set_keymap(win_id, "c-p",  function() move(-1) end)
-  smelt.api.win.set_keymap(win_id, "c-n",  function() move(1)  end)
+  smelt.win.set_keymap(win_id, "up",   function() move(-1) end)
+  smelt.win.set_keymap(win_id, "down", function() move(1)  end)
+  smelt.win.set_keymap(win_id, "c-k",  function() move(-1) end)
+  smelt.win.set_keymap(win_id, "c-j",  function() move(1)  end)
+  smelt.win.set_keymap(win_id, "c-p",  function() move(-1) end)
+  smelt.win.set_keymap(win_id, "c-n",  function() move(1)  end)
 
   -- Step 4: Enter submits with `{index, item}`; Esc dismisses.
-  smelt.api.win.set_keymap(win_id, "enter", function()
-    smelt.api.win.close(win_id)
-    smelt.api.task.resume(task_id, {
+  smelt.win.set_keymap(win_id, "enter", function()
+    smelt.win.close(win_id)
+    smelt.task.resume(task_id, {
       index = selected,
       item = items[selected],
     })
   end)
-  smelt.api.win.set_keymap(win_id, "esc", function()
-    smelt.api.win.close(win_id)
-    smelt.api.task.resume(task_id, nil)
+  smelt.win.set_keymap(win_id, "esc", function()
+    smelt.win.close(win_id)
+    smelt.task.resume(task_id, nil)
   end)
 
   -- Step 5: park the task until a keymap resolves it.

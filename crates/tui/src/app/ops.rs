@@ -121,7 +121,7 @@ pub enum UiOp {
     },
     /// Register a Lua fn (previously stashed in `shared.callbacks`
     /// under `callback_id`) as a `Callback::Lua` keymap on `win`.
-    /// Pushed by `smelt.api.win.set_keymap`; the reducer does the
+    /// Pushed by `smelt.win.set_keymap`; the reducer does the
     /// actual `ui.win_set_keymap` call with a `Callback::Lua(LuaHandle
     /// (callback_id))`.
     WinBindLuaKeymap {
@@ -130,7 +130,7 @@ pub enum UiOp {
         callback_id: u64,
     },
     /// Register a Lua fn as a `Callback::Lua` lifecycle event handler on
-    /// `win`. Pushed by `smelt.api.win.on_event`; the reducer calls
+    /// `win`. Pushed by `smelt.win.on_event`; the reducer calls
     /// `ui.win_on_event(win, event, Callback::Lua(LuaHandle(id)))`.
     WinBindLuaEvent {
         win: ui::WinId,

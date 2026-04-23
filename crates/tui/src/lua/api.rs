@@ -1,7 +1,7 @@
-//! `smelt.api.*` binding setup. `LuaRuntime::register_api` is the big
-//! mlua table builder that wires every Rust-side primitive onto the
-//! `smelt` global. Theme / JSON / color helpers it uses live here too;
-//! payload + panel helpers for dialog callbacks live in `tasks.rs`.
+//! `smelt.*` binding setup. `LuaRuntime::register_api` is the big mlua
+//! table builder that wires every Rust-side primitive onto the `smelt`
+//! global. Theme / JSON / color helpers it uses live here too; payload
+//! + panel helpers for dialog callbacks live in `tasks.rs`.
 
 use super::{
     lua_commands_snapshot, messages_to_lua, parse_keybind, parse_win_event, AutocmdEvent,
@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 impl LuaRuntime {
     pub(super) fn register_api(lua: &Lua, shared: &Arc<LuaShared>) -> LuaResult<()> {
         let smelt = lua.create_table()?;
-        let api = lua.create_table()?;
         let smelt_ui = lua.create_table()?;
         let smelt_keymap = lua.create_table()?;
 
@@ -687,7 +686,7 @@ impl LuaRuntime {
             push_op!(lua, shared, |msg: String| UiOp::NotifyError(msg)),
         )?;
 
-        // smelt.api.theme
+        // smelt.theme
         let theme_tbl = lua.create_table()?;
         theme_tbl.set(
             "accent",
@@ -722,9 +721,9 @@ impl LuaRuntime {
             "is_light",
             lua.create_function(|_, ()| Ok(crate::theme::is_light()))?,
         )?;
-        api.set("theme", theme_tbl)?;
+        smelt.set("theme", theme_tbl)?;
 
-        // smelt.api.buf
+        // smelt.buf
         let buf_tbl = lua.create_table()?;
         buf_tbl.set(
             "text",
@@ -845,9 +844,9 @@ impl LuaRuntime {
                 )?,
             )?;
         }
-        api.set("buf", buf_tbl)?;
+        smelt.set("buf", buf_tbl)?;
 
-        // smelt.api.win
+        // smelt.win
         let win_tbl = lua.create_table()?;
         win_tbl.set(
             "focus",
@@ -928,9 +927,9 @@ impl LuaRuntime {
                 )?,
             )?;
         }
-        api.set("win", win_tbl)?;
+        smelt.set("win", win_tbl)?;
 
-        // smelt.api.task
+        // smelt.task
         {
             let task_tbl = lua.create_table()?;
             {
@@ -958,7 +957,7 @@ impl LuaRuntime {
                     })?,
                 )?;
             }
-            api.set("task", task_tbl)?;
+            smelt.set("task", task_tbl)?;
         }
 
         // smelt.prompt.set_section(name, content) / remove_section(name)
@@ -1054,7 +1053,7 @@ impl LuaRuntime {
         }
         smelt.set("tools", tools_tbl)?;
 
-        // smelt.api.fuzzy.score
+        // smelt.fuzzy.score
         let fuzzy_tbl = lua.create_table()?;
         fuzzy_tbl.set(
             "score",
@@ -1066,7 +1065,7 @@ impl LuaRuntime {
                 },
             )?,
         )?;
-        api.set("fuzzy", fuzzy_tbl)?;
+        smelt.set("fuzzy", fuzzy_tbl)?;
 
         // smelt.ui.picker
         {
@@ -1122,7 +1121,6 @@ impl LuaRuntime {
             smelt_ui.set("dialog", dialog_tbl)?;
         }
 
-        smelt.set("api", api)?;
         smelt.set("ui", smelt_ui)?;
 
         smelt.set(
@@ -1213,17 +1211,34 @@ impl LuaRuntime {
 
         lua.globals().set("smelt", smelt)?;
 
-        // Install the yielding primitives as Lua wrappers around
-        // `coroutine.yield`. Each checks `coroutine.isyieldable()` so
-        // calls from a non-task context raise a clear error instead of
-        // yielding into the void.
-        lua.load(TASK_YIELD_PRIMITIVES)
-            .set_name("smelt/task_primitives")
-            .exec()?;
+        // Bootstrap Lua chunks that wrap Rust primitives with Lua-side
+        // glue (`smelt.sleep`, the thick `smelt.ui.dialog.open` /
+        // `smelt.ui.picker.open` wrappers). Loaded at register time so
+        // they're present the instant the `smelt` global exists —
+        // before any autoloaded plugin or user init.lua runs — without
+        // the ordering constraint that AUTOLOAD_MODULES would impose.
+        for (name, src) in BOOTSTRAP_CHUNKS {
+            lua.load(*src).set_name(*name).exec()?;
+        }
 
         Ok(())
     }
 }
+
+const BOOTSTRAP_CHUNKS: &[(&str, &str)] = &[
+    (
+        "smelt/_bootstrap.lua",
+        include_str!("../../../../runtime/lua/smelt/_bootstrap.lua"),
+    ),
+    (
+        "smelt/dialog.lua",
+        include_str!("../../../../runtime/lua/smelt/dialog.lua"),
+    ),
+    (
+        "smelt/picker.lua",
+        include_str!("../../../../runtime/lua/smelt/picker.lua"),
+    ),
+];
 
 // ── theme + color helpers (called only from register_api) ─────────────
 
@@ -1409,27 +1424,3 @@ fn lua_value_to_json(lua: &Lua, val: &mlua::Value) -> serde_json::Value {
         _ => serde_json::Value::Null,
     }
 }
-
-/// Lua source injected at bootstrap to install the task-yielding
-/// primitives. Each checks `coroutine.isyieldable()` so calls from
-/// outside a task raise a clear error rather than failing later.
-const TASK_YIELD_PRIMITIVES: &str = r#"
-smelt.api = smelt.api or {}
-
-function smelt.api.sleep(ms)
-  if not coroutine.isyieldable() then
-    error("smelt.api.sleep: call from inside smelt.spawn(fn) or tool.execute", 2)
-  end
-  return coroutine.yield({__yield = "sleep", ms = ms})
-end
-
--- `smelt.ui.dialog.open` is installed by `runtime/lua/smelt/dialog.lua`.
--- It allocs a task id, calls `smelt.ui.dialog._request_open(task_id,
--- opts)` (which queues a `UiOp::OpenLuaDialog` so the reducer opens
--- the float + panels and resolves the task with `{win_id = …}`), parks
--- on an External yield, then wires Lua-side keymaps/events and parks
--- again for the final result.
-
--- `smelt.ui.picker.open` is installed by `runtime/lua/smelt/picker.lua`
--- with the same `_request_open` → External pattern.
-"#;

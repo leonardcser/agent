@@ -17,7 +17,7 @@
 //!
 //! ```lua
 //! smelt.spawn(function()
-//!   smelt.api.sleep(200)
+//!   smelt.sleep(200)
 //!   local r = smelt.ui.dialog.open({...})
 //!   return r.action
 //! end)
@@ -38,7 +38,7 @@ enum TaskWait {
     /// Resume with `nil` once `Instant` has passed.
     Sleep(Instant),
     /// Waiting for `resolve_external(id, …)` — either from a Lua
-    /// runtime file calling `smelt.api.task.resume(id, value)`, or
+    /// runtime file calling `smelt.task.resume(id, value)`, or
     /// from a reducer-side op (e.g. `UiOp::OpenLuaDialog`) that
     /// resolves after doing its work. `runtime/lua/smelt/*.lua`
     /// helpers own the coroutine dance themselves.
@@ -194,7 +194,7 @@ impl LuaTaskRuntime {
                     }
                     Ok(Yield::External(id)) => {
                         // No Rust-side output — resolution comes from a
-                        // Lua runtime file calling `smelt.api.task.resume`
+                        // Lua runtime file calling `smelt.task.resume`
                         // or from a reducer-side op (dialog/picker open).
                         task.wait = TaskWait::External(id);
                         false
@@ -241,7 +241,7 @@ impl Default for LuaTaskRuntime {
 enum Yield {
     Sleep(Duration),
     /// Park the task on an externally-resolved wait. The id must have
-    /// been minted via `smelt.api.task.alloc` (lock-free counter on
+    /// been minted via `smelt.task.alloc` (lock-free counter on
     /// `LuaShared::next_external_id`) beforehand, so the Lua runtime
     /// file or Rust-side op can hand it to its resolver before
     /// yielding.
@@ -302,10 +302,9 @@ mod tests {
         lua.load(
             r#"
             smelt = {}
-            smelt.api = {}
-            function smelt.api.sleep(ms)
+            function smelt.sleep(ms)
               if not coroutine.isyieldable() then
-                error("smelt.api.sleep: not inside a task", 2)
+                error("smelt.sleep: not inside a task", 2)
               end
               return coroutine.yield({__yield = "sleep", ms = ms})
             end
@@ -335,7 +334,7 @@ mod tests {
         let func: mlua::Function = lua
             .load(
                 r#"function()
-                smelt.api.sleep(100)
+                smelt.sleep(100)
                 return "done"
               end"#,
             )
@@ -451,7 +450,7 @@ mod tests {
     #[test]
     fn sleep_outside_task_errors() {
         let lua = lua_with_sleep();
-        let res: LuaResult<()> = lua.load("smelt.api.sleep(10)").exec();
+        let res: LuaResult<()> = lua.load("smelt.sleep(10)").exec();
         assert!(res.is_err());
         let msg = format!("{}", res.unwrap_err());
         assert!(msg.contains("not inside a task"));

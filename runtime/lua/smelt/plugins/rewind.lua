@@ -24,7 +24,7 @@ smelt.cmd.register("rewind", function(args)
   -- Callers can pass "insert" to force vim Insert restoration after
   -- dismiss (used by the double-Esc keymap which exits Insert before
   -- dispatching). Otherwise honor the current vim mode.
-  local restore_vim_insert = (args == "insert") or (smelt.api.win.mode() == "Insert")
+  local restore_vim_insert = (args == "insert") or (smelt.win.mode() == "Insert")
 
   smelt.spawn(function()
     local labels = build_labels(turns)

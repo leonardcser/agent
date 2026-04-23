@@ -17,8 +17,8 @@ smelt.cmd.register("btw", function(args)
   end
 
   smelt.spawn(function()
-    local buf = smelt.api.buf.create()
-    smelt.api.buf.set_lines(buf, { "thinking…" })
+    local buf = smelt.buf.create()
+    smelt.buf.set_lines(buf, { "thinking…" })
 
     local history = smelt.engine.history()
     local messages = {}
@@ -36,7 +36,7 @@ smelt.cmd.register("btw", function(args)
         for line in (content .. "\n"):gmatch("([^\n]*)\n") do
           table.insert(lines, line)
         end
-        smelt.api.buf.set_lines(buf, lines)
+        smelt.buf.set_lines(buf, lines)
       end,
     })
 

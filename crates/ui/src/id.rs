@@ -1,13 +1,13 @@
 /// Buffer handle. IDs below `LUA_BUF_ID_BASE` are minted by the Rust
 /// side via `Ui::buf_create`; IDs at or above are minted by plugin
-/// code via `smelt.api.buf.create`. The split is by contract, not
+/// code via `smelt.buf.create`. The split is by contract, not
 /// enforcement — `Ui::buf_create_with_id` still refuses to overwrite,
 /// so a collision surfaces as a loud notify rather than silent data
 /// loss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BufId(pub u64);
 
-/// Smallest id a plugin-side `smelt.api.buf.create` will mint. Keeps
+/// Smallest id a plugin-side `smelt.buf.create` will mint. Keeps
 /// Lua buffers in a disjoint range from Rust's sequential allocator.
 pub const LUA_BUF_ID_BASE: u64 = 1 << 32;
 

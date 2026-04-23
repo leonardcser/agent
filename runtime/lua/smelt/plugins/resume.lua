@@ -3,7 +3,7 @@
 -- Live-filtered session picker. The input panel above captures typing;
 -- the list panel below shows matches. Enter loads the highlighted
 -- session, Ctrl-d deletes it, Alt-w toggles the workspace-only
--- filter. Fuzzy search uses `smelt.api.fuzzy.score`.
+-- filter. Fuzzy search uses `smelt.fuzzy.score`.
 
 local function is_junk(s)
   if s == nil then return true end
@@ -74,7 +74,7 @@ local function filter_entries(entries, query, workspace_only, current_cwd)
     if keep and query ~= "" then
       -- Fuzzy-score the title+subtitle. Non-match returns nil.
       local hay = display_title(e) .. " " .. (e.subtitle or "")
-      keep = smelt.api.fuzzy.score(hay, query) ~= nil
+      keep = smelt.fuzzy.score(hay, query) ~= nil
     end
     if keep then
       table.insert(filtered, e)
@@ -87,19 +87,19 @@ local function refresh_list(buf_id, filtered, now_ms)
   local lines = {}
   if #filtered == 0 then
     table.insert(lines, "  (no matching sessions)")
-    smelt.api.buf.set_lines(buf_id, lines)
+    smelt.buf.set_lines(buf_id, lines)
     return
   end
   for _, e in ipairs(filtered) do
     table.insert(lines, format_row(e, now_ms))
   end
-  smelt.api.buf.set_lines(buf_id, lines)
+  smelt.buf.set_lines(buf_id, lines)
   -- Dim the size + duration columns so the title reads as the primary
   -- content. Columns: `LEADING + SIZE_COL + GAP + TIME_COL` spans
   -- [0, LEADING+SIZE_COL+GAP+TIME_COL), everything after is the title.
   local meta_end = LEADING + SIZE_COL + GAP + TIME_COL
   for i = 1, #filtered do
-    smelt.api.buf.add_dim(buf_id, i, 0, meta_end)
+    smelt.buf.add_dim(buf_id, i, 0, meta_end)
   end
 end
 
@@ -117,7 +117,7 @@ smelt.cmd.register("resume", function()
     local query = ""
     local filtered = filter_entries(entries, query, workspace_only, current_cwd)
 
-    local list_buf = smelt.api.buf.create()
+    local list_buf = smelt.buf.create()
     -- Seed the buffer on the same tick the dialog opens. The op
     -- reducer drains this BufSetLines before `dialog.open` is
     -- serviced, so the list shows its initial rows without a flicker.

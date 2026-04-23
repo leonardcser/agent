@@ -104,7 +104,7 @@ smelt.tools.register({
       if custom ~= "" then
         answer = "Other: " .. custom
       elseif result.action == "dismiss" or result.option_index == nil then
-        smelt.api.engine.cancel()
+        smelt.engine.cancel()
         return { content = "user cancelled", is_error = true }
       else
         local picked = options[result.option_index]

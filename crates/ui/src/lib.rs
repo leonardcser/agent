@@ -107,7 +107,7 @@ impl Ui {
 
     /// Create a buffer at an explicit id. Returns `Err` if a buffer
     /// with that id already exists — callers should mint a fresh id
-    /// via `buf_create`. Plugin-facing IDs (Lua `smelt.api.buf.create`)
+    /// via `buf_create`. Plugin-facing IDs (Lua `smelt.buf.create`)
     /// live above `LUA_BUF_ID_BASE` so they can't collide with
     /// sequentially-allocated Rust buffers.
     pub fn buf_create_with_id(

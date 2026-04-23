@@ -50,8 +50,8 @@ end
 -- Render the agent registry into `list_buf`.
 local function refresh_list(list_buf, agents, snapshots)
   if #agents == 0 then
-    smelt.api.buf.set_lines(list_buf, { "  No subagents running" })
-    smelt.api.buf.add_dim(list_buf, 1, 0, #"  No subagents running")
+    smelt.buf.set_lines(list_buf, { "  No subagents running" })
+    smelt.buf.add_dim(list_buf, 1, 0, #"  No subagents running")
     return
   end
 
@@ -83,9 +83,9 @@ local function refresh_list(list_buf, agents, snapshots)
     end
     table.insert(lines, line)
   end
-  smelt.api.buf.set_lines(list_buf, lines)
+  smelt.buf.set_lines(list_buf, lines)
   for i, span in ipairs(status_spans) do
-    smelt.api.buf.add_dim(list_buf, i, span[1], span[2])
+    smelt.buf.add_dim(list_buf, i, span[1], span[2])
   end
 end
 
@@ -129,8 +129,8 @@ local function refresh_detail_title(title_buf, agent_id)
       line = line .. "  " .. format_cost(snap.cost_usd)
     end
   end
-  smelt.api.buf.set_lines(title_buf, { line, "" })
-  smelt.api.buf.add_highlight(title_buf, 1, 1, id_end, { fg = "agent", bold = true })
+  smelt.buf.set_lines(title_buf, { line, "" })
+  smelt.buf.add_highlight(title_buf, 1, 1, id_end, { fg = "agent", bold = true })
 end
 
 local function split_lines(s)
@@ -147,7 +147,7 @@ end
 local function refresh_detail_body(detail_buf, agent_id)
   local snap = find_snapshot(smelt.agent.snapshots(), agent_id)
   if not snap then
-    smelt.api.buf.set_lines(detail_buf, { "(agent not tracked)" })
+    smelt.buf.set_lines(detail_buf, { "(agent not tracked)" })
     return
   end
 
@@ -168,18 +168,18 @@ local function refresh_detail_body(detail_buf, agent_id)
       table.insert(lines, string.format("%s %s%s", entry.tool_name, entry.summary, elapsed))
     end
   end
-  smelt.api.buf.set_lines(detail_buf, lines)
+  smelt.buf.set_lines(detail_buf, lines)
   for _, i in ipairs(dim_lines) do
     local line = lines[i]
     if line then
-      smelt.api.buf.add_dim(detail_buf, i, 0, #line)
+      smelt.buf.add_dim(detail_buf, i, 0, #line)
     end
   end
 end
 
 local function open_detail(agent_id)
-  local title_buf = smelt.api.buf.create()
-  local detail_buf = smelt.api.buf.create()
+  local title_buf = smelt.buf.create()
+  local detail_buf = smelt.buf.create()
   refresh_detail_title(title_buf, agent_id)
   refresh_detail_body(detail_buf, agent_id)
 
@@ -206,11 +206,11 @@ smelt.cmd.register("agents", function()
         return
       end
 
-      local list_buf = smelt.api.buf.create()
+      local list_buf = smelt.buf.create()
       refresh_list(list_buf, agents, smelt.agent.snapshots())
-      local title_buf = smelt.api.buf.create()
-      smelt.api.buf.set_lines(title_buf, { "agents", "" })
-      smelt.api.buf.add_dim(title_buf, 1, 0, #"agents")
+      local title_buf = smelt.buf.create()
+      smelt.buf.set_lines(title_buf, { "agents", "" })
+      smelt.buf.add_dim(title_buf, 1, 0, #"agents")
 
       local result = smelt.ui.dialog.open({
         panels = {

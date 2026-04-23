@@ -376,12 +376,12 @@ pub(crate) struct LuaShared {
     pub(crate) plugin_tools: Mutex<HashMap<String, LuaHandle>>,
     pub(crate) callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub(crate) next_id: AtomicU64,
-    /// Separate counter for buffer IDs minted by `smelt.api.buf.create`.
+    /// Separate counter for buffer IDs minted by `smelt.buf.create`.
     /// Starts at `1 << 32` so Lua-allocated `BufId`s never collide with
     /// Rust-side buffers (prompt input, scratch, etc.) that are minted
     /// by `ui.buf_create` from 1.
     pub(crate) next_buf_id: AtomicU64,
-    /// Lock-free counter for `smelt.api.task.alloc`. Lives on the
+    /// Lock-free counter for `smelt.task.alloc`. Lives on the
     /// shared arc (not in `LuaTaskRuntime`) so a Lua coroutine running
     /// *inside* `drive_tasks` — which already holds the `tasks` lock —
     /// can mint an id without re-entering the same mutex.
@@ -405,11 +405,11 @@ pub(crate) struct LuaShared {
 /// Events that drive the Lua task runtime. After the D3 dialog + D2b
 /// picker ports both runtime files (`runtime/lua/smelt/dialog.lua`,
 /// `runtime/lua/smelt/picker.lua`) register `Callback::Lua` handlers
-/// directly via `smelt.api.win.set_keymap` / `on_event` and resolve
-/// themselves via `smelt.api.task.resume`, so the only remaining
+/// directly via `smelt.win.set_keymap` / `on_event` and resolve
+/// themselves via `smelt.task.resume`, so the only remaining
 /// event is the externally-allocated resume itself.
 pub enum TaskEvent {
-    /// `smelt.api.task.resume(id, value)` posts this to route the
+    /// `smelt.task.resume(id, value)` posts this to route the
     /// resume through the Lua pump. The pump looks up the parked task
     /// by `id` and resumes it with the stored value on the next
     /// `pump_task_events` drain.
@@ -859,15 +859,10 @@ impl Default for LuaRuntime {
 }
 
 /// Modules embedded in the binary, available via `require("smelt.plugins.X")`.
+/// Bootstrap primitives (`_bootstrap.lua`, `dialog.lua`, `picker.lua`) are
+/// loaded at register time in `register_api`, not here — they don't need
+/// to be `require`-able.
 const EMBEDDED_MODULES: &[(&str, &str)] = &[
-    (
-        "smelt.dialog",
-        include_str!("../../../../runtime/lua/smelt/dialog.lua"),
-    ),
-    (
-        "smelt.picker",
-        include_str!("../../../../runtime/lua/smelt/picker.lua"),
-    ),
     (
         "smelt.plugins.plan_mode",
         include_str!("../../../../runtime/lua/smelt/plugins/plan_mode.lua"),
@@ -922,8 +917,6 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
 /// init.lua). These are former Rust built-ins migrated to Lua. Required
 /// after the embedded searcher is set up, before user init.lua runs.
 const AUTOLOAD_MODULES: &[&str] = &[
-    "smelt.dialog",
-    "smelt.picker",
     "smelt.plugins.ask_user_question",
     "smelt.plugins.btw",
     "smelt.plugins.export",
@@ -1145,12 +1138,12 @@ mod tests {
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         let old_accent = crate::theme::accent_value();
         rt.lua
-            .load("smelt.api.theme.set('accent', { ansi = 42 })")
+            .load("smelt.theme.set('accent', { ansi = 42 })")
             .exec()
             .unwrap();
         let ansi: u8 = rt
             .lua
-            .load("return smelt.api.theme.accent().ansi")
+            .load("return smelt.theme.accent().ansi")
             .eval()
             .unwrap();
         assert_eq!(ansi, 42);
@@ -1162,12 +1155,12 @@ mod tests {
         let rt = LuaRuntime::new();
         let old_accent = crate::theme::accent_value();
         rt.lua
-            .load("smelt.api.theme.set('accent', { preset = 'sage' })")
+            .load("smelt.theme.set('accent', { preset = 'sage' })")
             .exec()
             .unwrap();
         let ansi: u8 = rt
             .lua
-            .load("return smelt.api.theme.accent().ansi")
+            .load("return smelt.theme.accent().ansi")
             .eval()
             .unwrap();
         assert_eq!(ansi, 108); // sage
@@ -1181,7 +1174,7 @@ mod tests {
             .lua
             .load(
                 r#"
-                local snap = smelt.api.theme.snapshot()
+                local snap = smelt.theme.snapshot()
                 local t = {}
                 for k, _ in pairs(snap) do t[#t+1] = k end
                 table.sort(t)
@@ -1213,11 +1206,7 @@ mod tests {
     #[test]
     fn theme_unknown_role_is_error() {
         let rt = LuaRuntime::new();
-        let err = rt
-            .lua
-            .load("smelt.api.theme.get('bogus')")
-            .exec()
-            .unwrap_err();
+        let err = rt.lua.load("smelt.theme.get('bogus')").exec().unwrap_err();
         assert!(err.to_string().contains("unknown theme role"));
     }
 
@@ -1226,7 +1215,7 @@ mod tests {
         let rt = LuaRuntime::new();
         let err = rt
             .lua
-            .load("smelt.api.theme.set('muted', { ansi = 1 })")
+            .load("smelt.theme.set('muted', { ansi = 1 })")
             .exec()
             .unwrap_err();
         assert!(err.to_string().contains("read-only"));
@@ -1323,7 +1312,7 @@ mod tests {
                   description = "",
                   parameters = { type = "object", properties = {} },
                   execute = function()
-                    local id = smelt.api.task.alloc()
+                    local id = smelt.task.alloc()
                     smelt.ui.dialog._request_open(id, {
                       panels = {
                         { kind = "content", text = "please confirm" },
@@ -1393,7 +1382,7 @@ mod tests {
                   description = "",
                   parameters = { type = "object", properties = {} },
                   execute = function()
-                    smelt.api.sleep(0)
+                    smelt.sleep(0)
                     return "yes"
                   end,
                 })
@@ -1659,11 +1648,7 @@ mod tests {
     fn buf_text_reads_context() {
         let rt = LuaRuntime::new();
         rt.set_context(None, Some("prompt content".into()), None, None);
-        let text: String = rt
-            .lua
-            .load("return smelt.api.buf.text()")
-            .eval()
-            .expect("eval");
+        let text: String = rt.lua.load("return smelt.buf.text()").eval().expect("eval");
         assert_eq!(text, "prompt content");
     }
 
