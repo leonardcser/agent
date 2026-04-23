@@ -608,6 +608,27 @@ change today since no Rust code registers `Callback::Lua`, but the
 plumbing is the prereq for `smelt.api.win.set_keymap(id, key,
 lua_fn)` in the D2b picker-first migration.
 
+**D3 primitives · `ctx.panels` pull-read + `ctx.win`**
+(shipped 2026-04-23). Prereq for the dialog port. When a
+`Callback::Lua` fires, the ctx passed in now carries
+`ctx.win` (the source WinId) plus `ctx.panels` — a live snapshot of
+the dialog's panels at dispatch time. Each entry is
+`{ kind = "content" | "list" | "input", selected = <1-based | nil>,
+text = "…" }`. The snapshot is built Rust-side by
+`Ui::snapshot_dialog_panels(win)` using new public accessors
+(`Dialog::panel_kind_at`, `selected_index_at`, `panel_widget_selected`,
+`panel_widget_text`, `panel_buf_at`) plus two default-impl methods on
+`PanelWidget` (`selected_index`, `text_value`) that `OptionList` and
+`TextInput` override. Empty slice for non-dialog windows — Lua code
+reads `ctx.panels[i]` without special-casing. `lua_invoke`'s signature
+grows to `FnMut(LuaHandle, WinId, &Payload, &[PanelSnapshot])`;
+aliased as `ui::LuaInvoke` to keep call sites readable.
+With this, a Lua runtime file can open a raw dialog, register
+Enter/Esc keymaps, and on fire read the current selection + input
+text to build the final result table and resume its parked task —
+no Rust-side `lua_dialog.rs` glue required. Port + deletion is the
+next commit.
+
 **D2b primitives · External task yield + keymap + task-id API**
 (shipped 2026-04-23). Additive foundation for Option 3 — no
 deletions yet. Shipped:

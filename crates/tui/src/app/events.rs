@@ -1858,8 +1858,11 @@ impl App {
             return;
         }
         let lua = &self.lua;
-        let mut lua_invoke = |handle: ui::LuaHandle, payload: &ui::Payload| {
-            lua.invoke_callback(handle, payload);
+        let mut lua_invoke = |handle: ui::LuaHandle,
+                              win: ui::WinId,
+                              payload: &ui::Payload,
+                              panels: &[ui::PanelSnapshot]| {
+            lua.invoke_callback(handle, win, payload, panels);
         };
         self.ui.dispatch_event(
             win,

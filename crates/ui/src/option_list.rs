@@ -345,6 +345,13 @@ impl PanelWidget for OptionList {
             self.wrapped.iter().map(|l| l.len().max(1)).sum()
         }
     }
+    fn selected_index(&self) -> Option<usize> {
+        if self.items.is_empty() {
+            None
+        } else {
+            Some(self.cursor)
+        }
+    }
 }
 
 #[cfg(test)]

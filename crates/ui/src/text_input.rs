@@ -253,6 +253,9 @@ impl PanelWidget for TextInput {
     fn content_rows(&self) -> usize {
         1
     }
+    fn text_value(&self) -> Option<String> {
+        Some(self.text.clone())
+    }
 }
 
 #[cfg(test)]

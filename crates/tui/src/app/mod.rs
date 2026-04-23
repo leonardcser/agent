@@ -849,9 +849,13 @@ impl App {
             // snapshot here each frame.
             {
                 let lua = &self.lua;
-                let mut lua_invoke = |handle: ui::LuaHandle, payload: &ui::Payload| {
-                    lua.invoke_callback(handle, payload);
-                };
+                let mut lua_invoke =
+                    |handle: ui::LuaHandle,
+                     win: ui::WinId,
+                     payload: &ui::Payload,
+                     panels: &[ui::PanelSnapshot]| {
+                        lua.invoke_callback(handle, win, payload, panels);
+                    };
                 self.ui.dispatch_tick(&mut lua_invoke);
             }
             self.apply_lua_ops();

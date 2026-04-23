@@ -71,6 +71,31 @@ pub trait PanelWidget: Component + Send {
     /// Called once per event-loop tick on the focused float. Default
     /// no-op.
     fn tick(&mut self) {}
+    /// 0-based selection index for list-like widgets (`OptionList`,
+    /// `ListSelect`). `None` for non-selectable widgets.
+    fn selected_index(&self) -> Option<usize> {
+        None
+    }
+    /// Current text for input-like widgets (`TextInput`). `None` for
+    /// widgets without a text concept.
+    fn text_value(&self) -> Option<String> {
+        None
+    }
+}
+
+/// Live snapshot of a dialog panel's widget state. Built on-demand by
+/// [`crate::Ui::snapshot_dialog_panels`] at keymap / event / tick
+/// dispatch so Lua callbacks can pull-read the current selection and
+/// input text without a bidirectional channel back into Ui.
+#[derive(Clone, Debug)]
+pub struct PanelSnapshot {
+    pub kind: PanelKind,
+    /// 0-based cursor / selection index. `None` for panels without a
+    /// selection (`Content`, `Input`, plain `Content`-widget panels).
+    pub selected: Option<usize>,
+    /// Current text for `Input` panels and `TextInput` widgets. Empty
+    /// for others — callers inspect `kind` to disambiguate.
+    pub text: String,
 }
 
 /// What a panel renders: a buffer in `Ui::bufs`, or a self-contained
@@ -767,13 +792,49 @@ impl Dialog {
         }
     }
 
-    pub(crate) fn selected_index_at(&self, panel_idx: usize) -> Option<usize> {
+    pub fn selected_index_at(&self, panel_idx: usize) -> Option<usize> {
         let panel = self.panels.get(panel_idx)?;
         if !matches!(panel.kind, PanelKind::List { .. }) {
             return None;
         }
         let win = panel.win()?;
         Some(win.scroll_top as usize + win.cursor_line as usize)
+    }
+
+    pub fn panel_kind_at(&self, panel_idx: usize) -> Option<PanelKind> {
+        self.panels.get(panel_idx).map(|p| p.kind)
+    }
+
+    /// `BufId` backing this panel, if buffer-backed. `None` for widget
+    /// panels.
+    pub fn panel_buf_at(&self, panel_idx: usize) -> Option<BufId> {
+        let panel = self.panels.get(panel_idx)?;
+        match &panel.content {
+            DialogPanelContent::Buffer { buf, .. } => Some(*buf),
+            DialogPanelContent::Widget(_) => None,
+        }
+    }
+
+    /// 0-based selection index for the widget in `panel_idx`, if the
+    /// widget exposes one (e.g. `OptionList`). `None` for buffer-backed
+    /// panels or widgets without a selection concept.
+    pub fn panel_widget_selected(&self, panel_idx: usize) -> Option<usize> {
+        let panel = self.panels.get(panel_idx)?;
+        match &panel.content {
+            DialogPanelContent::Widget(w) => w.selected_index(),
+            DialogPanelContent::Buffer { .. } => None,
+        }
+    }
+
+    /// Current text for the widget in `panel_idx`, if the widget
+    /// exposes one (e.g. `TextInput`). `None` for buffer-backed panels
+    /// or widgets without a text concept.
+    pub fn panel_widget_text(&self, panel_idx: usize) -> Option<String> {
+        let panel = self.panels.get(panel_idx)?;
+        match &panel.content {
+            DialogPanelContent::Widget(w) => w.text_value(),
+            DialogPanelContent::Buffer { .. } => None,
+        }
     }
 
     /// Scroll the buffer-backed panel at `panel_idx` by `delta` rows.

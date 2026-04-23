@@ -2296,7 +2296,13 @@ impl LuaRuntime {
     /// `nil`, which matches their semantic meaning. Errors are
     /// recorded via `record_error`; ops produced by the callback
     /// remain on `shared.ops` for the next `apply_lua_ops` drain.
-    pub fn invoke_callback(&self, handle: ui::LuaHandle, payload: &ui::Payload) {
+    pub fn invoke_callback(
+        &self,
+        handle: ui::LuaHandle,
+        win: ui::WinId,
+        payload: &ui::Payload,
+        panels: &[ui::PanelSnapshot],
+    ) {
         let Some(func) = (match self.shared.callbacks.lock() {
             Ok(cbs) => cbs
                 .get(&handle.0)
@@ -2316,6 +2322,22 @@ impl LuaRuntime {
         if let Err(e) = populate_payload_table(&payload_table, payload) {
             self.record_error(format!("callback payload: {e}"));
             return;
+        }
+        if let Err(e) = payload_table.set("win", win.0) {
+            self.record_error(format!("callback payload: {e}"));
+            return;
+        }
+        match build_panels_table(&self.lua, panels) {
+            Ok(t) => {
+                if let Err(e) = payload_table.set("panels", t) {
+                    self.record_error(format!("callback payload: {e}"));
+                    return;
+                }
+            }
+            Err(e) => {
+                self.record_error(format!("callback payload: {e}"));
+                return;
+            }
         }
         if let Err(e) = func.call::<()>(payload_table) {
             self.record_error(format!("callback `{}`: {e}", handle.0));
@@ -2867,6 +2889,31 @@ fn populate_payload_table(table: &mlua::Table, payload: &ui::Payload) -> mlua::R
     }
 }
 
+/// Build a Lua sequence describing a dialog window's panels at
+/// callback-fire time. Each entry is `{ kind = "content" | "list" |
+/// "input", selected = <1-based | nil>, text = "…" }`. The array is
+/// empty for non-dialog windows, which lets Lua keymap callbacks do
+/// `if ctx.panels[1] then …` without special-casing non-dialog
+/// contexts.
+fn build_panels_table(lua: &Lua, panels: &[ui::PanelSnapshot]) -> mlua::Result<mlua::Table> {
+    let out = lua.create_table()?;
+    for (i, p) in panels.iter().enumerate() {
+        let entry = lua.create_table()?;
+        let kind = match p.kind {
+            ui::PanelKind::Content => "content",
+            ui::PanelKind::List { .. } => "list",
+            ui::PanelKind::Input { .. } => "input",
+        };
+        entry.set("kind", kind)?;
+        if let Some(sel) = p.selected {
+            entry.set("selected", sel + 1)?;
+        }
+        entry.set("text", p.text.clone())?;
+        out.set(i + 1, entry)?;
+    }
+    Ok(out)
+}
+
 /// Build the resume value for a resolved picker. Looks up
 /// `opts.items[index0 + 1]` and returns `{ index = 1-based, item = <entry> }`.
 /// Returns an error if the opts key was stale or missing `items`.
@@ -3095,7 +3142,12 @@ mod tests {
             .unwrap();
         let func: mlua::Function = rt.lua.load("test_cb").eval().unwrap();
         let id = rt.register_callback(func).unwrap();
-        rt.invoke_callback(ui::LuaHandle(id), &ui::Payload::Selection { index: 2 });
+        rt.invoke_callback(
+            ui::LuaHandle(id),
+            ui::WinId(0),
+            &ui::Payload::Selection { index: 2 },
+            &[],
+        );
         let recorded: u64 = rt.lua.load("return _G.recorded").eval().unwrap();
         // Payload is 0-indexed; Lua gets 1-based.
         assert_eq!(recorded, 3);
@@ -3117,9 +3169,11 @@ mod tests {
         let id = rt.register_callback(func).unwrap();
         rt.invoke_callback(
             ui::LuaHandle(id),
+            ui::WinId(0),
             &ui::Payload::Text {
                 content: "hi".into(),
             },
+            &[],
         );
         let t: String = rt.lua.load("return _G.t").eval().unwrap();
         assert_eq!(t, "hi");
@@ -3129,7 +3183,58 @@ mod tests {
     fn invoke_callback_unknown_handle_is_noop() {
         let rt = LuaRuntime::new();
         // Nothing registered under id 9999 — should silently succeed.
-        rt.invoke_callback(ui::LuaHandle(9999), &ui::Payload::None);
+        rt.invoke_callback(ui::LuaHandle(9999), ui::WinId(0), &ui::Payload::None, &[]);
+    }
+
+    #[test]
+    fn invoke_callback_exposes_panels_snapshot() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                _G.sel = nil
+                _G.txt = nil
+                _G.win = nil
+                _G.cb  = function(ctx)
+                    _G.win = ctx.win
+                    _G.sel = ctx.panels[2].selected
+                    _G.txt = ctx.panels[3].text
+                end
+            "#,
+            )
+            .exec()
+            .unwrap();
+        let func: mlua::Function = rt.lua.load("cb").eval().unwrap();
+        let id = rt.register_callback(func).unwrap();
+        let panels = vec![
+            ui::PanelSnapshot {
+                kind: ui::PanelKind::Content,
+                selected: None,
+                text: String::new(),
+            },
+            ui::PanelSnapshot {
+                kind: ui::PanelKind::List { multi: false },
+                selected: Some(3),
+                text: String::new(),
+            },
+            ui::PanelSnapshot {
+                kind: ui::PanelKind::Input { multiline: false },
+                selected: None,
+                text: "hello".into(),
+            },
+        ];
+        rt.invoke_callback(
+            ui::LuaHandle(id),
+            ui::WinId(42),
+            &ui::Payload::None,
+            &panels,
+        );
+        let win: u64 = rt.lua.load("return _G.win").eval().unwrap();
+        let sel: u64 = rt.lua.load("return _G.sel").eval().unwrap();
+        let txt: String = rt.lua.load("return _G.txt").eval().unwrap();
+        assert_eq!(win, 42);
+        assert_eq!(sel, 4); // 1-based
+        assert_eq!(txt, "hello");
     }
 
     #[test]

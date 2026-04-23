@@ -28,6 +28,14 @@ mod id;
 
 pub type AttachmentId = u64;
 
+/// Callback shape for routing `Callback::Lua` handles out of Ui into
+/// the host's Lua runtime. Receives the handle, the focused window,
+/// the event payload, and a live snapshot of the window's dialog
+/// panels for pull-read inside the Lua callback. Empty slice when the
+/// window isn't a dialog.
+pub type LuaInvoke<'a> =
+    dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload, &[dialog::PanelSnapshot]) + 'a;
+
 pub use buffer::{BufType, Buffer, Span, SpanStyle};
 pub use buffer_view::BufferView;
 pub use callback::{
@@ -37,8 +45,8 @@ pub use callback::{
 pub use component::{Component, CursorInfo, CursorStyle, DrawContext, KeyResult, WidgetEvent};
 pub use compositor::Compositor;
 pub use dialog::{
-    Dialog, DialogConfig, PanelContent, PanelHeight, PanelKind, PanelSpec, PanelWidget,
-    SeparatorStyle,
+    Dialog, DialogConfig, PanelContent, PanelHeight, PanelKind, PanelSnapshot, PanelSpec,
+    PanelWidget, SeparatorStyle,
 };
 pub use edit_buffer::EditBuffer;
 pub use float_dialog::{FloatDialog, FloatDialogConfig};
@@ -338,7 +346,7 @@ impl Ui {
         win: WinId,
         ev: WinEvent,
         payload: Payload,
-        lua_invoke: &mut dyn FnMut(LuaHandle, &Payload),
+        lua_invoke: &mut LuaInvoke,
     ) {
         let Some(mut cbs) = self.callbacks.take_event(win, ev) else {
             return;
@@ -354,7 +362,8 @@ impl Ui {
                     let _ = inner(&mut ctx);
                 }
                 Callback::Lua(handle) => {
-                    lua_invoke(*handle, &payload);
+                    let panels = self.snapshot_dialog_panels(win);
+                    lua_invoke(*handle, win, &payload, &panels);
                 }
             }
         }
@@ -424,6 +433,44 @@ impl Ui {
         let layer_id = float_layer_id(win_id);
         let comp = self.compositor.component_mut(&layer_id)?;
         comp.as_any_mut().downcast_mut::<dialog::Dialog>()
+    }
+
+    pub fn dialog(&self, win_id: WinId) -> Option<&dialog::Dialog> {
+        let layer_id = float_layer_id(win_id);
+        let comp = self.compositor.component(&layer_id)?;
+        comp.as_any().downcast_ref::<dialog::Dialog>()
+    }
+
+    /// Build a live snapshot of every panel on the `Dialog` at `win_id`
+    /// for Lua pull-read. Empty vec when the window isn't a dialog. For
+    /// each panel: `selected` is the 0-based cursor / selection index
+    /// when applicable, `text` is the current buffer / widget text for
+    /// `Input` kinds.
+    pub fn snapshot_dialog_panels(&self, win_id: WinId) -> Vec<dialog::PanelSnapshot> {
+        let Some(dlg) = self.dialog(win_id) else {
+            return Vec::new();
+        };
+        (0..dlg.panel_count())
+            .map(|i| {
+                let kind = dlg.panel_kind_at(i).unwrap_or(dialog::PanelKind::Content);
+                let selected = dlg
+                    .selected_index_at(i)
+                    .or_else(|| dlg.panel_widget_selected(i));
+                let text = match kind {
+                    dialog::PanelKind::Input { .. } => dlg
+                        .panel_buf_at(i)
+                        .and_then(|b| self.bufs.get(&b))
+                        .map(|b| b.text())
+                        .unwrap_or_default(),
+                    _ => dlg.panel_widget_text(i).unwrap_or_default(),
+                };
+                dialog::PanelSnapshot {
+                    kind,
+                    selected,
+                    text,
+                }
+            })
+            .collect()
     }
 
     pub fn win(&self, id: WinId) -> Option<&Window> {
@@ -568,7 +615,7 @@ impl Ui {
         code: crossterm::event::KeyCode,
         mods: crossterm::event::KeyModifiers,
     ) -> KeyResult {
-        self.handle_key_with_lua(code, mods, &mut |_, _| {})
+        self.handle_key_with_lua(code, mods, &mut |_, _, _, _| {})
     }
 
     /// Dispatch a key event through the focused window's keymap
@@ -580,7 +627,7 @@ impl Ui {
         &mut self,
         code: crossterm::event::KeyCode,
         mods: crossterm::event::KeyModifiers,
-        lua_invoke: &mut dyn FnMut(LuaHandle, &Payload),
+        lua_invoke: &mut LuaInvoke,
     ) -> KeyResult {
         let focused = self.compositor.focused().and_then(parse_float_layer_id);
         let Some(win) = focused else {
@@ -603,7 +650,8 @@ impl Ui {
                 }
                 Callback::Lua(handle) => {
                     let payload = Payload::Key { code, mods };
-                    lua_invoke(*handle, &payload);
+                    let panels = self.snapshot_dialog_panels(win);
+                    lua_invoke(*handle, win, &payload, &panels);
                     KeyResult::Consumed
                 }
             };
@@ -625,7 +673,8 @@ impl Ui {
                 }
                 Callback::Lua(handle) => {
                     let payload = Payload::Key { code, mods };
-                    lua_invoke(*handle, &payload);
+                    let panels = self.snapshot_dialog_panels(win);
+                    lua_invoke(*handle, win, &payload, &panels);
                     KeyResult::Consumed
                 }
             };
@@ -652,7 +701,10 @@ impl Ui {
     /// Tick callback. Used by the app event loop to drive per-frame
     /// refresh of dialogs with live external state (subagent list,
     /// process registry, …).
-    pub fn dispatch_tick(&mut self, lua_invoke: &mut dyn FnMut(LuaHandle, &Payload)) {
+    pub fn dispatch_tick(
+        &mut self,
+        lua_invoke: &mut LuaInvoke,
+    ) {
         let wins: Vec<WinId> = self.callbacks.wins_with_event(WinEvent::Tick);
         for win in wins {
             self.dispatch_event(win, WinEvent::Tick, Payload::None, lua_invoke);
