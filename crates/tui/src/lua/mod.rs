@@ -9,7 +9,7 @@
 //!   them in per-category registries that the app polls on the tick.
 //! - **D3 autocmd dispatch** — `AutocmdRegistry` + `emit_autocmd` run
 //!   handlers synchronously; errors are logged and the next handler
-//!   runs (handler-dead tracking defers to D6).
+//!   runs.
 //! - **D4 user-command + keymap registration** — registration stores
 //!   `LuaRef` handles keyed by `(mode, chord)`; mode `"n"` matches
 //!   Normal, `"i"` Insert, `"v"` Visual, `""` matches any mode.
@@ -276,7 +276,6 @@ impl AutocmdEvent {
 /// across GC cycles and can be invoked from Rust handlers.
 pub(crate) struct LuaHandle {
     key: mlua::RegistryKey,
-    dead: bool,
 }
 
 pub use crate::app::ops::{AppOp, DomainOp, OpsHandle, UiOp};
@@ -624,9 +623,6 @@ impl LuaRuntime {
             let Some(handle) = map.get(name) else {
                 return false;
             };
-            if handle.dead {
-                return false;
-            }
             let Ok(f) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
                 return false;
             };
@@ -663,9 +659,6 @@ impl LuaRuntime {
             let Some(handle) = handle else {
                 return false;
             };
-            if handle.dead {
-                return false;
-            }
             let Ok(f) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
                 return false;
             };
@@ -721,7 +714,6 @@ impl LuaRuntime {
             return Vec::new();
         };
         list.iter()
-            .filter(|h| !h.dead)
             .filter_map(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok())
             .collect()
     }
@@ -766,9 +758,6 @@ impl LuaRuntime {
     pub fn tick_statusline(&self) -> Option<Vec<crate::render::StatusItem>> {
         let handle = self.shared.statusline.lock().ok()?;
         let handle = handle.as_ref()?;
-        if handle.dead {
-            return None;
-        }
         let func = self
             .lua
             .registry_value::<mlua::Function>(&handle.key)

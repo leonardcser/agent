@@ -24,10 +24,10 @@
 
 local M = {}
 
--- Build the legacy-shape ctx table (`{selected_index, inputs, close,
--- win}`) from a raw callback ctx (`{win, panels, …}`). `opts` is the
--- original `dialog.open` opts so we can walk panel metadata; `win_id`
--- is captured in the closing function.
+-- Build the keymap-callback ctx table (`{selected_index, inputs,
+-- close, win}`) from a raw callback ctx (`{win, panels, …}`). `opts`
+-- is the original `dialog.open` opts so we can walk panel metadata;
+-- `win_id` is captured in the closing function.
 local function build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels)
   local ctx = { win = raw_ctx.win }
   if option_panel_idx then

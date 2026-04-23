@@ -1098,7 +1098,7 @@ impl App {
 
         // ── Compute layout ──
         let natural_prompt_height =
-            self.measure_prompt_height_pub(&self.input, width, queued, prediction, false);
+            self.measure_prompt_height(&self.input, width, queued, prediction);
         self.layout = render::layout::LayoutState::compute(&render::layout::LayoutInput {
             term_width: term_w,
             term_height: term_h,
@@ -2853,7 +2853,7 @@ impl App {
     }
 
     /// Lookup the currently-painted viewport for a pane.
-    fn viewport_for(&self, target: crate::app::AppFocus) -> Option<render::region::Viewport> {
+    fn viewport_for(&self, target: crate::app::AppFocus) -> Option<ui::WindowViewport> {
         match target {
             crate::app::AppFocus::Content => self.transcript_viewport,
             crate::app::AppFocus::Prompt => self.prompt_viewport,

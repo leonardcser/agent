@@ -19,7 +19,7 @@ pub(crate) struct TranscriptData {
     pub clamped_scroll: u16,
     pub total_rows: u16,
     pub scrollbar_col: u16,
-    pub viewport: crate::render::region::Viewport,
+    pub viewport: ui::WindowViewport,
 }
 
 pub(crate) struct TranscriptCursor {
@@ -194,17 +194,6 @@ impl App {
             output,
             engine_elapsed,
         );
-    }
-
-    pub(crate) fn measure_prompt_height_pub(
-        &self,
-        state: &crate::input::PromptState,
-        width: usize,
-        queued: &[String],
-        prediction: Option<&str>,
-        _has_notification: bool,
-    ) -> u16 {
-        self.measure_prompt_height(state, width, queued, prediction)
     }
 
     pub fn has_transcript_content(&mut self, show_thinking: bool) -> bool {
@@ -624,7 +613,7 @@ impl App {
         let end = (start + viewport_rows as usize).min(buf.line_count());
         self.last_viewport_text = buf.get_lines(start, end).to_vec();
 
-        let viewport = crate::render::region::Viewport::new(
+        let viewport = ui::WindowViewport::new(
             ui::Rect::new(0, 0, tw as u16, viewport_rows),
             tw as u16,
             total_rows,
@@ -648,7 +637,7 @@ impl App {
         history_cursor_line: u16,
         history_cursor_col: u16,
         transcript_owns_cursor: bool,
-        viewport: Option<&crate::render::region::Viewport>,
+        viewport: Option<&ui::WindowViewport>,
     ) -> TranscriptCursor {
         let gutters = crate::window::TRANSCRIPT_GUTTERS;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
@@ -714,7 +703,7 @@ impl App {
         }
     }
 
-    fn measure_prompt_height(
+    pub(crate) fn measure_prompt_height(
         &self,
         state: &crate::input::PromptState,
         width: usize,

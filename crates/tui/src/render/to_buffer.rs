@@ -1,14 +1,8 @@
 //! Projection: turn `DisplayBlock` output (produced by `SpanCollector`,
 //! the in-memory `LayoutSink`) into a `ui::Buffer` so content rendered
-//! by legacy renderers (`print_inline_diff`, `print_syntax_file`,
-//! `render_markdown_inner`, etc.) can be displayed through the normal
-//! buffer → view → grid path and inherit scrollbar, selection, and
-//! vim motions.
-//!
-//! Transcript projection uses these helpers directly; Confirm preview
-//! migration will add a `render_into_buffer(buf, width, theme, fill)`
-//! convenience that wraps `SpanCollector::new`, `finish`, and this
-//! projection in one call.
+//! by `print_inline_diff`, `print_syntax_file`, `render_markdown_inner`,
+//! etc. flows through the normal buffer → view → grid path and
+//! inherits scrollbar, selection, and vim motions.
 
 use super::display::{DisplayLine, SpanStyle as DisplaySpanStyle};
 use super::layout_out::SpanCollector;
@@ -18,10 +12,10 @@ use ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
 
 /// Run any `LayoutSink`-using renderer (inline diff, syntax
 /// highlighter, markdown, etc.) against a fresh `SpanCollector`,
-/// project the captured `DisplayBlock` into `buf`. Used by Confirm
-/// preview migration: existing renderers write to `&mut SpanCollector`
-/// unchanged; their styled output lands as `SpanStyle` highlights on
-/// `buf`, gaining scrollbar / selection / vim motions for free.
+/// project the captured `DisplayBlock` into `buf`. Renderers write
+/// into `&mut SpanCollector`; their styled output lands as
+/// `SpanStyle` highlights on `buf`, gaining scrollbar / selection /
+/// vim motions for free.
 pub(crate) fn render_into_buffer(
     buf: &mut Buffer,
     width: u16,

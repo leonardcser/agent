@@ -9,7 +9,6 @@ pub(crate) mod layout;
 pub(crate) mod layout_out;
 mod paint;
 pub(crate) mod prompt_data;
-pub(crate) mod region;
 mod scrollbar;
 pub(crate) mod selection;
 pub(crate) mod status;
@@ -22,9 +21,9 @@ pub(crate) mod window_view;
 pub mod working;
 
 pub(crate) use layout::HitRegion;
-pub(crate) use region::ViewportHit;
 pub use status::StatusItem;
 pub use transcript::{SnapshotCell, TranscriptSnapshot};
+pub(crate) use ui::ViewportHit;
 pub use viewport::ViewportGeom;
 
 pub use history::{

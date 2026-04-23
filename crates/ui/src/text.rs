@@ -6,8 +6,8 @@
 /// word boundaries. Words longer than `width` are broken
 /// character-by-character. Width is measured in terminal columns
 /// (wide chars like CJK count as 2). Used by widgets (OptionList,
-/// TabBar, custom dialog widgets) and by legacy renderers that
-/// pre-wrap content before emitting into `SpanCollector`.
+/// TabBar, custom dialog widgets) and by renderers that pre-wrap
+/// content before emitting into `SpanCollector`.
 pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
     if width == 0 {

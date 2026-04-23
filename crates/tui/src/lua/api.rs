@@ -88,7 +88,7 @@ impl LuaRuntime {
                             .and_then(|t| t.get::<Option<String>>("desc").ok().flatten());
                         let key = lua.create_registry_value(handler)?;
                         if let Ok(mut map) = s.commands.lock() {
-                            map.insert(name.clone(), LuaHandle { key, dead: false });
+                            map.insert(name.clone(), LuaHandle { key });
                         }
                         if let Ok(mut snap) = lua_commands_snapshot().lock() {
                             snap.insert(name, desc);
@@ -338,7 +338,7 @@ impl LuaRuntime {
                     if let Some(func) = on_response {
                         let key = lua.create_registry_value(func)?;
                         if let Ok(mut cbs) = s.callbacks.lock() {
-                            cbs.insert(id, LuaHandle { key, dead: false });
+                            cbs.insert(id, LuaHandle { key });
                         }
                     }
 
@@ -890,13 +890,13 @@ impl LuaRuntime {
 
                     if let Some(key) = on_select_handle {
                         if let Ok(mut cbs) = s.callbacks.lock() {
-                            cbs.insert(buf_id, LuaHandle { key, dead: false });
+                            cbs.insert(buf_id, LuaHandle { key });
                         }
                     }
                     if let Some(key) = on_dismiss_handle {
                         let dismiss_id = buf_id | (1 << 63);
                         if let Ok(mut cbs) = s.callbacks.lock() {
-                            cbs.insert(dismiss_id, LuaHandle { key, dead: false });
+                            cbs.insert(dismiss_id, LuaHandle { key });
                         }
                     }
 
@@ -953,13 +953,7 @@ impl LuaRuntime {
                         let registry_key = lua.create_registry_value(func)?;
                         let id = s.next_id.fetch_add(1, Ordering::Relaxed);
                         if let Ok(mut cbs) = s.callbacks.lock() {
-                            cbs.insert(
-                                id,
-                                LuaHandle {
-                                    key: registry_key,
-                                    dead: false,
-                                },
-                            );
+                            cbs.insert(id, LuaHandle { key: registry_key });
                         }
                         if let Ok(mut o) = s.ops.lock() {
                             o.push(UiOp::WinBindLuaKeymap {
@@ -987,13 +981,7 @@ impl LuaRuntime {
                         let registry_key = lua.create_registry_value(func)?;
                         let id = s.next_id.fetch_add(1, Ordering::Relaxed);
                         if let Ok(mut cbs) = s.callbacks.lock() {
-                            cbs.insert(
-                                id,
-                                LuaHandle {
-                                    key: registry_key,
-                                    dead: false,
-                                },
-                            );
+                            cbs.insert(id, LuaHandle { key: registry_key });
                         }
                         if let Ok(mut o) = s.ops.lock() {
                             o.push(UiOp::WinBindLuaEvent {
@@ -1093,7 +1081,7 @@ impl LuaRuntime {
             lua.set_named_registry_value(&format!("__pt_meta_{name}"), meta)?;
 
             if let Ok(mut map) = s.plugin_tools.lock() {
-                map.insert(name, LuaHandle { key, dead: false });
+                map.insert(name, LuaHandle { key });
             }
             Ok(())
         })?;
@@ -1224,7 +1212,7 @@ impl LuaRuntime {
                     move |lua, (mode, chord, handler): (String, String, mlua::Function)| {
                         let key = lua.create_registry_value(handler)?;
                         if let Ok(mut map) = s.keymaps.lock() {
-                            map.insert((mode, chord), LuaHandle { key, dead: false });
+                            map.insert((mode, chord), LuaHandle { key });
                         }
                         Ok(())
                     },
@@ -1242,9 +1230,7 @@ impl LuaRuntime {
                     };
                     let key = lua.create_registry_value(handler)?;
                     if let Ok(mut map) = s.autocmds.lock() {
-                        map.entry(kind)
-                            .or_default()
-                            .push(LuaHandle { key, dead: false });
+                        map.entry(kind).or_default().push(LuaHandle { key });
                     }
                     Ok(())
                 })?,
@@ -1260,7 +1246,7 @@ impl LuaRuntime {
                     if let Ok(mut q) = s.timers.lock() {
                         q.push((
                             Instant::now() + Duration::from_millis(ms),
-                            LuaHandle { key, dead: false },
+                            LuaHandle { key },
                         ));
                     }
                     Ok(())
@@ -1275,7 +1261,7 @@ impl LuaRuntime {
                 lua.create_function(move |lua, handler: mlua::Function| {
                     let key = lua.create_registry_value(handler)?;
                     if let Ok(mut slot) = s.statusline.lock() {
-                        *slot = Some(LuaHandle { key, dead: false });
+                        *slot = Some(LuaHandle { key });
                     }
                     Ok(())
                 })?,

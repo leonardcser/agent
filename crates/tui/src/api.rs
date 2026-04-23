@@ -112,7 +112,7 @@ pub mod cmd {
 
     /// Run a command line. Accepts `/name args...` or `:name args...`
     /// or a bare `name`. Parses the name, looks it up in the registry,
-    /// falls back to the legacy match for commands not yet migrated.
+    /// and dispatches.
     ///
     /// The same code path runs whether the user typed the command,
     /// pressed a keybind that resolved to `Action::Cmd(name)`, or a

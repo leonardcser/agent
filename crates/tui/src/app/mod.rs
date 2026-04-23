@@ -157,11 +157,11 @@ pub struct App {
     /// Buffer viewport for the prompt input text area, recorded after
     /// paint. Used by scrollbar click/drag and input-focus mouse
     /// routing.
-    pub(crate) prompt_viewport: Option<render::region::Viewport>,
+    pub(crate) prompt_viewport: Option<ui::WindowViewport>,
     /// Buffer viewport for the transcript window, recorded after each
     /// render. Used by mouse hit-testing, transcript cursor positioning,
     /// and focus-mouse routing.
-    pub(crate) transcript_viewport: Option<render::region::Viewport>,
+    pub(crate) transcript_viewport: Option<ui::WindowViewport>,
     pub settings: state::ResolvedSettings,
     pub multi_agent: bool,
     /// Human-readable name for this agent.

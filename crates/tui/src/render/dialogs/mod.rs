@@ -1,8 +1,5 @@
 //! Dialog data types shared between the render layer and the
-//! compositor-driven dialogs in `app/dialogs/`. The legacy
-//! `trait Dialog`, `DialogResult`, `TextArea`, `ConfirmDialog`, and
-//! `QuestionDialog` were all removed with the panel-framework
-//! migration (Step 9.5b items 9–12).
+//! compositor-driven dialogs in `app/dialogs/`.
 
 pub(crate) mod confirm;
 

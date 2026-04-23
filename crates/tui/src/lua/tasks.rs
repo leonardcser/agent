@@ -77,7 +77,7 @@ impl LuaRuntime {
         let key = self.lua.create_registry_value(func)?;
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut cbs) = self.shared.callbacks.lock() {
-            cbs.insert(id, LuaHandle { key, dead: false });
+            cbs.insert(id, LuaHandle { key });
         }
         Ok(id)
     }
@@ -101,7 +101,6 @@ impl LuaRuntime {
         let Some(func) = (match self.shared.callbacks.lock() {
             Ok(cbs) => cbs
                 .get(&handle.0)
-                .filter(|h| !h.dead)
                 .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok()),
             Err(_) => None,
         }) else {

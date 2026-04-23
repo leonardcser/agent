@@ -1,10 +1,7 @@
-//! Confirm-dialog preview rendering. The legacy terminal-drawing
-//! `ConfirmDialog` struct was removed with the panel-framework
-//! migration (Step 9.5b item 11). The remaining `ConfirmPreview`
-//! owns the tool-specific preview payload and renders into a
-//! `ui::Buffer` via the `SpanCollector` projection pipeline. The new
-//! `app/dialogs/confirm.rs` consumes both `from_tool` and
-//! `render_into_buffer`.
+//! Confirm-dialog preview rendering. `ConfirmPreview` owns the
+//! tool-specific preview payload and renders into a `ui::Buffer` via
+//! the `SpanCollector` projection pipeline. `app/dialogs/confirm.rs`
+//! consumes `from_tool` + `render_into_buffer`.
 
 use crate::render::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
 use crate::render::layout_out::LayoutSink;

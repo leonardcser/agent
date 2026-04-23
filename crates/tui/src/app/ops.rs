@@ -90,9 +90,8 @@ pub enum UiOp {
     Notify(String),
     /// Show a transient error toast (accent-styled).
     NotifyError(String),
-    /// Close a float (universal). Runs the same cleanup path as the
-    /// legacy `close_float`: fires any Lua dismiss callback, removes
-    /// the window from the compositor, deletes the primary buf.
+    /// Close a float. Fires any Lua dismiss callback, removes the
+    /// window from the compositor, deletes the primary buf.
     CloseFloat(ui::WinId),
     /// Set ghost text (predicted input) on the prompt.
     SetGhostText(String),
@@ -212,8 +211,7 @@ pub enum DomainOp {
     /// SIGTERM to the whole subtree, deregisters, and cleans up its
     /// socket. No-op when the PID isn't in the registry anymore.
     KillAgent(u32),
-    /// Resolve an open Confirm dialog with the user's choice. Drives
-    /// the same logic as the legacy `App::resolve_confirm`. Sets
+    /// Resolve an open Confirm dialog with the user's choice. Sets
     /// `pending_agent_cancel` internally when the resolution asks
     /// the turn to cancel.
     ResolveConfirm {
