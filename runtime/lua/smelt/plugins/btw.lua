@@ -10,7 +10,7 @@ local SYSTEM = "You are a helpful assistant. The user is asking a quick side que
   .. "You have the conversation history for context."
 
 smelt.api.cmd.register("btw", function(args)
-  local question = args.args or ""
+  local question = args or ""
   if question == "" then
     smelt.api.ui.notify_error("usage: /btw <question>")
     return

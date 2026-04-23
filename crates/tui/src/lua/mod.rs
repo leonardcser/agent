@@ -925,6 +925,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.dialog",
     "smelt.picker",
     "smelt.plugins.ask_user_question",
+    "smelt.plugins.btw",
     "smelt.plugins.export",
     "smelt.plugins.rewind",
     "smelt.plugins.ps",
