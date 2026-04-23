@@ -23,6 +23,7 @@
 mod api;
 mod task;
 mod tasks;
+pub mod ui_ops;
 
 pub use task::{LuaTaskRuntime, TaskCompletion, TaskDriveOutput};
 

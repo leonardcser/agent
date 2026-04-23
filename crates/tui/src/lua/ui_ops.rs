@@ -1,28 +1,29 @@
-//! Dialog opener for `smelt.api.dialog.open` yields. Parses the
-//! plugin-supplied `opts` table into a `PanelSpec` list (the part Lua
-//! can't own without userdata constructors), creates the dialog float,
-//! and hands the new `WinId` back to the parked task. All callback
-//! wiring — Submit / Dismiss / custom keymaps / `on_change` /
-//! `on_tick` — lives in `runtime/lua/smelt/dialog.lua`; the Lua side
-//! uses `ctx.panels` pull-reads to build the final result table and
-//! resumes the parked task via `smelt.api.task.resume`.
-//!
-//! Supported panel kinds (from `opts.panels[]`):
-//! - `{ kind = "content",  text = "..." }`      plain lines
-//! - `{ kind = "markdown", text = "..." }`      rendered via `render_markdown_inner`
-//! - `{ kind = "options",  items = [{label, shortcut?}] }`
-//! - `{ kind = "input",    placeholder? = "..." }`
-//! - `{ kind = "list",     buf = <id> }`
+//! Lua → ui translators for `smelt.api.dialog.open` and
+//! `smelt.api.picker.open`. These parse the plugin-supplied `opts`
+//! tables into the typed `PanelSpec` / `PickerItem` shapes that the
+//! `ui` crate consumes, create the compositor float, and hand the new
+//! `WinId` back to the parked Lua task. Everything else — keymap
+//! callbacks, submit / dismiss routing, selection tracking —
+//! lives in `runtime/lua/smelt/{dialog,picker}.lua`.
 
-use super::super::App;
+use crate::app::App;
 use ui::buffer::BufCreateOpts;
 use ui::text_input::TextInput;
-use ui::{BufId, FitMax, OptionItem, OptionList, PanelHeight, PanelSpec, WinId};
+use ui::{
+    BufId, Constraint, FitMax, FloatConfig, OptionItem, OptionList, PanelHeight, PanelSpec,
+    Placement, WinId,
+};
 
-/// Open the dialog described by the Lua `opts_key` table. On success,
-/// returns the new `WinId` so the caller can resolve the parked task
-/// with it. Returns `Err` when the table is malformed.
-pub fn open(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String> {
+// ── Dialog ───────────────────────────────────────────────────────────
+//
+// Supported panel kinds from `opts.panels[]`:
+// - `{ kind = "content",  text = "..." | buf = <id> }`
+// - `{ kind = "markdown", text = "..." }`  (rendered via `render_markdown_inner`)
+// - `{ kind = "options",  items = [{label, shortcut?}] }`
+// - `{ kind = "input",    placeholder? = "..." }`
+// - `{ kind = "list",     buf = <id> }`
+
+pub fn open_dialog(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String> {
     let opts: mlua::Table = app
         .lua
         .lua()
@@ -37,7 +38,7 @@ pub fn open(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String>
     for pair in panels_tbl.sequence_values::<mlua::Table>() {
         let panel = pair.map_err(|e| format!("dialog panel entry: {e}"))?;
         let kind: String = panel.get("kind").map_err(|e| format!("panel.kind: {e}"))?;
-        let height = parse_height(&panel)?;
+        let height = parse_panel_height(&panel)?;
         let initial_focus: bool = panel.get("focus").unwrap_or(false);
         match kind.as_str() {
             "content" => {
@@ -119,9 +120,9 @@ pub fn open(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String>
         return Err("dialog must have at least one panel".into());
     }
 
-    // Collect footer hints from top-level `opts.keymaps[].hint`. The
-    // Lua side handles the actual keymap registration; Rust just needs
-    // the hint strings to build the footer.
+    // Collect footer hints from top-level `opts.keymaps[].hint`. The Lua
+    // side handles the actual keymap registration; Rust only needs the
+    // hint strings to build the footer.
     let mut extra_hints: Vec<String> = Vec::new();
     if let Ok(km_tbl) = opts.get::<mlua::Table>("keymaps") {
         for entry_res in km_tbl.sequence_values::<mlua::Table>() {
@@ -142,28 +143,66 @@ pub fn open(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String>
     let dialog_config =
         app.builtin_dialog_config(Some(crate::keymap::hints::join(&hint_parts)), vec![]);
 
-    let win_id = app
-        .ui
+    app.ui
         .dialog_open(
-            ui::FloatConfig {
+            FloatConfig {
                 title,
                 border: ui::Border::None,
-                placement: ui::Placement::fit_content(FitMax::HalfScreen),
+                placement: Placement::fit_content(FitMax::HalfScreen),
                 blocks_agent: true,
                 ..Default::default()
             },
             dialog_config,
             panel_specs,
         )
-        .ok_or_else(|| "failed to open dialog window".to_string())?;
-
-    Ok(win_id)
+        .ok_or_else(|| "failed to open dialog window".to_string())
 }
 
-/// Parse the per-panel `height` option. `"fit"` → Fit (auto-shrink),
-/// `"fill"` → Fill (stretch + scroll), an integer → Fixed rows. Absent
-/// → Ok(None) so the caller can pick a kind-appropriate default.
-fn parse_height(panel: &mlua::Table) -> Result<Option<PanelHeight>, String> {
+// ── Picker ───────────────────────────────────────────────────────────
+
+pub fn open_picker(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String> {
+    let lua = app.lua.lua();
+    let opts: mlua::Table = lua
+        .registry_value(&opts_key)
+        .map_err(|e| format!("picker opts: {e}"))?;
+
+    let items_tbl: mlua::Table = opts
+        .get("items")
+        .map_err(|e| format!("picker items: {e}"))?;
+    let mut items: Vec<ui::picker::PickerItem> = Vec::new();
+    for pair in items_tbl.sequence_values::<mlua::Value>() {
+        let v = pair.map_err(|e| format!("picker item: {e}"))?;
+        items.push(parse_picker_item(&v)?);
+    }
+    if items.is_empty() {
+        return Err("picker.open: items must be non-empty".into());
+    }
+
+    let placement = parse_picker_placement(&opts);
+    let title: Option<String> = opts.get("title").ok();
+
+    let float_config = FloatConfig {
+        title,
+        border: ui::Border::Rounded,
+        placement,
+        focusable: true,
+        blocks_agent: false,
+        ..Default::default()
+    };
+
+    // Lua picker floats default to non-reversed (top-down); the plugin
+    // controls placement, and they don't necessarily dock above a prompt.
+    app.ui
+        .picker_open(float_config, items, 0, Default::default(), false)
+        .ok_or_else(|| "picker.open: failed to create float".to_string())
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/// Parse a per-panel `height` option. `"fit"` → Fit (auto-shrink),
+/// `"fill"` → Fill (stretch + scroll), integer → Fixed rows. Absent →
+/// Ok(None) so the caller can pick a kind-appropriate default.
+fn parse_panel_height(panel: &mlua::Table) -> Result<Option<PanelHeight>, String> {
     match panel.get::<mlua::Value>("height").ok() {
         None | Some(mlua::Value::Nil) => Ok(None),
         Some(mlua::Value::String(s)) => match s.to_str().map_err(|e| e.to_string())?.as_ref() {
@@ -175,6 +214,46 @@ fn parse_height(panel: &mlua::Table) -> Result<Option<PanelHeight>, String> {
         Some(other) => Err(format!(
             "panel.height: expected 'fit' | 'fill' | int, got {other:?}"
         )),
+    }
+}
+
+fn parse_picker_item(v: &mlua::Value) -> Result<ui::picker::PickerItem, String> {
+    match v {
+        mlua::Value::String(s) => Ok(ui::picker::PickerItem::new(s.to_string_lossy().to_string())),
+        mlua::Value::Table(t) => {
+            let label: String = t
+                .get("label")
+                .map_err(|e| format!("picker item.label: {e}"))?;
+            let mut item = ui::picker::PickerItem::new(label);
+            if let Ok(desc) = t.get::<String>("description") {
+                item = item.with_description(desc);
+            }
+            if let Ok(prefix) = t.get::<String>("prefix") {
+                item = item.with_prefix(prefix);
+            }
+            Ok(item)
+        }
+        other => Err(format!(
+            "picker item: expected string or table, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn parse_picker_placement(opts: &mlua::Table) -> Placement {
+    let mode: String = opts
+        .get("placement")
+        .ok()
+        .unwrap_or_else(|| "center".to_string());
+    match mode.as_str() {
+        "bottom" => Placement::dock_bottom_full_width(Constraint::Pct(40)),
+        "cursor" => Placement::AnchorCursor {
+            row_offset: 1,
+            col_offset: 0,
+            width: Constraint::Fixed(48),
+            height: Constraint::Pct(40),
+        },
+        _ => Placement::centered(Constraint::Pct(60), Constraint::Pct(50)),
     }
 }
 

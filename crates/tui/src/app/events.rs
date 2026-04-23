@@ -1762,7 +1762,7 @@ impl App {
 
     /// Build the common `DialogConfig` used by all built-in dialogs
     /// (accent top rule, bar background, scrollbar colors, hints row).
-    pub(super) fn builtin_dialog_config(
+    pub(crate) fn builtin_dialog_config(
         &self,
         hint_text: Option<String>,
         dismiss_keys: Vec<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
@@ -2039,7 +2039,7 @@ impl App {
                 }
             }
             UiOp::OpenLuaDialog { task_id, opts } => {
-                let value = match super::dialogs::lua_dialog::open(self, opts) {
+                let value = match crate::lua::ui_ops::open_dialog(self, opts) {
                     Ok(win_id) => self
                         .lua
                         .lua()
@@ -2057,7 +2057,7 @@ impl App {
                 self.lua.resolve_external(task_id, value);
             }
             UiOp::OpenLuaPicker { task_id, opts } => {
-                let value = match super::dialogs::lua_picker::open(self, opts) {
+                let value = match crate::lua::ui_ops::open_picker(self, opts) {
                     Ok(win_id) => self
                         .lua
                         .lua()
