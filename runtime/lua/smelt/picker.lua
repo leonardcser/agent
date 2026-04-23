@@ -7,16 +7,17 @@
 -- `selected` counter and pushes it to Rust through
 -- `smelt.api.picker.set_selected` each time the user moves.
 --
--- Protocol:
---   1. Yield `{__yield = "picker", opts = opts}`; Rust reducer opens
---      the focusable float, resumes with `{win_id = <u64>}`.
---   2. Alloc an external task id.
---   3. Register nav keymaps (Up, Down, Ctrl-J/K/N/P) that update the
---      local `selected` counter and mirror it to the Rust Picker via
---      `set_selected`.
---   4. Register Enter → resume with `{index, item}`; Esc → resume with
+-- Protocol (everything rides on `TaskWait::External`):
+--   1. Alloc an external task id for the open ack, call
+--      `smelt.api.picker._request_open(open_id, opts)` (queues a
+--      `UiOp::OpenLuaPicker`), yield External — reducer opens the
+--      focusable float and resolves with `{win_id = <u64>}`.
+--   2. Alloc a second id for the final result. Register nav keymaps
+--      (Up, Down, Ctrl-J/K/N/P) that update the local `selected`
+--      counter and mirror it to Rust via `set_selected`.
+--   3. Register Enter → resume with `{index, item}`; Esc → resume with
 --      nil.
---   5. Yield `{__yield = "external", id = task_id}` and return the
+--   4. Yield `{__yield = "external", id = result_id}` and return the
 --      resumed value.
 
 local M = {}
@@ -37,8 +38,11 @@ function smelt.api.picker.open(opts)
     error("smelt.api.picker.open: opts.items must be non-empty", 2)
   end
 
-  -- Step 1: open the focusable float in Rust, get the WinId back.
-  local opened = coroutine.yield({__yield = "picker", opts = opts})
+  -- Step 1: queue a picker-open op and park the task. The reducer
+  -- opens the focusable float and resolves us with `{win_id = <u64>}`.
+  local open_id = smelt.api.task.alloc()
+  smelt.api.picker._request_open(open_id, opts)
+  local opened = coroutine.yield({__yield = "external", id = open_id})
   if type(opened) ~= "table" or type(opened.win_id) ~= "number" then
     return nil
   end

@@ -66,7 +66,8 @@ impl WindowView {
     /// on the next `sync_from_buffer`, so callers reapply each frame.
     /// Used for selection/search overlays.
     pub fn add_highlight(&mut self, line: usize, col_start: u16, col_end: u16, style: Style) {
-        self.buffer_view.add_highlight(line, col_start, col_end, style);
+        self.buffer_view
+            .add_highlight(line, col_start, col_end, style);
     }
 
     pub fn set_rows(&mut self, rows: Vec<WindowRow>) {

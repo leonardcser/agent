@@ -3,13 +3,14 @@
 //! A `LuaTask` wraps an `mlua::Thread`. The task runs until it yields a
 //! discriminated table (`{ __yield = "...", ... }`); the runtime parks
 //! the task on a typed `TaskWait`, and the app-loop driver resumes it
-//! when the wait is satisfied (timer elapsed, dialog resolved, …).
+//! when the wait is satisfied (timer elapsed, external resolver fires,
+//! …).
 //!
-//! This replaces three ad-hoc patterns:
-//! - `DomainOp::ResolveToolResult` + `callbacks: HashMap<u64, …>` +
-//!   `smelt.api.tools.resolve(...)`.
-//! - `smelt.defer(ms, fn)` callback timers.
-//! - Declarative `confirm = {...}` specs bolted onto tool registration.
+//! Only two wait kinds ship: `Sleep` (timer) and `External` (anything
+//! the Lua runtime files own themselves — dialog opens, picker opens,
+//! widget events, …). Dialog/picker open requests ride on `External`
+//! too, via `UiOp::OpenLuaDialog` / `OpenLuaPicker` and
+//! `resolve_external`.
 //!
 //! Lua side, every suspending API is `coroutine.yield` under the hood,
 //! so plugin code reads as synchronous:
@@ -17,13 +18,10 @@
 //! ```lua
 //! smelt.task(function()
 //!   smelt.api.sleep(200)
-//!   local r = smelt.api.dialog.open({...})  -- step (iv)
+//!   local r = smelt.api.dialog.open({...})
 //!   return r.action
 //! end)
 //! ```
-//!
-//! Step (i) (this module) supports only `Sleep`. `OpenDialog` and
-//! `ToolResult` completion land in steps (iii) / (iv).
 
 use mlua::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,19 +33,15 @@ enum TaskWait {
     /// Resume on next drive tick with this value. New tasks start
     /// with `Ready(Nil)` (fire-and-forget) or `Ready(args_table)`
     /// (initial args for tool execute). External resolvers also set
-    /// this (`resolve_dialog` stores the answer here).
+    /// this (`resolve_external` stores the answer here).
     Ready(LuaValue),
     /// Resume with `nil` once `Instant` has passed.
     Sleep(Instant),
-    /// Waiting for `resolve_dialog(dialog_id, …)` to be called.
-    Dialog(u64),
-    /// Waiting for `resolve_picker(picker_id, …)` to be called.
-    Picker(u64),
-    /// Waiting for a Lua runtime file to call `smelt.api.task.resume
-    /// (id, value)`. Used by `runtime/lua/smelt/*.lua` helpers that
-    /// own the coroutine dance themselves — no Rust-side TaskDriveOutput
-    /// is emitted, because the Lua runtime file opens the float + binds
-    /// keymaps + closes the float on its own.
+    /// Waiting for `resolve_external(id, …)` — either from a Lua
+    /// runtime file calling `smelt.api.task.resume(id, value)`, or
+    /// from a reducer-side op (e.g. `UiOp::OpenLuaDialog`) that
+    /// resolves after doing its work. `runtime/lua/smelt/*.lua`
+    /// helpers own the coroutine dance themselves.
     External(u64),
 }
 
@@ -69,26 +63,9 @@ struct LuaTask {
 }
 
 /// One output per drive tick. The app loop consumes these and maps
-/// them onto Rust-side side effects (open a dialog, deliver a tool
-/// result, notify an error).
+/// them onto Rust-side side effects (deliver a tool result, notify an
+/// error).
 pub enum TaskDriveOutput {
-    /// Task yielded `{ __yield = "dialog", opts = {...} }`. The app
-    /// builds the dialog, pushes it onto the compositor, and later
-    /// calls `LuaTaskRuntime::resolve_dialog(dialog_id, result)`.
-    OpenDialog {
-        task_id: u64,
-        dialog_id: u64,
-        opts: mlua::RegistryKey,
-    },
-    /// Task yielded `{ __yield = "picker", opts = {...} }`. The app
-    /// opens a focusable picker float, registers Up/Down/Enter/Escape
-    /// keymaps, and on resolution calls
-    /// `LuaTaskRuntime::resolve_picker(picker_id, result)`.
-    OpenPicker {
-        task_id: u64,
-        picker_id: u64,
-        opts: mlua::RegistryKey,
-    },
     /// Tool-execute task returned.
     ToolComplete {
         request_id: u64,
@@ -106,14 +83,6 @@ pub enum TaskDriveOutput {
 pub struct LuaTaskRuntime {
     tasks: Vec<LuaTask>,
     next_task_id: AtomicU64,
-    next_dialog_id: AtomicU64,
-    next_picker_id: AtomicU64,
-    /// Outputs that an in-line `drive` produced but whose caller
-    /// doesn't route them itself — e.g. `execute_plugin_tool` runs
-    /// one drive inline and consumes only its own `ToolComplete`;
-    /// any `OpenDialog` or stray outputs get parked here for the
-    /// next app-level `drive_tasks` to handle.
-    deferred: Vec<TaskDriveOutput>,
 }
 
 impl LuaTaskRuntime {
@@ -121,16 +90,7 @@ impl LuaTaskRuntime {
         Self {
             tasks: Vec::new(),
             next_task_id: AtomicU64::new(1),
-            next_dialog_id: AtomicU64::new(1),
-            next_picker_id: AtomicU64::new(1),
-            deferred: Vec::new(),
         }
-    }
-
-    /// Queue outputs produced by an inline drive whose caller didn't
-    /// consume them. Drained into the next `drive` return.
-    pub fn defer_output(&mut self, output: TaskDriveOutput) {
-        self.deferred.push(output);
     }
 
     /// Spawn a task from a Lua function. The task runs on the next
@@ -156,30 +116,6 @@ impl LuaTaskRuntime {
         Ok(id)
     }
 
-    /// Satisfy a `TaskWait::Dialog(id)` wait with the given result
-    /// value. Returns `true` if a matching task was found.
-    pub fn resolve_dialog(&mut self, dialog_id: u64, value: LuaValue) -> bool {
-        for task in &mut self.tasks {
-            if matches!(&task.wait, TaskWait::Dialog(id) if *id == dialog_id) {
-                task.wait = TaskWait::Ready(value);
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Satisfy a `TaskWait::Picker(id)` wait with the given result
-    /// value. Returns `true` if a matching task was found.
-    pub fn resolve_picker(&mut self, picker_id: u64, value: LuaValue) -> bool {
-        for task in &mut self.tasks {
-            if matches!(&task.wait, TaskWait::Picker(id) if *id == picker_id) {
-                task.wait = TaskWait::Ready(value);
-                return true;
-            }
-        }
-        false
-    }
-
     /// Satisfy a `TaskWait::External(id)` wait with the given result
     /// value. Returns `true` if a matching task was found.
     pub fn resolve_external(&mut self, external_id: u64, value: LuaValue) -> bool {
@@ -194,16 +130,15 @@ impl LuaTaskRuntime {
 
     /// Drive all ready tasks once. Each ready task is resumed; if it
     /// yields, it's parked on a new wait; if it returns, its
-    /// completion is reported. Any outputs deferred from a previous
-    /// inline drive are flushed first, in order.
+    /// completion is reported.
     pub fn drive(&mut self, lua: &Lua, now: Instant) -> Vec<TaskDriveOutput> {
-        let mut outputs = std::mem::take(&mut self.deferred);
+        let mut outputs = Vec::new();
         let mut i = 0;
         while i < self.tasks.len() {
             let ready = match &self.tasks[i].wait {
                 TaskWait::Ready(_) => true,
                 TaskWait::Sleep(deadline) => *deadline <= now,
-                TaskWait::Dialog(_) | TaskWait::Picker(_) | TaskWait::External(_) => false,
+                TaskWait::External(_) => false,
             };
             if !ready {
                 i += 1;
@@ -227,7 +162,7 @@ impl LuaTaskRuntime {
             TaskWait::Ready(v) => v,
             TaskWait::Sleep(_) => LuaValue::Nil,
             // unreachable per ready check above:
-            TaskWait::Dialog(_) | TaskWait::Picker(_) | TaskWait::External(_) => LuaValue::Nil,
+            TaskWait::External(_) => LuaValue::Nil,
         };
         let result: LuaResult<LuaValue> = task.thread.resume(resume_arg);
 
@@ -257,31 +192,10 @@ impl LuaTaskRuntime {
                         task.wait = TaskWait::Sleep(Instant::now() + d);
                         false
                     }
-                    Ok(Yield::OpenDialog(opts_key)) => {
-                        let did = self.next_dialog_id.fetch_add(1, Ordering::Relaxed);
-                        let task_id = task.id;
-                        task.wait = TaskWait::Dialog(did);
-                        outputs.push(TaskDriveOutput::OpenDialog {
-                            task_id,
-                            dialog_id: did,
-                            opts: opts_key,
-                        });
-                        false
-                    }
-                    Ok(Yield::OpenPicker(opts_key)) => {
-                        let pid = self.next_picker_id.fetch_add(1, Ordering::Relaxed);
-                        let task_id = task.id;
-                        task.wait = TaskWait::Picker(pid);
-                        outputs.push(TaskDriveOutput::OpenPicker {
-                            task_id,
-                            picker_id: pid,
-                            opts: opts_key,
-                        });
-                        false
-                    }
                     Ok(Yield::External(id)) => {
-                        // No Rust-side output — the Lua runtime file
-                        // owns the resume via `smelt.api.task.resume`.
+                        // No Rust-side output — resolution comes from a
+                        // Lua runtime file calling `smelt.api.task.resume`
+                        // or from a reducer-side op (dialog/picker open).
                         task.wait = TaskWait::External(id);
                         false
                     }
@@ -326,16 +240,15 @@ impl Default for LuaTaskRuntime {
 /// Decoded `coroutine.yield(...)` payload.
 enum Yield {
     Sleep(Duration),
-    OpenDialog(mlua::RegistryKey),
-    OpenPicker(mlua::RegistryKey),
     /// Park the task on an externally-resolved wait. The id must have
     /// been minted via `smelt.api.task.alloc` (lock-free counter on
     /// `LuaShared::next_external_id`) beforehand, so the Lua runtime
-    /// file can hand it to its keymaps before yielding.
+    /// file or Rust-side op can hand it to its resolver before
+    /// yielding.
     External(u64),
 }
 
-fn decode_yield(lua: &Lua, v: LuaValue) -> Result<Yield, String> {
+fn decode_yield(_lua: &Lua, v: LuaValue) -> Result<Yield, String> {
     let table = match v {
         LuaValue::Table(t) => t,
         other => {
@@ -349,20 +262,6 @@ fn decode_yield(lua: &Lua, v: LuaValue) -> Result<Yield, String> {
         "sleep" => {
             let ms: u64 = table.get("ms").map_err(|e| format!("sleep: {e}"))?;
             Ok(Yield::Sleep(Duration::from_millis(ms)))
-        }
-        "dialog" => {
-            let opts: mlua::Table = table.get("opts").map_err(|e| format!("dialog: {e}"))?;
-            let key = lua
-                .create_registry_value(opts)
-                .map_err(|e| format!("dialog opts registry: {e}"))?;
-            Ok(Yield::OpenDialog(key))
-        }
-        "picker" => {
-            let opts: mlua::Table = table.get("opts").map_err(|e| format!("picker: {e}"))?;
-            let key = lua
-                .create_registry_value(opts)
-                .map_err(|e| format!("picker opts registry: {e}"))?;
-            Ok(Yield::OpenPicker(key))
         }
         "external" => {
             let id: u64 = table.get("id").map_err(|e| format!("external: {e}"))?;

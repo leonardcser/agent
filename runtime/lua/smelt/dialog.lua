@@ -7,17 +7,19 @@
 -- keymaps, `on_select` / `on_change` / `on_tick`, submit/dismiss
 -- routing — lives here.
 --
--- Protocol:
---   1. Yield `{__yield = "dialog", opts = opts}`; Rust reducer calls
---      `app.ui.dialog_open(...)`, resumes the coroutine with
---      `{win_id = <u64>}`.
---   2. Alloc an external task id for the final result.
---   3. Register `smelt.api.win.on_event(win, "submit"|"dismiss", …)`
---      handlers that build the result table, close the float, and
---      resume via `smelt.api.task.resume(task_id, result)`.
---   4. Register any user-provided keymaps (`opts.keymaps`), the
+-- Protocol (everything rides on `TaskWait::External`; no bespoke
+-- dialog-yield variant):
+--   1. Alloc an external task id for the open ack, call
+--      `smelt.api.dialog._request_open(open_id, opts)` (queues a
+--      `UiOp::OpenLuaDialog`), yield External — reducer opens the
+--      float and resolves with `{win_id = <u64>}`.
+--   2. Alloc a second id for the final result. Register
+--      `smelt.api.win.on_event(win, "submit"|"dismiss", …)` handlers
+--      that build the result, close the float, and resume via
+--      `smelt.api.task.resume(result_id, result)`.
+--   3. Register any user-provided keymaps (`opts.keymaps`), the
 --      `on_tick` handler, and per-input `on_change` handlers.
---   5. Yield `{__yield = "external", id = task_id}` and return the
+--   4. Yield `{__yield = "external", id = result_id}` and return the
 --      resumed value.
 
 local M = {}
@@ -102,8 +104,11 @@ function smelt.api.dialog.open(opts)
     end
   end
 
-  -- Step 1: open the float + panels in Rust, get the WinId back.
-  local opened = coroutine.yield({__yield = "dialog", opts = opts})
+  -- Step 1: queue a dialog-open op and park the task. The reducer
+  -- opens the float + panels and resolves us with `{win_id = <u64>}`.
+  local open_id = smelt.api.task.alloc()
+  smelt.api.dialog._request_open(open_id, opts)
+  local opened = coroutine.yield({__yield = "external", id = open_id})
   if type(opened) ~= "table" or type(opened.win_id) ~= "number" then
     return { action = "dismiss", inputs = {} }
   end

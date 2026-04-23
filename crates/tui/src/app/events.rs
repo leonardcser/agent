@@ -1140,10 +1140,8 @@ impl App {
         );
         self.transcript_viewport = Some(transcript_viewport);
 
-        let transcript_selection = self.transcript_selection_highlights(
-            tdata.clamped_scroll,
-            viewport_rows,
-        );
+        let transcript_selection =
+            self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
 
         // Sync transcript WindowView from the projected buffer.
         if let Some(tv) = self
@@ -1858,18 +1856,18 @@ impl App {
         self.apply_ops(ops);
     }
 
-    /// Drive the `LuaTask` runtime and act on its outputs. Errors
-    /// are queued via `NotifyError` internally; only
-    /// `ToolComplete` (tool-as-task results) and `OpenDialog` (step
-    /// iv) need app-side routing.
+    /// Drive the `LuaTask` runtime and act on its outputs. Errors are
+    /// queued via `NotifyError` internally; the only remaining output
+    /// is `ToolComplete` (tool-as-task results). Dialog/picker opens
+    /// now ride on `UiOp::OpenLuaDialog` / `OpenLuaPicker` and are
+    /// resolved inside `apply_ui_op`.
     pub(super) fn drive_lua_tasks(&mut self) {
         self.apply_lua_ops();
         let outs = self.lua.drive_tasks();
         // Drain the ops pushed by the coroutine *before* it yielded —
-        // `ui::dialog_open` silently drops a dialog whose buffers
-        // aren't registered, so a task that calls `buf.create` +
-        // `buf.set_lines` right before `dialog.open` needs those ops
-        // applied now, not after the `for out in outs` loop.
+        // a task that calls `buf.create` + `buf.set_lines` right
+        // before `dialog.open` needs those ops applied now so the
+        // reducer sees the buffers when `OpenLuaDialog` fires.
         self.apply_lua_ops();
         for out in outs {
             match out {
@@ -1886,46 +1884,6 @@ impl App {
                         is_error,
                     });
                 }
-                crate::lua::TaskDriveOutput::OpenDialog {
-                    dialog_id, opts, ..
-                } => match super::dialogs::lua_dialog::open(self, opts) {
-                    Ok(win_id) => {
-                        let value = self
-                            .lua
-                            .lua()
-                            .create_table()
-                            .and_then(|t| {
-                                t.set("win_id", win_id.0)?;
-                                Ok(mlua::Value::Table(t))
-                            })
-                            .unwrap_or(mlua::Value::Nil);
-                        self.lua.resolve_dialog(dialog_id, value);
-                    }
-                    Err(e) => {
-                        self.notify_error(format!("dialog.open: {e}"));
-                        self.lua.resolve_dialog(dialog_id, mlua::Value::Nil);
-                    }
-                },
-                crate::lua::TaskDriveOutput::OpenPicker {
-                    picker_id, opts, ..
-                } => match super::dialogs::lua_picker::open(self, opts) {
-                    Ok(win_id) => {
-                        let value = self
-                            .lua
-                            .lua()
-                            .create_table()
-                            .and_then(|t| {
-                                t.set("win_id", win_id.0)?;
-                                Ok(mlua::Value::Table(t))
-                            })
-                            .unwrap_or(mlua::Value::Nil);
-                        self.lua.resolve_picker(picker_id, value);
-                    }
-                    Err(e) => {
-                        self.notify_error(format!("picker.open: {e}"));
-                        self.lua.resolve_picker(picker_id, mlua::Value::Nil);
-                    }
-                },
                 crate::lua::TaskDriveOutput::Error(msg) => {
                     self.notify_error(msg);
                 }
@@ -2079,6 +2037,42 @@ impl App {
                 if let Some(p) = self.ui.picker_mut(win) {
                     p.set_selected(index);
                 }
+            }
+            UiOp::OpenLuaDialog { task_id, opts } => {
+                let value = match super::dialogs::lua_dialog::open(self, opts) {
+                    Ok(win_id) => self
+                        .lua
+                        .lua()
+                        .create_table()
+                        .and_then(|t| {
+                            t.set("win_id", win_id.0)?;
+                            Ok(mlua::Value::Table(t))
+                        })
+                        .unwrap_or(mlua::Value::Nil),
+                    Err(e) => {
+                        self.notify_error(format!("dialog.open: {e}"));
+                        mlua::Value::Nil
+                    }
+                };
+                self.lua.resolve_external(task_id, value);
+            }
+            UiOp::OpenLuaPicker { task_id, opts } => {
+                let value = match super::dialogs::lua_picker::open(self, opts) {
+                    Ok(win_id) => self
+                        .lua
+                        .lua()
+                        .create_table()
+                        .and_then(|t| {
+                            t.set("win_id", win_id.0)?;
+                            Ok(mlua::Value::Table(t))
+                        })
+                        .unwrap_or(mlua::Value::Nil),
+                    Err(e) => {
+                        self.notify_error(format!("picker.open: {e}"));
+                        mlua::Value::Nil
+                    }
+                };
+                self.lua.resolve_external(task_id, value);
             }
         }
     }

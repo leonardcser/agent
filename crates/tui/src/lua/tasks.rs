@@ -1,8 +1,8 @@
 //! Task + callback lifecycle methods on `LuaRuntime`. Covers Lua
 //! callbacks (`register_callback`, `invoke_callback`, `fire_callback`),
-//! the parked-task resume API (`resolve_{dialog,picker,external}` +
-//! `pump_task_events`), the `LuaTaskRuntime` bridge (`drive_tasks`),
-//! and plugin-tool execution (`plugin_tool_defs`, `execute_plugin_tool`).
+//! the parked-task resume API (`resolve_external` + `pump_task_events`),
+//! the `LuaTaskRuntime` bridge (`drive_tasks`), and plugin-tool
+//! execution (`plugin_tool_defs`, `execute_plugin_tool`).
 
 use super::{
     AppOp, LuaHandle, LuaRuntime, TaskCompletion, TaskDriveOutput, TaskEvent, ToolExecResult, UiOp,
@@ -39,24 +39,6 @@ impl LuaRuntime {
         if let Ok(mut cbs) = self.shared.callbacks.lock() {
             cbs.remove(&id);
         }
-    }
-
-    /// Satisfy a `smelt.api.dialog.open` wait: hand the result table
-    /// back to the parked task so it resumes on the next `drive_tasks`
-    /// call. Returns `true` if a matching task was found.
-    pub fn resolve_dialog(&self, dialog_id: u64, value: mlua::Value) -> bool {
-        let Ok(mut rt) = self.shared.tasks.lock() else {
-            return false;
-        };
-        rt.resolve_dialog(dialog_id, value)
-    }
-
-    /// Satisfy a `smelt.api.picker.open` wait.
-    pub fn resolve_picker(&self, picker_id: u64, value: mlua::Value) -> bool {
-        let Ok(mut rt) = self.shared.tasks.lock() else {
-            return false;
-        };
-        rt.resolve_picker(picker_id, value)
     }
 
     /// Satisfy a `TaskWait::External(id)` from outside the runtime.
@@ -310,30 +292,15 @@ impl LuaRuntime {
                 } if rid == request_id && cid == call_id => {
                     immediate = Some((content, is_error));
                 }
+                TaskDriveOutput::ToolComplete { .. } => {
+                    // Orphaned completion (unmatched id) — swallow.
+                }
                 TaskDriveOutput::Error(msg) => self.record_error(msg),
-                other => self.queue_task_output(other),
             }
         }
         match immediate {
             Some((content, is_error)) => ToolExecResult::Immediate { content, is_error },
             None => ToolExecResult::Pending,
-        }
-    }
-
-    /// Forward a non-terminal task output produced by an inline drive
-    /// (inside `execute_plugin_tool`) onto the runtime's deferred queue
-    /// so the next app-level `drive_tasks` sees it.
-    fn queue_task_output(&self, out: TaskDriveOutput) {
-        match out {
-            TaskDriveOutput::OpenDialog { .. } | TaskDriveOutput::OpenPicker { .. } => {
-                if let Ok(mut rt) = self.shared.tasks.lock() {
-                    rt.defer_output(out);
-                }
-            }
-            TaskDriveOutput::ToolComplete { .. } => {
-                // Orphaned completion (unmatched id) — swallow.
-            }
-            TaskDriveOutput::Error(msg) => self.record_error(msg),
         }
     }
 }

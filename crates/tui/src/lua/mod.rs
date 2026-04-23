@@ -539,7 +539,6 @@ impl LuaRuntime {
         rt
     }
 
-
     fn load_init(&mut self, path: &std::path::Path) -> LuaResult<()> {
         let src = std::fs::read_to_string(path)
             .map_err(|e| LuaError::RuntimeError(format!("read init.lua: {e}")))?;
@@ -613,7 +612,6 @@ impl LuaRuntime {
     pub fn ops_handle(&self) -> OpsHandle {
         OpsHandle(self.shared.clone())
     }
-
 
     /// Invoke a registered command by name. Returns `true` when the
     /// command exists and was dispatched (regardless of whether the
@@ -728,13 +726,11 @@ impl LuaRuntime {
             .collect()
     }
 
-
     /// Access the underlying Lua state so callers can build result
     /// tables (e.g. for `resolve_dialog`).
     pub fn lua(&self) -> &Lua {
         &self.lua
     }
-
 
     /// Fire any `smelt.defer` timers whose deadline has passed.
     pub fn tick_timers(&self) {
@@ -829,14 +825,12 @@ impl LuaRuntime {
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default()
     }
-
 }
 
 fn ansi_color_from_lua(table: &mlua::Table, key: &str) -> Option<crossterm::style::Color> {
     let val: u8 = table.get(key).ok()?;
     Some(crossterm::style::Color::AnsiValue(val))
 }
-
 
 /// Convert a `serde_json::Value` to a `mlua::Value`.
 pub fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {
@@ -867,7 +861,6 @@ pub fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {
         }
     }
 }
-
 
 impl Default for LuaRuntime {
     fn default() -> Self {
@@ -1325,15 +1318,15 @@ mod tests {
     }
 
     #[test]
-    fn dialog_open_yield_parks_task_and_emits_open_dialog_output() {
-        // After the D3 port, `smelt.api.dialog.open` is a thick Lua
-        // wrapper implemented in `runtime/lua/smelt/dialog.lua`. End-
-        // to-end resolution now requires the App-level reducer (which
-        // opens the float, wires `Callback::Lua` keymaps, and routes
-        // Submit/Dismiss back through Lua) and can't be exercised
-        // inside a pure `LuaRuntime` test. This test just verifies the
-        // foundation: the raw `{__yield = "dialog", opts = ...}` still
-        // parks the task and emits an `OpenDialog` drive output.
+    fn dialog_request_open_queues_ui_op_and_parks_task() {
+        // `smelt.api.dialog.open` is a thick Lua wrapper in
+        // `runtime/lua/smelt/dialog.lua` that allocs an external task
+        // id, calls `_request_open`, and parks on External. End-to-end
+        // resolution requires the App-level reducer (which actually
+        // opens the float and resolves the task), so this test just
+        // verifies the foundation: calling `_request_open` queues a
+        // `UiOp::OpenLuaDialog` and the subsequent External yield
+        // parks the task.
         let rt = LuaRuntime::new();
         rt.lua
             .load(
@@ -1343,14 +1336,14 @@ mod tests {
                   description = "",
                   parameters = { type = "object", properties = {} },
                   execute = function()
-                    -- Bypass the thick wrapper in dialog.lua to exercise
-                    -- just the raw yield shape.
-                    local r = coroutine.yield({__yield = "dialog", opts = {
+                    local id = smelt.api.task.alloc()
+                    smelt.api.dialog._request_open(id, {
                       panels = {
                         { kind = "content", text = "please confirm" },
                       },
-                    }})
-                    return tostring(r.win_id)
+                    })
+                    local r = coroutine.yield({__yield = "external", id = id})
+                    return tostring(r and r.win_id or "nil")
                   end,
                 })
                 "#,
@@ -1362,10 +1355,10 @@ mod tests {
             rt.execute_plugin_tool("confirm_raw_yield", &args, 1, "c"),
             ToolExecResult::Pending
         ));
-        let outs = rt.drive_tasks();
-        assert!(outs
+        let ops = rt.drain_ops();
+        assert!(ops
             .iter()
-            .any(|o| matches!(o, TaskDriveOutput::OpenDialog { .. })));
+            .any(|op| matches!(op, AppOp::Ui(UiOp::OpenLuaDialog { .. }))));
     }
 
     #[test]

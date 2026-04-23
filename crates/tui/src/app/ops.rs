@@ -159,6 +159,22 @@ pub enum UiOp {
         win: ui::WinId,
         index: usize,
     },
+    /// Open a Lua-described dialog float. Pushed by
+    /// `smelt.api.dialog._request_open(task_id, opts)`. The reducer
+    /// runs `lua_dialog::open`, then resolves the parked
+    /// `TaskWait::External(task_id)` with `{win_id = …}` (or `nil` on
+    /// error). Lua code owns all keymap/event wiring in
+    /// `runtime/lua/smelt/dialog.lua`.
+    OpenLuaDialog {
+        task_id: u64,
+        opts: mlua::RegistryKey,
+    },
+    /// Open a Lua-described picker float. Same shape as `OpenLuaDialog`,
+    /// dispatching through `lua_picker::open`.
+    OpenLuaPicker {
+        task_id: u64,
+        opts: mlua::RegistryKey,
+    },
 }
 
 /// App-state mutations, engine commands, and session/agent/permission

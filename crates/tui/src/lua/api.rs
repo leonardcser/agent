@@ -4,8 +4,8 @@
 //! payload + panel helpers for dialog callbacks live in `tasks.rs`.
 
 use super::{
-    AutocmdEvent, LuaHandle, LuaRuntime, LuaShared, TaskCompletion, TaskEvent, lua_commands_snapshot,
-    messages_to_lua, parse_keybind, parse_win_event,
+    lua_commands_snapshot, messages_to_lua, parse_keybind, parse_win_event, AutocmdEvent,
+    LuaHandle, LuaRuntime, LuaShared, TaskCompletion, TaskEvent,
 };
 use crate::app::ops::{DomainOp, UiOp};
 use mlua::prelude::*;
@@ -1166,7 +1166,39 @@ impl LuaRuntime {
                     })?,
                 )?;
             }
+            {
+                let s = shared.clone();
+                picker_tbl.set(
+                    "_request_open",
+                    lua.create_function(move |lua, (task_id, opts): (u64, mlua::Table)| {
+                        let key = lua.create_registry_value(opts)?;
+                        if let Ok(mut o) = s.ops.lock() {
+                            o.push(UiOp::OpenLuaPicker { task_id, opts: key });
+                        }
+                        Ok(())
+                    })?,
+                )?;
+            }
             api.set("picker", picker_tbl)?;
+        }
+
+        // smelt.api.dialog
+        {
+            let dialog_tbl = lua.create_table()?;
+            {
+                let s = shared.clone();
+                dialog_tbl.set(
+                    "_request_open",
+                    lua.create_function(move |lua, (task_id, opts): (u64, mlua::Table)| {
+                        let key = lua.create_registry_value(opts)?;
+                        if let Ok(mut o) = s.ops.lock() {
+                            o.push(UiOp::OpenLuaDialog { task_id, opts: key });
+                        }
+                        Ok(())
+                    })?,
+                )?;
+            }
+            api.set("dialog", dialog_tbl)?;
         }
 
         smelt.set("api", api)?;
@@ -1477,13 +1509,13 @@ function smelt.api.sleep(ms)
   return coroutine.yield({__yield = "sleep", ms = ms})
 end
 
--- `smelt.api.dialog.open` is installed by `runtime/lua/smelt/dialog.lua`,
--- which wraps a raw `{__yield = "dialog", opts = ...}` (the Rust side
--- opens the float + panels and resumes with `{win_id = …}`) with full
--- Lua-side callback registration, result building, and task.resume.
+-- `smelt.api.dialog.open` is installed by `runtime/lua/smelt/dialog.lua`.
+-- It allocs a task id, calls `smelt.api.dialog._request_open(task_id,
+-- opts)` (which queues a `UiOp::OpenLuaDialog` so the reducer opens
+-- the float + panels and resolves the task with `{win_id = …}`), parks
+-- on an External yield, then wires Lua-side keymaps/events and parks
+-- again for the final result.
 
--- `smelt.api.picker.open` is installed by `runtime/lua/smelt/picker.lua`,
--- which wraps a raw `{__yield = "picker", opts = ...}` (the Rust side
--- opens the focusable float and resumes with `{win_id = …}`) with full
--- Lua-side navigation keymaps, selection tracking, and task.resume.
+-- `smelt.api.picker.open` is installed by `runtime/lua/smelt/picker.lua`
+-- with the same `_request_open` → External pattern.
 "#;
