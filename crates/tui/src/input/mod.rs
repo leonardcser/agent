@@ -43,12 +43,12 @@ pub struct InputSnapshot {
 /// editable buffer) plus prompt-specific side-cars (completer, menu,
 /// stash, history, attachments). `Deref<Target = EditBuffer>` gives
 /// direct access to `input.buf`, `input.attachment_ids`, etc.
-pub struct InputState {
+pub struct PromptState {
     pub win: ui::Window,
     pub store: AttachmentStore,
     pub completer: Option<CompleterSession>,
     /// Picker float IDs from closed completer sessions, waiting for the
-    /// next frame to drain and `win_close`. `InputState` doesn't hold a
+    /// next frame to drain and `win_close`. `PromptState` doesn't hold a
     /// `&mut ui::Ui`, so closing has to happen out-of-band.
     pub pending_picker_close: Vec<ui::WinId>,
     pub menu: Option<MenuState>,
@@ -65,7 +65,7 @@ pub struct InputState {
     pub command_arg_sources: Vec<(String, Vec<String>)>,
 }
 
-impl std::ops::Deref for InputState {
+impl std::ops::Deref for PromptState {
     type Target = crate::buffer::Buffer;
     fn deref(&self) -> &crate::buffer::Buffer {
         &self.win.edit_buf
@@ -87,13 +87,13 @@ pub enum Action {
     Noop,
 }
 
-impl Default for InputState {
+impl Default for PromptState {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl InputState {
+impl PromptState {
     pub fn new() -> Self {
         let mut win = ui::Window::new(
             ui::WinId(0),
@@ -1286,7 +1286,7 @@ mod tests {
 
     #[test]
     fn paste_into_empty_buffer_sets_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!echo hello".to_string());
         assert!(
             input.skip_shell_escape(),
@@ -1297,7 +1297,7 @@ mod tests {
 
     #[test]
     fn type_then_type_sets_from_paste_false() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_char('!');
         input.insert_char('e');
         assert!(
@@ -1308,7 +1308,7 @@ mod tests {
 
     #[test]
     fn type_bang_then_paste_sets_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         // Simulate user typing '!'
         input.insert_char('!');
@@ -1328,7 +1328,7 @@ mod tests {
 
     #[test]
     fn paste_in_middle_of_line_does_not_set_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         input.win.edit_buf.buf = "hello ".to_string();
         input.win.cpos = 6; // After "hello "
@@ -1342,7 +1342,7 @@ mod tests {
 
     #[test]
     fn paste_at_end_of_line_does_not_set_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 5; // At end
@@ -1356,7 +1356,7 @@ mod tests {
 
     #[test]
     fn paste_at_start_of_multiline_buffer() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         input.win.edit_buf.buf = "line1\nline2".to_string();
         input.win.cpos = 0; // At very start
@@ -1370,7 +1370,7 @@ mod tests {
 
     #[test]
     fn paste_at_start_of_second_line_sets_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         input.win.edit_buf.buf = "line1\n".to_string();
         input.win.cpos = 6; // Start of second line
@@ -1384,7 +1384,7 @@ mod tests {
 
     #[test]
     fn paste_middle_of_second_line_does_not_set_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         input.win.edit_buf.buf = "line1\nhello".to_string();
         input.win.cpos = 8; // Insert at byte position 8 (before first 'l' of "hello")
@@ -1398,7 +1398,7 @@ mod tests {
 
     #[test]
     fn manual_char_after_paste_clears_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
@@ -1411,7 +1411,7 @@ mod tests {
 
     #[test]
     fn backspace_at_start_clears_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
@@ -1428,7 +1428,7 @@ mod tests {
 
     #[test]
     fn delete_word_backward_at_start_clears_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
@@ -1455,7 +1455,7 @@ mod tests {
 
     #[test]
     fn clear_resets_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!test".to_string());
         assert!(input.skip_shell_escape());
 
@@ -1465,7 +1465,7 @@ mod tests {
 
     #[test]
     fn large_paste_creates_attachment() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         // Use multi-line paste which definitely creates an attachment
         let multi_line = (0..PASTE_LINE_THRESHOLD)
@@ -1486,7 +1486,7 @@ mod tests {
 
     #[test]
     fn multi_line_paste_above_threshold_creates_attachment() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         let multi_line = (0..PASTE_LINE_THRESHOLD)
             .map(|i| format!("!line{}", i))
@@ -1505,7 +1505,7 @@ mod tests {
 
     #[test]
     fn small_multi_line_paste_inlined() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         let multi_line = "!line1\nline2\nline3".to_string();
         input.insert_paste(multi_line);
@@ -1522,7 +1522,7 @@ mod tests {
 
     #[test]
     fn stash_preserves_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!test".to_string());
         assert!(input.skip_shell_escape());
 
@@ -1545,7 +1545,7 @@ mod tests {
 
     #[test]
     fn multiple_pastes_set_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!first".to_string());
         assert!(input.skip_shell_escape());
 
@@ -1564,7 +1564,7 @@ mod tests {
 
     #[test]
     fn paste_with_carriage_returns_normalized() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!line1\r\nline2\rline3".to_string());
         assert!(input.skip_shell_escape());
         assert!(
@@ -1576,7 +1576,7 @@ mod tests {
 
     #[test]
     fn empty_paste_does_not_set_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("".to_string());
         assert!(
             !input.skip_shell_escape(),
@@ -1586,7 +1586,7 @@ mod tests {
 
     #[test]
     fn whitespace_only_paste_at_start_sets_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("   ".to_string());
         assert!(
             input.skip_shell_escape(),
@@ -1597,7 +1597,7 @@ mod tests {
     #[test]
     fn paste_starting_with_bang_at_line_start() {
         // This is the main bug scenario: type '!', then paste command
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         input.win.edit_buf.buf = String::new();
         input.win.cpos = 0;
@@ -1618,7 +1618,7 @@ mod tests {
 
     #[test]
     fn shift_select_right_creates_selection() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
@@ -1629,7 +1629,7 @@ mod tests {
 
     #[test]
     fn shift_select_extends_selection() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
@@ -1642,7 +1642,7 @@ mod tests {
 
     #[test]
     fn movement_clears_selection() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
@@ -1654,7 +1654,7 @@ mod tests {
 
     #[test]
     fn backspace_deletes_selection() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 0;
         // Select "hello"
@@ -1669,7 +1669,7 @@ mod tests {
 
     #[test]
     fn delete_forward_deletes_selection() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 0;
         for _ in 0..5 {
@@ -1681,7 +1681,7 @@ mod tests {
 
     #[test]
     fn typing_replaces_selection() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 0;
         for _ in 0..5 {
@@ -1694,7 +1694,7 @@ mod tests {
 
     #[test]
     fn select_left_from_end() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 5;
         input.execute_key_action(KeyAction::SelectLeft, None);
@@ -1706,7 +1706,7 @@ mod tests {
 
     #[test]
     fn select_word_forward() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world foo".to_string();
         input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectWordForward, None);
@@ -1719,7 +1719,7 @@ mod tests {
 
     #[test]
     fn select_word_backward() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 11;
         input.execute_key_action(KeyAction::SelectWordBackward, None);
@@ -1730,7 +1730,7 @@ mod tests {
 
     #[test]
     fn select_to_line_start() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 5;
         input.execute_key_action(KeyAction::SelectStartOfLine, None);
@@ -1739,7 +1739,7 @@ mod tests {
 
     #[test]
     fn select_to_line_end() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 5;
         input.execute_key_action(KeyAction::SelectEndOfLine, None);
@@ -1748,7 +1748,7 @@ mod tests {
 
     #[test]
     fn newline_replaces_selection() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 0;
         for _ in 0..5 {
@@ -1761,7 +1761,7 @@ mod tests {
 
     #[test]
     fn kill_to_eol_with_selection() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 0;
         for _ in 0..5 {
@@ -1775,7 +1775,7 @@ mod tests {
 
     #[test]
     fn selection_at_buffer_boundary() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "ab".to_string();
         input.win.cpos = 0;
         // Select all.
@@ -1789,7 +1789,7 @@ mod tests {
 
     #[test]
     fn selection_range_empty_when_anchor_equals_cursor() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 3;
         input.win.win_cursor.set_anchor(Some(3));
@@ -1798,7 +1798,7 @@ mod tests {
 
     #[test]
     fn clear_resets_selection() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
@@ -1809,7 +1809,7 @@ mod tests {
 
     #[test]
     fn delete_word_backward_with_selection() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 6;
         // Select "wor"
@@ -1822,7 +1822,7 @@ mod tests {
 
     #[test]
     fn delete_word_forward_with_selection() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 0;
         for _ in 0..3 {
@@ -1834,7 +1834,7 @@ mod tests {
 
     #[test]
     fn delete_to_start_of_line_with_selection() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 3;
         for _ in 0..4 {
@@ -1846,7 +1846,7 @@ mod tests {
 
     #[test]
     fn select_left_at_start_stays() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectLeft, None);
@@ -1856,7 +1856,7 @@ mod tests {
 
     #[test]
     fn select_right_at_end_stays() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 5;
         input.execute_key_action(KeyAction::SelectRight, None);
@@ -1865,7 +1865,7 @@ mod tests {
 
     #[test]
     fn select_empty_buffer() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = String::new();
         input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
@@ -1875,7 +1875,7 @@ mod tests {
 
     #[test]
     fn utf8_selection() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "héllo".to_string();
         input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
@@ -1889,7 +1889,7 @@ mod tests {
 
     #[test]
     fn selection_preserved_across_multiple_select_directions() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.win.edit_buf.buf = "abcdef".to_string();
         input.win.cpos = 3; // on 'd'
                             // Select right 2 chars.
@@ -1911,7 +1911,7 @@ mod tests {
             Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
         };
 
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.set_vim_enabled(true);
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 0;
@@ -1940,7 +1940,7 @@ mod tests {
 
     #[test]
     fn delete_selection_removes_attachments() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         // Insert text with an attachment marker in the middle: "ab[paste]cd"
         input.win.edit_buf.buf = format!("ab{}cd", ATTACHMENT_MARKER);
         input.win.cpos = 0;
@@ -1962,7 +1962,7 @@ mod tests {
     // ── Attachment dedup within a single message ───────────────────────
 
     /// Place two markers in the buffer that both point at `id`.
-    fn buf_with_two_markers(input: &mut InputState, id: AttachmentId) {
+    fn buf_with_two_markers(input: &mut PromptState, id: AttachmentId) {
         input.win.edit_buf.buf = format!("pre{m}mid{m}post", m = ATTACHMENT_MARKER);
         input.win.cpos = input.buf.len();
         input.win.edit_buf.attachment_ids = vec![id, id];
@@ -1970,7 +1970,7 @@ mod tests {
 
     #[test]
     fn expanded_text_inlines_paste_once_for_duplicate_ids() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         let body = "secret pasted block".to_string();
         let id = input.store.insert_paste(body.clone());
         buf_with_two_markers(&mut input, id);
@@ -1986,7 +1986,7 @@ mod tests {
 
     #[test]
     fn expanded_text_distinct_pastes_both_expand() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         let id1 = input.store.insert_paste("alpha body long enough".into());
         let id2 = input.store.insert_paste("beta body different".into());
         input.win.edit_buf.buf = format!("{m}and{m}", m = ATTACHMENT_MARKER);
@@ -2000,7 +2000,7 @@ mod tests {
 
     #[test]
     fn expanded_text_three_identical_ids_emits_one_body_two_stubs() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         let body = "repeated content".to_string();
         let id = input.store.insert_paste(body.clone());
         input.win.edit_buf.buf = format!("{m}a{m}b{m}", m = ATTACHMENT_MARKER);
@@ -2013,7 +2013,7 @@ mod tests {
 
     #[test]
     fn build_content_dedups_repeated_image_in_parts() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         let id = input
             .store
             .insert_image("img.png".into(), "data:image/png;base64,AAA".into());
@@ -2028,7 +2028,7 @@ mod tests {
 
     #[test]
     fn build_content_preserves_distinct_images() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         let id1 = input
             .store
             .insert_image("a.png".into(), "data:image/png;base64,AAA".into());
@@ -2045,7 +2045,7 @@ mod tests {
     #[test]
     fn build_content_dedups_interleaved_image_references() {
         // Pattern: img A, img B, img A again. Parts should be [A, B].
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         let id_a = input
             .store
             .insert_image("a.png".into(), "data:image/png;base64,AAA".into());

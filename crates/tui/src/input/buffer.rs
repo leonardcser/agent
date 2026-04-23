@@ -1,15 +1,15 @@
-//! Low-level buffer editing primitives for `InputState`.
+//! Low-level buffer editing primitives for `PromptState`.
 //!
 //! These operate directly on `buf`, `cpos`, and `attachment_ids`, and are the
 //! implementation details behind the `KeyAction` dispatch in `mod.rs`. They
 //! assume any selection handling, undo recording, and completer recomputation
 //! has already been set up by the caller (the dispatcher).
 
-use super::{InputState, ATTACHMENT_MARKER, PASTE_LINE_THRESHOLD};
+use super::{PromptState, ATTACHMENT_MARKER, PASTE_LINE_THRESHOLD};
 use crate::attachment::AttachmentId;
 use crate::vim::ViMode;
 
-impl InputState {
+impl PromptState {
     /// Save undo state before an editing operation.
     /// When vim is in insert mode, skip — the entire insert session is
     /// already covered by the undo entry saved on insert entry.

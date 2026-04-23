@@ -9,12 +9,12 @@
 //!   * the `open_*` helpers for settings/stats/cost/picker menus
 
 use super::{
-    Action, History, InputState, Menu, MenuAction, MenuKind, MenuResult, MenuState, SettingsState,
+    Action, History, Menu, MenuAction, MenuKind, MenuResult, MenuState, PromptState, SettingsState,
 };
 use crate::completer::Completer;
 use crossterm::event::Event;
 
-impl InputState {
+impl PromptState {
     pub(super) fn handle_menu_event(&mut self, ev: &Event) -> Action {
         let ms = self.menu.as_mut().unwrap();
         match ms.nav.handle_event(ev) {

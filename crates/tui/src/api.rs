@@ -21,7 +21,7 @@ pub const VERSION: &str = "1";
 /// Buffer-level operations — text, attachments, whole-buffer replace.
 pub mod buf {
     use crate::buffer::Buffer;
-    use crate::input::InputState;
+    use crate::input::PromptState;
 
     /// Read the text of a buffer.
     pub fn get_text(buffer: &Buffer) -> &str {
@@ -37,7 +37,7 @@ pub mod buf {
     /// into the prompt (unqueue, resume restore, ghost accept). Direct
     /// `input.buf = …` writes skip these invariants and have been a
     /// recurring source of undo / completer / paste-state bugs.
-    pub fn replace(input: &mut InputState, text: String, cursor: Option<usize>) {
+    pub fn replace(input: &mut PromptState, text: String, cursor: Option<usize>) {
         input.replace_text(text, cursor);
     }
 }

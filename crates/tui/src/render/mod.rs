@@ -1,6 +1,5 @@
 pub(crate) mod blocks;
 pub(crate) mod cache;
-pub(crate) mod cmdline;
 mod context;
 pub(crate) mod dialogs;
 pub(crate) mod display;
@@ -11,7 +10,6 @@ pub(crate) mod layout_out;
 mod paint;
 pub(crate) mod prompt_data;
 pub(crate) mod region;
-pub(crate) mod screen;
 mod scrollbar;
 pub(crate) mod selection;
 pub(crate) mod status;
@@ -23,10 +21,8 @@ pub(crate) mod viewport;
 pub(crate) mod window_view;
 pub mod working;
 
-pub use cmdline::CmdlineState;
 pub(crate) use layout::HitRegion;
 pub(crate) use region::ViewportHit;
-pub use screen::{ContentVisualKind, ContentVisualRange};
 pub use status::StatusItem;
 pub use transcript::{SnapshotCell, TranscriptSnapshot};
 pub use viewport::ViewportGeom;
@@ -565,33 +561,6 @@ impl io::Write for RenderOut {
     fn flush(&mut self) -> io::Result<()> {
         self.out.flush()
     }
-}
-
-/// Colors for the software block cursor, adapted to light/dark theme.
-pub(super) fn cursor_colors() -> (Color, Color) {
-    if theme::is_light() {
-        (Color::White, Color::Black)
-    } else {
-        (Color::Black, Color::White)
-    }
-}
-
-/// Draw a software cursor at the given position. Any character passed
-/// as `under` is re-rendered with the cursor fg/bg inverted so the
-/// glyph under the cursor stays visible (as in the prompt). Pass `" "`
-/// for an empty cell.
-pub(super) fn draw_soft_cursor(out: &mut RenderOut, col: u16, row: u16, under: &str) {
-    let (fg, bg) = cursor_colors();
-    let _ = out.queue(cursor::MoveTo(col, row));
-    // Reset first so any lingering DIM / italic / underline style from
-    // the surrounding paint doesn't wash out the cursor — we want a
-    // hard-contrast black-on-white (or white-on-black) cell.
-    out.reset_style();
-    out.set_fg(fg);
-    out.set_bg(bg);
-    let glyph = if under.is_empty() { " " } else { under };
-    out.print(glyph);
-    out.reset_style();
 }
 
 /// Resolve a `display::ColorRole` against the live theme atomics.

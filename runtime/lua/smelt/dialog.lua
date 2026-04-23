@@ -90,6 +90,8 @@ function smelt.api.dialog.open(opts)
               }
             end
           end
+        elseif p.kind == "list" and not option_panel_idx then
+          option_panel_idx = i
         elseif p.kind == "input" then
           input_panels[p.name or ("input_" .. i)] = i
           if type(p.on_change) == "function" then

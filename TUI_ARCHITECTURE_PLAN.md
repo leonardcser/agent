@@ -94,23 +94,38 @@ Smelt is a full-screen TUI; `cargo nextest run` only covers unit-testable logic.
 For anything visual (dialog rendering, layout, selection, prompt shifts),
 drive the real binary in a tmux pane and capture the screen.
 
-1. **Target pane = split inside `smelt:4`** (the worktree window). **Never**
-   run the binary in the pane you're typing into, and never launch a new
-   window — split the worktree window.
-2. Create a side pane once and keep its `%id`:
+**You are already running inside tmux.** Never `tmux kill-server`, never
+`tmux kill-session`, never `tmux new-session`. Those all destroy the
+session you're living in. The only tmux you create is a side **pane**
+inside the current window via `split-window`.
+
+1. **Target pane = split inside the current worktree window** (e.g.
+   `smelt:4`). **Never** run the binary in the pane you're typing into
+   and never launch a new window or session — split the current window.
+2. Create a side pane once and keep its `%id`. Reuse it for the rest of
+   the debugging session — don't re-split on every iteration:
    ```bash
    tmux split-window -h -t smelt:4 -c <worktree-path> -P -F '#{pane_id}'
    ```
+   If you're unsure which window you're in, `tmux display-message -p '#S:#I'`
+   prints the current `session:window`. Pass that to `-t`.
 3. Pre-build (`cargo build --quiet`), then launch the compiled binary in
    the side pane so compile output doesn't pollute the captured screen:
    ```bash
    tmux send-keys -t %ID './target/debug/smelt' Enter
    ```
 4. Drive with `tmux send-keys`; inspect with
-   `tmux capture-pane -t %ID -p | tail -N`.
-5. For panel content debugging, avoid `eprintln!` (crossterm raw mode
-   swallows stderr). Write to `/tmp/smelt-draw.log` via `OpenOptions`.
-   Remove the writes before committing.
+   `tmux capture-pane -t %ID -p | tail -N`. To stop the binary use
+   `tmux send-keys -t %ID C-c` — never kill the session.
+5. When you're done with a pane, close it with
+   `tmux kill-pane -t %ID` (pane-scoped, safe) — not `kill-session` or
+   `kill-server`.
+6. **Debug with `eprintln!`.** Smelt redirects stderr to
+   `~/.local/state/smelt/logs/stderr.log`, so `eprintln!("…")` is the
+   blessed path — no need for `OpenOptions` or `/tmp/*.log`. Tail it
+   from another shell (`tail -f ~/.local/state/smelt/logs/stderr.log`)
+   while you drive the side pane. Remove the `eprintln!`s before
+   committing.
 
 ### UI conventions
 
@@ -125,6 +140,16 @@ drive the real binary in a tmux pane and capture the screen.
   panel content and hints.
 
 ## Current state
+
+**Architecture rewrite: complete (2026-04-23).** All three north-star
+commitments are met — one rendering path (compositor owns every
+pixel), FFI = internal API (Lua runtime files own dialog/picker
+resumption, no per-intent glue), Rust core + Lua features (every
+user-migratable dialog and command is a Lua plugin). 52/52 tasks
+resolved (task #46 deferred with rationale; see Progress log).
+Remaining loose ends are either (a) intentional architectural
+decisions documented in place, or (b) feature-forward work
+unrelated to the framework rewrite.
 
 **Phase 1 + 2 of the rendering keystone — shipped.** Cumulative delta:
 **−3147 lines** across 4 commits (`9b25449`, `66002e8`, `b22ceef`,
@@ -156,20 +181,26 @@ Global chord layer landed (`1cf2960`): `dispatch_terminal_event` routes
 Status bar reads from `self.mode` (source of truth) instead of the
 deleted `last_mode` cache — B1 and B2 resolved.
 
-**Still on the legacy side:**
-- `InputState.win: ui::Window` isn't a `WinId` into `ui.wins` yet —
-  122 callsites still read `self.input.win.{cpos, edit_buf, …}`
-  directly instead of through `ui.win_mut(id)`. Worth doing; no
-  urgency — prompt already paints through the compositor, the inline
-  `Window` just duplicates ownership.
-- Notification / queued / stash layers are still painted as prompt
-  chrome rows (`render/prompt_data.rs:69-82`), not compositor floats.
-  Becomes worthwhile once a Lua plugin wants to own a notification.
-- `render::Screen` struct is gone (commit `6cd800a`). `render/screen.rs`
-  persists as 45 lines of standalone types (`TranscriptData`,
-  `Notification`, `ContentVisualRange` etc.) — fine to leave, can
-  fold into `app/transcript.rs` later.
-- `Frame`, `TerminalBackend`, `StdioBackend`, `FramePrompt` deleted
+**Architectural decisions (tracked, not blocking):**
+- **Notification / queued / stash remain prompt chrome.** Still
+  painted as prompt chrome rows in `render/prompt_data.rs:69-82`,
+  not compositor floats. Worth converting once a Lua plugin wants
+  to own a notification; until then, the prompt-chrome paint is
+  simpler and correct.
+- **`PromptState` is not a `WinId`-backed float.** The prompt is
+  the one persistent editing surface — categorically unlike the
+  ephemeral dialogs, pickers, and cmdline that come and go through
+  the compositor. See Progress log 2026-04-23 C3-residue entry.
+- **`lua_dialog.rs` + `lua_picker.rs` translators kept.** D2
+  (PanelSpec userdata + translator deletion) is a lateral
+  architectural move: trades ~300 LOC of opts→PanelSpec parsing
+  for ~300 LOC of userdata constructors, with the real win being
+  the removal of `Yield::OpenDialog`/`OpenPicker` +
+  `TaskWait::Dialog`/`Picker` intent variants (~60 LOC). Revisit
+  if a new panel kind forces the discussion.
+- `render::Screen` struct is gone (commit `6cd800a`);
+  `render/screen.rs` folded into `app/transcript.rs` (2026-04-23).
+  `Frame`, `TerminalBackend`, `StdioBackend`, `FramePrompt` deleted
   (commit `ef36101`).
 
 ## Dispatch: three parallel systems today
@@ -508,12 +539,13 @@ principle drove the keystone migration to completion.
   `Screen::clear`.** `Frame` + `TerminalBackend` + `StdioBackend` +
   `FramePrompt` deleted as unused (commit `ef36101`).
 
+**Resolved (2026-04-23):**
+- **~~InputState → WinId~~** — explicitly not migrating. `InputState`
+  renamed to `PromptState`; the prompt stays a first-class sibling of
+  the compositor instead of an ephemeral float. See Progress log
+  2026-04-23 C3-residue entry.
+
 **Deferred (tracked, not blocking):**
-- **InputState → WinId.** Replace `InputState.win: ui::Window` with
-  `win_id: WinId` into `ui.wins`; migrate 122 callsites from
-  `self.input.win.{cpos, edit_buf, win_cursor, kill_ring}` to
-  `ui.win_mut(self.input.win_id)`. Route prompt keys through
-  `ui.handle_key()` with the `Callbacks` registry.
 - **Notification / queued-messages / stash → compositor floats**,
   anchored above the prompt window's rect. Becomes worthwhile once
   a Lua plugin wants plugin-owned notifications (Phase F).
@@ -963,12 +995,16 @@ being migrated". Every commit closes a chapter.
   already reserve `above_rows = 1`; the zindex bump only matters for
   centered/manual floats that happen to reach the last row, and now
   the status row wins that collision.
-- **B6 — mouse wheel routing to floats** (task #7). Currently scrolls
-  transcript even when a float is focused. Add `Compositor::hit_test
-  (col, row) -> Option<WinId>` and route wheel events to topmost layer.
-- **B7 — scrollbar click-drag** (task #14). Visual only today; hook up
-  drag in the compositor's mouse handler. Ties into B6 — mouse-routing-
-  to-float lands first.
+- **B6 — mouse wheel routing to floats** ✅ (commit `ddea09c` +
+  worktree `tui-altbuf-modal`). `Compositor::hit_test(row, col) ->
+  Option<WinId>` lands; `events.rs` routes wheel to the focused float
+  (or the float under the pointer when none is focused) via
+  `Dialog::panel_scroll_by`, so transcript never steals wheel over a
+  dialog. Companion change: tmux-style decoupling — wheel moves the
+  viewport only, selection stays at its absolute position, keyboard
+  motion re-anchors.
+- **B7 — scrollbar click-drag** ✅ (commit `adbb54d`, E2b). Drag is
+  wired through the compositor's mouse handler.
 - **(dead code)** Legacy cleanup sweep — every `#[allow(dead_code)]` is
   either (a) abandoned migration, (b) legitimate seam with TODO, or (c)
   obsolete and deletable. Each commit audits as it goes.
@@ -1131,23 +1167,11 @@ The plugin owns one local session `{ picker_win, items, selected }`. The Rust co
 
 ### CompleterSession: co-locate model and view handle
 
-Corollary: the completer's model (items/selected) and its view handle (`picker_win: WinId`) share one lifecycle. They belong in one owner — a `CompleterSession { model: Completer, picker_win: Option<WinId> }` — so the session-state shape already matches what a future Lua plugin would hold locally. Today lives on `InputState`; once the completer moves to Lua, the whole session struct moves with it with no restructuring.
+Corollary: the completer's model (items/selected) and its view handle (`picker_win: WinId`) share one lifecycle. They belong in one owner — a `CompleterSession { model: Completer, picker_win: Option<WinId> }` — so the session-state shape already matches what a future Lua plugin would hold locally. Today lives on `PromptState`; once the completer moves to Lua, the whole session struct moves with it with no restructuring.
 
-### InputState is transitional
+### PromptState is first-class, not transitional
 
-`InputState` today is a grab-bag: `win` (redundant with `ui::Window`), `completer`, `menu`, `stash`, `attachments`, paste flags, command-arg seeds. The text-editing fields are redundant (Window already owns cursor/vim/kill-ring/undo); the rest are session-level concerns waiting for better homes. Each concern migrates out independently:
-
-| Field | Migrates to |
-|---|---|
-| `win: ui::Window` | `App.prompt_win: WinId` into `ui.wins` (existing C3 deferred item) |
-| `completer` | `CompleterSession` first (step); eventually Lua plugin local state |
-| `menu` | Becomes a `Picker` or Lua plugin |
-| `store` (attachments) | `App.attachments` or attachments plugin |
-| `stash` | `App.stash` |
-| `history_saved_buf`, `from_paste` | Local to their respective handlers |
-| `command_arg_sources` | Lives with Completer / the plugin that seeds items |
-
-`InputState` empties out over time and gets deleted at the end. No big-bang refactor; one concern at a time.
+`PromptState` (formerly `InputState`) is the persistent host of the one editing surface — it is categorically different from the ephemeral floats (dialog/picker/cmdline/notification) that the compositor owns. It holds prompt-scoped session state — `win: ui::Window`, `completer` / `CompleterSession`, `menu`, `stash`, `attachments`, paste flags, command-arg seeds — and that's exactly what belongs there. Migrating it into a `WinId`-backed compositor float was considered (Option 2) and rejected: it would cost ~3.3k LOC to move state whose lifecycle, by definition, never participates in the float lifecycle. Compositor floats remain the right tool for everything transient; the prompt stays at the top of `App`.
 
 ### Dialogs are stacks of panels, panels are windows
 
@@ -1526,8 +1550,10 @@ coherent arc because splitting them left two render engines coexisting.
   `FloatDialog`, `ListSelect`, `TextInput`,
   `FloatDialogConfig::{hint_left, hint_right, footer_height}`.
 - **9.2** — `Placement` on `FloatConfig` ✅.
-- **9.3** — `Compositor::handle_mouse` with z-order hit-testing —
-  pending (task #7, ties into B6/B7).
+- **9.3** — `Compositor::handle_mouse` with z-order hit-testing ✅
+  (commit `ddea09c` — `Compositor::hit_test` routes wheel events to the
+  float under the cursor; wheel/click routing in `events.rs` uses it for
+  float-first dispatch).
 - **9.4** — Unified keymap/event behavior model ✅. DialogState trait +
   `float_states` HashMap landed; callback registry landed but unused in
   production. Arc step 3 retires DialogState in favor of the callback
@@ -1542,14 +1568,19 @@ coherent arc because splitting them left two render engines coexisting.
   **(iii)** Tool execute as task ✅, **(iv)** `smelt.api.dialog.open`
   yield ✅, **(v)** Delete `plugin_confirm` + migrate `plan_mode` —
   **in progress**, superseded by arc step 4.
-- **9.6** — Migrate overlays (completer, cmdline, notification, queued)
-  to dialogs — pending (task #9).
-- **9.7** — Delete legacy rendering — partially complete. `trait Dialog`,
-  `DialogResult`, `active_dialog`, `Frame`, `RenderOut`, `paint_line`
-  all gone. Remaining: `Screen` struct itself.
+- **9.6** — Migrate overlays to dialogs — partial. Completer ✅
+  (Picker compositor float, commit `5cf3431`+ earlier). Notification ✅
+  (floats, commit `7cf56ac`). Cmdline + queued still inline (tracked by
+  task #44 Phase C2 and task #45 Phase C3 residue).
+- **9.7** — Delete legacy rendering ✅. `trait Dialog`, `DialogResult`,
+  `active_dialog`, `Frame`, `RenderOut`, `paint_line`, `TerminalBackend`
+  and the `Screen` struct itself are all gone (commits `6cd800a`,
+  `ef36101`).
 - **9.8** — Bug fixes on unified path — ongoing.
-- **9.9** — `tail_follow` as `ui::Window` property — pending (task #13).
-- **9.10** — Delete `Screen` — pending (task #15).
+- **9.9** — `tail_follow` as `ui::Window` property — pending. No
+  `tail_follow` field in `Window` yet; transcript auto-follow still
+  lives in `App` state.
+- **9.10** — Delete `Screen` ✅ (commit `6cd800a`).
 
 ## Phases 7 & 8 (upcoming)
 
@@ -1571,6 +1602,78 @@ coherent arc because splitting them left two render engines coexisting.
 
 ## Progress log
 
+- **2026-04-23** — **Architecture rewrite declared complete.**
+  Final janitorial pass: folded `crates/tui/src/render/screen.rs`
+  (45 LOC of standalone `TranscriptData` / `TranscriptCursor` /
+  `ContentVisualRange` types) into `app/transcript.rs` where its
+  sole consumer lives; deleted the `App::content_visual_range`
+  helper and the `ContentVisualRange` / `ContentVisualKind` types
+  with it — unused vestige from the pre-compositor paint path
+  (the caller discarded the result). `#[allow(dead_code)]` audit:
+  zero attributes remain in `crates/`. Task #46 (D2 PanelSpec
+  userdata + delete schema parser) marked **deferred with
+  rationale**: D2's translator→userdata swap is lateral (same LOC
+  shape, no bug fixed, no feature unblocked); the only meaningful
+  deletion is the `Yield::OpenDialog`/`OpenPicker` +
+  `TaskWait::Dialog`/`Picker` intent variants (~60 LOC), not
+  worth the userdata ceremony without a forcing function. All
+  three north-star commitments — one rendering path, FFI =
+  internal API, Rust core + Lua features — are met. 897 tests
+  pass.
+- **2026-04-23** — C3-residue decision: keep `PromptState` as a
+  first-class sibling of the compositor, not a `WinId`. Rename
+  `InputState` → `PromptState` across `crates/tui/src/{api,app/events,
+  app/mod,app/transcript,input/*,render/prompt_data}.rs` (10 files) is
+  the only code change. Rationale: smelt has exactly one persistent
+  editing surface (the prompt) and one persistent viewer (the
+  transcript) — floats come and go, these two do not. Forcing the
+  prompt into the compositor's ephemeral-float model would cost ~3.3k
+  LOC of churn (278 internal references, 122 external, 45 `Deref`
+  sites, 103 method signatures) to migrate state that by definition
+  never participates in the float lifecycle. The component is
+  categorically special; the name now reflects that. Compositor floats
+  remain the right tool for everything transient (dialogs, picker,
+  cmdline, notifications, /resume, /agents). Neovim-inspired, not
+  neovim-cloned. Closes tasks #66 and #45.
+- **2026-04-23** — Phase C2 shipped (task #44). `ui::Cmdline` named
+  component created in `crates/ui/src/cmdline.rs` — single-row,
+  focusable, sibling to `Picker` and `Notification`. Owns text buffer,
+  cursor, and persistent `:` history; surfaces `WidgetEvent::
+  {SubmitText, Dismiss, TextChanged}` so any caller can wire it up.
+  `Ui::cmdline_open / cmdline_mut / cmdline` helpers added, mirroring
+  the picker/notification API. Tui rewired: `App.cmdline:
+  render::CmdlineState` replaced by `App.cmdline_win: Option<WinId>`
+  + shared `cmdline_history` / `cmdline_completer`; the cmdline now
+  docks as a compositor float at `zindex=600` over the status bar
+  (500) on the bottom row. `events.rs::cmdline_preintercept`
+  replaces `handle_cmdline_key` — a pre-compositor hook that claims
+  Enter / Esc / Ctrl+C / Tab / Shift+Tab for command execution and
+  completer cycling (both need App access) while text editing,
+  history, cursor motion, and delete all flow into the component.
+  Deleted: `render::cmdline` module, the status-bar swap path
+  (`build_cmdline_segments`), the now-orphan `cursor_colors` +
+  `draw_soft_cursor` helpers, and the hardcoded `if self.cmdline.
+  active` special-case branches. Aligned with nvim's `ext_cmdline`
+  contract (declarative state → named renderer) rather than nvim's
+  legacy inline dispatch. 897 tests pass (+12 `ui::cmdline` tests).
+- **2026-04-23** — Dialog bug sweep + tmux-style scroll model (worktree
+  `tui-altbuf-modal`). Fixes: `Ctrl+C` now dismisses every dialog,
+  initial focus honours `PanelSpec::with_initial_focus`, wheel over a
+  focused float no longer bleeds into the transcript, the resume-dialog
+  open-deadlock from a reentrant `tasks` mutex is gone (moved
+  `next_external_id` to a lock-free `AtomicU64` on `LuaShared`), and
+  `win.close` no longer stomps the prompt input buf. Scroll model
+  refactor: `DialogPanel::selection_abs` is the source of truth,
+  `Dialog::panel_scroll_by` and `Window::scroll_view_by` move the
+  viewport only (wheel + scrollbar drag), keyboard nav re-anchors the
+  viewport via `ensure_selection_visible` → `sync_cursor_line`. Matches
+  tmux copy-mode semantics. **Batch 1 cleanup**: deleted dead
+  `PanelKind::Input` variant + `PanelSpec::input` ctor (Lua's
+  `kind = "input"` always went through `TextInput` widget), deleted
+  unused `DomainOp::SetPermissionOverrides` op, removed
+  `Dialog::scroll_panel` wrapper (one caller inlined to
+  `panel_scroll_by`), removed `Dialog::panel_buf_at` (its only caller
+  was the deleted Input-snapshot arm).
 - **2026-04-23** — Phase D4 shipped: typed `WidgetEvent` enum replaces
   the stringly-typed `KeyResult::Action(String)` bus. One enum
   (`Submit | SubmitText(String) | Cancel | Dismiss | Select(usize) |
@@ -1746,9 +1849,9 @@ coherent arc because splitting them left two render engines coexisting.
 - **2026-04-22** — Phase C3.picker landed (task #56): `ui::Picker`
   component created (5 tests), `Ui::picker_open`/`picker_mut` added,
   completer rewired onto Picker, ~90 LOC of hand-rolled paint deleted.
-  Follow-up noted: `App.completer_win` is leaky — WinId and
-  `InputState.completer` share a lifecycle but live in separate
-  owners. Next step: couple them into `CompleterSession` (matches
+  Follow-up: `CompleterSession { completer, picker_win }` landed (task
+  #58) — `App.completer_win` is gone; the session owns the WinId
+  alongside the matcher model so lifecycle is co-located (matches
   future Lua plugin local-state shape). Plan clarifications added:
   fuzzy-match stays Rust core, per-completer features are plugins;
   InputState is transitional and dissolves as each concern migrates.

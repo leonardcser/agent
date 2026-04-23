@@ -174,7 +174,6 @@ pub enum DomainOp {
     Submit(String),
     SetPromptSection(String, String),
     RemovePromptSection(String),
-    SetPermissionOverrides(protocol::PermissionOverrides),
     /// Rewind to a transcript block (Rewind dialog). `block_idx=None`
     /// means "kept at current"; `restore_vim_insert` re-enters Insert
     /// mode when the dialog was opened from there.

@@ -38,6 +38,7 @@ pub fn open(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String>
         let panel = pair.map_err(|e| format!("dialog panel entry: {e}"))?;
         let kind: String = panel.get("kind").map_err(|e| format!("panel.kind: {e}"))?;
         let height = parse_height(&panel)?;
+        let initial_focus: bool = panel.get("focus").unwrap_or(false);
         match kind.as_str() {
             "content" => {
                 let buf = if let Ok(id) = panel.get::<u64>("buf") {
@@ -52,13 +53,16 @@ pub fn open(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String>
                 if pad_left > 0 {
                     spec = spec.with_pad_left(pad_left);
                 }
-                spec = spec.focusable(focusable);
+                spec = spec.focusable(focusable).with_initial_focus(initial_focus);
                 panel_specs.push(spec);
             }
             "markdown" => {
                 let text: String = panel.get("text").unwrap_or_default();
                 let buf = make_markdown_buffer(app, &text);
-                panel_specs.push(PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit)));
+                panel_specs.push(
+                    PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit))
+                        .with_initial_focus(initial_focus),
+                );
             }
             "options" => {
                 let items_tbl: mlua::Table = panel
@@ -85,7 +89,9 @@ pub fn open(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String>
                         .with_cursor_style(accent_style())
                         .with_shortcut_style(accent_style()),
                 );
-                panel_specs.push(PanelSpec::widget(widget, PanelHeight::Fit));
+                panel_specs.push(
+                    PanelSpec::widget(widget, PanelHeight::Fit).with_initial_focus(initial_focus),
+                );
             }
             "input" => {
                 let placeholder: Option<String> = panel.get("placeholder").ok();
@@ -94,14 +100,16 @@ pub fn open(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String>
                     ti = ti.with_placeholder(p);
                 }
                 let widget = Box::new(ti);
-                panel_specs.push(PanelSpec::widget(widget, PanelHeight::Fit));
+                panel_specs.push(
+                    PanelSpec::widget(widget, PanelHeight::Fit).with_initial_focus(initial_focus),
+                );
             }
             "list" => {
                 let buf_id: u64 = panel.get("buf").map_err(|e| format!("list.buf: {e}"))?;
-                panel_specs.push(PanelSpec::list(
-                    BufId(buf_id),
-                    height.unwrap_or(PanelHeight::Fill),
-                ));
+                panel_specs.push(
+                    PanelSpec::list(BufId(buf_id), height.unwrap_or(PanelHeight::Fill))
+                        .with_initial_focus(initial_focus),
+                );
             }
             other => return Err(format!("unknown panel kind: {other}")),
         }

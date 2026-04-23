@@ -226,28 +226,29 @@ impl BufferView {
                     col += 1;
                 }
             } else {
+                // Layered merge: every span that covers `col` contributes;
+                // later spans (pushed after the projection sync) override
+                // earlier non-None fg/bg. Lets a selection-bg overlay tint
+                // the background while preserving the underlying fg.
                 while col < content_w && (col as usize) < chars.len() {
-                    let active = spans.iter().find(|s| col >= s.col_start && col < s.col_end);
-                    if let Some(span) = active {
-                        let style = Style {
-                            fg: span.style.fg.or(fallback_style.fg),
-                            bg: span.style.bg.or(fallback_style.bg),
-                            ..span.style
-                        };
-                        let end = span.col_end.min(content_w).min(chars.len() as u16);
-                        for c in col..end {
-                            grid.set(offset_x + c, offset_y + row, chars[c as usize], style);
+                    let mut style = fallback_style;
+                    for span in spans {
+                        if col >= span.col_start && col < span.col_end {
+                            if span.style.fg.is_some() {
+                                style.fg = span.style.fg;
+                            }
+                            if span.style.bg.is_some() {
+                                style.bg = span.style.bg;
+                            }
+                            style.bold |= span.style.bold;
+                            style.dim |= span.style.dim;
+                            style.italic |= span.style.italic;
+                            style.underline |= span.style.underline;
+                            style.crossedout |= span.style.crossedout;
                         }
-                        col = end;
-                    } else {
-                        grid.set(
-                            offset_x + col,
-                            offset_y + row,
-                            chars[col as usize],
-                            fallback_style,
-                        );
-                        col += 1;
                     }
+                    grid.set(offset_x + col, offset_y + row, chars[col as usize], style);
+                    col += 1;
                 }
             }
 

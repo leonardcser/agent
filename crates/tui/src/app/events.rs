@@ -37,16 +37,17 @@ impl App {
             // otherwise the float's keymap (e.g. Confirm's BackTab
             // handler) gets first dibs.
             if self.ui.focused_float().is_none() {
-                match (*code, *modifiers) {
-                    (KeyCode::BackTab, _) => {
+                let ctx = self.input.key_context(self.agent.is_some(), false);
+                match keymap::lookup(*code, *modifiers, &ctx) {
+                    Some(KeyAction::ToggleMode) => {
                         self.toggle_mode();
                         return false;
                     }
-                    (KeyCode::Char('t'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    Some(KeyAction::CycleReasoning) => {
                         self.cycle_reasoning();
                         return false;
                     }
-                    (KeyCode::Char('l'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    Some(KeyAction::Redraw) => {
                         self.ui.force_redraw();
                         return false;
                     }
@@ -59,29 +60,47 @@ impl App {
         // through the compositor. The Callbacks registry handles
         // per-window keymaps, auto-dispatches widget actions into
         // `WinEvent::Submit/Dismiss`, and any Rust callbacks queue
-        // `AppOp`s drained below.
+        // `AppOp`s drained below. Mouse events fall through so the
+        // regular `handle_mouse` path can run wheel/scrollbar logic
+        // over the float's rect.
         if self.ui.focused_float().is_some() {
             if let Event::Resize(w, h) = ev {
                 self.handle_resize(w, h);
                 return false;
             }
-            if let Event::Key(KeyEvent {
-                code, modifiers, ..
-            }) = ev
-            {
-                let _ = self.ui.handle_key(code, modifiers);
-                self.apply_lua_ops();
-            }
-            return false;
-        }
-
-        // Cmdline mode: when the `:` command line is active, route
-        // all key events to it. Esc cancels, Enter executes.
-        if self.cmdline.active {
             if let Event::Key(k) = ev {
-                return self.handle_cmdline_key(k);
+                // Cmdline needs App access for command execution
+                // (CommandAction::Quit propagation, Lua completer).
+                // Intercept Enter / Esc / Tab / Ctrl+C before the
+                // generic compositor dispatch; everything else flows
+                // into the `ui::Cmdline` component for text editing.
+                if self.cmdline_is_focused() {
+                    if let Some(quit) = self.cmdline_preintercept(k) {
+                        return quit;
+                    }
+                }
+                let KeyEvent {
+                    code, modifiers, ..
+                } = k;
+                let lua = &self.lua;
+                let mut lua_invoke =
+                    |handle: ui::LuaHandle,
+                     win: ui::WinId,
+                     payload: &ui::Payload,
+                     panels: &[ui::PanelSnapshot]| {
+                        lua.invoke_callback(handle, win, payload, panels);
+                    };
+                let _ = self
+                    .ui
+                    .handle_key_with_lua(code, modifiers, &mut lua_invoke);
+                self.apply_lua_ops();
+                return false;
             }
-            return false;
+            if !matches!(ev, Event::Mouse(_)) {
+                return false;
+            }
+            // Fallthrough: mouse events go to the regular dispatch
+            // below so wheel + scrollbar drag work on floats.
         }
 
         // Ctrl+C while exec is running → kill it.
@@ -247,7 +266,7 @@ impl App {
     ///
     /// Returns `Some(outcome)` when the event was fully handled;
     /// `None` when the caller should continue with path-specific
-    /// logic (esc handling, keymap lookups, `InputState`).
+    /// logic (esc handling, keymap lookups, `PromptState`).
     ///
     /// Dispatch priority (first match wins):
     ///  1. Resize / mouse — structural events, always handled
@@ -377,7 +396,7 @@ impl App {
             t.last_esc = None;
         }
 
-        // Keymap lookup for app-level actions (before delegating to InputState).
+        // Keymap lookup for app-level actions (before delegating to PromptState).
         if let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = ev
@@ -438,14 +457,14 @@ impl App {
                             return EventOutcome::Redraw;
                         }
                         _ => {
-                            // Delegate to InputState for editing/navigation actions.
+                            // Delegate to PromptState for editing/navigation actions.
                         }
                     }
                 }
             }
         }
 
-        // Delegate to InputState::handle_event (menu, completer, vim, editing).
+        // Delegate to PromptState::handle_event (menu, completer, vim, editing).
         let action = self.input.handle_event(ev, Some(&mut self.input_history));
         self.dispatch_input_action(action)
     }
@@ -544,7 +563,7 @@ impl App {
             return EventOutcome::Noop;
         }
 
-        // Everything else → InputState::handle_event (type-ahead with history).
+        // Everything else → PromptState::handle_event (type-ahead with history).
         match self.input.handle_event(ev, Some(&mut self.input_history)) {
             Action::Submit {
                 mut content,
@@ -806,18 +825,6 @@ impl App {
         let width = term_w as usize;
         let status_bg = Color::AnsiValue(233);
 
-        // Cmdline mode: the status row IS the `:` line when active.
-        if self.cmdline.active {
-            let _ = width;
-            let (left, right) = render::status::build_cmdline_segments(&self.cmdline, status_bg);
-            if let Some(bar) = self.ui.layer_mut::<ui::StatusBar>("status") {
-                *bar = ui::StatusBar::new().with_bg(Style::bg(status_bg));
-                bar.set_left(left);
-                bar.set_right(right);
-            }
-            return;
-        }
-
         // Custom status items (from Lua plugins) override everything.
         if let Some(items) = self.custom_status_items.as_ref() {
             let mut spans: Vec<StatusSpan> = items.iter().map(|i| i.to_span(status_bg)).collect();
@@ -1065,8 +1072,6 @@ impl App {
             let (total, viewport) = self.transcript_dims();
             self.transcript_window.apply_pin(total, viewport);
         }
-        let _visual = self.content_visual_range();
-
         let queued_owned: Vec<String> = if show_queued {
             self.queued_messages.clone()
         } else {
@@ -1081,12 +1086,13 @@ impl App {
         let prediction: Option<&str> = prediction_owned.as_deref();
 
         // Compute cursor ownership for this frame. Cmdline steals the
-        // cursor; terminal-unfocused suppresses it; otherwise app_focus
-        // decides prompt-vs-transcript.
-        let has_prompt_cursor = !self.cmdline.active
+        // cursor (via its compositor layer); terminal-unfocused
+        // suppresses; otherwise app_focus decides prompt-vs-transcript.
+        let cmdline_active = self.cmdline_win.is_some();
+        let has_prompt_cursor = !cmdline_active
             && self.term_focused
             && matches!(self.app_focus, crate::app::AppFocus::Prompt);
-        let has_transcript_cursor = !self.cmdline.active
+        let has_transcript_cursor = !cmdline_active
             && self.term_focused
             && matches!(self.app_focus, crate::app::AppFocus::Content);
 
@@ -1134,6 +1140,11 @@ impl App {
         );
         self.transcript_viewport = Some(transcript_viewport);
 
+        let transcript_selection = self.transcript_selection_highlights(
+            tdata.clamped_scroll,
+            viewport_rows,
+        );
+
         // Sync transcript WindowView from the projected buffer.
         if let Some(tv) = self
             .ui
@@ -1143,6 +1154,14 @@ impl App {
                 self.transcript_projection.buf(),
                 tdata.clamped_scroll as usize,
             );
+            for (line, col_start, col_end) in &transcript_selection {
+                tv.add_highlight(
+                    *line,
+                    *col_start,
+                    *col_end,
+                    ui::grid::Style::bg(crate::theme::selection_bg()),
+                );
+            }
             tv.set_soft_cursor(tcursor.soft_cursor);
             tv.set_viewport(Some(transcript_viewport));
         }
@@ -1267,7 +1286,7 @@ impl App {
     // ── Completer float ────────────────────────────────────────────
     //
     // Mirrors the active `CompleterSession` into a `ui::Picker`
-    // compositor float. The session (`InputState.completer`) holds both
+    // compositor float. The session (`PromptState.completer`) holds both
     // the matcher model *and* the `picker_win: Option<WinId>` — one
     // owner, one lifecycle. Matches the shape a future Lua completer
     // plugin would hold in its own local state.
@@ -1440,7 +1459,7 @@ impl App {
         // Readonly-buffer scrolling keybinds: Ctrl-U / Ctrl-D (half-page),
         // Ctrl-B / Ctrl-F (full-page), Ctrl-Y / Ctrl-E (one line). These
         // mirror Vim's scroll commands. Since Vim in the prompt reuses
-        // InputState for these, we implement them here by driving the
+        // PromptState for these, we implement them here by driving the
         // content cursor directly — which in turn pulls the viewport via
         // the normal scroll-follows-cursor logic.
         if k.modifiers.contains(M::CONTROL) {
@@ -1650,60 +1669,6 @@ impl App {
                 true
             }
         }
-    }
-
-    /// Compute the content pane's visual selection range (if any) in
-    /// absolute transcript coordinates for the renderer to highlight.
-    fn content_visual_range(&mut self) -> Option<render::ContentVisualRange> {
-        if self.app_focus != crate::app::AppFocus::Content {
-            return None;
-        }
-        let rows = self.full_transcript_display_text(self.settings.show_thinking);
-        if rows.is_empty() {
-            return None;
-        }
-        let buf = rows.join("\n");
-        let cpos = self.transcript_window.compute_cpos(&rows);
-        let (s, e, kind) = if let Some(vim) = self.transcript_window.vim.as_ref() {
-            let kind = match vim.mode() {
-                crate::vim::ViMode::Visual => render::ContentVisualKind::Char,
-                crate::vim::ViMode::VisualLine => render::ContentVisualKind::Line,
-                _ => return None,
-            };
-            let (s, e) = vim.visual_range(&buf, cpos)?;
-            (s, e, kind)
-        } else {
-            let (s, e) = self.transcript_window.selection_range(&rows)?;
-            (s, e, render::ContentVisualKind::Char)
-        };
-        // Byte offsets in display text → (line, display_col).
-        let offset_to_line_col = |off: usize| -> (usize, usize) {
-            let off = crate::text_utils::snap(&buf, off);
-            let prefix = &buf[..off];
-            let line = prefix.bytes().filter(|&b| b == b'\n').count();
-            let line_start = prefix.rfind('\n').map(|p| p + 1).unwrap_or(0);
-            (
-                line,
-                crate::text_utils::byte_to_cell(&buf[line_start..off], off - line_start),
-            )
-        };
-        let (start_line_abs, start_col) = offset_to_line_col(s);
-        let (end_line_abs, end_col) = offset_to_line_col(e);
-        // Transcript-absolute line indices → viewport-relative so the
-        // painter can walk `last_viewport_text` directly.
-        let viewport = self.viewport_rows_estimate();
-        let total = rows.len().min(u16::MAX as usize) as u16;
-        let scroll = self.transcript_window.scroll_top;
-        let geom = render::ViewportGeom::new(total, viewport, scroll);
-        let view_top = geom.skip_from_top() as usize;
-        let to_view = |abs: usize| abs.saturating_sub(view_top);
-        Some(render::ContentVisualRange {
-            start_line: to_view(start_line_abs),
-            start_col,
-            end_line: to_view(end_line_abs),
-            end_col,
-            kind,
-        })
     }
 
     /// Viewport rows available for the content pane. Uses the prompt's
@@ -2160,9 +2125,6 @@ impl App {
             DomainOp::RemovePromptSection(name) => {
                 self.prompt_sections.remove(&name);
             }
-            DomainOp::SetPermissionOverrides(_overrides) => {
-                // TODO: store overrides and include in StartTurn
-            }
             DomainOp::SyncPermissions {
                 session_entries,
                 workspace_rules,
@@ -2288,28 +2250,57 @@ impl App {
 
     // ── Mouse event dispatch ─────────────────────────────────────────────
     fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
-        use crossterm::event::{KeyCode, KeyModifiers, MouseButton};
-        // Wheel events over a float route into that float regardless
-        // of focus — the compositor hit-test finds the topmost layer
-        // under the cursor. Lua dialogs and confirm/picker panels all
-        // respond to Up/Down for list-nav; synthesising keys keeps
-        // the dispatch uniform until widgets grow a real mouse
-        // handler (scrollbar drag comes next).
-        if matches!(
+        use crossterm::event::MouseButton;
+        // Wheel routing over a float. The focused float claims vertical
+        // scroll outright so a pointer that drifts off its rect doesn't
+        // bleed wheel events into the transcript. With no focused float,
+        // wheel still routes onto whatever float is under the pointer
+        // (unfocused dropdowns — completer, etc.). Horizontal scroll is
+        // absorbed (no natural analogue in a vertical list) but not
+        // forwarded.
+        //
+        // Under this model wheel moves the viewport only (scroll_top)
+        // and never the selection — `panel_scroll_by` is the primitive.
+        let is_scroll = matches!(
             me.kind,
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-        ) && self.ui.float_at(me.row, me.column).is_some()
-        {
-            let code = if matches!(me.kind, MouseEventKind::ScrollUp) {
-                KeyCode::Up
-            } else {
-                KeyCode::Down
-            };
-            for _ in 0..3 {
-                let _ = self.ui.handle_key(code, KeyModifiers::NONE);
+            MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        );
+        if is_scroll {
+            let target = self
+                .ui
+                .focused_float()
+                .or_else(|| self.ui.float_at(me.row, me.column));
+            if let Some(win) = target {
+                let delta: isize = match me.kind {
+                    MouseEventKind::ScrollUp => -3,
+                    MouseEventKind::ScrollDown => 3,
+                    _ => 0,
+                };
+                if delta != 0 {
+                    if let Some(dlg) = self.ui.dialog_mut(win) {
+                        let panel_idx = dlg
+                            .panel_at(me.row, me.column)
+                            .unwrap_or_else(|| dlg.focused_panel());
+                        dlg.panel_scroll_by(panel_idx, delta);
+                    }
+                }
+                return EventOutcome::Redraw;
             }
-            self.apply_lua_ops();
-            return EventOutcome::Redraw;
+        }
+
+        // Modal gate. With a focused float up, clicks / drags outside
+        // the float's rect are absorbed (no selection extension, no
+        // cursor repositioning in the transcript behind). Clicks inside
+        // the float continue to the normal path below so the scrollbar
+        // drag hit-test and float-aware handlers run.
+        if let Some(focused) = self.ui.focused_float() {
+            let inside_focused = self.ui.float_at(me.row, me.column) == Some(focused);
+            if !inside_focused {
+                return EventOutcome::Noop;
+            }
         }
         if self.layout.hit_test(me.row, me.column) == render::HitRegion::Status {
             return EventOutcome::Noop;
@@ -2480,7 +2471,13 @@ impl App {
             return;
         }
         self.app_focus = crate::app::AppFocus::Content;
-        self.move_content_cursor_by_lines(delta);
+        // tmux copy-mode model: wheel pans the viewport; cpos / cursor
+        // stay anchored at their absolute position and scroll out of
+        // view. Keyboard motions (j/k, arrows) or a click re-anchor.
+        let rows = self.full_transcript_display_text(self.settings.show_thinking);
+        let viewport = self.viewport_rows_estimate();
+        self.transcript_window
+            .scroll_view_by(delta, rows.len(), viewport);
     }
 
     fn scroll_prompt_by_lines(&mut self, delta: isize) {
@@ -2617,11 +2614,13 @@ impl App {
             self.drag_autoscroll_since = None;
             return;
         }
-        // `cursor_line` is measured from the bottom of the viewport:
-        // 0 = bottom row, viewport-1 = top row.
-        let delta: isize = if self.transcript_window.cursor_line >= viewport.saturating_sub(1) {
+        // `cursor_line` counts from the top of the viewport: 0 = top
+        // row, viewport-1 = bottom row. Top edge → cursor-up (-1) so the
+        // viewport scrolls to reveal older rows; bottom edge → cursor-
+        // down (+1) so newer rows come into view.
+        let delta: isize = if self.transcript_window.cursor_line == 0 {
             -1
-        } else if self.transcript_window.cursor_line == 0 {
+        } else if self.transcript_window.cursor_line >= viewport.saturating_sub(1) {
             1
         } else {
             self.drag_autoscroll_since = None;
@@ -2631,6 +2630,63 @@ impl App {
             .get_or_insert_with(std::time::Instant::now);
         self.move_content_cursor_by_lines(delta);
         self.sync_transcript_pin();
+    }
+
+    /// Build the transcript's per-line selection ranges (absolute buffer
+    /// line index, col_start, col_end) in display-cell units. Used by
+    /// the per-frame sync to overlay selection-bg on top of the
+    /// projected buffer's text highlights.
+    fn transcript_selection_highlights(
+        &mut self,
+        scroll_top: u16,
+        viewport_rows: u16,
+    ) -> Vec<(usize, u16, u16)> {
+        let rows = self.full_transcript_display_text(self.settings.show_thinking);
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        let buf = rows.join("\n");
+        let cpos = self.transcript_window.compute_cpos(&rows);
+        let (s, e) = if let Some(vim) = self.transcript_window.vim.as_ref() {
+            match vim.mode() {
+                crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine => {
+                    match vim.visual_range(&buf, cpos) {
+                        Some(range) => range,
+                        None => return Vec::new(),
+                    }
+                }
+                _ => match self.transcript_window.win_cursor.range(cpos) {
+                    Some(range) => range,
+                    None => return Vec::new(),
+                },
+            }
+        } else {
+            match self.transcript_window.win_cursor.range(cpos) {
+                Some(range) => range,
+                None => return Vec::new(),
+            }
+        };
+        if s >= e {
+            return Vec::new();
+        }
+        let first = scroll_top as usize;
+        let last = (first + viewport_rows as usize).min(rows.len());
+        let mut line_start = rows[..first].iter().map(|r| r.len() + 1).sum::<usize>();
+        let mut out = Vec::new();
+        for (idx, row) in rows.iter().enumerate().take(last).skip(first) {
+            let line_end = line_start + row.len();
+            if e > line_start && s <= line_end {
+                let clip_s = s.saturating_sub(line_start).min(row.len());
+                let clip_e = e.saturating_sub(line_start).min(row.len());
+                let start_cell = crate::text_utils::byte_to_cell(row, clip_s) as u16;
+                let end_cell = crate::text_utils::byte_to_cell(row, clip_e) as u16;
+                if end_cell > start_cell {
+                    out.push((idx, start_cell, end_cell));
+                }
+            }
+            line_start = line_end + 1;
+        }
+        out
     }
 
     /// Finalise a prompt drag-select: copy any non-empty selection to
@@ -2959,125 +3015,194 @@ impl App {
     }
     // ── Cmdline (:) ───────────────────────────────────────────────────
 
-    pub fn open_cmdline(&mut self) {
-        self.cmdline.open();
+    pub fn cmdline_is_focused(&self) -> bool {
+        self.cmdline_win.is_some() && self.ui.focused_float() == self.cmdline_win
     }
 
-    fn handle_cmdline_key(&mut self, k: KeyEvent) -> bool {
-        use crossterm::event::KeyModifiers as M;
-        if !self.cmdline.active {
-            return false;
+    pub fn open_cmdline(&mut self) {
+        if self.cmdline_win.is_some() {
+            return;
         }
-        let mut needs_completer_update = false;
+        let status_bg = crossterm::style::Color::AnsiValue(233);
+        let style = ui::CmdlineStyle {
+            background: ui::grid::Style {
+                bg: Some(status_bg),
+                fg: Some(crossterm::style::Color::White),
+                ..Default::default()
+            },
+            text: ui::grid::Style {
+                bg: Some(status_bg),
+                fg: Some(crossterm::style::Color::White),
+                ..Default::default()
+            },
+            cursor: ui::grid::Style {
+                bg: Some(crossterm::style::Color::White),
+                fg: Some(status_bg),
+                ..Default::default()
+            },
+        };
+        let cmdline = ui::Cmdline::new()
+            .with_history(self.cmdline_history.clone())
+            .with_style(style);
+        // Take over the bottom row (same row as the status bar at
+        // zindex 500). Higher zindex paints on top of it. `above_rows
+        // = 0` so the rect is `term_h - 1`, not `term_h - 2` (which is
+        // what the `dock_bottom_full_width` helper reserves).
+        let config = ui::FloatConfig {
+            border: ui::Border::None,
+            placement: ui::Placement::DockBottom {
+                above_rows: 0,
+                full_width: true,
+                max_width: ui::Constraint::Fill,
+                max_height: ui::Constraint::Fixed(1),
+            },
+            zindex: 600,
+            focusable: true,
+            blocks_agent: false,
+            ..Default::default()
+        };
+        if let Some(win_id) = self.ui.cmdline_open(config, cmdline) {
+            self.cmdline_win = Some(win_id);
+            self.cmdline_completer = None;
+        }
+    }
+
+    fn close_cmdline(&mut self) {
+        if let Some(win) = self.cmdline_win.take() {
+            // Merge the component's history (which may have had a
+            // successful submit appended on our behalf) back into the
+            // app-level persistent list before the component is dropped.
+            if let Some(c) = self.ui.cmdline(win) {
+                self.cmdline_history = c.history().to_vec();
+            }
+            self.ui.win_close(win);
+        }
+        self.cmdline_completer = None;
+    }
+
+    /// Pre-compositor hook for the focused cmdline float. Intercepts
+    /// Enter (run the command, propagate Quit), Esc/Ctrl+C (dismiss),
+    /// and Tab / Shift+Tab (drive the shared completer). Everything
+    /// else returns `None` so the compositor routes the key to the
+    /// `ui::Cmdline` component for text editing / history / cursor
+    /// motion.
+    ///
+    /// Return value mirrors `dispatch_terminal_event`:
+    /// - `None` → key wasn't ours; let compositor handle it.
+    /// - `Some(true)` → we handled it AND it's a Quit. Propagate up.
+    /// - `Some(false)` → we handled it; no quit.
+    fn cmdline_preintercept(&mut self, k: KeyEvent) -> Option<bool> {
+        use crossterm::event::KeyModifiers as M;
         match (k.code, k.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('c'), M::CONTROL) => {
-                self.cmdline.close();
+                self.close_cmdline();
+                Some(false)
             }
             (KeyCode::Enter, _) => {
-                let line = self.cmdline.submit();
-                if !line.is_empty() {
-                    let action = super::commands::run_command(self, &format!(":{line}"));
-                    match action {
-                        CommandAction::Quit => return true,
-                        CommandAction::CancelAndClear => {
-                            self.reset_session();
-                            self.agent = None;
-                        }
-                        CommandAction::Compact { instructions } => {
-                            if self.history.is_empty() {
-                                self.notify_error("nothing to compact".into());
-                            } else {
-                                self.compact_history(instructions);
-                            }
-                        }
-                        CommandAction::Exec(rx, kill) => {
-                            self.exec_rx = Some(rx);
-                            self.exec_kill = Some(kill);
-                        }
-                        CommandAction::Continue => {}
+                let line = self
+                    .cmdline_win
+                    .and_then(|w| self.ui.cmdline(w))
+                    .map(|c| c.text().to_string())
+                    .unwrap_or_default();
+                // Persist into the shared history before close wipes
+                // the component.
+                if let Some(w) = self.cmdline_win {
+                    if let Some(c) = self.ui.cmdline_mut(w) {
+                        c.push_history(line.clone());
                     }
+                }
+                self.close_cmdline();
+                if line.is_empty() {
+                    return Some(false);
+                }
+                let action = super::commands::run_command(self, &format!(":{line}"));
+                match action {
+                    CommandAction::Quit => Some(true),
+                    CommandAction::CancelAndClear => {
+                        self.reset_session();
+                        self.agent = None;
+                        Some(false)
+                    }
+                    CommandAction::Compact { instructions } => {
+                        if self.history.is_empty() {
+                            self.notify_error("nothing to compact".into());
+                        } else {
+                            self.compact_history(instructions);
+                        }
+                        Some(false)
+                    }
+                    CommandAction::Exec(rx, kill) => {
+                        self.exec_rx = Some(rx);
+                        self.exec_kill = Some(kill);
+                        Some(false)
+                    }
+                    CommandAction::Continue => Some(false),
                 }
             }
             (KeyCode::Tab, _)
             | (KeyCode::Char('j'), M::CONTROL)
             | (KeyCode::Char('n'), M::CONTROL) => {
-                if self.cmdline.completer.is_some() {
-                    if let Some(ref mut comp) = self.cmdline.completer {
-                        comp.move_up();
-                    }
-                } else {
-                    let lua_cmds = self.lua.command_names();
-                    self.cmdline.update_completer(&lua_cmds);
-                }
-                self.cmdline.apply_selected_completion();
+                self.cmdline_cycle_completer(true);
+                Some(false)
             }
             (KeyCode::BackTab, _)
             | (KeyCode::Char('k'), M::CONTROL)
             | (KeyCode::Char('p'), M::CONTROL) => {
-                if self.cmdline.completer.is_some() {
-                    if let Some(ref mut comp) = self.cmdline.completer {
-                        comp.move_down();
-                    }
-                } else {
-                    let lua_cmds = self.lua.command_names();
-                    self.cmdline.update_completer(&lua_cmds);
-                }
-                self.cmdline.apply_selected_completion();
+                self.cmdline_cycle_completer(false);
+                Some(false)
             }
-            (KeyCode::Backspace, _) => {
-                self.cmdline.backspace();
-                if self.cmdline.buf.is_empty() {
-                    self.cmdline.close();
-                } else {
-                    needs_completer_update = true;
-                }
-            }
-            (KeyCode::Delete, _) => {
-                self.cmdline.delete();
-                needs_completer_update = true;
-            }
-            (KeyCode::Left, _) => {
-                self.cmdline.move_left();
-            }
-            (KeyCode::Right, _) => {
-                self.cmdline.move_right();
-            }
-            (KeyCode::Up, _) => {
-                self.cmdline.history_up();
-            }
-            (KeyCode::Down, _) => {
-                self.cmdline.history_down();
-            }
-            (KeyCode::Home, _) | (KeyCode::Char('a'), M::CONTROL) => {
-                self.cmdline.move_start();
-            }
-            (KeyCode::End, _) | (KeyCode::Char('e'), M::CONTROL) => {
-                self.cmdline.move_end();
-            }
-            (KeyCode::Char('w'), M::CONTROL) => {
-                self.cmdline.delete_word_back();
-                if self.cmdline.buf.is_empty() {
-                    self.cmdline.close();
-                } else {
-                    needs_completer_update = true;
-                }
-            }
-            (KeyCode::Char('u'), M::CONTROL) => {
-                self.cmdline.buf.clear();
-                self.cmdline.cursor = 0;
-                self.cmdline.completer = None;
-            }
-            (KeyCode::Char(ch), M::NONE | M::SHIFT) => {
-                self.cmdline.insert_char(ch);
-                needs_completer_update = true;
-            }
-            _ => {}
+            _ => None,
         }
-        if needs_completer_update && self.cmdline.completer.is_some() {
+    }
+
+    /// Build / advance the completer based on the cmdline's current
+    /// text, then apply the selected label. No-op when the cmdline
+    /// isn't open.
+    fn cmdline_cycle_completer(&mut self, next: bool) {
+        use crate::completer::{Completer, CompletionItem};
+        let Some(win) = self.cmdline_win else {
+            return;
+        };
+        let current = self
+            .ui
+            .cmdline(win)
+            .map(|c| c.text().to_string())
+            .unwrap_or_default();
+        if self.cmdline_completer.is_none() {
+            let mut comp = Completer::commands(0);
             let lua_cmds = self.lua.command_names();
-            self.cmdline.update_completer(&lua_cmds);
+            if !lua_cmds.is_empty() {
+                let mut items: Vec<CompletionItem> = comp.all_items().to_vec();
+                for name in lua_cmds {
+                    if !items.iter().any(|i| i.label == name) {
+                        items.push(CompletionItem {
+                            label: name,
+                            description: Some("(lua)".into()),
+                            ..Default::default()
+                        });
+                    }
+                }
+                comp.refresh_items(items);
+            }
+            comp.update_query(current);
+            self.cmdline_completer = Some(comp);
+        } else if let Some(ref mut comp) = self.cmdline_completer {
+            // Reversed picker style: `next` advances upward toward the
+            // best match near the prompt.
+            if next {
+                comp.move_up();
+            } else {
+                comp.move_down();
+            }
         }
-        false
+        if let Some(ref comp) = self.cmdline_completer {
+            if let Some(item) = comp.selected_item() {
+                let label = item.label.clone();
+                if let Some(c) = self.ui.cmdline_mut(win) {
+                    c.set_text(label);
+                }
+            }
+        }
     }
 }
 

@@ -1,12 +1,12 @@
-//! Bridge between `InputState` and the vim state machine.
+//! Bridge between `PromptState` and the vim state machine.
 //!
 //! Vim owns its own mode/count state but operates on the input's live
 //! `buf`/`cpos`/`attachment_ids`. After Part B of the refactor, vim no longer
 //! keeps a private register or undo history either — it borrows the kill ring
-//! and the single `UndoHistory` owned by `InputState` through `VimContext`,
+//! and the single `UndoHistory` owned by `PromptState` through `VimContext`,
 //! so no post-key sync is needed.
 
-use super::{Action, History, InputState};
+use super::{Action, History, PromptState};
 use crate::vim::{self, VimContext};
 use crossterm::event::{Event, KeyEvent};
 
@@ -20,7 +20,7 @@ pub(super) enum VimBridgeResult {
     NotAKey,
 }
 
-impl InputState {
+impl PromptState {
     pub(super) fn dispatch_vim(
         &mut self,
         ev: &Event,

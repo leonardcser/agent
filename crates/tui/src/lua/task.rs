@@ -108,7 +108,6 @@ pub struct LuaTaskRuntime {
     next_task_id: AtomicU64,
     next_dialog_id: AtomicU64,
     next_picker_id: AtomicU64,
-    next_external_id: AtomicU64,
     /// Outputs that an in-line `drive` produced but whose caller
     /// doesn't route them itself — e.g. `execute_plugin_tool` runs
     /// one drive inline and consumes only its own `ToolComplete`;
@@ -124,16 +123,8 @@ impl LuaTaskRuntime {
             next_task_id: AtomicU64::new(1),
             next_dialog_id: AtomicU64::new(1),
             next_picker_id: AtomicU64::new(1),
-            next_external_id: AtomicU64::new(1),
             deferred: Vec::new(),
         }
-    }
-
-    /// Mint an external-wait id without spawning a task. The Lua
-    /// runtime file calls this, holds the id, and later passes it to
-    /// `resolve_external` when its keymaps fire.
-    pub fn alloc_external_id(&self) -> u64 {
-        self.next_external_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Queue outputs produced by an inline drive whose caller didn't
@@ -338,8 +329,9 @@ enum Yield {
     OpenDialog(mlua::RegistryKey),
     OpenPicker(mlua::RegistryKey),
     /// Park the task on an externally-resolved wait. The id must have
-    /// been minted via `alloc_external_id` beforehand, so the Lua
-    /// runtime file can hand it to its keymaps before yielding.
+    /// been minted via `smelt.api.task.alloc` (lock-free counter on
+    /// `LuaShared::next_external_id`) beforehand, so the Lua runtime
+    /// file can hand it to its keymaps before yielding.
     External(u64),
 }
 

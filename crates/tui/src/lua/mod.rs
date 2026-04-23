@@ -379,6 +379,11 @@ pub(crate) struct LuaShared {
     /// Rust-side buffers (prompt input, scratch, etc.) that are minted
     /// by `ui.buf_create` from 1.
     pub(crate) next_buf_id: AtomicU64,
+    /// Lock-free counter for `smelt.api.task.alloc`. Lives on the
+    /// shared arc (not in `LuaTaskRuntime`) so a Lua coroutine running
+    /// *inside* `drive_tasks` — which already holds the `tasks` lock —
+    /// can mint an id without re-entering the same mutex.
+    pub(crate) next_external_id: AtomicU64,
     pub(crate) history: Mutex<Arc<Vec<protocol::Message>>>,
     pub(crate) tasks: Mutex<LuaTaskRuntime>,
     /// Background process registry. Installed by `App::new` so Lua
@@ -425,6 +430,7 @@ impl Default for LuaShared {
             callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             next_buf_id: AtomicU64::new(ui::LUA_BUF_ID_BASE),
+            next_external_id: AtomicU64::new(1),
             history: Mutex::new(Arc::new(Vec::new())),
             tasks: Mutex::new(LuaTaskRuntime::new()),
             processes: Mutex::new(None),
@@ -1492,7 +1498,7 @@ impl LuaRuntime {
                 "close",
                 lua.create_function(move |_, id: u64| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.push(UiOp::WinClose { id });
+                        o.push(UiOp::CloseFloat(ui::WinId(id)));
                     }
                     Ok(())
                 })?,
@@ -1616,10 +1622,10 @@ impl LuaRuntime {
                 task_tbl.set(
                     "alloc",
                     lua.create_function(move |_, ()| {
-                        let Ok(rt) = s.tasks.lock() else {
-                            return Ok(0u64);
-                        };
-                        Ok(rt.alloc_external_id())
+                        // Lock-free — runs from inside a Lua coroutine
+                        // that's already under the `tasks` mutex via
+                        // `drive_tasks`, so we MUST NOT re-lock it here.
+                        Ok(s.next_external_id.fetch_add(1, Ordering::Relaxed))
                     })?,
                 )?;
             }
@@ -2130,16 +2136,6 @@ impl LuaRuntime {
             return false;
         };
         rt.resolve_external(external_id, value)
-    }
-
-    /// Mint a fresh external-wait id. Used by `smelt.api.task.alloc`
-    /// so a Lua runtime file can register keymaps with the id baked
-    /// in *before* yielding the matching `{__yield = "external", id}`.
-    pub fn alloc_external_id(&self) -> u64 {
-        let Ok(rt) = self.shared.tasks.lock() else {
-            return 0;
-        };
-        rt.alloc_external_id()
     }
 
     /// Drain the task-runtime inbox and apply each event. Dialog
@@ -2805,7 +2801,6 @@ fn build_panels_table(lua: &Lua, panels: &[ui::PanelSnapshot]) -> mlua::Result<m
         let kind = match p.kind {
             ui::PanelKind::Content => "content",
             ui::PanelKind::List { .. } => "list",
-            ui::PanelKind::Input { .. } => "input",
         };
         entry.set("kind", kind)?;
         if let Some(sel) = p.selected {
@@ -3109,7 +3104,7 @@ mod tests {
                 text: String::new(),
             },
             ui::PanelSnapshot {
-                kind: ui::PanelKind::Input { multiline: false },
+                kind: ui::PanelKind::Content,
                 selected: None,
                 text: "hello".into(),
             },

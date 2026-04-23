@@ -10,11 +10,23 @@ use crate::render::history::{
     AgentBlockStatus, Block, BlockId, Status, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
 use crate::render::layout_out::{LayoutSink, SpanCollector};
-use crate::render::screen::{TranscriptCursor, TranscriptData};
 use crate::render::selection::wrap_and_locate_cursor;
 use crate::render::SPINNER_FRAMES;
 use std::collections::HashMap;
 use std::time::Duration;
+
+pub(crate) struct TranscriptData {
+    pub clamped_scroll: u16,
+    pub total_rows: u16,
+    pub scrollbar_col: u16,
+    pub viewport: crate::render::region::Viewport,
+}
+
+pub(crate) struct TranscriptCursor {
+    pub clamped_line: u16,
+    pub clamped_col: u16,
+    pub soft_cursor: Option<crate::render::window_view::SoftCursor>,
+}
 
 impl App {
     pub fn block_count(&self) -> usize {
@@ -186,7 +198,7 @@ impl App {
 
     pub(crate) fn measure_prompt_height_pub(
         &self,
-        state: &crate::input::InputState,
+        state: &crate::input::PromptState,
         width: usize,
         queued: &[String],
         prediction: Option<&str>,
@@ -704,7 +716,7 @@ impl App {
 
     fn measure_prompt_height(
         &self,
-        state: &crate::input::InputState,
+        state: &crate::input::PromptState,
         width: usize,
         queued: &[String],
         prediction: Option<&str>,

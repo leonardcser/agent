@@ -4,7 +4,7 @@ use super::selection::{
 };
 use super::status::BarSpan;
 use super::window_view::{StyledSegment, WindowRow};
-use crate::input::InputState;
+use crate::input::PromptState;
 use crate::theme;
 use ui::buffer::{Buffer, SpanStyle};
 use ui::grid::Style;
@@ -14,7 +14,7 @@ use crossterm::style::Color;
 pub(crate) struct PromptInput<'a> {
     pub queued: &'a [String],
     pub stash: &'a Option<crate::input::InputSnapshot>,
-    pub input: &'a InputState,
+    pub input: &'a PromptState,
     pub prediction: Option<&'a str>,
     pub width: u16,
     pub height: u16,
@@ -959,7 +959,7 @@ mod tests {
 
     #[test]
     fn compute_prompt_produces_bars_and_status() {
-        let input_state = InputState::default();
+        let input_state = PromptState::default();
         let mut prompt_input = PromptInput {
             queued: &[],
             stash: &None,

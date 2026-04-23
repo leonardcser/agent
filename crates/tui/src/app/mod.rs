@@ -7,7 +7,7 @@ mod events;
 mod history;
 pub mod ops;
 
-use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, MenuResult};
+use crate::input::{resolve_agent_esc, Action, EscAction, History, MenuResult, PromptState};
 use crate::render::{
     tool_arg_summary, ApprovalScope, Block, ConfirmChoice, ConfirmRequest, ToolOutput, ToolStatus,
 };
@@ -94,7 +94,7 @@ pub struct App {
     pub(crate) last_viewport_text: Vec<String>,
     pub history: Vec<Message>,
     pub input_history: History,
-    pub input: InputState,
+    pub input: PromptState,
     exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>>,
     exec_kill: Option<std::sync::Arc<tokio::sync::Notify>>,
     pub queued_messages: Vec<String>,
@@ -121,10 +121,20 @@ pub struct App {
     /// Open `ui::Notification` float, if one is visible. Dismissed on
     /// any key (see `handle_overlay_keys`). `None` when no toast.
     pub notification: Option<ui::WinId>,
-    /// Nvim-style `:` command line. When `active`, the status bar
-    /// paints it in place of the usual status spans and keystrokes
-    /// route through `handle_cmdline_key`.
-    pub cmdline: render::CmdlineState,
+    /// Nvim-style `:` command line as a compositor float. `Some(win)`
+    /// while the prompt is active; the `ui::Cmdline` component on that
+    /// window owns all edit / history state. Events.rs pre-dispatches
+    /// Enter / Esc / Tab while the cmdline is focused and drives the
+    /// shared `cmdline_completer` + `cmdline_history` below.
+    pub cmdline_win: Option<ui::WinId>,
+    /// Persistent `:` history across open/close cycles. The component
+    /// only sees this as a snapshot at open time; on close / submit we
+    /// merge the component's working history back in.
+    pub cmdline_history: Vec<String>,
+    /// Shared completer instance for `:` command completion. Lazily
+    /// constructed on first Tab press (it queries Lua command names),
+    /// dropped on cmdline close.
+    pub cmdline_completer: Option<crate::completer::Completer>,
     /// Terminal focus (FocusGained / FocusLost). Cursor is suppressed
     /// when the terminal isn't focused, so input from other apps
     /// doesn't draw a stale cursor in our window.
@@ -452,7 +462,7 @@ impl App {
     ) -> Self {
         let saved = state::State::load();
         let mode = saved.mode();
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         let vim_enabled = settings.vim;
         if vim_enabled {
             input.set_vim_enabled(true);
@@ -584,7 +594,9 @@ impl App {
             pending_dialog: false,
             custom_status_items: None,
             notification: None,
-            cmdline: render::CmdlineState::new(),
+            cmdline_win: None,
+            cmdline_history: Vec::new(),
+            cmdline_completer: None,
             term_focused: true,
             working: render::working::WorkingState::new(),
             transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,
@@ -1051,12 +1063,22 @@ impl App {
                     // render — otherwise each tick repaints the whole
                     // screen and the terminal can't keep up, making
                     // fast scrolling feel laggy or frozen.
+                    //
+                    // The coalescer only fires when there's no focused
+                    // float. With a dialog up, wheel events need to
+                    // reach `dispatch_terminal_event` → `handle_mouse`
+                    // so they route into the float instead of bleeding
+                    // past it into the transcript behind.
+                    let coalesce_scroll = self.ui.focused_float().is_none();
                     let mut scroll_delta: isize = 0;
                     let mut scroll_row: u16 = 0;
                     let absorb = |ev: event::Event,
                                       delta: &mut isize,
                                       row: &mut u16|
                      -> Option<event::Event> {
+                        if !coalesce_scroll {
+                            return Some(ev);
+                        }
                         if let event::Event::Mouse(m) = &ev {
                             match m.kind {
                                 event::MouseEventKind::ScrollUp => {

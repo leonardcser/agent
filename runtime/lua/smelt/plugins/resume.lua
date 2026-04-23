@@ -137,7 +137,7 @@ smelt.api.cmd.register("resume", function()
             filtered = filter_entries(entries, query, workspace_only, current_cwd)
             refresh_list(list_buf, filtered, now_ms)
           end },
-        { kind = "list", buf = list_buf, height = "fill" },
+        { kind = "list", buf = list_buf, height = "fill", focus = true },
       },
       keymaps = {
         { key = "alt-w", hint = "⌥w: toggle workspace filter", on_press = function(ctx)

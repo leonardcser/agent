@@ -8,13 +8,13 @@
 //!   * writing accepted completions back into the buffer (`accept_completion`)
 //!   * settings toggle and picker acceptance logic
 //!
-//! All functions are methods on `InputState` (separate `impl` block).
+//! All functions are methods on `PromptState` (separate `impl` block).
 
-use super::{cursor_in_at_zone, find_slash_anchor, Action, InputState, MenuResult, SettingsState};
+use super::{cursor_in_at_zone, find_slash_anchor, Action, MenuResult, PromptState, SettingsState};
 use crate::completer::{Completer, CompleterKind};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
-impl InputState {
+impl PromptState {
     /// Accept the selected item from a Model/Theme/Color picker, clear the buffer,
     /// apply side effects, and return the appropriate action.
     pub(super) fn accept_picker(&mut self, comp: Completer) -> Action {

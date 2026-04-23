@@ -128,7 +128,7 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
                 if let Some(dialog) = ctx.ui.dialog_mut(ctx.win) {
                     let page = (dialog.panel_rect_height(PANEL_PREVIEW).max(1) as isize) / 2;
                     let dir = if up { -1 } else { 1 };
-                    dialog.scroll_panel(PANEL_PREVIEW, dir * page);
+                    dialog.panel_scroll_by(PANEL_PREVIEW, dir * page);
                 }
                 CallbackResult::Consumed
             })),

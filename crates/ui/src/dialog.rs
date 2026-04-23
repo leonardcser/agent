@@ -31,8 +31,6 @@ pub enum PanelKind {
     /// Selectable rows. Cursor line = current selection. Enter
     /// returns `select:{idx}` from `handle_key`.
     List { multi: bool },
-    /// Editable buffer. Enter returns `submit:{text}`.
-    Input { multiline: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +116,9 @@ pub struct PanelSpec {
     /// Whether this panel participates in focus cycling. Title/summary
     /// panels usually don't.
     pub focusable: bool,
+    /// Take initial focus on dialog open. When no panel opts in, the
+    /// dialog focuses the first focusable panel.
+    pub focus_initial: bool,
     /// Hide the panel when its buffer has zero non-blank content.
     pub collapse_when_empty: bool,
 }
@@ -131,6 +132,7 @@ impl PanelSpec {
             separator_above: None,
             pad_left: 1,
             focusable: false,
+            focus_initial: false,
             collapse_when_empty: false,
         }
     }
@@ -143,18 +145,7 @@ impl PanelSpec {
             separator_above: None,
             pad_left: 2,
             focusable: true,
-            collapse_when_empty: false,
-        }
-    }
-
-    pub fn input(buf: BufId, height: PanelHeight, multiline: bool) -> Self {
-        Self {
-            content: PanelContent::Buffer(buf),
-            kind: PanelKind::Input { multiline },
-            height,
-            separator_above: None,
-            pad_left: 1,
-            focusable: true,
+            focus_initial: false,
             collapse_when_empty: false,
         }
     }
@@ -169,6 +160,7 @@ impl PanelSpec {
             separator_above: None,
             pad_left: 1,
             focusable: true,
+            focus_initial: false,
             collapse_when_empty: false,
         }
     }
@@ -185,6 +177,11 @@ impl PanelSpec {
 
     pub fn focusable(mut self, focusable: bool) -> Self {
         self.focusable = focusable;
+        self
+    }
+
+    pub fn with_initial_focus(mut self, focus: bool) -> Self {
+        self.focus_initial = focus;
         self
     }
 }
@@ -217,11 +214,19 @@ pub(crate) struct DialogPanel {
     pub separator_above: Option<SeparatorStyle>,
     pub pad_left: u16,
     pub focusable: bool,
+    pub focus_initial: bool,
     pub collapse_when_empty: bool,
     pub content: DialogPanelContent,
     /// Rows the content wants to render. For buffers, `buf.line_count`
     /// at last sync. For widgets, `widget.content_rows()`.
     pub line_count: usize,
+    /// Absolute selection row for `PanelKind::List`. Decoupled from the
+    /// viewport: wheel / scrollbar drag scrolls the buffer but leaves
+    /// this alone, so the selected item stays put even when scrolled
+    /// out of view. `win.cursor_line` is re-derived from this on each
+    /// scroll or nav (it's always the viewport-relative render row, or
+    /// a sentinel > viewport_rows when the selection is off-screen).
+    pub selection_abs: u16,
     /// Resolved rect within the dialog, recomputed each frame.
     rect: Rect,
     /// Resolved viewport (rect + scrollbar geometry) recomputed each
@@ -267,7 +272,11 @@ pub struct Dialog {
 
 impl Dialog {
     pub(crate) fn new(config: DialogConfig, mut panels: Vec<DialogPanel>) -> Self {
-        let focused = panels.iter().position(|p| p.focusable).unwrap_or(0);
+        let focused = panels
+            .iter()
+            .position(|p| p.focusable && p.focus_initial)
+            .or_else(|| panels.iter().position(|p| p.focusable))
+            .unwrap_or(0);
         // Propagate the dialog's bg to each buffer panel's view so
         // glyphs render on the dialog fill instead of terminal
         // defaults. Widgets handle their own styling.
@@ -357,6 +366,9 @@ impl Dialog {
         let from_top = bar.scroll_from_top_for_thumb(thumb_top);
         win.scroll_top = from_top;
         view.set_scroll(from_top as usize);
+        if matches!(panel.kind, PanelKind::List { .. }) {
+            Self::sync_cursor_line(panel);
+        }
         true
     }
 
@@ -696,21 +708,7 @@ impl Dialog {
     }
 
     fn scroll_focused(&mut self, delta: isize) {
-        let Some(panel) = self.panels.get_mut(self.focused) else {
-            return;
-        };
-        let total = panel.line_count as isize;
-        let rect_height = panel.rect.height;
-        let rows = rect_height as isize;
-        let max_scroll = (total - rows).max(0);
-        let is_list = matches!(panel.kind, PanelKind::List { .. });
-        let Some(win) = panel.win_mut() else { return };
-        let new = (win.scroll_top as isize + delta).clamp(0, max_scroll);
-        win.scroll_top = new as u16;
-        if is_list {
-            let max_line = rect_height.saturating_sub(1);
-            win.cursor_line = win.cursor_line.min(max_line);
-        }
+        self.panel_scroll_by(self.focused, delta);
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -718,9 +716,10 @@ impl Dialog {
     }
 
     /// Move the selection of the List panel at `panel_idx` by `delta`
-    /// rows. Used by the fzf-style fallback — when an input widget
-    /// ignores a nav key, route it to the first List panel instead of
-    /// the focused one.
+    /// rows. Updates `selection_abs` (the source of truth) and scrolls
+    /// the viewport only as much as needed to keep the selection
+    /// visible — the tmux/less "keyboard re-anchors the viewport"
+    /// half of the split wheel/keyboard model.
     fn move_selection_at(&mut self, panel_idx: usize, delta: isize) {
         let Some(panel) = self.panels.get_mut(panel_idx) else {
             return;
@@ -732,20 +731,74 @@ impl Dialog {
         if total == 0 {
             return;
         }
+        let new = ((panel.selection_abs as isize) + delta).clamp(0, total - 1);
+        panel.selection_abs = new as u16;
+        Self::ensure_selection_visible(panel);
+    }
+
+    /// Re-anchor a list panel's viewport and render cursor to its
+    /// current `selection_abs`. Called after selection changes
+    /// (`move_selection_at`, `set_selected_index`) and after pure
+    /// viewport scrolls (`panel_scroll_by`, scrollbar drag) so
+    /// `win.cursor_line` is always either the correct viewport-relative
+    /// row or `u16::MAX` (render path treats this as "off-screen, skip
+    /// the highlight").
+    fn ensure_selection_visible(panel: &mut DialogPanel) {
         let rows = panel.rect.height as isize;
+        let abs = panel.selection_abs as isize;
         let Some(win) = panel.win_mut() else { return };
-        let current = win.scroll_top as isize + win.cursor_line as isize;
-        let new = (current + delta).clamp(0, total - 1);
-        let scroll = win.scroll_top as isize;
-        if new < scroll {
-            win.scroll_top = new as u16;
-            win.cursor_line = 0;
-        } else if new >= scroll + rows {
-            win.scroll_top = (new - rows + 1).max(0) as u16;
-            win.cursor_line = (new - win.scroll_top as isize) as u16;
-        } else {
-            win.cursor_line = (new - scroll) as u16;
+        // Move scroll_top just far enough to include the selection.
+        if rows > 0 {
+            let scroll = win.scroll_top as isize;
+            if abs < scroll {
+                win.scroll_top = abs as u16;
+            } else if abs >= scroll + rows {
+                win.scroll_top = (abs - rows + 1).max(0) as u16;
+            }
         }
+        Self::sync_cursor_line(panel);
+    }
+
+    /// Derive `win.cursor_line` from `selection_abs` and the current
+    /// `scroll_top`. Called after any mutation that might change either.
+    /// `u16::MAX` signals off-screen — the render path in `draw_panel`
+    /// already short-circuits on `cursor_line >= viewport.rect.height`,
+    /// so painting the cursor highlight is skipped automatically.
+    fn sync_cursor_line(panel: &mut DialogPanel) {
+        let rows = panel.rect.height as i64;
+        let abs = panel.selection_abs as i64;
+        let Some(win) = panel.win_mut() else { return };
+        let rel = abs - win.scroll_top as i64;
+        win.cursor_line = if rel < 0 || rel >= rows {
+            u16::MAX
+        } else {
+            rel as u16
+        };
+    }
+
+    /// Scroll a buffer-backed panel's viewport by `delta` rows without
+    /// moving `selection_abs`. Used for mouse-wheel and scrollbar drag.
+    /// If the selection would fall outside the new viewport, the
+    /// highlight is hidden (`cursor_line = u16::MAX`); `Enter` still
+    /// submits the same item.
+    pub fn panel_scroll_by(&mut self, panel_idx: usize, delta: isize) -> isize {
+        let Some(panel) = self.panels.get_mut(panel_idx) else {
+            return 0;
+        };
+        let total = panel.line_count as isize;
+        let rows = panel.rect.height as isize;
+        let max_scroll = (total - rows).max(0);
+        let Some(win) = panel.win_mut() else { return 0 };
+        let cur = win.scroll_top as isize;
+        let new = (cur + delta).clamp(0, max_scroll);
+        if new == cur {
+            return 0;
+        }
+        win.scroll_top = new as u16;
+        if matches!(panel.kind, PanelKind::List { .. }) {
+            Self::sync_cursor_line(panel);
+        }
+        new - cur
     }
 
     /// Handle a navigation key against the List panel at `panel_idx`.
@@ -797,22 +850,11 @@ impl Dialog {
         if !matches!(panel.kind, PanelKind::List { .. }) {
             return None;
         }
-        let win = panel.win()?;
-        Some(win.scroll_top as usize + win.cursor_line as usize)
+        Some(panel.selection_abs as usize)
     }
 
     pub fn panel_kind_at(&self, panel_idx: usize) -> Option<PanelKind> {
         self.panels.get(panel_idx).map(|p| p.kind)
-    }
-
-    /// `BufId` backing this panel, if buffer-backed. `None` for widget
-    /// panels.
-    pub fn panel_buf_at(&self, panel_idx: usize) -> Option<BufId> {
-        let panel = self.panels.get(panel_idx)?;
-        match &panel.content {
-            DialogPanelContent::Buffer { buf, .. } => Some(*buf),
-            DialogPanelContent::Widget(_) => None,
-        }
     }
 
     /// 0-based selection index for the widget in `panel_idx`, if the
@@ -835,23 +877,6 @@ impl Dialog {
             DialogPanelContent::Widget(w) => w.text_value(),
             DialogPanelContent::Buffer { .. } => None,
         }
-    }
-
-    /// Scroll the buffer-backed panel at `panel_idx` by `delta` rows.
-    /// No-op for widget-backed panels or invalid indices. Used by
-    /// dialog keymap callbacks to scroll a non-focused content panel
-    /// (e.g. Confirm forwards PageUp/PageDown to its preview while
-    /// focus stays on the options widget).
-    pub fn scroll_panel(&mut self, panel_idx: usize, delta: isize) {
-        let Some(panel) = self.panels.get_mut(panel_idx) else {
-            return;
-        };
-        let total = panel.line_count as isize;
-        let rows = panel.rect.height as isize;
-        let max_scroll = (total - rows).max(0);
-        let Some(win) = panel.win_mut() else { return };
-        let new = (win.scroll_top as isize + delta).clamp(0, max_scroll);
-        win.scroll_top = new as u16;
     }
 
     /// Height of `panel_idx`'s rect from the last layout pass. Callers
@@ -877,20 +902,8 @@ impl Dialog {
             return;
         }
         let clamped = idx.min(total - 1) as u16;
-        let rows = panel.rect.height;
-        let Some(win) = panel.win_mut() else { return };
-        if rows == 0 {
-            win.scroll_top = clamped;
-            win.cursor_line = 0;
-            return;
-        }
-        if clamped < rows {
-            win.scroll_top = 0;
-            win.cursor_line = clamped;
-        } else {
-            win.scroll_top = clamped + 1 - rows;
-            win.cursor_line = rows - 1;
-        }
+        panel.selection_abs = clamped;
+        Self::ensure_selection_visible(panel);
     }
 
     pub fn selected_index(&self) -> Option<usize> {
@@ -1115,11 +1128,6 @@ impl Component for Dialog {
                 }
                 _ => KeyResult::Ignored,
             },
-            PanelKind::Input { .. } => {
-                // Input panel handling lands in a follow-up commit
-                // that wires EditBuffer into the panel's Window.
-                KeyResult::Ignored
-            }
         }
     }
 
@@ -1206,9 +1214,11 @@ pub(crate) fn build_panels(
                 separator_above: spec.separator_above,
                 pad_left: spec.pad_left,
                 focusable: spec.focusable,
+                focus_initial: spec.focus_initial,
                 collapse_when_empty: spec.collapse_when_empty,
                 content,
                 line_count,
+                selection_abs: 0,
                 rect: Rect::new(0, 0, 0, 0),
                 viewport: None,
             }

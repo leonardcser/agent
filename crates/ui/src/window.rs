@@ -483,6 +483,22 @@ impl Window {
         !matches!(action, Action::Passthrough)
     }
 
+    /// Shift `scroll_top` by `delta` rows, clamped to
+    /// `[0, total_lines - viewport_rows]`. Intentionally does **not**
+    /// touch `cpos`, `cursor_line`, or `win_cursor` — wheel / scrollbar
+    /// scrolling moves the viewport only, letting the cursor scroll out
+    /// of view until the next keyboard motion or click re-anchors it.
+    /// Matches tmux copy-mode semantics: "wheel pans the buffer,
+    /// keyboard moves the cursor."
+    pub fn scroll_view_by(&mut self, delta: isize, total_lines: usize, viewport_rows: u16) {
+        if delta == 0 {
+            return;
+        }
+        let max_scroll = total_lines.saturating_sub(viewport_rows as usize) as isize;
+        let new = ((self.scroll_top as isize) + delta).clamp(0, max_scroll);
+        self.scroll_top = new as u16;
+    }
+
     pub fn scroll_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
         if rows.is_empty() || delta == 0 {
             return;
