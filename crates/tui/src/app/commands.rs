@@ -505,13 +505,8 @@ impl App {
         let old = self.mode;
         self.mode = mode;
         state::set_mode(self.mode);
-        let system_prompt = self.rebuild_system_prompt();
-        let plugin_tools = self.lua.plugin_tool_defs(self.mode);
-        self.engine.send(UiCommand::SetMode {
-            mode: self.mode,
-            system_prompt: Some(system_prompt),
-            plugin_tools: Some(plugin_tools),
-        });
+        // Fire ModeChange first so plugins can (un)register tools and prompt
+        // sections for the new mode before we snapshot them for the engine.
         if old != mode {
             let from = old.as_str().to_string();
             let to = mode.as_str().to_string();
@@ -524,6 +519,13 @@ impl App {
                     Ok(t)
                 });
         }
+        let system_prompt = self.rebuild_system_prompt();
+        let plugin_tools = self.lua.plugin_tool_defs(self.mode);
+        self.engine.send(UiCommand::SetMode {
+            mode: self.mode,
+            system_prompt: Some(system_prompt),
+            plugin_tools: Some(plugin_tools),
+        });
     }
 
     pub(super) fn toggle_mode(&mut self) {
