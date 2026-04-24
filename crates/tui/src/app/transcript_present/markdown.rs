@@ -300,5 +300,115 @@ fn render_markdown_table_from_lines<S: LayoutSink>(
         let cells: Vec<String> = trimmed.split('|').map(|c| c.trim().to_string()).collect();
         table_rows.push(cells);
     }
-    render_markdown_table(out, &table_rows, dim, bctx, indent)
+    // Attach the joined raw markdown source to the first rendered row.
+    // Selections that include row 0 (the top border) reconstruct the
+    // table verbatim via `copy_range`'s `source_text` shortcut; rows
+    // 1..N are marked as soft-wrap continuations so they're skipped
+    // once the source has been emitted. Sub-table selections that
+    // exclude row 0 fall back to the rendered box-drawing chars.
+    let raw_source = lines.join("\n");
+    let mut tagged = SourceTextOnFirstRow::new(out, raw_source);
+    render_markdown_table(&mut tagged, &table_rows, dim, bctx, indent)
+}
+
+/// `LayoutSink` adapter that injects `set_source_text` before the
+/// first `newline()` and marks every subsequent `newline()` as a
+/// soft-wrap continuation. Used to attach a raw markdown source string
+/// to the first visual row of a multi-row rendered construct (tables)
+/// where per-row source mapping is impractical because the renderer
+/// builds its own visual layout.
+struct SourceTextOnFirstRow<'a, S: LayoutSink> {
+    inner: &'a mut S,
+    pending_source: Option<String>,
+}
+
+impl<'a, S: LayoutSink> SourceTextOnFirstRow<'a, S> {
+    fn new(inner: &'a mut S, source: String) -> Self {
+        Self {
+            inner,
+            pending_source: Some(source),
+        }
+    }
+}
+
+impl<S: LayoutSink> LayoutSink for SourceTextOnFirstRow<'_, S> {
+    fn print(&mut self, text: &str) {
+        self.inner.print(text);
+    }
+    fn newline(&mut self) {
+        if let Some(src) = self.pending_source.take() {
+            self.inner.set_source_text(&src);
+        } else {
+            self.inner.mark_soft_wrap_continuation();
+        }
+        self.inner.newline();
+    }
+    fn mark_wrapped(&mut self) {
+        self.inner.mark_wrapped();
+    }
+    fn fill_line_bg(&mut self, bg: crate::render::display::ColorValue, right_margin: u16) {
+        self.inner.fill_line_bg(bg, right_margin);
+    }
+    fn snapshot_style(&self) -> crate::render::display::SpanStyle {
+        self.inner.snapshot_style()
+    }
+    fn apply_style(&mut self, style: crate::render::display::SpanStyle) {
+        self.inner.apply_style(style);
+    }
+    fn push_style(&mut self, style: crate::render::display::SpanStyle) {
+        self.inner.push_style(style);
+    }
+    fn pop_style(&mut self) {
+        self.inner.pop_style();
+    }
+    fn set_gutter_bg(&mut self, bg: crate::render::display::ColorValue) {
+        self.inner.set_gutter_bg(bg);
+    }
+    fn mark_soft_wrap_continuation(&mut self) {
+        self.inner.mark_soft_wrap_continuation();
+    }
+    fn set_source_text(&mut self, text: &str) {
+        self.inner.set_source_text(text);
+    }
+    fn print_with_meta(&mut self, text: &str, meta: crate::render::display::SpanMeta) {
+        self.inner.print_with_meta(text, meta);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::layout_out::SpanCollector;
+
+    #[test]
+    fn rendered_table_attaches_raw_source_to_first_row() {
+        // Whole-table selection (any range that includes row 0) should
+        // round-trip back to the raw `|col|val|` markdown — not the
+        // rendered ┃ box-drawing chars. Achieved via the
+        // `SourceTextOnFirstRow` wrapper: row 0 carries the joined
+        // input lines as `source_text`; subsequent rows are marked as
+        // soft-wrap continuations.
+        let mut sink = SpanCollector::new(80);
+        let md = "| col | val |\n| --- | --- |\n| a   | 1   |\n";
+        render_markdown_inner(&mut sink, md, 80, "", false, None);
+        let block = sink.finish();
+        assert!(block.lines.len() >= 2, "table should render multiple rows");
+        // Row 0 carries the full raw markdown table.
+        assert_eq!(
+            block.lines[0].source_text.as_deref(),
+            Some("| col | val |\n| --- | --- |\n| a   | 1   |")
+        );
+        // Subsequent table rows are soft-wrap continuations; they are
+        // skipped by `copy_range` once row 0's source has been emitted.
+        for (i, line) in block.lines.iter().enumerate().skip(1) {
+            assert!(
+                line.soft_wrapped,
+                "row {i} should be marked soft-wrap continuation"
+            );
+            assert!(
+                line.source_text.is_none(),
+                "row {i} should not carry its own source_text"
+            );
+        }
+    }
 }
