@@ -217,4 +217,20 @@ Canonicalization (Ctrl-R and friends):
   to declarations; `history_search` still uses the lower-level
   `smelt.prompt.open_picker` directly because its tab-vs-enter
   restore logic doesn't match the generic shape.
-- **Step 6 — Migrate Confirm to Lua.** Pending.
+- **Step 6 — Migrate Confirm to Lua.** Deferred. The mechanical
+  migration is clear (add `smelt.confirm.build_{title,summary,preview}
+  _buf`, `smelt.confirm.resolve`, `smelt.confirm.back_tab` sync
+  primitives, port `app/dialogs/confirm.rs` + `confirm_preview.rs`'s
+  panel layout / keymap wiring to `confirm.lua`, change
+  `agent.rs:1381` to fire `smelt.confirm.open(req_tbl)` instead of
+  calling `dialogs::confirm::open`, delete the Rust dialog file plus
+  `DomainOp::ConfirmBackTab` / `DomainOp::ResolveConfirm`). The
+  reason to defer: Confirm is the only security-critical dialog —
+  getting the approval-scope / pattern / BackTab mode-toggle paths
+  wrong bypasses permission checks. Worth a focused session with
+  live smoke-testing, not a rush at the end of a bigger refactor.
+  Confirm.rs's `DomainOp`s (ConfirmBackTab, ResolveConfirm) are
+  legitimate domain ops while the dialog is Rust-authored — the
+  Rust BackTab keymap closure holds `&mut Ui` when it fires, so it
+  can't use `with_app` directly; the DomainOp queue is the correct
+  funnel until the closure itself moves to Lua.
