@@ -480,12 +480,19 @@ impl Window {
         };
         vim.set_curswant(self.win_cursor.curswant());
         let mut cpos = self.cpos;
+        // The transcript pushes yanked text to the clipboard at the
+        // caller (`content_keys::handle_content_vim_key`) because it
+        // needs `copy_display_range` to convert rendered text back to
+        // raw markdown. Using `NullClipboard` here avoids a redundant
+        // raw-text push from `yank_range`.
+        let mut clipboard = crate::clipboard::NullClipboard;
         let mut ctx = VimContext {
             buf: &mut self.edit_buf.buf,
             cpos: &mut cpos,
             attachments: &mut self.edit_buf.attachment_ids,
             kill_ring: &mut self.kill_ring,
             history: &mut self.edit_buf.history,
+            clipboard: &mut clipboard,
         };
         let action = vim.handle_key(key, &mut ctx);
         self.cpos = cpos;

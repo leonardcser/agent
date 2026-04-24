@@ -603,7 +603,9 @@ impl App {
     fn copy_prompt_selection_on_release(&mut self) {
         if let Some((s, e)) = self.input.selection_range() {
             let text: String = self.input.win.edit_buf.buf[s..e].to_string();
-            let _ = crate::app::commands::copy_to_clipboard(&text);
+            if crate::app::commands::copy_to_clipboard(&text).is_ok() {
+                self.input.win.kill_ring.record_clipboard_write(text);
+            }
         }
         if let Some(prev) = self.prompt_drag_return_vim_mode.take() {
             if let Some(vim) = self.input.win.vim.as_mut() {
@@ -620,7 +622,9 @@ impl App {
         let cpos = self.input.win.cpos;
         if let Some((s, e)) = self.input.select_word_at(cpos) {
             let text = self.input.win.edit_buf.buf[s..e].to_string();
-            let _ = crate::app::commands::copy_to_clipboard(&text);
+            if crate::app::commands::copy_to_clipboard(&text).is_ok() {
+                self.input.win.kill_ring.record_clipboard_write(text);
+            }
         }
     }
 
@@ -640,7 +644,11 @@ impl App {
             self.drag_anchor_word = Some((s, e));
             self.drag_anchor_line = None;
             let text = self.copy_display_range(s, e, self.settings.show_thinking);
-            let _ = crate::app::commands::copy_to_clipboard(&text);
+            if crate::app::commands::copy_to_clipboard(&text).is_ok() {
+                self.transcript_window
+                    .kill_ring
+                    .record_clipboard_write(text);
+            }
         }
     }
 
@@ -656,7 +664,11 @@ impl App {
             self.drag_anchor_line = Some((s, e));
             self.drag_anchor_word = None;
             let text = self.copy_display_range(s, e, self.settings.show_thinking);
-            let _ = crate::app::commands::copy_to_clipboard(&text);
+            if crate::app::commands::copy_to_clipboard(&text).is_ok() {
+                self.transcript_window
+                    .kill_ring
+                    .record_clipboard_write(text);
+            }
         }
     }
 
@@ -678,7 +690,11 @@ impl App {
                 let e = crate::text_utils::snap(&buf, e);
                 if s < e {
                     let copy = self.copy_display_range(s, e, self.settings.show_thinking);
-                    let _ = crate::app::commands::copy_to_clipboard(&copy);
+                    if crate::app::commands::copy_to_clipboard(&copy).is_ok() {
+                        self.transcript_window
+                            .kill_ring
+                            .record_clipboard_write(copy);
+                    }
                 }
             }
         }

@@ -53,12 +53,17 @@ pub enum Action {
 /// `InputState` (as the kill ring and the single `UndoHistory`). The caller
 /// bundles them here along with the live buffer so vim can read and mutate
 /// them without any post-keystroke synchronization.
+///
+/// `clipboard` bridges yank / paste with the system clipboard: yanks
+/// mirror into it, pastes pull from it when it was updated externally
+/// (see `KillRing::last_clipboard_write`).
 pub struct VimContext<'a> {
     pub buf: &'a mut String,
     pub cpos: &'a mut usize,
     pub attachments: &'a mut Vec<AttachmentId>,
     pub kill_ring: &'a mut KillRing,
     pub history: &'a mut UndoHistory,
+    pub clipboard: &'a mut dyn crate::clipboard::Clipboard,
 }
 
 impl VimContext<'_> {
@@ -91,9 +96,16 @@ impl VimContext<'_> {
     }
 
     /// Copy `buf[start..end]` into the kill ring with the given linewise flag.
+    /// Also mirrors the text to the system clipboard so a `y` in smelt is
+    /// immediately pasteable in other apps, matching nvim's
+    /// `clipboard=unnamedplus`.
     fn yank_range(&mut self, start: usize, end: usize, linewise: bool) {
         let text = self.buf[start..end].to_string();
-        self.kill_ring.set_with_source(text, linewise, start, end);
+        self.kill_ring
+            .set_with_source(text.clone(), linewise, start, end);
+        if self.clipboard.write(&text).is_ok() {
+            self.kill_ring.record_clipboard_write(text);
+        }
     }
 
     fn register(&self) -> &str {
@@ -102,6 +114,23 @@ impl VimContext<'_> {
 
     fn register_linewise(&self) -> bool {
         self.kill_ring.is_linewise()
+    }
+
+    /// Before reading the register for a paste, reconcile with the
+    /// system clipboard. If the clipboard holds text different from
+    /// what we last pushed, an external source updated it — overwrite
+    /// the kill ring with that text (charwise, since external sources
+    /// don't carry vim's linewise flag). When they match, the kill
+    /// ring stays authoritative so `p` vs `P` + linewise still work.
+    fn sync_paste_from_clipboard(&mut self) {
+        let current = self.clipboard.read();
+        let Some(text) = current else { return };
+        let prev = self.kill_ring.last_clipboard_write().map(str::to_owned);
+        if prev.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        self.kill_ring.set_with_linewise(text.clone(), false);
+        self.kill_ring.record_clipboard_write(text);
     }
 }
 
@@ -564,6 +593,7 @@ impl Vim {
 
             // ── Paste ───────────────────────────────────────────────────
             'p' => {
+                ctx.sync_paste_from_clipboard();
                 if !ctx.register().is_empty() {
                     ctx.save_undo();
                     if ctx.register_linewise() {
@@ -589,6 +619,7 @@ impl Vim {
                 Action::Consumed
             }
             'P' => {
+                ctx.sync_paste_from_clipboard();
                 if !ctx.register().is_empty() {
                     ctx.save_undo();
                     if ctx.register_linewise() {
@@ -1158,6 +1189,7 @@ impl Vim {
 
             // ── Paste over selection ───────────────────────────────────
             'p' | 'P' => {
+                ctx.sync_paste_from_clipboard();
                 if !ctx.register().is_empty() {
                     if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos) {
                         ctx.save_undo();
@@ -1167,7 +1199,12 @@ impl Vim {
                         *ctx.cpos = start;
                         clamp_normal(ctx.buf, ctx.cpos);
                         // The replaced text goes into register (like vim).
-                        ctx.kill_ring.set_with_linewise(old, false);
+                        // Also mirror to clipboard so subsequent external
+                        // pastes pick it up.
+                        ctx.kill_ring.set_with_linewise(old.clone(), false);
+                        if ctx.clipboard.write(&old).is_ok() {
+                            ctx.kill_ring.record_clipboard_write(old);
+                        }
                     }
                 }
                 self.exit_visual();
@@ -1890,14 +1927,57 @@ mod tests {
         }
 
         fn handle(&mut self, k: KeyEvent) -> Action {
+            let mut clipboard = crate::clipboard::NullClipboard;
             let mut ctx = VimContext {
                 buf: &mut self.buf,
                 cpos: &mut self.cpos,
                 attachments: &mut self.attachments,
                 kill_ring: &mut self.kill_ring,
                 history: &mut self.history,
+                clipboard: &mut clipboard,
             };
             self.vim.handle_key(k, &mut ctx)
+        }
+
+        fn handle_with_clipboard(
+            &mut self,
+            k: KeyEvent,
+            clipboard: &mut dyn crate::clipboard::Clipboard,
+        ) -> Action {
+            let mut ctx = VimContext {
+                buf: &mut self.buf,
+                cpos: &mut self.cpos,
+                attachments: &mut self.attachments,
+                kill_ring: &mut self.kill_ring,
+                history: &mut self.history,
+                clipboard,
+            };
+            self.vim.handle_key(k, &mut ctx)
+        }
+    }
+
+    /// In-memory `Clipboard` for testing the sync between the kill
+    /// ring and the system clipboard without shelling out.
+    struct MemClipboard {
+        text: Option<String>,
+        writes: usize,
+    }
+    impl MemClipboard {
+        fn new(initial: Option<&str>) -> Self {
+            Self {
+                text: initial.map(str::to_string),
+                writes: 0,
+            }
+        }
+    }
+    impl crate::clipboard::Clipboard for MemClipboard {
+        fn read(&mut self) -> Option<String> {
+            self.text.clone()
+        }
+        fn write(&mut self, text: &str) -> Result<(), String> {
+            self.text = Some(text.to_string());
+            self.writes += 1;
+            Ok(())
         }
     }
 
@@ -2217,6 +2297,45 @@ mod tests {
         h.handle(key('$'));
         h.handle(key('p'));
         assert_eq!(h.buf, "hello worldhello ");
+    }
+
+    #[test]
+    fn yank_mirrors_to_clipboard() {
+        let mut h = TestHarness::new("hello world");
+        let mut clip = MemClipboard::new(None);
+        h.handle_with_clipboard(key('y'), &mut clip);
+        h.handle_with_clipboard(key('w'), &mut clip);
+        assert_eq!(clip.text.as_deref(), Some("hello "));
+        assert_eq!(clip.writes, 1);
+        assert_eq!(h.kill_ring.last_clipboard_write(), Some("hello "));
+    }
+
+    #[test]
+    fn paste_prefers_external_clipboard_when_updated() {
+        // External tool put "pasted" on the clipboard. `p` should use
+        // that instead of whatever is in the kill ring.
+        let mut h = TestHarness::new("abc");
+        h.kill_ring.set_with_linewise("stale".to_string(), false);
+        let mut clip = MemClipboard::new(Some("pasted"));
+        // Move cursor to end so `p` inserts after.
+        h.handle_with_clipboard(key('$'), &mut clip);
+        h.handle_with_clipboard(key('p'), &mut clip);
+        assert_eq!(h.buf, "abcpasted");
+    }
+
+    #[test]
+    fn paste_keeps_kill_ring_when_clipboard_matches_last_write() {
+        // Kill ring was the last writer — its linewise flag matters
+        // for `p` placement, so we must not overwrite charwise.
+        let mut h = TestHarness::new("abc\n");
+        // Simulate a prior `yy`: linewise + clipboard mirror.
+        h.kill_ring.set_with_linewise("line\n".to_string(), true);
+        h.kill_ring.record_clipboard_write("line\n".to_string());
+        let mut clip = MemClipboard::new(Some("line\n"));
+        // Position on first line, then `p` — linewise pastes below.
+        h.handle_with_clipboard(key('p'), &mut clip);
+        assert!(h.buf.contains("line\n"));
+        assert!(h.kill_ring.is_linewise());
     }
 
     #[test]

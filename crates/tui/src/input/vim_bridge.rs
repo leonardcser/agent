@@ -42,12 +42,14 @@ impl PromptState {
         let vim = self.win.vim.as_mut().unwrap();
         vim.set_curswant(seed);
         let result = {
+            let mut clipboard = crate::app::commands::SystemClipboard;
             let mut ctx = VimContext {
                 buf: &mut self.win.edit_buf.buf,
                 cpos: &mut self.win.cpos,
                 attachments: &mut self.win.edit_buf.attachment_ids,
                 kill_ring: &mut self.win.kill_ring,
                 history: &mut self.win.edit_buf.history,
+                clipboard: &mut clipboard,
             };
             vim.handle_key(key_ev, &mut ctx)
         };

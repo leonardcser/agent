@@ -393,9 +393,12 @@ impl PromptState {
     }
 
     /// Kill text into the kill ring and copy to the system clipboard.
+    /// Records the clipboard write on the kill ring so subsequent
+    /// pastes know this is *our* latest push (distinguished from an
+    /// externally-updated clipboard).
     pub(super) fn kill_and_copy(&mut self, text: String) {
-        if !text.is_empty() {
-            let _ = crate::app::copy_to_clipboard(&text);
+        if !text.is_empty() && crate::app::copy_to_clipboard(&text).is_ok() {
+            self.win.kill_ring.record_clipboard_write(text.clone());
         }
         self.win.kill_ring.kill(text);
     }

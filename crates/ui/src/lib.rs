@@ -1,6 +1,7 @@
 pub mod buffer;
 pub mod buffer_view;
 pub mod callback;
+pub mod clipboard;
 pub mod cmdline;
 pub mod component;
 pub mod compositor;

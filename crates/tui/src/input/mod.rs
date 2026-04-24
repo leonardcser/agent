@@ -253,6 +253,23 @@ impl PromptState {
         self.win.kill_ring.set(contents);
     }
 
+    /// Reconcile the kill ring with the system clipboard before an
+    /// emacs-style paste (`C-y`). If the clipboard text differs from
+    /// what we last pushed, treat it as externally updated and
+    /// overwrite the kill ring (charwise — external sources don't
+    /// know about vim's linewise concept). When they match, the kill
+    /// ring is already authoritative.
+    fn sync_kill_ring_from_clipboard(&mut self) {
+        let Some(text) = crate::app::commands::paste_from_clipboard() else {
+            return;
+        };
+        if self.win.kill_ring.last_clipboard_write() == Some(text.as_str()) {
+            return;
+        }
+        self.win.kill_ring.set(text.clone());
+        self.win.kill_ring.record_clipboard_write(text);
+    }
+
     pub fn clear(&mut self) {
         self.win.edit_buf.buf.clear();
         self.win.cpos = 0;
@@ -757,6 +774,7 @@ impl PromptState {
                 if self.has_selection() {
                     self.delete_selection();
                 }
+                self.sync_kill_ring_from_clipboard();
                 if let Some(new_cpos) = self
                     .win
                     .kill_ring
@@ -815,7 +833,9 @@ impl PromptState {
             KeyAction::CopySelection => {
                 if let Some((start, end)) = self.selection_range() {
                     let text = self.win.edit_buf.buf[start..end].to_string();
-                    let _ = crate::app::copy_to_clipboard(&text);
+                    if crate::app::copy_to_clipboard(&text).is_ok() {
+                        self.win.kill_ring.record_clipboard_write(text.clone());
+                    }
                     self.win.kill_ring.set(text);
                 }
                 Action::Noop
@@ -824,7 +844,9 @@ impl PromptState {
                 if self.selection_range().is_some() {
                     self.save_undo();
                     if let Some(text) = self.delete_selection() {
-                        let _ = crate::app::copy_to_clipboard(&text);
+                        if crate::app::copy_to_clipboard(&text).is_ok() {
+                            self.win.kill_ring.record_clipboard_write(text.clone());
+                        }
                         self.win.kill_ring.set(text);
                     }
                     self.recompute_completer();
@@ -834,13 +856,28 @@ impl PromptState {
                 }
             }
             KeyAction::ClipboardImage => {
+                // Cmd/Meta+V. When bracketed paste is active the
+                // terminal forwards the clipboard as an `Event::Paste`
+                // we never reach here. But some terminals (or configs
+                // with bracketed paste off) send raw Cmd+V as a key —
+                // handle both image and text paste so the shortcut is
+                // reliable regardless of the terminal's paste mode.
                 if let Some(url) = clipboard_image_to_data_url() {
                     self.save_undo();
                     self.insert_image("clipboard.png".into(), url);
-                    Action::Redraw
-                } else {
-                    Action::Noop
+                    return Action::Redraw;
                 }
+                if let Some(text) = crate::app::commands::paste_from_clipboard() {
+                    if !text.is_empty() {
+                        self.save_undo();
+                        if self.has_selection() {
+                            self.delete_selection();
+                        }
+                        self.insert_paste(text);
+                        return Action::Redraw;
+                    }
+                }
+                Action::Noop
             }
 
             // ── Selection (shift+movement) ─────────────────────────────

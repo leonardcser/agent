@@ -38,6 +38,12 @@ pub struct KillRing {
     /// a brief post-yank highlight flash on the source range. Cleared
     /// implicitly by the flash window expiring.
     last_yank_at: Option<Instant>,
+    /// Exact text last pushed to the system clipboard from this kill
+    /// ring. Paste sites compare `clipboard.read()` to this value to
+    /// decide between "kill ring is authoritative" (preserves vim
+    /// linewise flag + yank-pop history) and "clipboard was updated
+    /// externally" (overwrite kill ring with the clipboard text).
+    last_clipboard_write: Option<String>,
 }
 
 impl Default for KillRing {
@@ -56,6 +62,7 @@ impl KillRing {
             linewise: false,
             source_range: None,
             last_yank_at: None,
+            last_clipboard_write: None,
         }
     }
 
@@ -178,6 +185,19 @@ impl KillRing {
     /// at frame rate while the flash is visible so it clears promptly.
     pub fn yank_flash_until(&self) -> Option<Instant> {
         self.last_yank_at.map(|t| t + YANK_FLASH_DURATION)
+    }
+
+    /// Record that we just pushed `text` to the system clipboard. The
+    /// next paste compares `clipboard.read()` against this value: a
+    /// match means our push is still current (trust kill ring's
+    /// linewise flag); a mismatch means the clipboard was updated
+    /// externally and the new text should overwrite the kill ring.
+    pub fn record_clipboard_write(&mut self, text: String) {
+        self.last_clipboard_write = Some(text);
+    }
+
+    pub fn last_clipboard_write(&self) -> Option<&str> {
+        self.last_clipboard_write.as_deref()
     }
 }
 

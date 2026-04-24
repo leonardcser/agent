@@ -586,3 +586,45 @@ pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
         Err(format!("{cmd} exited with {status}"))
     }
 }
+
+/// Read text from the system clipboard using platform commands.
+/// Returns `None` when the platform helper fails or the clipboard is
+/// empty / holds non-text data — callers should fall back to the kill
+/// ring in that case.
+pub(crate) fn paste_from_clipboard() -> Option<String> {
+    use std::process::{Command, Stdio};
+
+    let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("pbpaste", &[])
+    } else if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        ("wl-paste", &["--no-newline"])
+    } else {
+        ("xclip", &["-selection", "clipboard", "-o"])
+    };
+
+    let output = Command::new(cmd)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+/// `ui::clipboard::Clipboard` impl backed by the platform subprocess
+/// helpers. Passed into `VimContext` so vim yank / paste sites can
+/// read and write the system clipboard without pulling subprocess
+/// plumbing into the `ui` crate.
+pub(crate) struct SystemClipboard;
+
+impl ui::clipboard::Clipboard for SystemClipboard {
+    fn read(&mut self) -> Option<String> {
+        paste_from_clipboard()
+    }
+    fn write(&mut self, text: &str) -> Result<(), String> {
+        copy_to_clipboard(text)
+    }
+}

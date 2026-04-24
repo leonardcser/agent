@@ -223,7 +223,11 @@ impl App {
                     } else {
                         raw
                     };
-                    let _ = crate::app::commands::copy_to_clipboard(&copy);
+                    if crate::app::commands::copy_to_clipboard(&copy).is_ok() {
+                        self.transcript_window
+                            .kill_ring
+                            .record_clipboard_write(copy);
+                    }
                 }
                 self.snap_transcript_cursor();
                 true

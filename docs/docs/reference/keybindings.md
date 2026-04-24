@@ -20,7 +20,7 @@
 | `↑` / `↓` / `Ctrl+P` / `Ctrl+N` | Navigate input history             |
 | `Tab`                           | Accept completion / ghost text     |
 | `?`                             | Open help (empty input only)       |
-| `Cmd+V`                         | Paste image from clipboard         |
+| `Cmd+V`                         | Paste clipboard (image or text)    |
 
 ### Cursor
 
@@ -91,6 +91,12 @@ normal, and visual modes. When in normal mode, these keys change behavior:
 Full vim support: motions, operators (`d`, `c`, `y`), text objects (`iw`,
 `a(`…), find (`f`, `t`, `F`, `T`, `;`, `,`), and commands (`x`, `s`, `r`, `p`,
 `u`, `~`, `J`, etc.).
+
+Yank / paste are mirrored with the system clipboard: `y` / `yy` / `d` / `x`
+push to the clipboard, and `p` / `P` read from it. If the clipboard was
+updated externally since your last yank, `p` pastes the external text
+(charwise); otherwise vim's linewise flag from `yy` is preserved. The emacs
+`Ctrl+Y` yank behaves the same way.
 
 ## Dialogs
 
