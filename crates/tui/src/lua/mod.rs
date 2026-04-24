@@ -1040,7 +1040,6 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.rewind",
     "smelt.plugins.ps",
     "smelt.plugins.help",
-    "smelt.plugins.yank_block",
     "smelt.plugins.permissions",
     "smelt.plugins.resume",
     "smelt.plugins.agents",
