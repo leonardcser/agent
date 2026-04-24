@@ -925,9 +925,7 @@ mod tests {
             "\n",
             "---\n",
         );
-        let block = Block::Text {
-            content: md.into(),
-        };
+        let block = Block::Text { content: md.into() };
         assert_eq!(block.raw_text().as_deref(), Some(md));
     }
 

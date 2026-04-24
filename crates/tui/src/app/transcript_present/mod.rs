@@ -377,7 +377,7 @@ pub(super) fn render_block<S: LayoutSink>(
         }
         Block::Text { content } => render_markdown_inner(out, content, width, "", false, None),
         Block::CodeLine { content, lang } => {
-            render_code_block(out, &[content.as_str()], lang, width, false, None)
+            render_code_block(out, &[content.as_str()], lang, width, false, None, false)
         }
         Block::ToolCall {
             call_id,

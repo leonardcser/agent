@@ -33,6 +33,13 @@ fn syntax_theme() -> &'static syntect::highlighting::Theme {
     }
 }
 
+/// Render a code block. When `fence` is true, the rendered output
+/// stays unchanged but each code line's `source_text` carries its raw
+/// content, with the opening ```` ```{lang} ```` prepended to the first
+/// row and the closing ```` ``` ```` appended to the last row. This
+/// lets partial selections (vim visual / click-drag) over fenced blocks
+/// round-trip back to raw markdown — the visible code body is what the
+/// user sees, the fences re-attach if the first/last row is covered.
 pub(crate) fn render_code_block<S: LayoutSink>(
     out: &mut S,
     lines: &[&str],
@@ -40,6 +47,7 @@ pub(crate) fn render_code_block<S: LayoutSink>(
     width: usize,
     dim: bool,
     bctx: Option<&super::BoxContext>,
+    fence: bool,
 ) -> u16 {
     let _perf = crate::perf::begin("render:code_block");
     let ext = match lang {
@@ -69,13 +77,32 @@ pub(crate) fn render_code_block<S: LayoutSink>(
     }
 
     let bg = ColorValue::Role(ColorRole::CodeBlockBg);
-    for line in &expanded {
+    let last_idx = expanded.len().saturating_sub(1);
+    for (line_idx, line) in expanded.iter().enumerate() {
         let line_with_nl = format!("{}\n", line);
         let regions = h
             .highlight_line(&line_with_nl, &SYNTAX_SET)
             .unwrap_or_default();
         let visual_rows = split_regions_into_rows(out, &regions, text_w);
-        for vrow in &visual_rows {
+        if visual_rows.len() > 1 {
+            out.mark_wrapped();
+        }
+        for (vi, vrow) in visual_rows.iter().enumerate() {
+            if vi == 0 {
+                let mut src = String::new();
+                if fence && line_idx == 0 {
+                    src.push_str("```");
+                    src.push_str(lang);
+                    src.push('\n');
+                }
+                src.push_str(line);
+                if fence && line_idx == last_idx {
+                    src.push_str("\n```");
+                }
+                out.set_source_text(&src);
+            } else {
+                out.mark_soft_wrap_continuation();
+            }
             if let Some(b) = bctx {
                 if dim {
                     out.reset_style();
@@ -2036,5 +2063,51 @@ mod tests {
         // giving width=4 after stripping. The new parser keeps the run
         // literal, so stripping should return the whole thing.
         assert_eq!(strip_markdown_markers("**text*"), "**text*");
+    }
+
+    /// Source-text round-trip for fenced code blocks: opening fence on
+    /// the first row, closing fence on the last, raw line per row in
+    /// between. Lets vim-visual / click-drag selections that cover any
+    /// subset of code rows reconstruct the markdown — fences re-attach
+    /// when the first / last row is in the selection.
+    #[test]
+    fn render_code_block_with_fence_attaches_source_text_per_line() {
+        let mut sink = SpanCollector::new(80);
+        let lines = ["let x = 1;", "let y = 2;", "let z = 3;"];
+        render_code_block(&mut sink, &lines, "rust", 80, false, None, true);
+        let block = sink.finish();
+        assert_eq!(block.lines.len(), 3);
+        assert_eq!(
+            block.lines[0].source_text.as_deref(),
+            Some("```rust\nlet x = 1;")
+        );
+        assert_eq!(block.lines[1].source_text.as_deref(), Some("let y = 2;"));
+        assert_eq!(
+            block.lines[2].source_text.as_deref(),
+            Some("let z = 3;\n```")
+        );
+    }
+
+    #[test]
+    fn render_code_block_single_line_wraps_with_both_fences() {
+        let mut sink = SpanCollector::new(80);
+        render_code_block(&mut sink, &["let x = 1;"], "rust", 80, false, None, true);
+        let block = sink.finish();
+        assert_eq!(block.lines.len(), 1);
+        assert_eq!(
+            block.lines[0].source_text.as_deref(),
+            Some("```rust\nlet x = 1;\n```")
+        );
+    }
+
+    #[test]
+    fn render_code_block_without_fence_sets_raw_source_per_line() {
+        // Block::CodeLine streaming path: no fences, but each line
+        // still gets its raw source so partial selections preserve it.
+        let mut sink = SpanCollector::new(80);
+        render_code_block(&mut sink, &["let x = 1;"], "rust", 80, false, None, false);
+        let block = sink.finish();
+        assert_eq!(block.lines.len(), 1);
+        assert_eq!(block.lines[0].source_text.as_deref(), Some("let x = 1;"));
     }
 }

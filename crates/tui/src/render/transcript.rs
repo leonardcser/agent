@@ -399,11 +399,7 @@ impl TranscriptSnapshot {
         // `all_selectable_covered` check, letting the `source_text`
         // shortcut emit the original markdown instead of stripping
         // inline markup off the last row.
-        let end_col = self
-            .row_cells
-            .get(end_row)
-            .map(|c| c.len())
-            .unwrap_or(0);
+        let end_col = self.row_cells.get(end_row).map(|c| c.len()).unwrap_or(0);
         let text = self.copy_range(start_row, 0, end_row, end_col);
         if text.is_empty() {
             None

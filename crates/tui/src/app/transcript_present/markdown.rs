@@ -40,7 +40,7 @@ pub(crate) fn render_markdown_inner<S: LayoutSink>(
             if i < lines.len() {
                 i += 1;
             }
-            rows += render_code_block(out, code_lines, lang, width, dim, bctx);
+            rows += render_code_block(out, code_lines, lang, width, dim, bctx, true);
             last_content_line = None;
         } else if lines[i].trim_start().starts_with('|') {
             let table_start = i;
