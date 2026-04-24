@@ -12,22 +12,8 @@ impl App {
         let width = term_w as usize;
         let show_queued = agent_running || self.is_compacting();
 
-        // Freeze the transcript viewport when the user has an active
-        // selection / vim visual / mouse drag — streaming rows grow
-        // into scrollback rather than shifting their selection. Outside
-        // those gestures, `follow_tail` (toggled by wheel / keyboard
-        // scroll) decides: true snaps to the newest row each frame so
-        // content appended below stays visible, even when the viewport
-        // resizes (e.g. prompt grew and shrank the transcript).
-        let has_selection = self.transcript_window.win_cursor.anchor().is_some();
-        let in_vim_visual = matches!(
-            self.transcript_window.vim.as_ref().map(|v| v.mode()),
-            Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
-        );
-        let freeze = has_selection || in_vim_visual || self.mouse_drag_active;
-        if !freeze && self.transcript_window.follow_tail {
-            self.transcript_window.scroll_top = u16::MAX;
-        }
+        self.adjust_tail_scroll();
+
         let queued_owned: Vec<String> = if show_queued {
             self.queued_messages.clone()
         } else {
@@ -41,18 +27,9 @@ impl App {
         let queued: &[String] = &queued_owned;
         let prediction: Option<&str> = prediction_owned.as_deref();
 
-        // Compute cursor ownership for this frame. Cmdline steals the
-        // cursor (via its compositor layer); terminal-unfocused
-        // suppresses; otherwise app_focus decides prompt-vs-transcript.
-        let cmdline_active = self.cmdline_win.is_some();
-        let has_prompt_cursor = !cmdline_active
-            && self.term_focused
-            && matches!(self.app_focus, crate::app::AppFocus::Prompt);
-        let has_transcript_cursor = !cmdline_active
-            && self.term_focused
-            && matches!(self.app_focus, crate::app::AppFocus::Content);
+        let (has_prompt_cursor, has_transcript_cursor) = self.compute_cursor_ownership();
 
-        // ── Compute layout ──
+        // ── Layout ──
         let natural_prompt_height =
             self.measure_prompt_height(&self.input, width, queued, prediction);
         self.layout = render::layout::LayoutState::compute(&render::layout::LayoutInput {
@@ -64,7 +41,68 @@ impl App {
         let prompt_rect = self.layout.prompt;
         let prompt_height = prompt_rect.height;
 
-        // ── Transcript ──
+        let transcript_rect =
+            self.sync_transcript_layer(term_w, width, viewport_rows, has_transcript_cursor);
+        let prompt_input_rect = self.sync_prompt_layer(
+            term_w,
+            prompt_rect,
+            prompt_height,
+            queued,
+            prediction,
+            has_prompt_cursor,
+        );
+        self.refresh_status_bar();
+
+        self.finalize_layer_rects(transcript_rect, prompt_rect, prompt_input_rect, term_w, term_h);
+
+        self.sync_completer_float(prompt_rect);
+        self.sync_notification_float(prompt_rect);
+
+        let mut stdout = std::io::stdout();
+        let _ = self.ui.render(&mut stdout);
+    }
+
+    /// Freeze transcript tail-follow during an active selection / vim
+    /// visual / mouse drag so streaming rows grow into scrollback
+    /// rather than shifting the user's selection. Otherwise, when
+    /// `follow_tail` is on, snap `scroll_top` to the bottom so content
+    /// appended below stays visible across viewport resizes.
+    fn adjust_tail_scroll(&mut self) {
+        let has_selection = self.transcript_window.win_cursor.anchor().is_some();
+        let in_vim_visual = matches!(
+            self.transcript_window.vim.as_ref().map(|v| v.mode()),
+            Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
+        );
+        let freeze = has_selection || in_vim_visual || self.mouse_drag_active;
+        if !freeze && self.transcript_window.follow_tail {
+            self.transcript_window.scroll_top = u16::MAX;
+        }
+    }
+
+    /// Cmdline steals the cursor (via its compositor layer);
+    /// terminal-unfocused suppresses; otherwise `app_focus` decides
+    /// prompt-vs-transcript ownership for this frame.
+    fn compute_cursor_ownership(&self) -> (bool, bool) {
+        let cmdline_active = self.cmdline_win.is_some();
+        let has_prompt_cursor = !cmdline_active
+            && self.term_focused
+            && matches!(self.app_focus, crate::app::AppFocus::Prompt);
+        let has_transcript_cursor = !cmdline_active
+            && self.term_focused
+            && matches!(self.app_focus, crate::app::AppFocus::Content);
+        (has_prompt_cursor, has_transcript_cursor)
+    }
+
+    /// Project the transcript into its buffer, compute the soft cursor,
+    /// and sync the `transcript` WindowView layer (rows + selection
+    /// overlays + viewport). Returns the transcript layer's rect.
+    fn sync_transcript_layer(
+        &mut self,
+        term_w: u16,
+        width: usize,
+        viewport_rows: u16,
+        has_transcript_cursor: bool,
+    ) -> ui::Rect {
         let t_pad = self.transcript_gutters.pad_left;
         let transcript_rect = ui::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
         let tdata = self.project_transcript_buffer(
@@ -75,7 +113,6 @@ impl App {
         );
         self.transcript_window.scroll_top = tdata.clamped_scroll;
 
-        // Compute transcript cursor.
         let tcursor = self.compute_transcript_cursor(
             width,
             viewport_rows,
@@ -99,7 +136,6 @@ impl App {
         let transcript_selection =
             self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
 
-        // Sync transcript WindowView from the projected buffer.
         if let Some(tv) = self
             .ui
             .layer_mut::<render::window_view::WindowView>("transcript")
@@ -120,8 +156,23 @@ impl App {
             tv.set_viewport(Some(transcript_viewport));
         }
 
-        // ── Prompt ──
-        // Extract all immutable data first, then take the mutable btw borrow.
+        transcript_rect
+    }
+
+    /// Compute prompt chrome (queued / stash / bars) + input area, then
+    /// sync both the `prompt` (chrome rows) and `prompt_input` (edit
+    /// buffer) WindowView layers. Returns the `prompt_input` layer rect
+    /// for later `set_layer_rect`.
+    fn sync_prompt_layer(
+        &mut self,
+        term_w: u16,
+        prompt_rect: ui::Rect,
+        prompt_height: u16,
+        queued: &[String],
+        prediction: Option<&str>,
+        has_prompt_cursor: bool,
+    ) -> ui::Rect {
+        // Pull all immutable data out before the mutable buf borrow.
         let prev_input_scroll = self.prompt_input_scroll;
         let bar_info = render::prompt_data::BarInfo {
             model_label: Some(self.model.clone()),
@@ -155,36 +206,34 @@ impl App {
         let chrome_rows = prompt_output.chrome_rows;
         let cursor = prompt_output.cursor;
         let cursor_style = prompt_output.cursor_style;
-        let input_scroll = prompt_output.input_scroll;
-        let input_viewport_data = prompt_output.input_viewport;
+        self.prompt_input_scroll = prompt_output.input_scroll;
 
-        self.prompt_input_scroll = input_scroll;
-
-        let (prompt_input_rect, prompt_viewport) = if let Some(ref ivp) = input_viewport_data {
-            let input_rect = ui::Rect::new(
-                prompt_rect.top + ivp.top_row,
-                0,
-                prompt_rect.width,
-                ivp.rows,
-            );
-            let viewport = ui::WindowViewport::new(
-                input_rect,
-                ivp.content_width,
-                ivp.total_rows,
-                ivp.scroll_top,
-                ui::ScrollbarState::new(
-                    prompt_rect.width.saturating_sub(1),
-                    ivp.total_rows,
+        let (prompt_input_rect, prompt_viewport) =
+            if let Some(ref ivp) = prompt_output.input_viewport {
+                let input_rect = ui::Rect::new(
+                    prompt_rect.top + ivp.top_row,
+                    0,
+                    prompt_rect.width,
                     ivp.rows,
-                ),
-            );
-            (input_rect, Some(viewport))
-        } else {
-            (
-                ui::Rect::new(prompt_rect.bottom(), 0, prompt_rect.width, 0),
-                None,
-            )
-        };
+                );
+                let viewport = ui::WindowViewport::new(
+                    input_rect,
+                    ivp.content_width,
+                    ivp.total_rows,
+                    ivp.scroll_top,
+                    ui::ScrollbarState::new(
+                        prompt_rect.width.saturating_sub(1),
+                        ivp.total_rows,
+                        ivp.rows,
+                    ),
+                );
+                (input_rect, Some(viewport))
+            } else {
+                (
+                    ui::Rect::new(prompt_rect.bottom(), 0, prompt_rect.width, 0),
+                    None,
+                )
+            };
         self.prompt_viewport = prompt_viewport;
 
         if let Some(pv) = self
@@ -195,32 +244,38 @@ impl App {
             pv.set_viewport(None);
             pv.set_cursor(None, None);
         }
-        {
-            let viewport = self.prompt_viewport;
-            let input_buf_id = self.input_display_buf;
-            let buf_snapshot = self.ui.buf(input_buf_id).cloned();
-            if let (Some(pv), Some(buf)) = (
-                self.ui
-                    .layer_mut::<render::window_view::WindowView>("prompt_input"),
-                buf_snapshot,
-            ) {
-                // `compute_input_area` already wrote only the visible
-                // slice of wrapped lines into `buf`, with highlights
-                // indexed 0..content_rows. Passing the absolute scroll
-                // here would make `BufferView::draw_content` skip past
-                // the slice and render empty rows — the buffer offset
-                // must be 0, while the *viewport* above still carries
-                // the real scroll so the scrollbar tracks correctly.
-                pv.sync_from_buffer(&buf, 0);
-                pv.set_viewport(viewport);
-                pv.set_cursor(cursor, cursor_style);
-            }
+
+        let viewport = self.prompt_viewport;
+        let input_buf_id = self.input_display_buf;
+        let buf_snapshot = self.ui.buf(input_buf_id).cloned();
+        if let (Some(pv), Some(buf)) = (
+            self.ui
+                .layer_mut::<render::window_view::WindowView>("prompt_input"),
+            buf_snapshot,
+        ) {
+            // `compute_input_area` already wrote only the visible slice
+            // of wrapped lines into `buf`, with highlights indexed
+            // 0..content_rows. Passing the absolute scroll here would
+            // make `BufferView::draw_content` skip past the slice and
+            // render empty rows — the buffer offset must be 0, while
+            // the *viewport* above still carries the real scroll so
+            // the scrollbar tracks correctly.
+            pv.sync_from_buffer(&buf, 0);
+            pv.set_viewport(viewport);
+            pv.set_cursor(cursor, cursor_style);
         }
 
-        // ── Status bar ──
-        self.refresh_status_bar();
+        prompt_input_rect
+    }
 
-        // ── Update layer rects and focus ──
+    fn finalize_layer_rects(
+        &mut self,
+        transcript_rect: ui::Rect,
+        prompt_rect: ui::Rect,
+        prompt_input_rect: ui::Rect,
+        term_w: u16,
+        term_h: u16,
+    ) {
         let status_rect = ui::Rect::new(term_h - 1, 0, term_w, 1);
         self.ui.set_layer_rect("transcript", transcript_rect);
         self.ui.set_layer_rect("prompt", prompt_rect);
@@ -233,14 +288,6 @@ impl App {
                 crate::app::AppFocus::Content => self.ui.focus_layer("transcript"),
             }
         }
-
-        self.sync_completer_float(prompt_rect);
-        self.sync_notification_float(prompt_rect);
-
-        let mut stdout = std::io::stdout();
-        let _ = self.ui.render(&mut stdout);
-
-        // Clean up state.
     }
 
     // ── Completer float ────────────────────────────────────────────
