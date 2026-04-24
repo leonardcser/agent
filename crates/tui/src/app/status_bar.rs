@@ -60,7 +60,7 @@ impl App {
         let mut spans: Vec<StatusSpan> = Vec::with_capacity(16);
 
         // Slug pill: spinner + label.
-        let is_compacting = self.working.throbber == Some(Throbber::Compacting);
+        let is_compacting = self.working.is_compacting();
         let pill_bg = if is_compacting {
             Color::White
         } else {
@@ -165,11 +165,10 @@ impl App {
 
         // Throbber spans (timer, tok/s, etc.).
         let throbber_spans = self.working.throbber_spans(self.settings.show_tps);
-        let is_active = matches!(
-            self.working.throbber,
-            Some(Throbber::Working) | Some(Throbber::Compacting) | Some(Throbber::Retrying { .. })
-        );
-        let skip = if is_active && !throbber_spans.is_empty() {
+        // Live-turn spans lead with the spinner glyph (already included
+        // as a separate left-aligned span via `spinner_char`); skip it
+        // here to avoid duplicating the glyph in the right-aligned area.
+        let skip = if self.working.is_animating() && !throbber_spans.is_empty() {
             1
         } else {
             0

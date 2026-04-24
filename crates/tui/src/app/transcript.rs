@@ -606,10 +606,12 @@ impl App {
     /// redraw.
     pub fn update_spinner(&mut self) -> bool {
         let mut changed = false;
-        if let Some(elapsed) = self.working.elapsed() {
+        if let (Some(elapsed), Some(prev_frame)) =
+            (self.working.elapsed(), self.working.last_spinner_frame())
+        {
             let frame = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
-            if frame != self.working.last_spinner_frame {
-                self.working.last_spinner_frame = frame;
+            if frame != prev_frame {
+                self.working.set_last_spinner_frame(frame);
                 changed = true;
             }
         }

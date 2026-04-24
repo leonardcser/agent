@@ -498,13 +498,13 @@ impl App {
     }
 
     pub fn is_compacting(&self) -> bool {
-        self.working.throbber == Some(Throbber::Compacting)
+        self.working.is_compacting()
     }
 
     pub fn compact_history(&mut self, instructions: Option<String>) {
         self.pending_compact_epoch = self.compact_epoch;
         {
-            self.working.set_throbber(Throbber::Compacting);
+            self.working.begin(TurnPhase::Compacting);
         };
         self.engine.send(UiCommand::Compact {
             history: self.history.clone(),
@@ -515,7 +515,7 @@ impl App {
     pub(super) fn apply_compaction(&mut self, messages: Vec<protocol::Message>) {
         if messages.is_empty() {
             {
-                self.working.set_throbber(Throbber::Done);
+                self.working.finish(TurnOutcome::Done);
             };
             return;
         }
@@ -532,7 +532,7 @@ impl App {
         self.context_tokens = None;
         self.save_session();
         {
-            self.working.set_throbber(Throbber::Done);
+            self.working.finish(TurnOutcome::Done);
         };
         self.transcript_window.scroll_to_bottom();
     }

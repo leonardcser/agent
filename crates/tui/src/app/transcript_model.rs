@@ -236,15 +236,6 @@ pub enum ConfirmChoice {
     AlwaysDir(String, ApprovalScope),
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum Throbber {
-    Working,
-    Retrying { delay: Duration, attempt: u32 },
-    Compacting,
-    Done,
-    Interrupted,
-}
-
 /// Stable, monotonic per-session handle to a block. Independent of
 /// block content: mutating a block in place keeps the same `BlockId`.
 /// Layout cache invalidation on content change is handled via

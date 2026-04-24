@@ -356,10 +356,10 @@ impl App {
                     let restore_mode = t.esc_vim_mode.take();
 
                     // Cancel in-flight compaction on double-Esc.
-                    if self.working.throbber == Some(Throbber::Compacting) {
+                    if self.working.is_compacting() {
                         self.compact_epoch += 1;
                         {
-                            self.working.set_throbber(Throbber::Interrupted);
+                            self.working.finish(TurnOutcome::Interrupted);
                         };
                         self.notify("compaction cancelled".into());
                         if restore_mode == Some(vim::ViMode::Insert) {

@@ -35,8 +35,9 @@ pub type SharedSnapshots = Arc<Mutex<Vec<AgentSnapshot>>>;
 
 pub(crate) use crate::app::transcript_model::{
     AgentBlockStatus, ApprovalScope, Block, BlockId, ConfirmChoice, ConfirmRequest,
-    PermissionEntry, Throbber, ToolOutput, ToolState, ToolStatus, ViewState,
+    PermissionEntry, ToolOutput, ToolState, ToolStatus, ViewState,
 };
+pub(crate) use crate::app::working::{TurnOutcome, TurnPhase};
 use crate::input::{resolve_agent_esc, Action, EscAction, History, MenuResult, PromptState};
 use crate::session::Session;
 use crate::{render, session, state, vim};
@@ -171,9 +172,9 @@ pub struct App {
     /// when the terminal isn't focused, so input from other apps
     /// doesn't draw a stale cursor in our window.
     pub term_focused: bool,
-    /// Spinner + throbber state (active timer, TPS samples, elapsed).
-    /// Consulted by the status bar each frame; `set_throbber` is the
-    /// single write path, mirrored from engine lifecycle events.
+    /// Live-turn + last-turn state driving the status bar spinner and
+    /// result line. `begin(TurnPhase::...)` / `finish(TurnOutcome::...)`
+    /// are the write paths, mirrored from engine lifecycle events.
     pub working: working::WorkingState,
     /// Gutter reservation for the transcript window (left padding +
     /// right scrollbar column).

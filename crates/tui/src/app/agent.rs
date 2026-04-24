@@ -56,7 +56,7 @@ impl App {
     fn dispatch_turn(&mut self, content: Content) -> TurnState {
         let Some(api_key) = self.resolve_api_key() else {
             {
-                self.working.set_throbber(Throbber::Done);
+                self.working.finish(TurnOutcome::Done);
             };
             return TurnState {
                 turn_id: 0,
@@ -66,7 +66,7 @@ impl App {
         };
 
         {
-            self.working.set_throbber(Throbber::Working);
+            self.working.begin(TurnPhase::Working);
         };
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
 
@@ -242,7 +242,7 @@ impl App {
         }
         self.maybe_generate_title(Some(&evaluated));
         {
-            self.working.set_throbber(Throbber::Working);
+            self.working.begin(TurnPhase::Working);
         };
 
         let turn_id = self.next_turn_id;
@@ -279,7 +279,7 @@ impl App {
         self.sleep_inhibit.release();
         self.engine.send(UiCommand::Cancel);
         {
-            self.working.set_throbber(Throbber::Interrupted);
+            self.working.finish(TurnOutcome::Interrupted);
         };
         self.queued_messages.clear();
     }
@@ -320,7 +320,7 @@ impl App {
         self.finalize_active_tools();
         if cancelled {
             {
-                self.working.set_throbber(Throbber::Interrupted);
+                self.working.finish(TurnOutcome::Interrupted);
             };
             // If a title/slug generation was in-flight, discard it so stale
             // TitleGenerated events don't update the session. But if a slug
@@ -342,7 +342,7 @@ impl App {
             }
         } else {
             {
-                self.working.set_throbber(Throbber::Done);
+                self.working.finish(TurnOutcome::Done);
             };
             self.input_prediction = None;
         }
@@ -389,7 +389,7 @@ impl App {
                         self.working.record_tokens_per_sec(tps);
                     }
                     {
-                        self.working.set_throbber(Throbber::Working);
+                        self.working.begin(TurnPhase::Working);
                     };
                 }
                 let cost = cost_usd.unwrap_or(0.0);
@@ -586,7 +586,7 @@ impl App {
                 request_id,
             })),
             EngineEvent::Retrying { delay_ms, attempt } => {
-                self.working.set_throbber(Throbber::Retrying {
+                self.working.begin(TurnPhase::Retrying {
                     delay: Duration::from_millis(delay_ms),
                     attempt,
                 });
@@ -599,7 +599,7 @@ impl App {
             EngineEvent::CompactionComplete { messages } => {
                 if self.pending_compact_epoch != self.compact_epoch {
                     {
-                        self.working.set_throbber(Throbber::Done);
+                        self.working.finish(TurnOutcome::Done);
                     };
                     return SessionControl::Continue;
                 }
@@ -648,7 +648,7 @@ impl App {
             }
             EngineEvent::TurnError { message } => {
                 {
-                    self.working.set_throbber(Throbber::Done);
+                    self.working.finish(TurnOutcome::Done);
                 };
                 self.notify_error(message);
                 SessionControl::Done
@@ -753,7 +753,7 @@ impl App {
             }
             EngineEvent::CompactionComplete { messages } => {
                 if self.pending_compact_epoch != self.compact_epoch {
-                    self.working.set_throbber(Throbber::Done);
+                    self.working.finish(TurnOutcome::Done);
                     return;
                 }
                 self.apply_compaction(messages);
@@ -777,7 +777,7 @@ impl App {
                 self.handle_process_completed(id, exit_code);
             }
             EngineEvent::TurnError { message } => {
-                self.working.set_throbber(Throbber::Done);
+                self.working.finish(TurnOutcome::Done);
                 self.notify_error(message);
             }
             EngineEvent::AgentExited {
