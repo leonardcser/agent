@@ -556,6 +556,12 @@ impl App {
                 let end_cell = crate::text_utils::byte_to_cell(row, clip_e) as u16;
                 if end_cell > start_cell {
                     out.push((idx, start_cell, end_cell));
+                } else if row.is_empty() && s <= line_start && e > line_start {
+                    // Empty line inside the selection: paint a single
+                    // virtual cell so the user can see the line is part
+                    // of the range. Mirrors vim's "$" virtual-space
+                    // behavior on empty lines in v / V mode.
+                    out.push((idx, 0, 1));
                 }
             }
             line_start = line_end + 1;
