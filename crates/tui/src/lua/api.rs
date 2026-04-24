@@ -142,15 +142,6 @@ impl LuaRuntime {
             "context_window",
             snap_read!(lua, shared, |o| o.engine.context_window),
         )?;
-        engine_tbl.set(
-            "session_dir",
-            snap_read!(lua, shared, |o| o.engine.session_dir.clone()),
-        )?;
-        engine_tbl.set(
-            "session_id",
-            snap_read!(lua, shared, |o| o.engine.session_id.clone()),
-        )?;
-
         // smelt.session.*
         let session_tbl = lua.create_table()?;
         session_tbl.set(
@@ -1189,13 +1180,34 @@ impl LuaRuntime {
                 let s = shared.clone();
                 statusline_tbl.set(
                     "register",
-                    lua.create_function(move |lua, (name, handler): (String, mlua::Function)| {
-                        let key = lua.create_registry_value(handler)?;
-                        if let Ok(mut map) = s.statusline_sources.lock() {
-                            map.insert(name, LuaHandle { key });
-                        }
-                        Ok(())
-                    })?,
+                    lua.create_function(
+                        move |lua,
+                              (name, handler, opts): (
+                            String,
+                            mlua::Function,
+                            Option<mlua::Table>,
+                        )| {
+                            let default_align_right = opts
+                                .as_ref()
+                                .and_then(|t| t.get::<Option<String>>("align").ok().flatten())
+                                .map(|s| s == "right")
+                                .unwrap_or(false);
+                            let key = lua.create_registry_value(handler)?;
+                            let source = crate::lua::StatusSource {
+                                handle: LuaHandle { key },
+                                default_align_right,
+                            };
+                            if let Ok(mut sources) = s.statusline_sources.lock() {
+                                if let Some(existing) = sources.iter_mut().find(|(n, _)| n == &name)
+                                {
+                                    existing.1 = source;
+                                } else {
+                                    sources.push((name, source));
+                                }
+                            }
+                            Ok(())
+                        },
+                    )?,
                 )?;
             }
             {
@@ -1203,8 +1215,8 @@ impl LuaRuntime {
                 statusline_tbl.set(
                     "unregister",
                     lua.create_function(move |_, name: String| {
-                        if let Ok(mut map) = s.statusline_sources.lock() {
-                            map.remove(&name);
+                        if let Ok(mut sources) = s.statusline_sources.lock() {
+                            sources.retain(|(n, _)| n != &name);
                         }
                         Ok(())
                     })?,
@@ -1228,34 +1240,11 @@ impl LuaRuntime {
 
         lua.globals().set("smelt", smelt)?;
 
-        // Bootstrap Lua chunks that wrap Rust primitives with Lua-side
-        // glue (`smelt.sleep`, the thick `smelt.ui.dialog.open` /
-        // `smelt.ui.picker.open` wrappers). Loaded at register time so
-        // they're present the instant the `smelt` global exists —
-        // before any autoloaded plugin or user init.lua runs — without
-        // the ordering constraint that AUTOLOAD_MODULES would impose.
-        for (name, src) in BOOTSTRAP_CHUNKS {
-            lua.load(*src).set_name(*name).exec()?;
-        }
+        super::load_bootstrap_chunks(lua)?;
 
         Ok(())
     }
 }
-
-const BOOTSTRAP_CHUNKS: &[(&str, &str)] = &[
-    (
-        "smelt/_bootstrap.lua",
-        include_str!("../../../../runtime/lua/smelt/_bootstrap.lua"),
-    ),
-    (
-        "smelt/dialog.lua",
-        include_str!("../../../../runtime/lua/smelt/dialog.lua"),
-    ),
-    (
-        "smelt/picker.lua",
-        include_str!("../../../../runtime/lua/smelt/picker.lua"),
-    ),
-];
 
 // ── theme + color helpers (called only from register_api) ─────────────
 

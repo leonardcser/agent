@@ -364,6 +364,14 @@ impl LuaOps {
     }
 }
 
+/// One registered `smelt.statusline.register` entry. `default_align`
+/// applies to items the source returns without an explicit
+/// `align_right` field; items can still override per-item.
+pub(crate) struct StatusSource {
+    pub(crate) handle: LuaHandle,
+    pub(crate) default_align_right: bool,
+}
+
 /// All shared state between Lua closures and the app loop.
 /// One `Arc<LuaShared>` replaces N separate `Arc<Mutex<…>>` fields.
 pub(crate) struct LuaShared {
@@ -372,7 +380,16 @@ pub(crate) struct LuaShared {
     pub(crate) keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
     pub(crate) autocmds: Mutex<HashMap<AutocmdEvent, Vec<LuaHandle>>>,
     pub(crate) timers: Mutex<Vec<(Instant, LuaHandle)>>,
-    pub(crate) statusline_sources: Mutex<HashMap<String, LuaHandle>>,
+    /// Statusline sources in registration order. A `Vec` (not a
+    /// `HashMap`) so the on-screen left-to-right order matches the
+    /// order plugins called `smelt.statusline.register`. Re-registering
+    /// an existing name updates in place without changing position.
+    pub(crate) statusline_sources: Mutex<Vec<(String, StatusSource)>>,
+    /// Last error message reported per statusline source. Used to
+    /// rate-limit `notify_error` so a perpetually-broken source doesn't
+    /// spam one toast per frame — only re-notify when the message
+    /// changes; clear the entry on a successful tick.
+    pub(crate) statusline_last_errors: Mutex<HashMap<String, String>>,
     pub(crate) plugin_tools: Mutex<HashMap<String, LuaHandle>>,
     pub(crate) callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub(crate) next_id: AtomicU64,
@@ -427,7 +444,8 @@ impl Default for LuaShared {
             keymaps: Mutex::new(HashMap::new()),
             autocmds: Mutex::new(HashMap::new()),
             timers: Mutex::new(Vec::new()),
-            statusline_sources: Mutex::new(HashMap::new()),
+            statusline_sources: Mutex::new(Vec::new()),
+            statusline_last_errors: Mutex::new(HashMap::new()),
             plugin_tools: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -762,33 +780,53 @@ impl LuaRuntime {
         let Ok(sources) = self.shared.statusline_sources.lock() else {
             return Vec::new();
         };
-        let mut names: Vec<&String> = sources.keys().collect();
-        names.sort();
         let mut items = Vec::new();
-        let mut errors = Vec::new();
-        for name in names {
-            let Some(handle) = sources.get(name) else {
-                continue;
-            };
-            let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
+        // (source_name, error_msg) pairs from this tick. Compared
+        // against `statusline_last_errors` after the loop so we only
+        // notify on transitions (new error, or message changed).
+        let mut tick_errors: Vec<(String, Option<String>)> = Vec::new();
+        for (name, source) in sources.iter() {
+            let Ok(func) = self
+                .lua
+                .registry_value::<mlua::Function>(&source.handle.key)
+            else {
                 continue;
             };
             match func.call::<mlua::Value>(()) {
-                Ok(mlua::Value::Nil) => {}
+                Ok(mlua::Value::Nil) => {
+                    tick_errors.push((name.clone(), None));
+                }
                 Ok(mlua::Value::Table(t)) => {
-                    collect_statusline_items(&t, &mut items);
+                    collect_statusline_items(&t, source.default_align_right, &mut items);
+                    tick_errors.push((name.clone(), None));
                 }
                 Ok(_) => {
-                    errors.push(format!("statusline[{name}]: expected table"));
+                    tick_errors.push((
+                        name.clone(),
+                        Some(format!("statusline[{name}]: expected table")),
+                    ));
                 }
                 Err(e) => {
-                    errors.push(format!("statusline[{name}]: {e}"));
+                    tick_errors.push((name.clone(), Some(format!("statusline[{name}]: {e}"))));
                 }
             }
         }
         drop(sources);
-        for msg in errors {
-            self.record_error(msg);
+        if let Ok(mut last) = self.shared.statusline_last_errors.lock() {
+            for (name, msg) in tick_errors {
+                match msg {
+                    Some(new_msg) => {
+                        let prev = last.get(&name);
+                        if prev != Some(&new_msg) {
+                            self.record_error(new_msg.clone());
+                            last.insert(name, new_msg);
+                        }
+                    }
+                    None => {
+                        last.remove(&name);
+                    }
+                }
+            }
         }
         items
     }
@@ -825,34 +863,48 @@ fn ansi_color_from_lua(table: &mlua::Table, key: &str) -> Option<crossterm::styl
 
 /// Parse a single-item or list-of-items Lua table into `StatusItem`s
 /// and append them to `out`. Empty-text items are skipped.
-fn collect_statusline_items(table: &mlua::Table, out: &mut Vec<crate::render::StatusItem>) {
+fn collect_statusline_items(
+    table: &mlua::Table,
+    default_align_right: bool,
+    out: &mut Vec<crate::render::StatusItem>,
+) {
     let looks_like_item = table.contains_key("text").unwrap_or(false);
     if looks_like_item {
-        if let Some(item) = statusline_item_from(table) {
+        if let Some(item) = statusline_item_from(table, default_align_right) {
             out.push(item);
         }
         return;
     }
     for pair in table.sequence_values::<mlua::Table>() {
         let Ok(entry) = pair else { continue };
-        if let Some(item) = statusline_item_from(&entry) {
+        if let Some(item) = statusline_item_from(&entry, default_align_right) {
             out.push(item);
         }
     }
 }
 
-fn statusline_item_from(entry: &mlua::Table) -> Option<crate::render::StatusItem> {
+fn statusline_item_from(
+    entry: &mlua::Table,
+    default_align_right: bool,
+) -> Option<crate::render::StatusItem> {
     let text: String = entry.get("text").ok()?;
     if text.is_empty() {
         return None;
     }
+    // Per-item `align_right` wins over the source-level default; falls
+    // back to the source's `align` opt when the item omits the field.
+    let align_right = if entry.contains_key("align_right").unwrap_or(false) {
+        entry.get("align_right").unwrap_or(default_align_right)
+    } else {
+        default_align_right
+    };
     Some(crate::render::StatusItem {
         text,
         fg: ansi_color_from_lua(entry, "fg"),
         bg: ansi_color_from_lua(entry, "bg"),
         bold: entry.get("bold").unwrap_or(false),
         priority: entry.get("priority").unwrap_or(0),
-        align_right: entry.get("align_right").unwrap_or(false),
+        align_right,
         truncatable: entry.get("truncatable").unwrap_or(false),
         group: entry.get("group").unwrap_or(false),
     })
@@ -894,10 +946,39 @@ impl Default for LuaRuntime {
     }
 }
 
+/// Bootstrap Lua chunks loaded at `register_api` time, after the
+/// `smelt` global is fully populated but before any plugin or user
+/// init.lua runs. Not `require`-able — they extend `smelt` directly
+/// (e.g. `smelt.sleep`, the thick `smelt.ui.dialog.open` /
+/// `smelt.ui.picker.open` wrappers around the Rust primitives).
+const BOOTSTRAP_CHUNKS: &[(&str, &str)] = &[
+    (
+        "smelt/_bootstrap.lua",
+        include_str!("../../../../runtime/lua/smelt/_bootstrap.lua"),
+    ),
+    (
+        "smelt/dialog.lua",
+        include_str!("../../../../runtime/lua/smelt/dialog.lua"),
+    ),
+    (
+        "smelt/picker.lua",
+        include_str!("../../../../runtime/lua/smelt/picker.lua"),
+    ),
+];
+
+/// Load all `BOOTSTRAP_CHUNKS` into the given Lua state. Called from
+/// `register_api` once the `smelt` global is in place.
+pub(super) fn load_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
+    for (name, src) in BOOTSTRAP_CHUNKS {
+        lua.load(*src).set_name(*name).exec()?;
+    }
+    Ok(())
+}
+
 /// Modules embedded in the binary, available via `require("smelt.plugins.X")`.
 /// Bootstrap primitives (`_bootstrap.lua`, `dialog.lua`, `picker.lua`) are
-/// loaded at register time in `register_api`, not here — they don't need
-/// to be `require`-able.
+/// loaded via `load_bootstrap_chunks`, not here — they don't need to be
+/// `require`-able.
 const EMBEDDED_MODULES: &[(&str, &str)] = &[
     (
         "smelt.plugins.plan_mode",
@@ -1089,6 +1170,37 @@ mod tests {
         let rt = LuaRuntime::new();
         // Nothing registered under id 9999 — should silently succeed.
         rt.invoke_callback(ui::LuaHandle(9999), ui::WinId(0), &ui::Payload::None, &[]);
+    }
+
+    /// Regression: every code path that drops a Lua-backed callback
+    /// (window close, displaced keymap binding) must funnel through
+    /// `remove_callback` to evict the entry from `shared.callbacks`,
+    /// otherwise the registry grows unbounded over a long session. Tests
+    /// the floor invariant: register inserts, remove evicts, and a
+    /// removed handle is a no-op when invoked.
+    #[test]
+    fn remove_callback_evicts_handle_from_registry() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                _G.fired = 0
+                _G.cb = function() _G.fired = _G.fired + 1 end
+            "#,
+            )
+            .exec()
+            .unwrap();
+        let func: mlua::Function = rt.lua.load("cb").eval().unwrap();
+        let id = rt.register_callback(func).unwrap();
+        assert_eq!(rt.shared.callbacks.lock().unwrap().len(), 1);
+
+        rt.remove_callback(id);
+        assert!(rt.shared.callbacks.lock().unwrap().is_empty());
+
+        // Invoking the dropped handle must not resurrect the call.
+        rt.invoke_callback(ui::LuaHandle(id), ui::WinId(0), &ui::Payload::None, &[]);
+        let fired: u64 = rt.lua.load("return _G.fired").eval().unwrap();
+        assert_eq!(fired, 0);
     }
 
     #[test]

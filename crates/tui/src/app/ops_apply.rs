@@ -141,29 +141,27 @@ impl App {
     fn apply_domain_op(&mut self, op: crate::app::ops::DomainOp) {
         use crate::app::ops::DomainOp;
         match op {
-            DomainOp::RunCommand(line) => {
-                match crate::api::cmd::run(self, &line) {
-                    crate::app::CommandAction::Quit => {
-                        self.pending_quit = true;
-                    }
-                    crate::app::CommandAction::CancelAndClear => {
-                        self.reset_session();
-                        self.agent = None;
-                    }
-                    crate::app::CommandAction::Compact { instructions } => {
-                        if self.history.is_empty() {
-                            self.notify_error("nothing to compact".into());
-                        } else {
-                            self.compact_history(instructions);
-                        }
-                    }
-                    crate::app::CommandAction::Exec(rx, kill) => {
-                        self.exec_rx = Some(rx);
-                        self.exec_kill = Some(kill);
-                    }
-                    crate::app::CommandAction::Continue => {}
+            DomainOp::RunCommand(line) => match crate::api::cmd::run(self, &line) {
+                crate::app::CommandAction::Quit => {
+                    self.pending_quit = true;
                 }
-            }
+                crate::app::CommandAction::CancelAndClear => {
+                    self.reset_session();
+                    self.agent = None;
+                }
+                crate::app::CommandAction::Compact { instructions } => {
+                    if self.history.is_empty() {
+                        self.notify_error("nothing to compact".into());
+                    } else {
+                        self.compact_history(instructions);
+                    }
+                }
+                crate::app::CommandAction::Exec(rx, kill) => {
+                    self.exec_rx = Some(rx);
+                    self.exec_kill = Some(kill);
+                }
+                crate::app::CommandAction::Continue => {}
+            },
             DomainOp::SetMode(mode_str) => {
                 if let Some(mode) = Mode::parse(&mode_str) {
                     self.set_mode(mode);

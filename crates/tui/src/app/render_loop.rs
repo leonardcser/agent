@@ -241,9 +241,7 @@ impl App {
         // ended (session held the WinId; when it dropped, it queued the
         // WinId here for out-of-band close).
         for win in std::mem::take(&mut self.input.pending_picker_close) {
-            for id in self.ui.win_close(win) {
-                self.lua.remove_callback(id);
-            }
+            self.close_float(win);
         }
 
         let (max_rows, n_results, selected, items, existing_win) =
@@ -301,9 +299,7 @@ impl App {
                 _ => false,
             };
             if !same {
-                for id in self.ui.win_close(win) {
-                    self.lua.remove_callback(id);
-                }
+                self.close_float(win);
                 open_win = None;
             }
         }

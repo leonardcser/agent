@@ -65,9 +65,7 @@ impl App {
             if let Some(c) = self.ui.cmdline(win) {
                 self.cmdline_history = c.history().to_vec();
             }
-            for id in self.ui.win_close(win) {
-                self.lua.remove_callback(id);
-            }
+            self.close_float(win);
         }
         self.cmdline_completer = None;
     }

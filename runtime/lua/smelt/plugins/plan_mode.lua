@@ -81,7 +81,7 @@ local function generate_plan_name()
 end
 
 local function save_plan(summary)
-  local session_dir = smelt.engine.session_dir()
+  local session_dir = smelt.session.dir()
   if session_dir == "" then
     return nil, "no session directory"
   end

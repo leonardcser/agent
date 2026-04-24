@@ -5,7 +5,7 @@ Drop any of these files into `~/.config/smelt/init.lua` (or `dofile` them from y
 - **per_project.lua** — auto-load `$PWD/.smelt/init.lua` on top of the user config.
 - **mode_keybinds.lua** — `<C-y>` copies transcript or prompt depending on focused window, demonstrating `smelt.win.focus()` for context-aware keybinds.
 - **yank_block.lua** — `<Space>y` yanks the block under the cursor using `/yank-block`.
-- **statusline.lua** — three statusline sources (cwd, git branch, clock) added alongside the built-ins via `smelt.statusline.register(name, fn)`.
+- **statusline.lua** — three statusline sources (cwd, git branch, clock) added alongside the built-ins via `smelt.statusline.register(name, fn, opts?)`.
 - **override.lua** — register a custom command (`/hello`) and remap a keybind (`<C-s>` to `/fork`).
 
 ## API surface
