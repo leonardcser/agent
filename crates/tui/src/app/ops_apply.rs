@@ -28,9 +28,6 @@ impl App {
             UiOp::ClearGhostText => {
                 self.input_prediction = None;
             }
-            UiOp::OpenArgPicker { task_id, opts } => {
-                crate::lua::ui_ops::open_arg_picker(self, task_id, opts);
-            }
         }
     }
 

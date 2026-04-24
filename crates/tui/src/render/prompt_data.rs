@@ -481,16 +481,10 @@ fn compute_input_area(
     });
     let (visual_lines, cursor_line, _, cursor_char_in_line) =
         wrap_and_locate_cursor(&display_buf, &char_kinds, display_cursor, usable);
-    // An ArgPicker session owns the prompt — the buffer is a filter
-    // query, not a command. Skip command/exec styling so `!` and `/`
-    // typed into the filter render as plain text. Same for multi-line
-    // buffers: slash commands and `!exec` are single-line by design.
-    let picker_owns_prompt = state
-        .completer
-        .as_ref()
-        .is_some_and(|c| c.kind == crate::completer::CompleterKind::ArgPicker);
+    // Slash commands and `!exec` are single-line by design. Multi-line
+    // buffers render as plain text.
     let single_line = !state.buf.contains('\n');
-    let plain_only = picker_owns_prompt || !single_line;
+    let plain_only = !single_line;
     let is_command = !plain_only && crate::completer::Completer::is_command(state.buf.trim());
     let is_exec =
         !plain_only && matches!(state.buf.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());

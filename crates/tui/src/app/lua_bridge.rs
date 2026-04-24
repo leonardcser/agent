@@ -84,63 +84,6 @@ impl App {
     /// runs in the callback's own invocation pass; ops pushed by the
     /// handler are drained before returning so downstream code sees
     /// a consistent state.
-    /// Drain queued ArgPicker events from the prompt and route them
-    /// into the Lua runtime — fires `on_select` previews, resumes
-    /// parked tasks on accept / dismiss, and cleans up callback ids.
-    /// Call after every `PromptState::handle_event` so a single picker
-    /// interaction never leaves orphan state.
-    pub(super) fn drain_arg_picker_events(&mut self) {
-        let events = std::mem::take(&mut self.input.pending_arg_events);
-        if events.is_empty() {
-            return;
-        }
-        for ev in events {
-            match ev {
-                crate::input::ArgPickerEvent::Preview { callback_id, index } => {
-                    let payload = match self.lua.lua().create_table() {
-                        Ok(t) => {
-                            let _ = t.set("index", index as i64);
-                            mlua::Value::Table(t)
-                        }
-                        Err(_) => mlua::Value::Nil,
-                    };
-                    self.lua.invoke_callback_value(callback_id, payload);
-                }
-                crate::input::ArgPickerEvent::Accept {
-                    task_id,
-                    index,
-                    action,
-                    release_ids,
-                } => {
-                    let value = self
-                        .lua
-                        .lua()
-                        .create_table()
-                        .and_then(|t| {
-                            t.set("index", index as i64)?;
-                            t.set("action", action)?;
-                            Ok(mlua::Value::Table(t))
-                        })
-                        .unwrap_or(mlua::Value::Nil);
-                    self.lua.resolve_external(task_id, value);
-                    for id in release_ids {
-                        self.lua.remove_callback(id);
-                    }
-                }
-                crate::input::ArgPickerEvent::Dismiss {
-                    task_id,
-                    release_ids,
-                } => {
-                    self.lua.resolve_external(task_id, mlua::Value::Nil);
-                    for id in release_ids {
-                        self.lua.remove_callback(id);
-                    }
-                }
-            }
-        }
-        self.apply_lua_ops();
-    }
-
     pub(super) fn emit_prompt_text_changed_if_dirty(&mut self) {
         let current_text = self.input.win.edit_buf.buf.clone();
         if self.last_prompt_text == current_text {

@@ -1184,29 +1184,6 @@ impl LuaRuntime {
                 })?,
             )?;
         }
-        // `smelt.prompt._request_arg_picker(task_id, opts)` queues a
-        // `UiOp::OpenArgPicker`. The reducer installs a Completer of
-        // kind ArgPicker onto the prompt; the completer owns
-        // filtering, navigation, Tab/Enter/Esc semantics, and
-        // live-preview dispatch. The parked coroutine resumes with
-        // `{index, item, action}` on accept or `nil` on dismiss.
-        //
-        // Callers should use the `smelt.prompt.open_picker(opts)`
-        // wrapper in `runtime/lua/smelt/prompt_picker.lua` — it
-        // allocates the task id, queues the op, and yields.
-        {
-            let s = shared.clone();
-            prompt_tbl.set(
-                "_request_arg_picker",
-                lua.create_function(move |lua, (task_id, opts): (u64, mlua::Value)| {
-                    let key = lua.create_registry_value(opts)?;
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(UiOp::OpenArgPicker { task_id, opts: key });
-                    }
-                    Ok(())
-                })?,
-            )?;
-        }
         smelt.set("prompt", prompt_tbl)?;
 
         // smelt.tools.register(def) / unregister(name) / resolve(...)

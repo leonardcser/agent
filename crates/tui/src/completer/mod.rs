@@ -1,12 +1,9 @@
 use score::{query_match_score, split_words};
 
-pub mod arg_picker;
 pub mod command;
 pub mod file;
 pub mod history;
 mod score;
-
-pub use arg_picker::{ArgPickerHandles, ArgPickerKey};
 
 #[derive(Clone, Default)]
 pub struct CompletionItem {
@@ -26,11 +23,6 @@ pub enum CompleterKind {
     File,
     Command,
     CommandArg,
-    /// Lua-driven picker that owns the prompt input while active.
-    /// Every typed character filters the list; Tab inserts the selected
-    /// label into the buffer; Enter resolves the Lua task and submits
-    /// the command (or runs `on_accept`); Esc dismisses.
-    ArgPicker,
 }
 
 pub struct Completer {
@@ -169,22 +161,12 @@ impl Completer {
     }
 }
 
-/// Couples a `Completer` model with its `ui::Picker` float WinId, and
-/// — for `CompleterKind::ArgPicker` — the Lua task/callback handles
-/// that let the Rust reducer resolve the parked coroutine on
-/// accept/dismiss and fire the live-preview callback on each move.
-///
+/// Couples a `Completer` model with its `ui::Picker` float WinId.
 /// One owner, one lifecycle: created when a completer opens, destroyed
-/// when it closes. Opening a new completer via `PromptState::set_completer`
-/// implicitly disposes the old session's picker + Lua handles, so stale
-/// state can't accumulate.
+/// when it closes.
 pub struct CompleterSession {
     pub completer: Completer,
     pub picker_win: Option<ui::WinId>,
-    /// Lua-side coupling for ArgPicker sessions. `None` for inline
-    /// completers (File / Command / CommandArg) which have no coroutine
-    /// to resume or preview callback to fire.
-    pub arg_picker: Option<ArgPickerHandles>,
 }
 
 impl CompleterSession {
@@ -192,13 +174,7 @@ impl CompleterSession {
         Self {
             completer,
             picker_win: None,
-            arg_picker: None,
         }
-    }
-
-    pub fn with_arg_picker(mut self, handles: ArgPickerHandles) -> Self {
-        self.arg_picker = Some(handles);
-        self
     }
 }
 

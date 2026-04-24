@@ -435,7 +435,6 @@ impl App {
                         // Dismiss completer first, then clear buffer.
                         if self.input.completer.is_some() {
                             self.input.close_completer();
-                            self.drain_arg_picker_events();
                             return EventOutcome::Redraw;
                         }
                         t.last_ctrlc = Some(Instant::now());
@@ -455,7 +454,6 @@ impl App {
 
         // Delegate to PromptState::handle_event (menu, completer, vim, editing).
         let action = self.input.handle_event(ev, Some(&mut self.input_history));
-        self.drain_arg_picker_events();
         self.dispatch_input_action(action)
     }
 
@@ -483,7 +481,6 @@ impl App {
                         // Dismiss completer first, then cancel.
                         if self.input.completer.is_some() {
                             self.input.close_completer();
-                            self.drain_arg_picker_events();
                             return EventOutcome::Noop;
                         }
                         self.queued_messages.clear();
@@ -493,7 +490,6 @@ impl App {
                         // Dismiss completer first, then clear.
                         if self.input.completer.is_some() {
                             self.input.close_completer();
-                            self.drain_arg_picker_events();
                             return EventOutcome::Noop;
                         }
                         t.last_ctrlc = Some(Instant::now());
@@ -524,7 +520,6 @@ impl App {
             ) {
                 EscAction::VimToNormal => {
                     self.input.handle_event(ev, None);
-                    self.drain_arg_picker_events();
                 }
                 EscAction::Unqueue => {
                     let mut combined = self.queued_messages.join("\n");
@@ -548,7 +543,6 @@ impl App {
 
         // Everything else → PromptState::handle_event (type-ahead with history).
         let input_action = self.input.handle_event(ev, Some(&mut self.input_history));
-        self.drain_arg_picker_events();
         match input_action {
             Action::Submit {
                 mut content,

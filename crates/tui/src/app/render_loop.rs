@@ -323,8 +323,7 @@ impl App {
                 let prefix = match session.kind {
                     crate::completer::CompleterKind::Command => "/",
                     crate::completer::CompleterKind::File => "./",
-                    crate::completer::CompleterKind::ArgPicker
-                    | crate::completer::CompleterKind::CommandArg => "",
+                    crate::completer::CompleterKind::CommandArg => "",
                 };
                 let items: Vec<ui::PickerItem> = session
                     .results

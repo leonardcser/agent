@@ -199,4 +199,15 @@ Canonicalization (Ctrl-R and friends):
   plus the now-unused `BufCreate`, `BufSetLines`, `BufSetSource`,
   `BufAddHighlight` arms are gone. `dialog.lua` and `picker.lua` shrink
   to the final-result yield only. `OpenArgPicker` stays until Step 4.
-- **Step 4 — Delete ArgPicker machinery.** Pending.
+- **Step 4 — Delete ArgPicker machinery.** Done.
+  `CompleterKind::ArgPicker`, `completer/arg_picker.rs`,
+  `ArgPickerHandles`/`Key`, `ArgPickerEvent`, `pending_arg_events`,
+  `drain_arg_picker_events`, `invoke_callback_value`,
+  `_request_arg_picker`, and the `UiOp::OpenArgPicker` op are all
+  removed. `prompt_picker.lua` now composes `smelt.ui.picker._open`
+  (prompt_docked) + `smelt.win.set_keymap(PROMPT_WIN, …)` for Up/Down/
+  Enter/Tab/Esc + `on_event("text_changed")` for live re-filter via
+  `smelt.fuzzy.score` + `smelt.ui.picker.set_items`. The five plugin
+  callers (`model`, `theme`, `color`, `settings`, `history_search`)
+  stay unchanged.
+- **Step 5 — H-sugar.** Pending.

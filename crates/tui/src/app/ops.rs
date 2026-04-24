@@ -97,17 +97,6 @@ pub enum UiOp {
     SetGhostText(String),
     /// Clear ghost text from the prompt.
     ClearGhostText,
-    /// Open a prompt-owning arg picker (theme/model/color/settings-style).
-    /// Pushed by `smelt.prompt.open_picker(opts)`. The reducer installs
-    /// a `Completer` of kind `ArgPicker` onto the active prompt state;
-    /// on accept the caller's Lua task (`task_id`) is resumed with
-    /// `{index, item}`, on dismiss with `nil`. The reducer also owns
-    /// dropping the Lua callback handles — no bookkeeping leaks into
-    /// the Lua side.
-    OpenArgPicker {
-        task_id: u64,
-        opts: mlua::RegistryKey,
-    },
 }
 
 /// App-state mutations, engine commands, and session/agent/permission

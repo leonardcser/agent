@@ -10,7 +10,7 @@ pub use kill_ring::KillRing;
 pub use settings::SettingsState;
 
 use crate::attachment::{Attachment, AttachmentId, AttachmentStore};
-use crate::completer::{ArgPickerHandles, CompleterSession};
+use crate::completer::CompleterSession;
 use crate::keymap::{self, KeyAction, KeyContext};
 use crate::render;
 use crate::vim::{ViMode, Vim};
@@ -50,10 +50,6 @@ pub struct PromptState {
     /// next frame to drain and `win_close`. `PromptState` doesn't hold a
     /// `&mut ui::Ui`, so closing has to happen out-of-band.
     pub pending_picker_close: Vec<ui::WinId>,
-    /// Lua-bound outcomes from ArgPicker interactions (live preview,
-    /// accept, dismiss). Drained by the app each frame and routed to
-    /// `LuaRuntime` — keeps PromptState ignorant of the runtime.
-    pub pending_arg_events: Vec<ArgPickerEvent>,
     pub stash: Option<InputSnapshot>,
     /// Tracks whether the current buffer content originated from a paste.
     /// Cleared on any manual character input.
@@ -86,32 +82,6 @@ pub enum Action {
     Noop,
 }
 
-/// Outcome of an `ArgPicker` interaction that the app needs to route
-/// back into the Lua runtime. Queued on `PromptState.pending_arg_events`
-/// and drained once per frame by the app loop. Keeping this out of
-/// `Action` keeps the hot event path allocation-free for the common
-/// non-picker keys.
-pub enum ArgPickerEvent {
-    /// Navigation — fire the live-preview callback with the now-
-    /// selected item's index (1-based to match Lua).
-    Preview { callback_id: u64, index: usize },
-    /// User accepted the selection (Tab or Enter). Resume the parked
-    /// Lua task with `{index, item, action}` and release both
-    /// callback ids (select + accept).
-    Accept {
-        task_id: u64,
-        index: usize,
-        /// `"tab"` when the user pressed Tab (label was inserted into
-        /// the prompt, caller shouldn't also submit) or `"enter"`
-        /// (caller runs the command).
-        action: &'static str,
-        release_ids: Vec<u64>,
-    },
-    /// User dismissed (Esc / Ctrl-C). Resume the task with `nil` and
-    /// release callback ids.
-    Dismiss { task_id: u64, release_ids: Vec<u64> },
-}
-
 impl Default for PromptState {
     fn default() -> Self {
         Self::new()
@@ -134,7 +104,6 @@ impl PromptState {
             store: AttachmentStore::new(),
             completer: None,
             pending_picker_close: Vec::new(),
-            pending_arg_events: Vec::new(),
             stash: None,
             from_paste: false,
             pending_ctrl_x: false,
@@ -181,28 +150,10 @@ impl PromptState {
     /// End the active completer session, queueing its Picker float for
     /// close on the next frame. Replaces bare `self.completer = None`
     /// so the associated `ui::WinId` doesn't leak.
-    ///
-    /// When the session was an ArgPicker with Lua-side coupling, the
-    /// implicit close is treated as a dismiss: the parked Lua task is
-    /// resumed with `nil` and its callback ids are released. Plugin
-    /// callers can always trust that opening a picker eventually
-    /// resolves the task.
     pub fn close_completer(&mut self) {
         if let Some(session) = self.completer.take() {
             if let Some(win) = session.picker_win {
                 self.pending_picker_close.push(win);
-            }
-            if let Some(handles) = session.arg_picker {
-                let release_ids: Vec<u64> = handles
-                    .on_select
-                    .into_iter()
-                    .chain(handles.on_accept)
-                    .map(|k| k.0)
-                    .collect();
-                self.pending_arg_events.push(ArgPickerEvent::Dismiss {
-                    task_id: handles.task_id,
-                    release_ids,
-                });
             }
         }
     }
@@ -214,30 +165,6 @@ impl PromptState {
     pub fn set_completer(&mut self, comp: crate::completer::Completer) {
         self.close_completer();
         self.completer = Some(CompleterSession::new(comp));
-    }
-
-    /// Open an ArgPicker session with Lua callback coupling. Closes any
-    /// prior session first (resolving its task if it was also an
-    /// ArgPicker). Seeds the filter with the current buffer contents
-    /// (the prompt *is* the query) and fires an initial `Preview`
-    /// event so the live-preview callback — if any — sees the first
-    /// selection.
-    pub fn set_arg_picker(
-        &mut self,
-        mut comp: crate::completer::Completer,
-        handles: ArgPickerHandles,
-    ) {
-        self.close_completer();
-        let initial_query = self.win.edit_buf.buf.clone();
-        comp.update_query(initial_query);
-        let initial_preview = handles.on_select.map(|k| ArgPickerEvent::Preview {
-            callback_id: k.0,
-            index: 1,
-        });
-        self.completer = Some(CompleterSession::new(comp).with_arg_picker(handles));
-        if let Some(ev) = initial_preview {
-            self.pending_arg_events.push(ev);
-        }
     }
 
     /// Select the word at `cpos`. Used by mouse double-click.
