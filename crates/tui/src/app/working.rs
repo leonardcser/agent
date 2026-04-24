@@ -94,6 +94,18 @@ impl WorkingState {
         Some(self.since?.elapsed())
     }
 
+    /// Whether the current throbber state needs a per-frame redraw
+    /// (spinner glyph rotating, elapsed seconds ticking). `Done` and
+    /// `Interrupted` render static text and don't need animation
+    /// frames — treating them as animated keeps the render loop
+    /// awake at 60 Hz after every completed turn.
+    pub fn is_animating(&self) -> bool {
+        matches!(
+            self.throbber,
+            Some(Throbber::Working | Throbber::Compacting | Throbber::Retrying { .. })
+        )
+    }
+
     pub fn clear(&mut self) {
         self.throbber = None;
         self.since = None;

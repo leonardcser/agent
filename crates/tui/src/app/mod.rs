@@ -1118,7 +1118,7 @@ impl App {
                     .is_some_and(|t| t > now);
             let has_animation = self.ui.focused_float().is_some()
                 || self.has_active_exec()
-                || self.working.throbber.is_some()
+                || self.working.is_animating()
                 || yank_flash_active
                 || self
                     .agents
@@ -1236,26 +1236,28 @@ impl App {
                 }
 
                 _ = tokio::time::sleep({
-                    // When drag-autoscroll is running, fire fast so we
-                    // advance one line per tick and the motion stays
-                    // smooth; the interval itself ramps down the longer
-                    // the cursor is parked at the edge. While an
-                    // animation is in flight (spinner, exec output,
-                    // subagent turn, open dialog) we tick at the
-                    // normal frame interval; otherwise idle at 80ms.
+                    // Fires only when there's real time-driven work:
+                    // drag-autoscroll advances one line per tick (the
+                    // interval ramps down the longer the cursor is
+                    // parked at the edge), and animations (spinner,
+                    // exec output, working agent, yank flash) drive
+                    // frames at `MIN_FRAME_INTERVAL`. When neither is
+                    // active, this arm is disabled via the `if` guard
+                    // below — the loop parks on terminal / engine /
+                    // exec channels and CPU goes to ~0% until the next
+                    // event. An idle timer here would wake the loop
+                    // every 80ms to redraw the same screen.
                     let since = last_frame.elapsed();
                     let want = if let Some(started) = self.drag_autoscroll_since {
                         let held = started.elapsed().as_millis() as u64;
                         // Start at ~33 lines/sec (30 ms), ramp to ~200 lines/sec (5 ms).
                         let ms = 30u64.saturating_sub(held / 120).max(5);
                         Duration::from_millis(ms)
-                    } else if has_animation {
-                        MIN_FRAME_INTERVAL
                     } else {
-                        Duration::from_millis(80)
+                        MIN_FRAME_INTERVAL
                     };
                     want.saturating_sub(since)
-                }) => {
+                }), if has_animation || self.drag_autoscroll_since.is_some() => {
                     // Auto-scroll while the user is mid-drag with the
                     // cursor parked on the top/bottom row of the
                     // transcript — extends selection past the viewport
