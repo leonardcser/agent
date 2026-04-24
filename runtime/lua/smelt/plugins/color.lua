@@ -12,49 +12,26 @@ local function apply_by_name(name)
   return false
 end
 
-local function open_picker()
-  local presets = smelt.theme.presets()
-  local original = smelt.theme.get("slug")
-  local original_ansi = original and original.ansi
-
-  local items = {}
-  for _, p in ipairs(presets) do
-    items[#items + 1] = {
-      label       = p.name,
-      description = p.detail,
-      ansi_color  = p.ansi,
-    }
-  end
-
-  smelt.spawn(function()
-    local result = smelt.prompt.open_picker({
-      items     = items,
-      on_select = function(item)
-        if item and item.ansi_color then
-          smelt.theme.set("slug", { ansi = item.ansi_color })
-        end
-      end,
-    })
-    if result and result.action == "enter" then
-      smelt.cmd.run("/color " .. result.item.label)
-    elseif not result and original_ansi then
-      smelt.theme.set("slug", { ansi = original_ansi })
-    end
-  end)
+local presets = smelt.theme.presets()
+local preset_names = {}
+local items = {}
+for i, p in ipairs(presets) do
+  preset_names[i] = p.name
+  items[i] = { label = p.name, description = p.detail, ansi_color = p.ansi }
 end
 
-local preset_names = (function()
-  local names = {}
-  for _, p in ipairs(smelt.theme.presets()) do names[#names + 1] = p.name end
-  return names
-end)()
-
+local original_ansi
 smelt.cmd.register("color", function(arg)
   if arg and arg ~= "" then
-    if not apply_by_name(arg) then
-      smelt.notify_error("unknown color: " .. arg)
-    end
+    if not apply_by_name(arg) then smelt.notify_error("unknown color: " .. arg) end
     return
   end
-  open_picker()
-end, { desc = "set task slug color", args = preset_names })
+  original_ansi = (smelt.theme.get("slug") or {}).ansi
+end, {
+  desc       = "set task slug color",
+  args       = preset_names,
+  items      = items,
+  on_select  = function(item) if item.ansi_color then smelt.theme.set("slug", { ansi = item.ansi_color }) end end,
+  on_enter   = function(item) smelt.cmd.run("/color " .. item.label) end,
+  on_dismiss = function() if original_ansi then smelt.theme.set("slug", { ansi = original_ansi }) end end,
+})

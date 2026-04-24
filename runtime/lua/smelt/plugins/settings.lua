@@ -24,18 +24,15 @@ local function build_items()
       label        = m.label,
       description  = snap[m.key] and "on" or "off",
       search_terms = m.key .. " " .. (m.terms or ""),
+      _key         = m.key,
     }
   end
   return items
 end
 
-smelt.cmd.register("settings", function()
-  smelt.spawn(function()
-    while true do
-      local result = smelt.prompt.open_picker({ items = build_items() })
-      if not result or result.action ~= "enter" then return end
-      local meta = SETTINGS_META[result.index]
-      if meta then smelt.settings.toggle(meta.key) end
-    end
-  end)
-end, { desc = "open settings menu" })
+smelt.cmd.register("settings", nil, {
+  desc      = "open settings menu",
+  items     = build_items,
+  on_enter  = function(item) if item._key then smelt.settings.toggle(item._key) end end,
+  stay_open = true,
+})

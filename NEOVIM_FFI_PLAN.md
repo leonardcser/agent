@@ -210,4 +210,11 @@ Canonicalization (Ctrl-R and friends):
   `smelt.fuzzy.score` + `smelt.ui.picker.set_items`. The five plugin
   callers (`model`, `theme`, `color`, `settings`, `history_search`)
   stay unchanged.
-- **Step 5 — H-sugar.** Pending.
+- **Step 5 — H-sugar.** Done. `runtime/lua/smelt/cmd.lua` layers
+  declarative picker opts (`items`, `on_select`, `on_enter`,
+  `on_dismiss`, `stay_open`) over `smelt.cmd.register`. The four
+  arg-picker plugins (`theme`, `color`, `model`, `settings`) shrink
+  to declarations; `history_search` still uses the lower-level
+  `smelt.prompt.open_picker` directly because its tab-vs-enter
+  restore logic doesn't match the generic shape.
+- **Step 6 — Migrate Confirm to Lua.** Pending.

@@ -1119,6 +1119,10 @@ const BOOTSTRAP_CHUNKS: &[(&str, &str)] = &[
         "smelt/prompt_picker.lua",
         include_str!("../../../../runtime/lua/smelt/prompt_picker.lua"),
     ),
+    (
+        "smelt/cmd.lua",
+        include_str!("../../../../runtime/lua/smelt/cmd.lua"),
+    ),
 ];
 
 /// Load all `BOOTSTRAP_CHUNKS` into the given Lua state. Called from
