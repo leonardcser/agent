@@ -21,7 +21,6 @@ impl Completer {
             selected: 0,
             all_items,
             selected_key: None,
-            original_value: None,
         }
     }
 }

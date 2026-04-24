@@ -108,9 +108,32 @@ impl App {
                 self.ui
                     .win_on_event(win, event, ui::Callback::Lua(ui::LuaHandle(callback_id)));
             }
+            UiOp::WinClearKeymap { win, key } => {
+                if let Some(ui::Callback::Lua(ui::LuaHandle(old))) =
+                    self.ui.win_clear_keymap(win, key)
+                {
+                    self.lua.remove_callback(old);
+                }
+            }
+            UiOp::WinClearEvent {
+                win,
+                event,
+                callback_id,
+            } => {
+                if let Some(ui::Callback::Lua(ui::LuaHandle(old))) =
+                    self.ui.win_clear_event_by_id(win, event, callback_id)
+                {
+                    self.lua.remove_callback(old);
+                }
+            }
             UiOp::PickerSetSelected { win, index } => {
                 if let Some(p) = self.ui.picker_mut(win) {
                     p.set_selected(index);
+                }
+            }
+            UiOp::PickerSetItems { win, items } => {
+                if let Some(p) = self.ui.picker_mut(win) {
+                    p.set_items(items);
                 }
             }
             UiOp::OpenLuaDialog { task_id, opts } => {
@@ -148,6 +171,12 @@ impl App {
                     }
                 };
                 self.lua.resolve_external(task_id, value);
+            }
+            UiOp::OpenArgPicker { task_id, opts } => {
+                crate::lua::ui_ops::open_arg_picker(self, task_id, opts);
+            }
+            UiOp::PromptSetText(text) => {
+                crate::api::buf::replace(&mut self.input, text, None);
             }
         }
     }
@@ -192,6 +221,26 @@ impl App {
                 } else {
                     self.notify_error(format!("unknown reasoning effort: {effort_str}"));
                 }
+            }
+            DomainOp::ToggleSetting(key) => {
+                let mut s = self.settings_state();
+                match key.as_str() {
+                    "vim" => s.vim ^= true,
+                    "auto_compact" => s.auto_compact ^= true,
+                    "show_tps" => s.show_tps ^= true,
+                    "show_tokens" => s.show_tokens ^= true,
+                    "show_cost" => s.show_cost ^= true,
+                    "show_prediction" => s.show_prediction ^= true,
+                    "show_slug" => s.show_slug ^= true,
+                    "show_thinking" => s.show_thinking ^= true,
+                    "restrict_to_workspace" => s.restrict_to_workspace ^= true,
+                    "redact_secrets" => s.redact_secrets ^= true,
+                    _ => {
+                        self.notify_error(format!("unknown setting: {key}"));
+                        return;
+                    }
+                }
+                self.set_settings(s);
             }
             DomainOp::Cancel => {
                 self.engine.send(UiCommand::Cancel);

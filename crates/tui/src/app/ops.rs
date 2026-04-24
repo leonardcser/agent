@@ -151,6 +151,21 @@ pub enum UiOp {
         event: ui::WinEvent,
         callback_id: u64,
     },
+    /// Remove a keymap binding from `win`. Pushed by
+    /// `smelt.win.clear_keymap`; the reducer calls
+    /// `ui.win_clear_keymap` and drops the displaced Lua callback.
+    WinClearKeymap {
+        win: ui::WinId,
+        key: ui::KeyBind,
+    },
+    /// Remove a specific event callback by its callback id. Pushed by
+    /// `smelt.win.clear_event`; the reducer calls
+    /// `ui.win_clear_event_by_id` and drops the Lua handle.
+    WinClearEvent {
+        win: ui::WinId,
+        event: ui::WinEvent,
+        callback_id: u64,
+    },
     /// Drive the `ui::Picker` at `win` to a new 0-based `index`. Pushed
     /// by `smelt.ui.picker.set_selected` from Lua-side nav keymaps in
     /// `runtime/lua/smelt/picker.lua`; the reducer calls
@@ -158,6 +173,14 @@ pub enum UiOp {
     PickerSetSelected {
         win: ui::WinId,
         index: usize,
+    },
+    /// Replace the item list on a `ui::Picker` float. Pushed by
+    /// `smelt.ui.picker.set_items` so Lua-driven filtering can update
+    /// the visible list live as the user types. Each item carries
+    /// `{label, description?, prefix?}`.
+    PickerSetItems {
+        win: ui::WinId,
+        items: Vec<ui::picker::PickerItem>,
     },
     /// Open a Lua-described dialog float. Pushed by
     /// `smelt.ui.dialog._request_open(task_id, opts)`. The reducer
@@ -169,12 +192,29 @@ pub enum UiOp {
         task_id: u64,
         opts: mlua::RegistryKey,
     },
-    /// Open a Lua-described picker float. Same shape as `OpenLuaDialog`,
-    /// dispatching through `lua_picker::open`.
+    /// Open a free-floating `ui::Picker` (general-purpose, used by
+    /// `smelt.ui.picker.open`). Resolves the caller's task with
+    /// `{win_id}` so Lua can manage selection via `set_items` /
+    /// `set_selected` and close via `smelt.win.close`.
     OpenLuaPicker {
         task_id: u64,
         opts: mlua::RegistryKey,
     },
+    /// Open a prompt-owning arg picker (theme/model/color/settings-style).
+    /// Pushed by `smelt.prompt.open_picker(opts)`. The reducer installs
+    /// a `Completer` of kind `ArgPicker` onto the active prompt state;
+    /// on accept the caller's Lua task (`task_id`) is resumed with
+    /// `{index, item}`, on dismiss with `nil`. The reducer also owns
+    /// dropping the Lua callback handles — no bookkeeping leaks into
+    /// the Lua side.
+    OpenArgPicker {
+        task_id: u64,
+        opts: mlua::RegistryKey,
+    },
+    /// Replace the prompt buffer's text and move the cursor to the end.
+    /// Pushed by `smelt.prompt.set_text(s)`. Used by the Lua history
+    /// picker to commit a selection back into the prompt.
+    PromptSetText(String),
 }
 
 /// App-state mutations, engine commands, and session/agent/permission
@@ -185,6 +225,11 @@ pub enum DomainOp {
     SetMode(String),
     SetModel(String),
     SetReasoningEffort(String),
+    /// Flip one of the 10 boolean settings by key (`"vim"`,
+    /// `"auto_compact"`, …). The reducer reads the current
+    /// `SettingsState`, toggles the named field, and persists. Pushed
+    /// by `smelt.settings.toggle(key)`.
+    ToggleSetting(String),
     Cancel,
     Compact(Option<String>),
     Submit(String),

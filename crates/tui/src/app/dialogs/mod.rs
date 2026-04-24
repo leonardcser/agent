@@ -4,3 +4,4 @@
 
 pub mod confirm;
 pub(crate) mod confirm_preview;
+pub mod text_modal;

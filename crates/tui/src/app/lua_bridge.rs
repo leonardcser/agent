@@ -59,6 +59,116 @@ impl App {
         self.lua.set_history(self.history.clone());
     }
 
+    /// Push the current user-facing boolean settings into the Lua
+    /// snapshot. Called at startup and whenever settings mutate —
+    /// not every tick. Keeps `smelt.settings.snapshot()` cheap.
+    pub(super) fn push_settings_snapshot_to_lua(&self) {
+        let s = self.settings_state();
+        self.lua.set_settings_snapshot(vec![
+            ("vim".into(), s.vim),
+            ("auto_compact".into(), s.auto_compact),
+            ("show_tps".into(), s.show_tps),
+            ("show_tokens".into(), s.show_tokens),
+            ("show_cost".into(), s.show_cost),
+            ("show_prediction".into(), s.show_prediction),
+            ("show_slug".into(), s.show_slug),
+            ("show_thinking".into(), s.show_thinking),
+            ("restrict_to_workspace".into(), s.restrict_to_workspace),
+            ("redact_secrets".into(), s.redact_secrets),
+        ]);
+    }
+
+    /// Fire `WinEvent::TextChanged` on `PROMPT_WIN` when the prompt
+    /// buffer has changed since the last dispatch. Any Lua subscriber
+    /// (`smelt.win.on_event(smelt.prompt.win_id(), "text_changed", fn)`)
+    /// runs in the callback's own invocation pass; ops pushed by the
+    /// handler are drained before returning so downstream code sees
+    /// a consistent state.
+    /// Drain queued ArgPicker events from the prompt and route them
+    /// into the Lua runtime — fires `on_select` previews, resumes
+    /// parked tasks on accept / dismiss, and cleans up callback ids.
+    /// Call after every `PromptState::handle_event` so a single picker
+    /// interaction never leaves orphan state.
+    pub(super) fn drain_arg_picker_events(&mut self) {
+        let events = std::mem::take(&mut self.input.pending_arg_events);
+        if events.is_empty() {
+            return;
+        }
+        for ev in events {
+            match ev {
+                crate::input::ArgPickerEvent::Preview { callback_id, index } => {
+                    let payload = match self.lua.lua().create_table() {
+                        Ok(t) => {
+                            let _ = t.set("index", index as i64);
+                            mlua::Value::Table(t)
+                        }
+                        Err(_) => mlua::Value::Nil,
+                    };
+                    self.lua.invoke_callback_value(callback_id, payload);
+                }
+                crate::input::ArgPickerEvent::Accept {
+                    task_id,
+                    index,
+                    action,
+                    release_ids,
+                } => {
+                    let value = self
+                        .lua
+                        .lua()
+                        .create_table()
+                        .and_then(|t| {
+                            t.set("index", index as i64)?;
+                            t.set("action", action)?;
+                            Ok(mlua::Value::Table(t))
+                        })
+                        .unwrap_or(mlua::Value::Nil);
+                    self.lua.resolve_external(task_id, value);
+                    for id in release_ids {
+                        self.lua.remove_callback(id);
+                    }
+                }
+                crate::input::ArgPickerEvent::Dismiss {
+                    task_id,
+                    release_ids,
+                } => {
+                    self.lua.resolve_external(task_id, mlua::Value::Nil);
+                    for id in release_ids {
+                        self.lua.remove_callback(id);
+                    }
+                }
+            }
+        }
+        self.apply_lua_ops();
+    }
+
+    pub(super) fn emit_prompt_text_changed_if_dirty(&mut self) {
+        let current_text = self.input.win.edit_buf.buf.clone();
+        if self.last_prompt_text == current_text {
+            return;
+        }
+        self.last_prompt_text = current_text.clone();
+        // Sync the Lua snapshot so `smelt.prompt.text()` inside the
+        // handler sees the new value (the snapshot is otherwise only
+        // refreshed during keymap dispatch).
+        self.lua.set_prompt_text_snapshot(current_text.clone());
+        let lua = &self.lua;
+        let mut lua_invoke = |handle: ui::LuaHandle,
+                              win: ui::WinId,
+                              payload: &ui::Payload,
+                              panels: &[ui::PanelSnapshot]| {
+            lua.invoke_callback(handle, win, payload, panels);
+        };
+        self.ui.dispatch_event(
+            ui::PROMPT_WIN,
+            ui::WinEvent::TextChanged,
+            ui::Payload::Text {
+                content: current_text,
+            },
+            &mut lua_invoke,
+        );
+        self.apply_lua_ops();
+    }
+
     /// Drain and apply all pending Lua ops (notifications, errors,
     /// commands, engine mutations). Also pumps the task-runtime inbox
     /// (dialog resolutions etc.) so resumption side-effects become ops.

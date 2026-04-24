@@ -81,7 +81,24 @@ pub struct Ui {
     terminal_size: (u16, u16),
     compositor: Compositor,
     callbacks: Callbacks,
+    /// Rects for split / non-float windows (PROMPT_WIN, TRANSCRIPT_WIN,
+    /// …). Float rects are computed per-frame from `FloatConfig`; split
+    /// rects are laid out by the host app (TUI render loop) and pushed
+    /// in via [`Ui::set_window_rect`] so `Placement::DockedAbove` can
+    /// look them up without knowing layout specifics.
+    split_rects: HashMap<WinId, Rect>,
 }
+
+/// Reserved `WinId` for the main prompt input window. The prompt is
+/// rendered as a compositor layer (not inserted into `Ui::wins`), but
+/// callbacks (keymaps, `WinEvent` subscribers) are keyed by `WinId`,
+/// so we reserve a stable id so Lua can `smelt.win.on_event(prompt, …)`
+/// and `smelt.win.set_keymap(prompt, …)` like any other window.
+pub const PROMPT_WIN: WinId = WinId(0);
+
+/// Reserved `WinId` for the transcript (scroll-back) window. Same
+/// rationale as [`PROMPT_WIN`] — stable id for callback registration.
+pub const TRANSCRIPT_WIN: WinId = WinId(1);
 
 impl Ui {
     pub fn new() -> Self {
@@ -90,12 +107,22 @@ impl Ui {
             wins: HashMap::new(),
             current_win: None,
             next_buf_id: 1,
-            next_win_id: 1,
+            // 0 is reserved for PROMPT_WIN, 1 for TRANSCRIPT_WIN.
+            next_win_id: 2,
             layout: None,
             terminal_size: (80, 24),
             compositor: Compositor::new(80, 24),
             callbacks: Callbacks::new(),
+            split_rects: HashMap::new(),
         }
+    }
+
+    /// Publish a split window's current rect. Call each frame from the
+    /// host app's layout pass so `Placement::DockedAbove` can resolve
+    /// correctly. Floats don't need this — their rects come from
+    /// `FloatConfig`.
+    pub fn set_window_rect(&mut self, win_id: WinId, rect: Rect) {
+        self.split_rects.insert(win_id, rect);
     }
 
     pub fn buf_create(&mut self, opts: buffer::BufCreateOpts) -> BufId {
@@ -195,7 +222,7 @@ impl Ui {
         self.next_win_id += 1;
 
         let (tw, th) = self.terminal_size;
-        let rect = resolve_float_rect(&config, tw, th, None);
+        let rect = resolve_float_rect(&config, tw, th, None, &self.split_rects);
         let zindex = config.zindex;
 
         let mut p = picker::Picker::new()
@@ -248,7 +275,7 @@ impl Ui {
         self.next_win_id += 1;
 
         let (tw, th) = self.terminal_size;
-        let rect = resolve_float_rect(&config, tw, th, None);
+        let rect = resolve_float_rect(&config, tw, th, None, &self.split_rects);
         let zindex = config.zindex;
 
         let n = notification::Notification::new(message, level).with_style(style);
@@ -291,7 +318,7 @@ impl Ui {
         self.next_win_id += 1;
 
         let (tw, th) = self.terminal_size;
-        let rect = resolve_float_rect(&config, tw, th, None);
+        let rect = resolve_float_rect(&config, tw, th, None, &self.split_rects);
         let zindex = config.zindex;
 
         let placeholder_buf = BufId(0);
@@ -354,6 +381,15 @@ impl Ui {
     /// in registration order.
     pub fn win_on_event(&mut self, win: WinId, ev: WinEvent, cb: Callback) {
         self.callbacks.on_event(win, ev, cb);
+    }
+
+    /// Remove a specific event callback by its Lua handle id. Used by
+    /// plugins that install cross-window handlers (e.g. a picker that
+    /// listens to `text_changed` on the prompt) and need to tear down
+    /// exactly their own binding on close.
+    #[must_use]
+    pub fn win_clear_event_by_id(&mut self, win: WinId, ev: WinEvent, id: u64) -> Option<Callback> {
+        self.callbacks.clear_event_by_id(win, ev, id)
     }
 
     /// Dispatch a window event to its registered callbacks.
@@ -436,11 +472,11 @@ impl Ui {
         // constraint, not the content height), so we compute it first
         // with `natural_h = None` and feed the content width into
         // formatter-backed buffers before sampling `natural_height`.
-        let pre_rect = resolve_float_rect(&float_config, tw, th, None);
+        let pre_rect = resolve_float_rect(&float_config, tw, th, None, &self.split_rects);
         let content_width = pre_rect.width.saturating_sub(1);
         dlg.sync_from_bufs_mut(content_width, &mut self.bufs);
         let natural_h = Some(dlg.natural_height());
-        let rect = resolve_float_rect(&float_config, tw, th, natural_h);
+        let rect = resolve_float_rect(&float_config, tw, th, natural_h, &self.split_rects);
 
         let focusable = float_config.focusable;
         let mut win = Window::new(id, primary_buf, WinConfig::Float(float_config));
@@ -564,8 +600,8 @@ impl Ui {
             _ => return None,
         };
         let (tw, th) = self.terminal_size;
-        let natural_h = self.natural_dialog_height(win_id);
-        Some(resolve_float_rect(fc, tw, th, natural_h))
+        let natural_h = self.natural_layer_height(win_id);
+        Some(resolve_float_rect(fc, tw, th, natural_h, &self.split_rects))
     }
 
     pub fn resolve_float_rects(&self) -> Vec<(WinId, Rect)> {
@@ -578,22 +614,30 @@ impl Ui {
                     WinConfig::Float(f) => f,
                     _ => return None,
                 };
-                let natural_h = self.natural_dialog_height(id);
-                Some((id, resolve_float_rect(fc, tw, th, natural_h)))
+                let natural_h = self.natural_layer_height(id);
+                Some((
+                    id,
+                    resolve_float_rect(fc, tw, th, natural_h, &self.split_rects),
+                ))
             })
             .collect()
     }
 
-    /// Peek at the dialog's current natural height for placement. Only
-    /// meaningful once `sync_float_content` has run on this frame —
-    /// returns `None` for non-dialog floats or dialogs that haven't
-    /// populated `panel.line_count` yet, which the `FitContent`
-    /// placement interprets as "use the cap as a fallback".
-    fn natural_dialog_height(&self, win_id: WinId) -> Option<u16> {
+    /// Peek at a float layer's natural height for placement. Dialogs
+    /// expose `line_count`-derived height (used by `FitContent`); pickers
+    /// clamp item-count to `max_visible_rows` (used by `DockedAbove`).
+    /// Returns `None` for other layer kinds — placement variants that
+    /// don't consult natural height treat this as "use the max cap."
+    fn natural_layer_height(&self, win_id: WinId) -> Option<u16> {
         let layer_id = float_layer_id(win_id);
         let comp = self.compositor.component(&layer_id)?;
-        let dlg = comp.as_any().downcast_ref::<dialog::Dialog>()?;
-        Some(dlg.natural_height())
+        if let Some(dlg) = comp.as_any().downcast_ref::<dialog::Dialog>() {
+            return Some(dlg.natural_height());
+        }
+        if let Some(p) = comp.as_any().downcast_ref::<picker::Picker>() {
+            return Some(p.natural_height());
+        }
+        None
     }
 
     // ── Layer management ─────────────────────────────────────────
@@ -637,6 +681,47 @@ impl Ui {
         mods: crossterm::event::KeyModifiers,
     ) -> KeyResult {
         self.handle_key_with_lua(code, mods, &mut |_, _, _, _| {})
+    }
+
+    /// Try to dispatch a key to a specific window's keymap table —
+    /// Neovim-style "buffer-local keymap." Unlike [`handle_key_with_lua`]
+    /// this doesn't require the window to be focused; it's the hook
+    /// that lets callers route keys for non-float windows (e.g. the
+    /// main prompt) through the same Lua keymap registry. Returns
+    /// `KeyResult::Consumed` when a binding fired, `KeyResult::Ignored`
+    /// otherwise.
+    pub fn try_window_keymap(
+        &mut self,
+        win: WinId,
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+        lua_invoke: &mut LuaInvoke,
+    ) -> KeyResult {
+        let key = KeyBind::new(code, mods);
+        let Some(mut cb) = self.callbacks.take_keymap(win, key) else {
+            return KeyResult::Ignored;
+        };
+        let result = match &mut cb {
+            Callback::Rust(inner) => {
+                let mut ctx = CallbackCtx {
+                    ui: self,
+                    win,
+                    payload: Payload::Key { code, mods },
+                };
+                match inner(&mut ctx) {
+                    CallbackResult::Consumed => KeyResult::Consumed,
+                    CallbackResult::Pass => KeyResult::Ignored,
+                }
+            }
+            Callback::Lua(handle) => {
+                let payload = Payload::Key { code, mods };
+                let panels = self.snapshot_dialog_panels(win);
+                lua_invoke(*handle, win, &payload, &panels);
+                KeyResult::Consumed
+            }
+        };
+        self.callbacks.restore_keymap(win, key, cb);
+        result
     }
 
     /// Dispatch a key event through the focused window's keymap
@@ -744,6 +829,16 @@ impl Ui {
             .and_then(parse_float_layer_id)
     }
 
+    /// Snapshot of every float window's `WinId`, in HashMap iteration
+    /// order. Callers shouldn't rely on the ordering for painting —
+    /// that's the compositor's job.
+    pub fn float_ids(&self) -> Vec<WinId> {
+        self.wins
+            .iter()
+            .filter_map(|(id, w)| matches!(w.config, WinConfig::Float(_)).then_some(*id))
+            .collect()
+    }
+
     /// Look up the `FloatConfig` for a window, if it's a float.
     /// Non-float windows (splits) return `None`.
     pub fn float_config(&self, win: WinId) -> Option<&FloatConfig> {
@@ -782,7 +877,9 @@ impl Ui {
             .filter(|(_, w)| w.is_float())
             .map(|(id, w)| {
                 let width = match &w.config {
-                    WinConfig::Float(fc) => resolve_float_rect(fc, tw, th, None).width,
+                    WinConfig::Float(fc) => {
+                        resolve_float_rect(fc, tw, th, None, &self.split_rects).width
+                    }
                     _ => tw,
                 };
                 (float_layer_id(*id), width.saturating_sub(1))
@@ -843,8 +940,14 @@ fn resolve_constraint_dim(c: Constraint, total: u16) -> u16 {
     }
 }
 
-fn resolve_float_rect(fc: &FloatConfig, term_w: u16, term_h: u16, natural_h: Option<u16>) -> Rect {
-    resolve_placement(&fc.placement, term_w, term_h, natural_h)
+fn resolve_float_rect(
+    fc: &FloatConfig,
+    term_w: u16,
+    term_h: u16,
+    natural_h: Option<u16>,
+    split_rects: &HashMap<WinId, Rect>,
+) -> Rect {
+    resolve_placement(&fc.placement, term_w, term_h, natural_h, split_rects)
 }
 
 fn resolve_placement(
@@ -852,6 +955,7 @@ fn resolve_placement(
     term_w: u16,
     term_h: u16,
     natural_h: Option<u16>,
+    split_rects: &HashMap<WinId, Rect>,
 ) -> Rect {
     match p {
         layout::Placement::DockBottom {
@@ -933,6 +1037,19 @@ fn resolve_placement(
             let w = w.min(term_w.saturating_sub(left));
             let h = h.min(term_h.saturating_sub(top));
             Rect::new(top, left, w, h)
+        }
+        layout::Placement::DockedAbove { target, max_height } => {
+            // Target rect comes from `split_rects` (host app publishes
+            // split-window rects each frame). If missing, fall back to
+            // a centered-ish placement so the float still renders.
+            let anchor_rect = split_rects
+                .get(target)
+                .copied()
+                .unwrap_or_else(|| Rect::new(term_h / 2, 0, term_w, 1));
+            let max_h = resolve_constraint_dim(*max_height, anchor_rect.top).max(1);
+            let h = natural_h.unwrap_or(max_h).min(max_h).max(1);
+            let top = anchor_rect.top.saturating_sub(h);
+            Rect::new(top, anchor_rect.left, anchor_rect.width, h)
         }
     }
 }

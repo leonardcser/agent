@@ -41,6 +41,30 @@ impl LuaRuntime {
         }
     }
 
+    /// Invoke a registered Lua callback with a single value. Used by
+    /// event sources that aren't tied to a window (e.g. ArgPicker
+    /// `on_select` previews). Errors from the callback surface as an
+    /// error notification.
+    pub fn invoke_callback_value(&self, id: u64, arg: mlua::Value) {
+        let func: mlua::Function = {
+            let Ok(cbs) = self.shared.callbacks.lock() else {
+                return;
+            };
+            let Some(h) = cbs.get(&id) else {
+                return;
+            };
+            match self.lua.registry_value(&h.key) {
+                Ok(f) => f,
+                Err(_) => return,
+            }
+        };
+        if let Err(e) = func.call::<()>(arg) {
+            if let Ok(mut o) = self.shared.ops.lock() {
+                o.push(UiOp::NotifyError(format!("picker callback: {e}")));
+            }
+        }
+    }
+
     /// Satisfy a `TaskWait::External(id)` from outside the runtime.
     pub fn resolve_external(&self, external_id: u64, value: mlua::Value) -> bool {
         let Ok(mut rt) = self.shared.tasks.lock() else {

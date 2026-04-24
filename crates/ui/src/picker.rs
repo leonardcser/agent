@@ -21,6 +21,10 @@ pub struct PickerItem {
     /// Prefix appended to the label (e.g. `"/"` for commands, `"./"`
     /// for files). Participates in column-alignment width.
     pub prefix: String,
+    /// Optional per-item accent. When set, overrides the picker's
+    /// default label/description style for this row — drawn on prefix,
+    /// label, and description alike.
+    pub accent: Option<crossterm::style::Color>,
 }
 
 impl PickerItem {
@@ -29,6 +33,7 @@ impl PickerItem {
             label: label.into(),
             description: None,
             prefix: String::new(),
+            accent: None,
         }
     }
 
@@ -39,6 +44,11 @@ impl PickerItem {
 
     pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.prefix = prefix.into();
+        self
+    }
+
+    pub fn with_accent(mut self, color: crossterm::style::Color) -> Self {
+        self.accent = Some(color);
         self
     }
 }
@@ -142,6 +152,23 @@ impl Picker {
         self.items.len().max(1)
     }
 
+    pub fn max_visible_rows(&self) -> u16 {
+        self.max_visible_rows
+    }
+
+    /// Natural height for placement: number of items, clamped by
+    /// `max_visible_rows`, minimum 1. Used by `Placement::DockedAbove`
+    /// so a picker float shrinks to fit its visible rows.
+    pub fn natural_height(&self) -> u16 {
+        let items = self.items.len() as u16;
+        let cap = if self.max_visible_rows == u16::MAX {
+            items.max(1)
+        } else {
+            self.max_visible_rows
+        };
+        items.min(cap).max(1)
+    }
+
     fn max_label_chars(&self) -> usize {
         self.items
             .iter()
@@ -219,10 +246,36 @@ impl Component for Picker {
                 row_i as u16
             };
             let is_selected = item_i == self.selected;
-            let label_style = if is_selected {
+            let base_label_style = if is_selected {
                 self.style.selected_fg
             } else {
                 self.style.unselected_fg
+            };
+            // The per-item accent always paints the prefix (pill) so
+            // users can see the full palette at a glance. The label
+            // and description only pick up the accent on the selected
+            // row, giving the "you are looking at this one" focus
+            // cue without washing out the list.
+            let prefix_style = match item.accent {
+                Some(c) => Style {
+                    fg: Some(c),
+                    ..base_label_style
+                },
+                None => base_label_style,
+            };
+            let label_style = match (item.accent, is_selected) {
+                (Some(c), true) => Style {
+                    fg: Some(c),
+                    ..base_label_style
+                },
+                _ => base_label_style,
+            };
+            let description_style = match (item.accent, is_selected) {
+                (Some(c), true) => Style {
+                    fg: Some(c),
+                    ..self.style.description_fg
+                },
+                _ => self.style.description_fg,
             };
 
             let mut col: u16 = indent;
@@ -231,7 +284,7 @@ impl Component for Picker {
                 if col >= w {
                     break;
                 }
-                slice.set(col, row, ch, label_style);
+                slice.set(col, row, ch, prefix_style);
                 col = col.saturating_add(1);
             }
             for ch in item.label.chars() {
@@ -256,7 +309,7 @@ impl Component for Picker {
                     if col >= w {
                         break;
                     }
-                    slice.set(col, row, ch, self.style.description_fg);
+                    slice.set(col, row, ch, description_style);
                     col = col.saturating_add(1);
                 }
             }

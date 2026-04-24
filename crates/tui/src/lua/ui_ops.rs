@@ -7,6 +7,7 @@
 //! lives in `runtime/lua/smelt/{dialog,picker}.lua`.
 
 use crate::app::App;
+use crate::completer::{ArgPickerHandles, ArgPickerKey, CompletionItem};
 use crate::format::BufFormat;
 use ui::buffer::BufCreateOpts;
 use ui::text_input::TextInput;
@@ -174,6 +175,107 @@ pub fn open_dialog(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, 
         .ok_or_else(|| "failed to open dialog window".to_string())
 }
 
+// ── ArgPicker (prompt-owning picker backed by Rust Completer) ───────
+//
+// Opening one installs a `CompleterKind::ArgPicker` session on the
+// prompt. The completer owns nav / filter / accept semantics; this
+// function only translates the Lua `opts` table into that session and
+// registers the optional `on_select` callback.
+//
+// Lua opts shape:
+//   {
+//     items = { { label, description?, ansi_color?, search_terms? }, ... },
+//     on_select = function(arg), -- optional, fires on navigation
+//   }
+
+pub fn open_arg_picker(app: &mut App, task_id: u64, opts_key: mlua::RegistryKey) {
+    match build_arg_picker(app, task_id, opts_key) {
+        Ok(()) => {}
+        Err(e) => {
+            app.notify_error(format!("prompt.open_picker: {e}"));
+            // Resolve the caller's task with `nil` so the coroutine
+            // doesn't hang on a failed open.
+            app.lua.resolve_external(task_id, mlua::Value::Nil);
+        }
+    }
+}
+
+fn build_arg_picker(
+    app: &mut App,
+    task_id: u64,
+    opts_key: mlua::RegistryKey,
+) -> Result<(), String> {
+    let lua = app.lua.lua();
+    let opts: mlua::Table = lua
+        .registry_value(&opts_key)
+        .map_err(|e| format!("opts: {e}"))?;
+
+    let items_tbl: mlua::Table = opts.get("items").map_err(|e| format!("items: {e}"))?;
+    let mut items: Vec<CompletionItem> = Vec::new();
+    for pair in items_tbl.sequence_values::<mlua::Value>() {
+        let v = pair.map_err(|e| format!("item: {e}"))?;
+        items.push(parse_arg_picker_item(&v)?);
+    }
+    if items.is_empty() {
+        return Err("items must be non-empty".into());
+    }
+
+    // Stash optional Lua callbacks in the runtime registry and pass
+    // ids to the completer session. Cleanup happens when the session
+    // resolves (see `input::ArgPickerEvent::Accept/Dismiss`).
+    let on_select = match opts.get::<Option<mlua::Function>>("on_select") {
+        Ok(Some(f)) => Some(ArgPickerKey(
+            app.lua
+                .register_callback(f)
+                .map_err(|e| format!("on_select: {e}"))?,
+        )),
+        _ => None,
+    };
+
+    let handles = ArgPickerHandles {
+        task_id,
+        on_select,
+        on_accept: None,
+        stay_open_on_accept: false,
+        command_prefix: None,
+    };
+
+    let comp = crate::completer::Completer::arg_picker(0, items);
+    app.input.set_arg_picker(comp, handles);
+    Ok(())
+}
+
+fn parse_arg_picker_item(v: &mlua::Value) -> Result<CompletionItem, String> {
+    match v {
+        mlua::Value::String(s) => Ok(CompletionItem {
+            label: s.to_string_lossy().to_string(),
+            description: None,
+            ansi_color: None,
+            search_terms: None,
+        }),
+        mlua::Value::Table(t) => {
+            let label: String = t.get("label").map_err(|e| format!("item.label: {e}"))?;
+            let description: Option<String> = t.get("description").ok();
+            let ansi_color: Option<u8> = t
+                .get::<Option<u64>>("ansi_color")
+                .ok()
+                .flatten()
+                .map(|v| v as u8);
+            let search_terms: Option<String> = t.get("search_terms").ok();
+            Ok(CompletionItem {
+                label,
+                description,
+                ansi_color,
+                search_terms,
+            })
+        }
+        other => Err(format!(
+            "item: expected string or table, got {}",
+            other.type_name()
+        )),
+    }
+}
+
 // ── Picker ───────────────────────────────────────────────────────────
 
 pub fn open_picker(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String> {
@@ -194,22 +296,48 @@ pub fn open_picker(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, 
         return Err("picker.open: items must be non-empty".into());
     }
 
+    let placement_str: String = opts
+        .get("placement")
+        .ok()
+        .unwrap_or_else(|| "center".to_string());
+    let prompt_docked = placement_str == "prompt_docked";
     let placement = parse_picker_placement(&opts);
     let title: Option<String> = opts.get("title").ok();
 
+    // `prompt_docked`: no border, non-focusable, reversed (best match
+    // closest to the prompt). Placement::DockedAbove handles rect +
+    // natural-height resolution in the ui crate — no TUI sync loop.
+    let (border, focusable, reversed) = if prompt_docked {
+        (ui::Border::None, false, true)
+    } else {
+        (ui::Border::Rounded, true, false)
+    };
+    let zindex = if prompt_docked { 60 } else { 50 };
     let float_config = FloatConfig {
         title,
-        border: ui::Border::Rounded,
+        border,
         placement,
-        focusable: true,
+        focusable,
         blocks_agent: false,
-        ..Default::default()
+        zindex,
     };
 
-    // Lua picker floats default to non-reversed (top-down); the plugin
-    // controls placement, and they don't necessarily dock above a prompt.
+    let style = if prompt_docked {
+        ui::PickerStyle {
+            selected_fg: ui::grid::Style {
+                fg: Some(crate::theme::accent()),
+                ..Default::default()
+            },
+            unselected_fg: ui::grid::Style::dim(),
+            description_fg: ui::grid::Style::dim(),
+            background: ui::grid::Style::default(),
+        }
+    } else {
+        Default::default()
+    };
+
     app.ui
-        .picker_open(float_config, items, 0, Default::default(), false)
+        .picker_open(float_config, items, 0, style, reversed)
         .ok_or_else(|| "picker.open: failed to create float".to_string())
 }
 
@@ -233,7 +361,7 @@ fn parse_panel_height(panel: &mlua::Table) -> Result<Option<PanelHeight>, String
     }
 }
 
-fn parse_picker_item(v: &mlua::Value) -> Result<ui::picker::PickerItem, String> {
+pub fn parse_picker_item(v: &mlua::Value) -> Result<ui::picker::PickerItem, String> {
     match v {
         mlua::Value::String(s) => Ok(ui::picker::PickerItem::new(s.to_string_lossy().to_string())),
         mlua::Value::Table(t) => {
@@ -269,6 +397,7 @@ fn parse_picker_placement(opts: &mlua::Table) -> Placement {
             width: Constraint::Fixed(48),
             height: Constraint::Pct(40),
         },
+        "prompt_docked" => Placement::docked_above(ui::PROMPT_WIN, Constraint::Fixed(7)),
         _ => Placement::centered(Constraint::Pct(60), Constraint::Pct(50)),
     }
 }

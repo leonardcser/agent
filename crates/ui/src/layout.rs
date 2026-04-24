@@ -103,6 +103,15 @@ pub enum Placement {
         width: Constraint,
         height: Constraint,
     },
+    /// Docked directly above another window. Width matches the target's
+    /// rect; height tracks the float's natural height (picker item count,
+    /// etc.) clamped by `max_height`. The float grows upward from the
+    /// target's top edge — the canonical placement for prompt-anchored
+    /// pickers (completers, `/theme`, history search).
+    DockedAbove {
+        target: crate::WinId,
+        max_height: Constraint,
+    },
 }
 
 impl Placement {
@@ -121,6 +130,10 @@ impl Placement {
 
     pub fn fit_content(max: FitMax) -> Self {
         Placement::FitContent { max }
+    }
+
+    pub fn docked_above(target: crate::WinId, max_height: Constraint) -> Self {
+        Placement::DockedAbove { target, max_height }
     }
 }
 

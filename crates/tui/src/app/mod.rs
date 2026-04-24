@@ -38,7 +38,7 @@ pub(crate) use crate::app::transcript_model::{
     PermissionEntry, ToolOutput, ToolState, ToolStatus, ViewState,
 };
 pub(crate) use crate::app::working::{TurnOutcome, TurnPhase};
-use crate::input::{resolve_agent_esc, Action, EscAction, History, MenuResult, PromptState};
+use crate::input::{resolve_agent_esc, Action, EscAction, History, PromptState};
 use crate::session::Session;
 use crate::{render, session, state, vim};
 use engine::tools::tool_arg_summary;
@@ -258,6 +258,11 @@ pub struct App {
     /// (vim + kill ring + undo) and the viewport scroll / cursor
     /// position.
     pub transcript_window: ui::Window,
+    /// Last prompt-buffer text we dispatched a `TextChanged` event for.
+    /// After each event, if `input.buf` differs from this, we fire
+    /// `WinEvent::TextChanged` on `PROMPT_WIN` so Lua subscribers
+    /// (`smelt.win.on_event(prompt, "text_changed", …)`) get called.
+    pub last_prompt_text: String,
     /// Last primary-mouse-Down time, cell, and click count. Successive
     /// clicks on the same cell within a short window increment the
     /// count: 2 → word-select, 3 → line-select.
@@ -354,7 +359,6 @@ enum EventOutcome {
         content: Content,
         display: String,
     },
-    MenuResult(MenuResult),
     Exec(
         tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
         std::sync::Arc<tokio::sync::Notify>,
@@ -517,16 +521,11 @@ impl App {
         if vim_enabled {
             input.set_vim_enabled(true);
         }
-        let theme_names: Vec<String> = crate::theme::PRESETS
-            .iter()
-            .map(|(n, _, _)| (*n).to_string())
-            .collect();
-        let model_keys: Vec<String> = available_models.iter().map(|m| m.key.clone()).collect();
-        input.command_arg_sources = vec![
-            ("/model".into(), model_keys),
-            ("/theme".into(), theme_names.clone()),
-            ("/color".into(), theme_names),
-        ];
+        // Arg sources for the CommandArg inline completer (type `/cmd arg`).
+        // The picker-style commands (`/model`, `/theme`, `/color`, `/settings`)
+        // now live in Lua plugins and open real `ui::Picker` windows via
+        // `smelt.prompt.open_picker`, so they're not listed here.
+        input.command_arg_sources = Vec::new();
         // Only load accent from state if not already set from config
         if crate::theme::accent_value() == crate::theme::DEFAULT_ACCENT {
             if let Some(accent) = saved.accent_color {
@@ -594,8 +593,8 @@ impl App {
                 2,
             );
             // Status bar rides above all floats (default float zindex = 50;
-            // completer float uses 60). Picking 500 leaves headroom for any
-            // future always-above-status overlay without another collision.
+            // completer float uses 30, notification 40, cmdline 600). Picking
+            // 500 leaves headroom for any future always-above-status overlay.
             ui.add_layer(
                 "status",
                 Box::new(status_bar),
@@ -697,7 +696,7 @@ impl App {
             app_focus: AppFocus::Prompt,
             transcript_window: {
                 let mut w = ui::Window::new(
-                    ui::WinId(0),
+                    ui::TRANSCRIPT_WIN,
                     ui::BufId(0),
                     ui::WinConfig::Split(ui::SplitConfig {
                         region: "transcript".into(),
@@ -707,6 +706,7 @@ impl App {
                 w.set_vim_enabled(vim_enabled);
                 w
             },
+            last_prompt_text: String::new(),
             last_click: None,
             mouse_drag_active: false,
             drag_anchor_word: None,
@@ -861,13 +861,30 @@ impl App {
             self.notify_error(message);
         }
 
-        // Surface any Lua load errors on the first frame.
+        // Seed the Lua snapshot *before* plugins load. Plugins that read
+        // these at registration time — e.g. `model.lua` declaring
+        // `args = <model keys>` — need real data, otherwise their arg
+        // picker stays empty for the session.
+        self.snapshot_engine_context(false);
+        self.lua.set_available_models(
+            self.available_models
+                .iter()
+                .map(|m| (m.key.clone(), m.model_name.clone(), m.provider_name.clone()))
+                .collect(),
+        );
+        self.push_settings_snapshot_to_lua();
+        self.lua
+            .set_input_history(self.input_history.entries().to_vec());
+        self.lua.load_plugins();
         if let Some(err) = self.lua.load_error.take() {
             self.notify_error(format!("lua init: {err}"));
         }
-        self.snapshot_engine_context(false);
         self.lua.emit(crate::lua::AutocmdEvent::SessionStart);
         self.apply_lua_ops();
+        // Plugins have now registered their commands — pull every
+        // declared `args = {...}` list so the CommandArg picker opens
+        // when the user types `/name ` (space).
+        self.input.command_arg_sources = self.lua.command_args();
 
         let mut term_events = EventStream::new();
 
@@ -879,10 +896,10 @@ impl App {
                     self.exec_rx = Some(rx);
                     self.exec_kill = Some(kill);
                 }
-            } else if trimmed == "/resume" {
+            } else if trimmed == "/resume" || trimmed == "/settings" {
+                // Both are Lua-registered commands now; run through the
+                // normal dispatcher so the Lua handler fires.
                 self.handle_command(trimmed);
-            } else if trimmed == "/settings" {
-                self.input.open_settings(&self.settings_state());
             } else if let Some(reason) = classify_startup_command(trimmed) {
                 self.notify_error(format!("\"{}\" {}", trimmed, reason));
             } else {

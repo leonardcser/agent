@@ -127,26 +127,6 @@ pub(crate) const RUST_COMMANDS: &[RustCommand] = &[
         handler: cmd_fork,
     },
     RustCommand {
-        name: "model",
-        desc: Some("switch model"),
-        handler: cmd_model,
-    },
-    RustCommand {
-        name: "settings",
-        desc: Some("open settings menu"),
-        handler: cmd_settings,
-    },
-    RustCommand {
-        name: "theme",
-        desc: Some("change accent color"),
-        handler: cmd_theme,
-    },
-    RustCommand {
-        name: "color",
-        desc: Some("set task slug color"),
-        handler: cmd_color,
-    },
-    RustCommand {
         name: "stats",
         desc: Some("show token usage statistics"),
         handler: cmd_stats,
@@ -201,63 +181,11 @@ fn cmd_fork(app: &mut App, _: Option<String>) -> CommandAction {
     CommandAction::Continue
 }
 
-fn cmd_model(app: &mut App, arg: Option<String>) -> CommandAction {
-    if let Some(reference) = arg {
-        match crate::config::resolve_model_ref(&app.available_models, &reference) {
-            Ok(model) => {
-                let key = model.key.clone();
-                app.apply_model(&key);
-            }
-            Err(err) => app.notify_error(err.to_string()),
-        }
-    } else {
-        let models: Vec<(String, String, String)> = app
-            .available_models
-            .iter()
-            .map(|m| (m.key.clone(), m.model_name.clone(), m.provider_name.clone()))
-            .collect();
-        if !models.is_empty() {
-            app.input.open_model_completer(&models);
-        }
-    }
-    CommandAction::Continue
-}
-
-fn cmd_settings(app: &mut App, _: Option<String>) -> CommandAction {
-    app.input.open_settings(&app.settings_state());
-    CommandAction::Continue
-}
-
-fn cmd_theme(app: &mut App, arg: Option<String>) -> CommandAction {
-    if let Some(name) = arg {
-        if let Some(value) = crate::theme::preset_by_name(&name) {
-            app.apply_accent(value);
-        } else {
-            app.notify_error(format!("unknown theme: {name}"));
-        }
-    } else {
-        app.input.open_theme_completer();
-    }
-    CommandAction::Continue
-}
-
-fn cmd_color(app: &mut App, arg: Option<String>) -> CommandAction {
-    if let Some(name) = arg {
-        if let Some(value) = crate::theme::preset_by_name(&name) {
-            crate::theme::set_slug_color(value);
-        } else {
-            app.notify_error(format!("unknown color: {name}"));
-        }
-    } else {
-        app.input.open_color_completer();
-    }
-    CommandAction::Continue
-}
-
 fn cmd_stats(app: &mut App, _: Option<String>) -> CommandAction {
     let entries = crate::metrics::load();
     let stats = crate::metrics::render_stats(&entries);
-    app.input.open_stats(stats);
+    let text = crate::metrics::render_stats_text(&stats);
+    crate::app::dialogs::text_modal::open(app, "stats", &text);
     CommandAction::Continue
 }
 
@@ -266,7 +194,8 @@ fn cmd_cost(app: &mut App, _: Option<String>) -> CommandAction {
     let resolved = engine::pricing::resolve(&app.model, &app.provider_type, &app.model_config);
     let lines =
         crate::metrics::render_session_cost(app.session_cost_usd, &app.model, turns, &resolved);
-    app.input.open_cost(lines);
+    let text = crate::metrics::render_cost_text(&lines);
+    crate::app::dialogs::text_modal::open(app, "cost", &text);
     CommandAction::Continue
 }
 
@@ -491,6 +420,7 @@ impl App {
         self.input.set_vim_enabled(self.settings.vim);
         self.transcript_window.set_vim_enabled(self.settings.vim);
         state::save_settings(&self.settings);
+        self.push_settings_snapshot_to_lua();
     }
 
     /// Replace all resolved settings at once (from a settings dialog result),
@@ -542,12 +472,6 @@ impl App {
         self.reasoning_effort = effort;
         state::set_reasoning_effort(effort);
         self.engine.send(UiCommand::SetReasoningEffort { effort });
-    }
-
-    /// Apply an accent color: update the global theme, persist, and redraw.
-    pub(super) fn apply_accent(&mut self, value: u8) {
-        crate::theme::set_accent(value);
-        state::set_accent(value);
     }
 }
 

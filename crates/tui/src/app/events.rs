@@ -9,10 +9,6 @@ use crossterm::{
 use std::time::{Duration, Instant};
 
 impl App {
-    fn apply_settings_result(&mut self, s: &crate::input::SettingsState) {
-        self.set_settings(s.clone());
-    }
-
     // ── Terminal event dispatch ───────────────────────────────────────────
 
     /// Handle a single terminal event, potentially starting/stopping agents.
@@ -126,6 +122,11 @@ impl App {
             self.handle_event_idle(ev, t)
         };
 
+        // Fire `WinEvent::TextChanged` on the prompt window if the buffer
+        // changed during this event. Lua plugins use this to drive
+        // filter-as-you-type (e.g. `smelt.prompt.open_picker`).
+        self.emit_prompt_text_changed_if_dirty();
+
         match outcome {
             EventOutcome::Noop | EventOutcome::Redraw => false,
             EventOutcome::Quit => {
@@ -163,36 +164,6 @@ impl App {
                 );
                 self.reset_session();
                 self.agent = None;
-                false
-            }
-            EventOutcome::MenuResult(result) => {
-                match result {
-                    MenuResult::Settings(ref s) => {
-                        self.apply_settings_result(s);
-                        let items = crate::completer::Completer::settings_items(s);
-                        if let Some(comp) = self.input.completer.as_mut() {
-                            if comp.kind == crate::completer::CompleterKind::Settings {
-                                comp.refresh_items(items);
-                            }
-                        }
-                    }
-                    MenuResult::ModelSelect(ref key) => {
-                        self.apply_model(key);
-                    }
-                    MenuResult::ThemeSelect(value) => {
-                        // Live preview already set the in-memory accent;
-                        // mirror it explicitly so settings.json and the
-                        // atomic stay in lockstep regardless of preview
-                        // state.
-                        self.apply_accent(value);
-                    }
-                    MenuResult::ColorSelect(_) => {}
-                    MenuResult::Stats | MenuResult::Cost | MenuResult::Dismissed => {}
-                }
-                let is_settings = matches!(&result, MenuResult::Settings(_));
-                if !is_settings {
-                    self.input.restore_stash();
-                }
                 false
             }
             EventOutcome::Exec(rx, kill) => {
@@ -244,8 +215,8 @@ impl App {
                         }
                     }
                 }
-                // Restore stash unless a modal/dialog was opened (it will restore on close).
-                if !self.input.has_modal() && self.ui.focused_float().is_none() {
+                // Restore stash unless a dialog was opened (it will restore on close).
+                if self.ui.focused_float().is_none() {
                     self.input.restore_stash();
                 }
                 false
@@ -286,6 +257,36 @@ impl App {
         if let Event::Mouse(me) = *ev {
             return Some(self.handle_mouse(me));
         }
+        // Prompt-scoped ("buffer-local") Lua keymaps win over global
+        // ones — matches nvim's buffer-local > global priority. Fires
+        // only when the prompt owns focus and no float is up. Used by
+        // `smelt.prompt.open_picker` to capture Enter / Esc / arrows
+        // while a picker is active.
+        if let Event::Key(k) = *ev {
+            if matches!(self.app_focus, crate::app::AppFocus::Prompt)
+                && self.ui.focused_float().is_none()
+            {
+                let KeyEvent {
+                    code, modifiers, ..
+                } = k;
+                let lua = &self.lua;
+                let mut lua_invoke =
+                    |handle: ui::LuaHandle,
+                     win: ui::WinId,
+                     payload: &ui::Payload,
+                     panels: &[ui::PanelSnapshot]| {
+                        lua.invoke_callback(handle, win, payload, panels);
+                    };
+                let result =
+                    self.ui
+                        .try_window_keymap(ui::PROMPT_WIN, code, modifiers, &mut lua_invoke);
+                if matches!(result, ui::KeyResult::Consumed) {
+                    self.apply_lua_ops();
+                    return Some(EventOutcome::Noop);
+                }
+            }
+        }
+
         // Lua-registered keymaps get first crack at key events, matching
         // nvim's `vim.keymap.set` priority. Unbound chords fall through
         // to the built-in keymap dispatcher.
@@ -317,12 +318,12 @@ impl App {
                 }
                 crate::app::AppFocus::Content => false,
             };
-            if !in_insert && !self.input.has_modal() {
+            if !in_insert {
                 self.open_cmdline();
                 return Some(EventOutcome::Noop);
             }
         }
-        if self.app_focus == crate::app::AppFocus::Content && !self.input.has_modal() {
+        if self.app_focus == crate::app::AppFocus::Content {
             return Some(self.handle_event_app_history(ev));
         }
         if let Some(outcome) = self.handle_overlay_keys(ev) {
@@ -336,16 +337,14 @@ impl App {
             return outcome;
         }
 
-        // Esc / double-Esc (skip when a modal menu is open — let it handle Esc)
-        if !self.input.has_modal()
-            && matches!(
-                ev,
-                Event::Key(KeyEvent {
-                    code: KeyCode::Esc,
-                    ..
-                })
-            )
-        {
+        // Esc / double-Esc
+        if matches!(
+            ev,
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc,
+                ..
+            })
+        ) {
             let in_normal = !self.input.vim_enabled() || !self.input.vim_in_insert_mode();
             if in_normal {
                 let double = t
@@ -426,39 +425,29 @@ impl App {
                 }
             }
 
-            if !self.input.has_modal() {
-                if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
-                    // Handle actions that need app-level context.
-                    match action {
-                        KeyAction::Quit => {
-                            return EventOutcome::Quit;
-                        }
-                        KeyAction::ClearBuffer => {
-                            // Dismiss menu/completer first, then clear buffer.
-                            if let Some(result) = self.input.dismiss_menu() {
-                                return EventOutcome::MenuResult(result);
-                            }
-                            if self.input.completer.is_some() {
-                                self.input.close_completer();
-                                return EventOutcome::Redraw;
-                            }
-                            t.last_ctrlc = Some(Instant::now());
-                            self.input.clear();
+            if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
+                // Handle actions that need app-level context.
+                match action {
+                    KeyAction::Quit => {
+                        return EventOutcome::Quit;
+                    }
+                    KeyAction::ClearBuffer => {
+                        // Dismiss completer first, then clear buffer.
+                        if self.input.completer.is_some() {
+                            self.input.close_completer();
+                            self.drain_arg_picker_events();
                             return EventOutcome::Redraw;
                         }
-                        KeyAction::OpenHelp => {
-                            super::commands::run_command(self, "/help");
-                            return EventOutcome::Redraw;
-                        }
-                        KeyAction::OpenHistorySearch => {
-                            if self.input.history_search_query().is_none() {
-                                self.input.open_history_search(&self.input_history);
-                            }
-                            return EventOutcome::Redraw;
-                        }
-                        _ => {
-                            // Delegate to PromptState for editing/navigation actions.
-                        }
+                        t.last_ctrlc = Some(Instant::now());
+                        self.input.clear();
+                        return EventOutcome::Redraw;
+                    }
+                    KeyAction::OpenHelp => {
+                        super::commands::run_command(self, "/help");
+                        return EventOutcome::Redraw;
+                    }
+                    _ => {
+                        // Delegate to PromptState for editing/navigation actions.
                     }
                 }
             }
@@ -466,6 +455,7 @@ impl App {
 
         // Delegate to PromptState::handle_event (menu, completer, vim, editing).
         let action = self.input.handle_event(ev, Some(&mut self.input_history));
+        self.drain_arg_picker_events();
         self.dispatch_input_action(action)
     }
 
@@ -490,24 +480,20 @@ impl App {
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
                     KeyAction::CancelAgent => {
-                        // Dismiss menu/completer first, then cancel.
-                        if let Some(result) = self.input.dismiss_menu() {
-                            return EventOutcome::MenuResult(result);
-                        }
+                        // Dismiss completer first, then cancel.
                         if self.input.completer.is_some() {
                             self.input.close_completer();
+                            self.drain_arg_picker_events();
                             return EventOutcome::Noop;
                         }
                         self.queued_messages.clear();
                         return EventOutcome::CancelAgent;
                     }
                     KeyAction::ClearBuffer => {
-                        // Dismiss menu/completer first, then clear.
-                        if let Some(result) = self.input.dismiss_menu() {
-                            return EventOutcome::MenuResult(result);
-                        }
+                        // Dismiss completer first, then clear.
                         if self.input.completer.is_some() {
                             self.input.close_completer();
+                            self.drain_arg_picker_events();
                             return EventOutcome::Noop;
                         }
                         t.last_ctrlc = Some(Instant::now());
@@ -530,10 +516,6 @@ impl App {
                 ..
             })
         ) {
-            if self.input.has_modal() {
-                let action = self.input.handle_event(ev, None);
-                return self.dispatch_input_action(action);
-            }
             match resolve_agent_esc(
                 self.input.vim_mode(),
                 !self.queued_messages.is_empty(),
@@ -542,6 +524,7 @@ impl App {
             ) {
                 EscAction::VimToNormal => {
                     self.input.handle_event(ev, None);
+                    self.drain_arg_picker_events();
                 }
                 EscAction::Unqueue => {
                     let mut combined = self.queued_messages.join("\n");
@@ -564,7 +547,9 @@ impl App {
         }
 
         // Everything else → PromptState::handle_event (type-ahead with history).
-        match self.input.handle_event(ev, Some(&mut self.input_history)) {
+        let input_action = self.input.handle_event(ev, Some(&mut self.input_history));
+        self.drain_arg_picker_events();
+        match input_action {
             Action::Submit {
                 mut content,
                 mut display,
@@ -600,7 +585,6 @@ impl App {
             Action::NotifyError(msg) => {
                 self.notify_error(msg);
             }
-            Action::MenuResult(result) => return EventOutcome::MenuResult(result),
             Action::Noop | Action::Resize { .. } => {}
         }
         EventOutcome::Noop
@@ -613,7 +597,6 @@ impl App {
         match action {
             Action::Submit { content, display } => EventOutcome::Submit { content, display },
             Action::SubmitEmpty => EventOutcome::Noop,
-            Action::MenuResult(result) => EventOutcome::MenuResult(result),
             Action::ToggleMode => {
                 self.toggle_mode();
                 EventOutcome::Redraw
@@ -725,6 +708,8 @@ impl App {
 
         let trimmed = input.trim();
         self.input_history.push(input.to_string());
+        self.lua
+            .set_input_history(self.input_history.entries().to_vec());
 
         // Skip shell escape for pasted content
         let is_from_paste = self.input.skip_shell_escape();

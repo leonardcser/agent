@@ -22,7 +22,6 @@ pub enum KeyAction {
     CycleReasoning,
     ToggleStash,
     OpenHelp,
-    OpenHistorySearch,
     Redraw,
     AcceptGhostText,
 
@@ -271,12 +270,6 @@ static BINDINGS: &[Binding] = &[
     bind(KeyCode::Char('s'), CTRL, when(), KeyAction::ToggleStash),
     bind(KeyCode::BackTab, NONE, when(), KeyAction::ToggleMode),
     bind(KeyCode::Char('t'), CTRL, when(), KeyAction::CycleReasoning),
-    bind(
-        KeyCode::Char('r'),
-        CTRL,
-        when().not_vim_non_insert(),
-        KeyAction::OpenHistorySearch,
-    ),
     bind(KeyCode::Char('l'), CTRL, when(), KeyAction::Redraw),
     bind(
         KeyCode::Char('?'),

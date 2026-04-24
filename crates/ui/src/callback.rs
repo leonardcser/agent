@@ -197,6 +197,18 @@ impl Callbacks {
         self.keymaps.get_mut(&win).and_then(|t| t.remove(&key))
     }
 
+    /// Remove a specific event callback identified by its Lua handle id.
+    /// Lua plugins attach picker-lifetime handlers to other windows (e.g.
+    /// `on_event(prompt, "text_changed", …)`); they need a way to tear
+    /// down exactly their own binding without nuking co-existing ones.
+    pub fn clear_event_by_id(&mut self, win: WinId, ev: WinEvent, id: u64) -> Option<Callback> {
+        let list = self.events.get_mut(&win)?.get_mut(&ev)?;
+        let pos = list
+            .iter()
+            .position(|cb| matches!(cb, Callback::Lua(LuaHandle(h)) if *h == id))?;
+        Some(list.remove(pos))
+    }
+
     pub fn on_event(&mut self, win: WinId, ev: WinEvent, cb: Callback) {
         self.events
             .entry(win)

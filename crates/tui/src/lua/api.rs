@@ -87,12 +87,32 @@ impl LuaRuntime {
                         let desc: Option<String> = opts
                             .as_ref()
                             .and_then(|t| t.get::<Option<String>>("desc").ok().flatten());
+                        // `args` may be either a Lua array of strings
+                        // (static) or omitted. Drives the secondary
+                        // CommandArg picker that opens after `/name `.
+                        let args: Vec<String> = opts
+                            .as_ref()
+                            .and_then(|t| t.get::<Option<mlua::Table>>("args").ok().flatten())
+                            .map(|t| {
+                                let mut v = Vec::new();
+                                for pair in t.pairs::<mlua::Value, String>().flatten() {
+                                    v.push(pair.1);
+                                }
+                                v
+                            })
+                            .unwrap_or_default();
                         let key = lua.create_registry_value(handler)?;
                         if let Ok(mut map) = s.commands.lock() {
                             map.insert(name.clone(), LuaHandle { key });
                         }
                         if let Ok(mut snap) = lua_commands_snapshot().lock() {
-                            snap.insert(name, desc);
+                            snap.insert(
+                                name,
+                                crate::lua::CommandMeta {
+                                    description: desc,
+                                    args,
+                                },
+                            );
                         }
                         Ok(())
                     },
@@ -255,6 +275,29 @@ impl LuaRuntime {
             "set_model",
             push_op!(lua, shared, |v: String| DomainOp::SetModel(v)),
         )?;
+        // smelt.engine.models() → array of `{key, name, provider}`
+        // for the prompt-docked `/model` picker.
+        {
+            let s = shared.clone();
+            engine_tbl.set(
+                "models",
+                lua.create_function(move |lua, ()| {
+                    let out = lua.create_table()?;
+                    let o = s
+                        .ops
+                        .lock()
+                        .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+                    for (i, (key, name, provider)) in o.available_models.iter().enumerate() {
+                        let entry = lua.create_table()?;
+                        entry.set("key", key.clone())?;
+                        entry.set("name", name.clone())?;
+                        entry.set("provider", provider.clone())?;
+                        out.set(i + 1, entry)?;
+                    }
+                    Ok(out)
+                })?,
+            )?;
+        }
         engine_tbl.set(
             "set_mode",
             push_op!(lua, shared, |v: String| DomainOp::SetMode(v)),
@@ -729,6 +772,23 @@ impl LuaRuntime {
             "is_light",
             lua.create_function(|_, ()| Ok(crate::theme::is_light()))?,
         )?;
+        // Built-in color presets (name, description, ANSI-256 value).
+        // Exposed so Lua-side pickers (`/theme`, `/color`) can use
+        // them instead of hard-coding the list.
+        theme_tbl.set(
+            "presets",
+            lua.create_function(|lua, ()| {
+                let list = lua.create_table()?;
+                for (i, (name, detail, ansi)) in crate::theme::PRESETS.iter().enumerate() {
+                    let entry = lua.create_table()?;
+                    entry.set("name", *name)?;
+                    entry.set("detail", *detail)?;
+                    entry.set("ansi", *ansi)?;
+                    list.set(i + 1, entry)?;
+                }
+                Ok(list)
+            })?,
+        )?;
         smelt.set("theme", theme_tbl)?;
 
         // smelt.buf
@@ -953,12 +1013,85 @@ impl LuaRuntime {
                                 callback_id: id,
                             });
                         }
+                        Ok(id)
+                    },
+                )?,
+            )?;
+        }
+        {
+            let s = shared.clone();
+            win_tbl.set(
+                "clear_keymap",
+                lua.create_function(move |_, (win_id, key_str): (u64, String)| {
+                    let Some(key) = parse_keybind(&key_str) else {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "win.clear_keymap: unknown key `{key_str}`"
+                        )));
+                    };
+                    if let Ok(mut o) = s.ops.lock() {
+                        o.push(UiOp::WinClearKeymap {
+                            win: ui::WinId(win_id),
+                            key,
+                        });
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let s = shared.clone();
+            win_tbl.set(
+                "clear_event",
+                lua.create_function(
+                    move |_, (win_id, ev_str, callback_id): (u64, String, u64)| {
+                        let Some(event) = parse_win_event(&ev_str) else {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "win.clear_event: unknown event `{ev_str}`"
+                            )));
+                        };
+                        if let Ok(mut o) = s.ops.lock() {
+                            o.push(UiOp::WinClearEvent {
+                                win: ui::WinId(win_id),
+                                event,
+                                callback_id,
+                            });
+                        }
                         Ok(())
                     },
                 )?,
             )?;
         }
         smelt.set("win", win_tbl)?;
+
+        // smelt.settings — user preference booleans (vim, auto-compact,
+        // etc.). `snapshot()` returns the current state as a table;
+        // `toggle(key)` flips one by name. Used by `/settings` to build
+        // its picker entirely in Lua.
+        {
+            let settings_tbl = lua.create_table()?;
+            {
+                let s = shared.clone();
+                settings_tbl.set(
+                    "snapshot",
+                    lua.create_function(move |lua, ()| {
+                        let t = lua.create_table()?;
+                        let o = s
+                            .ops
+                            .lock()
+                            .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+                        for (k, v) in &o.settings {
+                            t.set(k.clone(), *v)?;
+                        }
+                        Ok(t)
+                    })?,
+                )?;
+            }
+            settings_tbl.set(
+                "toggle",
+                push_op!(lua, shared, |v: String| DomainOp::ToggleSetting(v)),
+            )?;
+            smelt.set("settings", settings_tbl)?;
+        }
 
         // smelt.task
         {
@@ -991,8 +1124,30 @@ impl LuaRuntime {
             smelt.set("task", task_tbl)?;
         }
 
-        // smelt.prompt.set_section(name, content) / remove_section(name)
+        // smelt.prompt — the main editable input surface.
+        //
+        // `win_id()` returns the stable `WinId` so plugins can reuse
+        // `smelt.win.on_event(prompt, "text_changed", …)` and
+        // `smelt.win.set_keymap(prompt, …)`. `text()` snapshots the
+        // current buffer; `set_text(s)` replaces it.
         let prompt_tbl = lua.create_table()?;
+        prompt_tbl.set("win_id", lua.create_function(|_, ()| Ok(ui::PROMPT_WIN.0))?)?;
+        prompt_tbl.set(
+            "text",
+            snap_read!(lua, shared, |o| o.prompt_text.clone().unwrap_or_default()),
+        )?;
+        {
+            let s = shared.clone();
+            prompt_tbl.set(
+                "set_text",
+                lua.create_function(move |_, text: String| {
+                    if let Ok(mut o) = s.ops.lock() {
+                        o.push(UiOp::PromptSetText(text));
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
         {
             let s = shared.clone();
             prompt_tbl.set(
@@ -1012,6 +1167,29 @@ impl LuaRuntime {
                 lua.create_function(move |_, name: String| {
                     if let Ok(mut o) = s.ops.lock() {
                         o.push(DomainOp::RemovePromptSection(name));
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+        // `smelt.prompt._request_arg_picker(task_id, opts)` queues a
+        // `UiOp::OpenArgPicker`. The reducer installs a Completer of
+        // kind ArgPicker onto the prompt; the completer owns
+        // filtering, navigation, Tab/Enter/Esc semantics, and
+        // live-preview dispatch. The parked coroutine resumes with
+        // `{index, item, action}` on accept or `nil` on dismiss.
+        //
+        // Callers should use the `smelt.prompt.open_picker(opts)`
+        // wrapper in `runtime/lua/smelt/prompt_picker.lua` — it
+        // allocates the task id, queues the op, and yields.
+        {
+            let s = shared.clone();
+            prompt_tbl.set(
+                "_request_arg_picker",
+                lua.create_function(move |lua, (task_id, opts): (u64, mlua::Value)| {
+                    let key = lua.create_registry_value(opts)?;
+                    if let Ok(mut o) = s.ops.lock() {
+                        o.push(UiOp::OpenArgPicker { task_id, opts: key });
                     }
                     Ok(())
                 })?,
@@ -1098,6 +1276,78 @@ impl LuaRuntime {
         )?;
         smelt.set("fuzzy", fuzzy_tbl)?;
 
+        // smelt.history — past submitted prompts.
+        //   entries()      → array of strings (oldest first)
+        //   search(query)  → [{index, score}] ranked by the
+        //                    history-specific scorer (word-match boosts,
+        //                    recency bonus). 1-based index into entries().
+        {
+            let history_tbl = lua.create_table()?;
+            {
+                let s = shared.clone();
+                history_tbl.set(
+                    "entries",
+                    lua.create_function(move |lua, ()| {
+                        let out = lua.create_table()?;
+                        let o = s
+                            .ops
+                            .lock()
+                            .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+                        for (i, entry) in o.input_history.iter().enumerate() {
+                            out.set(i + 1, entry.clone())?;
+                        }
+                        Ok(out)
+                    })?,
+                )?;
+            }
+            {
+                let s = shared.clone();
+                history_tbl.set(
+                    "search",
+                    lua.create_function(move |lua, query: String| {
+                        let out = lua.create_table()?;
+                        let o = s
+                            .ops
+                            .lock()
+                            .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+                        // Oldest first in the vec; the scorer wants
+                        // newest-first so "recent" ranks highest. Iterate
+                        // reversed and dedupe to match the old
+                        // `Completer::history` construction.
+                        let mut seen = std::collections::HashSet::new();
+                        let mut scored: Vec<(u32, usize, usize)> = Vec::new();
+                        for (rank, (orig_idx, entry)) in
+                            o.input_history.iter().enumerate().rev().enumerate()
+                        {
+                            if !seen.insert(entry.as_str()) {
+                                continue;
+                            }
+                            let label = entry
+                                .trim_start()
+                                .lines()
+                                .map(str::trim)
+                                .find(|l| !l.is_empty())
+                                .unwrap_or("");
+                            if let Some(s) =
+                                crate::completer::history::history_score(label, &query, rank)
+                            {
+                                scored.push((s, rank, orig_idx));
+                            }
+                        }
+                        scored.sort_by_key(|(s, rank, _)| (*s, *rank));
+                        for (i, (score, _rank, orig_idx)) in scored.into_iter().enumerate() {
+                            let entry = lua.create_table()?;
+                            entry.set("index", orig_idx + 1)?;
+                            entry.set("score", score)?;
+                            out.set(i + 1, entry)?;
+                        }
+                        Ok(out)
+                    })?,
+                )?;
+            }
+            smelt.set("history", history_tbl)?;
+        }
+
         // smelt.ui.picker
         {
             let picker_tbl = lua.create_table()?;
@@ -1125,6 +1375,28 @@ impl LuaRuntime {
                         let key = lua.create_registry_value(opts)?;
                         if let Ok(mut o) = s.ops.lock() {
                             o.push(UiOp::OpenLuaPicker { task_id, opts: key });
+                        }
+                        Ok(())
+                    })?,
+                )?;
+            }
+            {
+                let s = shared.clone();
+                picker_tbl.set(
+                    "set_items",
+                    lua.create_function(move |_, (win_id, items_tbl): (u64, mlua::Table)| {
+                        let mut items = Vec::new();
+                        for pair in items_tbl.sequence_values::<mlua::Value>() {
+                            let v = pair?;
+                            let it = crate::lua::ui_ops::parse_picker_item(&v)
+                                .map_err(LuaError::RuntimeError)?;
+                            items.push(it);
+                        }
+                        if let Ok(mut o) = s.ops.lock() {
+                            o.push(UiOp::PickerSetItems {
+                                win: ui::WinId(win_id),
+                                items,
+                            });
                         }
                         Ok(())
                     })?,

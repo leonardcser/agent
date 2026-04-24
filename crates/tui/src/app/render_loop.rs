@@ -61,7 +61,7 @@ impl App {
             term_h,
         );
 
-        self.sync_completer_float(prompt_rect);
+        self.sync_completer_float();
         self.sync_notification_float(prompt_rect);
 
         let mut stdout = std::io::stdout();
@@ -287,6 +287,10 @@ impl App {
         self.ui.set_layer_rect("prompt", prompt_rect);
         self.ui.set_layer_rect("prompt_input", prompt_input_rect);
         self.ui.set_layer_rect("status", status_rect);
+        // Publish split-window rects so `Placement::DockedAbove(WinId)`
+        // floats (prompt-docked pickers) can resolve their anchor.
+        self.ui.set_window_rect(ui::PROMPT_WIN, prompt_rect);
+        self.ui.set_window_rect(ui::TRANSCRIPT_WIN, transcript_rect);
 
         if self.ui.focused_float().is_none() {
             match self.app_focus {
@@ -306,7 +310,7 @@ impl App {
     //
     // `focusable = false` ensures keys keep flowing to the prompt,
     // driving `completer_bridge::handle_completer_event`.
-    fn sync_completer_float(&mut self, prompt_rect: ui::Rect) {
+    fn sync_completer_float(&mut self) {
         // Drain any Picker floats that were orphaned when their session
         // ended (session held the WinId; when it dropped, it queued the
         // WinId here for out-of-band close).
@@ -314,96 +318,77 @@ impl App {
             self.close_float(win);
         }
 
-        let (max_rows, n_results, selected, items, existing_win) =
-            match self.input.completer.as_ref() {
-                Some(session) => {
-                    let prefix = match session.kind {
-                        crate::completer::CompleterKind::Command => "/",
-                        crate::completer::CompleterKind::File => "./",
-                        _ => "",
-                    };
-                    let items: Vec<ui::PickerItem> = session
-                        .results
-                        .iter()
-                        .map(|r| {
-                            let mut it = ui::PickerItem::new(r.label.clone()).with_prefix(prefix);
-                            if let Some(desc) = r.description.as_deref() {
-                                it = it.with_description(desc);
-                            }
-                            it
-                        })
-                        .collect();
-                    (
-                        session.max_visible_rows(),
-                        session.results.len(),
-                        session.selected,
-                        items,
-                        session.picker_win,
-                    )
-                }
-                None => return,
-            };
-
-        let visible = n_results.min(max_rows).max(1);
-        let height = visible as u16;
-        let top = prompt_rect.top.saturating_sub(height);
-        let desired = ui::Rect::new(top, prompt_rect.left, prompt_rect.width, height);
-
-        // Close + forget the old Picker if the desired rect changed —
-        // reopening is how we reposition under Placement::Manual.
-        let mut open_win = existing_win;
-        if let Some(win) = open_win {
-            let same = match self.ui.float_config(win).map(|c| c.placement) {
-                Some(ui::Placement::Manual {
-                    row,
-                    col,
-                    width: w,
-                    height: h,
-                    ..
-                }) => {
-                    row == desired.top as i32
-                        && col == desired.left as i32
-                        && matches!(w, ui::Constraint::Fixed(v) if v == desired.width)
-                        && matches!(h, ui::Constraint::Fixed(v) if v == desired.height)
-                }
-                _ => false,
-            };
-            if !same {
-                self.close_float(win);
-                open_win = None;
+        let (max_rows, selected, items, existing_win) = match self.input.completer.as_ref() {
+            Some(session) => {
+                let prefix = match session.kind {
+                    crate::completer::CompleterKind::Command => "/",
+                    crate::completer::CompleterKind::File => "./",
+                    crate::completer::CompleterKind::ArgPicker
+                    | crate::completer::CompleterKind::CommandArg => "",
+                };
+                let items: Vec<ui::PickerItem> = session
+                    .results
+                    .iter()
+                    .map(|r| {
+                        let item_prefix = if r.ansi_color.is_some() {
+                            "● "
+                        } else {
+                            prefix
+                        };
+                        let mut it = ui::PickerItem::new(r.label.clone()).with_prefix(item_prefix);
+                        if let Some(desc) = r.description.as_deref() {
+                            it = it.with_description(desc);
+                        }
+                        if let Some(c) = r.ansi_color {
+                            it = it.with_accent(crossterm::style::Color::AnsiValue(c));
+                        }
+                        it
+                    })
+                    .collect();
+                (
+                    session.max_visible_rows(),
+                    session.selected,
+                    items,
+                    session.picker_win,
+                )
             }
-        }
+            None => return,
+        };
 
-        if open_win.is_none() {
-            let config = ui::FloatConfig {
-                placement: ui::Placement::Manual {
-                    anchor: ui::Anchor::NW,
-                    row: desired.top as i32,
-                    col: desired.left as i32,
-                    width: ui::Constraint::Fixed(desired.width),
-                    height: ui::Constraint::Fixed(desired.height),
-                },
-                border: ui::Border::None,
-                title: None,
-                zindex: 60,
-                focusable: false,
-                blocks_agent: false,
-            };
-            let style = ui::PickerStyle {
-                selected_fg: ui::Style {
-                    fg: Some(crate::theme::accent()),
-                    ..Default::default()
-                },
-                unselected_fg: ui::Style::dim(),
-                description_fg: ui::Style::dim(),
-                background: ui::Style::default(),
-            };
-            // The completer dock above the prompt — reverse the visual
-            // so the best match lands on the bottom row.
-            open_win = self
-                .ui
-                .picker_open(config, items.clone(), selected, style, true);
-        }
+        // Open once and reuse — `Placement::DockedAbove(PROMPT_WIN)` resizes
+        // the picker's rect in-place each frame from the picker's
+        // `natural_height()` (clamped by `max_height`). Closing and
+        // reopening the float on every filter change forces a full-screen
+        // redraw, which makes the cursor visibly jump around.
+        let open_win = match existing_win {
+            Some(win) => Some(win),
+            None => {
+                let config = ui::FloatConfig {
+                    placement: ui::Placement::DockedAbove {
+                        target: ui::PROMPT_WIN,
+                        max_height: ui::Constraint::Fixed(max_rows as u16),
+                    },
+                    border: ui::Border::None,
+                    title: None,
+                    // Below the default float zindex (50) so dialogs (help,
+                    // confirm, …) overlay the completer picker.
+                    zindex: 30,
+                    focusable: false,
+                    blocks_agent: false,
+                };
+                let style = ui::PickerStyle {
+                    selected_fg: ui::Style {
+                        fg: Some(crate::theme::accent()),
+                        ..Default::default()
+                    },
+                    unselected_fg: ui::Style::dim(),
+                    description_fg: ui::Style::dim(),
+                    background: ui::Style::default(),
+                };
+                self.ui
+                    .picker_open(config, items.clone(), selected, style, true)
+            }
+        };
 
         if let Some(win) = open_win {
             if let Some(p) = self.ui.picker_mut(win) {
@@ -412,7 +397,6 @@ impl App {
             }
         }
 
-        // Persist the handle back onto the session so next frame finds it.
         if let Some(session) = self.input.completer.as_mut() {
             session.picker_win = open_win;
         }

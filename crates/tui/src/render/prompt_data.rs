@@ -481,15 +481,20 @@ fn compute_input_area(
     });
     let (visual_lines, cursor_line, _, cursor_char_in_line) =
         wrap_and_locate_cursor(&display_buf, &char_kinds, display_cursor, usable);
-    let cmd_hint =
-        crate::completer::Completer::command_hint(&state.buf, &state.command_arg_sources);
-    let has_arg_space = cmd_hint.is_some()
-        && state.buf.len() > cmd_hint.as_ref().unwrap().0.len()
-        && state.buf.as_bytes()[cmd_hint.as_ref().unwrap().0.len()] == b' ';
-    let is_command =
-        cmd_hint.is_some() || crate::completer::Completer::is_command(state.buf.trim());
-    let is_exec = matches!(state.buf.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
-    let is_exec_invalid = state.buf == "!";
+    // An ArgPicker session owns the prompt — the buffer is a filter
+    // query, not a command. Skip command/exec styling so `!` and `/`
+    // typed into the filter render as plain text. Same for multi-line
+    // buffers: slash commands and `!exec` are single-line by design.
+    let picker_owns_prompt = state
+        .completer
+        .as_ref()
+        .is_some_and(|c| c.kind == crate::completer::CompleterKind::ArgPicker);
+    let single_line = !state.buf.contains('\n');
+    let plain_only = picker_owns_prompt || !single_line;
+    let is_command = !plain_only && crate::completer::Completer::is_command(state.buf.trim());
+    let is_exec =
+        !plain_only && matches!(state.buf.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
+    let is_exec_invalid = !plain_only && state.buf == "!";
     let total_content_rows = visual_lines.len();
 
     let fixed = row_offset as usize + 1 + 1; // bottom bar + status line
@@ -618,50 +623,22 @@ fn compute_input_area(
             None
         };
 
-        if has_arg_space && abs_idx == 0 {
-            let (prefix, hint) = cmd_hint.as_ref().unwrap();
-            let prefix_len = prefix.chars().count();
+        if is_command {
             let line_chars = line.chars().count();
-            let mut cmd_kinds = vec![SpanKind::AtRef; prefix_len.min(line_chars)];
+            let prefix_chars = if abs_idx == 0 {
+                line.char_indices()
+                    .find(|(_, c)| c.is_whitespace())
+                    .map(|(i, _)| line[..i].chars().count())
+                    .unwrap_or(line_chars)
+            } else {
+                0
+            };
+            let mut cmd_kinds = vec![SpanKind::AtRef; prefix_chars];
             cmd_kinds.resize(line_chars, SpanKind::Plain);
             add_segments_to_buffer(
                 buf,
                 li,
                 &styled_char_segments(line, &cmd_kinds, line_sel, line_cursor),
-            );
-            if line_chars >= prefix_len && state.buf == format!("{prefix} ") {
-                let max = usable.saturating_sub(prefix_len + 2);
-                let truncated: String = if hint.chars().count() > max {
-                    let mut s: String = hint.chars().take(max.saturating_sub(1)).collect();
-                    s.push('…');
-                    s
-                } else {
-                    hint.clone()
-                };
-                add_segments_to_buffer(
-                    buf,
-                    li,
-                    &[StyledSegment {
-                        text: truncated,
-                        style: Style {
-                            dim: true,
-                            ..Style::default()
-                        },
-                    }],
-                );
-            }
-        } else if has_arg_space {
-            add_segments_to_buffer(
-                buf,
-                li,
-                &styled_char_segments(line, kinds, line_sel, line_cursor),
-            );
-        } else if is_command {
-            let accent_kinds = vec![SpanKind::AtRef; line.chars().count()];
-            add_segments_to_buffer(
-                buf,
-                li,
-                &styled_char_segments(line, &accent_kinds, line_sel, line_cursor),
             );
         } else if (is_exec || is_exec_invalid) && abs_idx == 0 && line.starts_with('!') {
             add_segments_to_buffer(

@@ -45,17 +45,28 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
+/// Metadata a Lua plugin attaches to a `/command` via
+/// `smelt.cmd.register(name, fn, opts)`. `description` powers the
+/// `/`-completer hint; `args` drives the secondary `CommandArg`
+/// completer that opens after the user types `/name ` (space).
+#[derive(Clone, Default)]
+pub struct CommandMeta {
+    pub description: Option<String>,
+    pub args: Vec<String>,
+}
+
 /// Process-global snapshot of Lua-registered `/command` names and their
-/// optional descriptions. Written by `smelt.cmd.register`, read by
-/// `Completer::commands` / `Completer::is_command` — same free-function
-/// pattern as `custom_commands::list` / `builtin_commands::list`.
+/// metadata. Written by `smelt.cmd.register`, read by
+/// `Completer::commands` / `Completer::is_command` and by the
+/// `CommandArg` arg picker — same free-function pattern as
+/// `custom_commands::list` / `builtin_commands::list`.
 ///
-/// We keep a separate string-only snapshot (instead of exposing
+/// We keep a separate plain-data snapshot (instead of exposing
 /// `LuaShared` directly) because `LuaHandle` contains `!Send`
-/// `mlua::RegistryKey` and cannot live in a static, and because the
-/// completer only needs labels + descriptions.
-fn lua_commands_snapshot() -> &'static Mutex<HashMap<String, Option<String>>> {
-    static S: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+/// `mlua::RegistryKey` and cannot live in a static, and because
+/// completers only need strings.
+fn lua_commands_snapshot() -> &'static Mutex<HashMap<String, CommandMeta>> {
+    static S: OnceLock<Mutex<HashMap<String, CommandMeta>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -64,7 +75,28 @@ fn lua_commands_snapshot() -> &'static Mutex<HashMap<String, Option<String>>> {
 pub fn list_commands() -> Vec<(String, Option<String>)> {
     let mut items: Vec<(String, Option<String>)> = lua_commands_snapshot()
         .lock()
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.description.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    items
+}
+
+/// Return every Lua-registered command that declared an `args` list,
+/// as `("/cmd", args)` pairs. Used by `PromptState::command_arg_sources`
+/// to drive the secondary arg picker that opens after `/cmd <space>`.
+pub fn list_command_args() -> Vec<(String, Vec<String>)> {
+    let mut items: Vec<(String, Vec<String>)> = lua_commands_snapshot()
+        .lock()
+        .map(|m| {
+            m.iter()
+                .filter(|(_, v)| !v.args.is_empty())
+                .map(|(k, v)| (format!("/{k}"), v.args.clone()))
+                .collect()
+        })
         .unwrap_or_default();
     items.sort_by(|a, b| a.0.cmp(&b.0));
     items
@@ -327,6 +359,18 @@ pub struct LuaOps {
     pub vim_mode: Option<String>,
     // ── reads (snapshot) — engine state ─────────────────────────────
     pub engine: EngineSnapshot,
+    /// `(key, display_name, provider_name)` for every model the user
+    /// can switch to — exposed via `smelt.engine.models()`. Written
+    /// once at startup; session-immutable.
+    pub available_models: Vec<(String, String, String)>,
+    /// User-facing boolean settings as `(key, is_on)`. Exposed via
+    /// `smelt.settings.snapshot()`. Refreshed only when settings
+    /// mutate (not every tick).
+    pub settings: Vec<(String, bool)>,
+    /// Input history (past submitted prompts, oldest first). Exposed
+    /// via `smelt.history.entries()` and scored by `smelt.history.search()`.
+    /// Refreshed on every submit + at startup.
+    pub input_history: Vec<String>,
     // ── writes (queued mutations) ───────────────────────────────────
     pub ops: Vec<AppOp>,
 }
@@ -506,9 +550,13 @@ pub struct LuaRuntime {
 }
 
 impl LuaRuntime {
-    /// Build a fresh runtime, register the `smelt` global, and try to
-    /// run `~/.config/smelt/init.lua`. Missing config files are not
-    /// errors; syntax / runtime errors are captured on `load_error`.
+    /// Build a fresh runtime and register the `smelt` global.
+    ///
+    /// *Does not* load plugins or `init.lua` — call
+    /// [`LuaRuntime::load_plugins`] after pushing startup snapshots
+    /// (available models, settings, history) so plugins that read those
+    /// at registration time (e.g. `/model` declaring `args = model_keys`)
+    /// see real data.
     pub fn new() -> Self {
         let lua = Lua::new();
         // `Arc<LuaShared>` is single-threaded in practice (all Lua
@@ -534,27 +582,30 @@ impl LuaRuntime {
             }
         }
 
-        if rt.load_error.is_none() {
-            for &name in AUTOLOAD_MODULES {
-                let code = format!("require('{name}')");
-                if let Err(e) = rt.lua.load(&code).set_name(name).exec() {
-                    rt.load_error = Some(format!("autoload {name}: {e}"));
-                    break;
-                }
-            }
-        }
-
-        if rt.load_error.is_none() {
-            if let Some(path) = init_lua_path() {
-                if path.exists() {
-                    if let Err(e) = rt.load_init(&path) {
-                        rt.load_error = Some(format!("~/.config/smelt/init.lua: {e}"));
-                    }
-                }
-            }
-        }
-
         rt
+    }
+
+    /// Run autoload plugins and `~/.config/smelt/init.lua`. Call
+    /// *after* pushing startup snapshots so plugins see populated
+    /// `smelt.engine.models()` etc.
+    pub fn load_plugins(&mut self) {
+        if self.load_error.is_some() {
+            return;
+        }
+        for &name in AUTOLOAD_MODULES {
+            let code = format!("require('{name}')");
+            if let Err(e) = self.lua.load(&code).set_name(name).exec() {
+                self.load_error = Some(format!("autoload {name}: {e}"));
+                return;
+            }
+        }
+        if let Some(path) = init_lua_path() {
+            if path.exists() {
+                if let Err(e) = self.load_init(&path) {
+                    self.load_error = Some(format!("~/.config/smelt/init.lua: {e}"));
+                }
+            }
+        }
     }
 
     fn load_init(&mut self, path: &std::path::Path) -> LuaResult<()> {
@@ -576,11 +627,45 @@ impl LuaRuntime {
         }
     }
 
+    /// Push just the prompt text into the read-side snapshot. Used when
+    /// firing `WinEvent::TextChanged` so handlers reading
+    /// `smelt.prompt.text()` see the fresh buffer without going through
+    /// a full `set_context` pass.
+    pub fn set_prompt_text_snapshot(&self, text: String) {
+        if let Ok(mut o) = self.shared.ops.lock() {
+            o.prompt_text = Some(text);
+        }
+    }
+
     /// Populate the engine snapshot fields. Called once at startup and
     /// whenever the engine state changes (mode, model, cost, tokens).
     pub fn set_engine_context(&self, snap: EngineSnapshot) {
         if let Ok(mut o) = self.shared.ops.lock() {
             o.engine = snap;
+        }
+    }
+
+    /// Snapshot the set of models the user can switch to. Called once
+    /// at startup — this list is session-immutable.
+    pub fn set_available_models(&self, models: Vec<(String, String, String)>) {
+        if let Ok(mut o) = self.shared.ops.lock() {
+            o.available_models = models;
+        }
+    }
+
+    /// Snapshot current user-facing settings. Called at startup and
+    /// whenever a setting toggles — not every tick.
+    pub fn set_settings_snapshot(&self, settings: Vec<(String, bool)>) {
+        if let Ok(mut o) = self.shared.ops.lock() {
+            o.settings = settings;
+        }
+    }
+
+    /// Snapshot the input history (past submitted prompts). Called at
+    /// startup and whenever a new entry is pushed.
+    pub fn set_input_history(&self, entries: Vec<String>) {
+        if let Ok(mut o) = self.shared.ops.lock() {
+            o.input_history = entries;
         }
     }
 
@@ -854,6 +939,14 @@ impl LuaRuntime {
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default()
     }
+
+    /// `("/cmd", [arg, ...])` pairs for every Lua-registered command that
+    /// declared an `args` list via `smelt.cmd.register("name", fn, {args = {...}})`.
+    /// Drives the secondary `CommandArg` picker that opens after
+    /// `/name <space>`.
+    pub fn command_args(&self) -> Vec<(String, Vec<String>)> {
+        list_command_args()
+    }
 }
 
 fn ansi_color_from_lua(table: &mlua::Table, key: &str) -> Option<crossterm::style::Color> {
@@ -964,6 +1057,10 @@ const BOOTSTRAP_CHUNKS: &[(&str, &str)] = &[
         "smelt/picker.lua",
         include_str!("../../../../runtime/lua/smelt/picker.lua"),
     ),
+    (
+        "smelt/prompt_picker.lua",
+        include_str!("../../../../runtime/lua/smelt/prompt_picker.lua"),
+    ),
 ];
 
 /// Load all `BOOTSTRAP_CHUNKS` into the given Lua state. Called from
@@ -1028,6 +1125,26 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.plugins.agents",
         include_str!("../../../../runtime/lua/smelt/plugins/agents.lua"),
     ),
+    (
+        "smelt.plugins.theme",
+        include_str!("../../../../runtime/lua/smelt/plugins/theme.lua"),
+    ),
+    (
+        "smelt.plugins.color",
+        include_str!("../../../../runtime/lua/smelt/plugins/color.lua"),
+    ),
+    (
+        "smelt.plugins.model",
+        include_str!("../../../../runtime/lua/smelt/plugins/model.lua"),
+    ),
+    (
+        "smelt.plugins.settings",
+        include_str!("../../../../runtime/lua/smelt/plugins/settings.lua"),
+    ),
+    (
+        "smelt.plugins.history_search",
+        include_str!("../../../../runtime/lua/smelt/plugins/history_search.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -1043,6 +1160,11 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.permissions",
     "smelt.plugins.resume",
     "smelt.plugins.agents",
+    "smelt.plugins.theme",
+    "smelt.plugins.color",
+    "smelt.plugins.model",
+    "smelt.plugins.settings",
+    "smelt.plugins.history_search",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`
@@ -1400,7 +1522,8 @@ mod tests {
 
     #[test]
     fn autoload_registers_export_command() {
-        let rt = LuaRuntime::new();
+        let mut rt = LuaRuntime::new();
+        rt.load_plugins();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         assert!(
             rt.has_command("export"),
@@ -1410,7 +1533,8 @@ mod tests {
 
     #[test]
     fn autoload_registers_ps_command() {
-        let rt = LuaRuntime::new();
+        let mut rt = LuaRuntime::new();
+        rt.load_plugins();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         assert!(
             rt.has_command("ps"),
@@ -1420,7 +1544,8 @@ mod tests {
 
     #[test]
     fn autoload_registers_rewind_command() {
-        let rt = LuaRuntime::new();
+        let mut rt = LuaRuntime::new();
+        rt.load_plugins();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         assert!(
             rt.has_command("rewind"),
@@ -1430,7 +1555,8 @@ mod tests {
 
     #[test]
     fn autoload_registers_ask_user_question_as_sequential() {
-        let rt = LuaRuntime::new();
+        let mut rt = LuaRuntime::new();
+        rt.load_plugins();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         let defs = rt.plugin_tool_defs(protocol::Mode::Normal);
         let ask = defs

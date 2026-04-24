@@ -2,16 +2,15 @@ mod buffer;
 mod completer_bridge;
 mod history;
 mod kill_ring;
-mod menu_bridge;
 mod settings;
 mod vim_bridge;
 
 pub use history::History;
 pub use kill_ring::KillRing;
-pub use settings::{Menu, MenuAction, MenuKind, MenuResult, MenuState, SettingsState};
+pub use settings::SettingsState;
 
 use crate::attachment::{Attachment, AttachmentId, AttachmentStore};
-use crate::completer::{CompleterKind, CompleterSession};
+use crate::completer::{ArgPickerHandles, CompleterSession};
 use crate::keymap::{self, KeyAction, KeyContext};
 use crate::render;
 use crate::vim::{ViMode, Vim};
@@ -40,9 +39,9 @@ pub struct InputSnapshot {
 // ── Shared input state ───────────────────────────────────────────────────────
 
 /// Prompt window state — a `ui::Window` (cursor, vim, kill ring,
-/// editable buffer) plus prompt-specific side-cars (completer, menu,
-/// stash, history, attachments). `Deref<Target = EditBuffer>` gives
-/// direct access to `input.buf`, `input.attachment_ids`, etc.
+/// editable buffer) plus prompt-specific side-cars (completer, stash,
+/// history, attachments). `Deref<Target = EditBuffer>` gives direct
+/// access to `input.buf`, `input.attachment_ids`, etc.
 pub struct PromptState {
     pub win: ui::Window,
     pub store: AttachmentStore,
@@ -51,9 +50,10 @@ pub struct PromptState {
     /// next frame to drain and `win_close`. `PromptState` doesn't hold a
     /// `&mut ui::Ui`, so closing has to happen out-of-band.
     pub pending_picker_close: Vec<ui::WinId>,
-    pub menu: Option<MenuState>,
-    /// Saved buffer before history search, restored on cancel.
-    pub(super) history_saved_buf: Option<(String, usize)>,
+    /// Lua-bound outcomes from ArgPicker interactions (live preview,
+    /// accept, dismiss). Drained by the app each frame and routed to
+    /// `LuaRuntime` — keeps PromptState ignorant of the runtime.
+    pub pending_arg_events: Vec<ArgPickerEvent>,
     pub stash: Option<InputSnapshot>,
     /// Tracks whether the current buffer content originated from a paste.
     /// Cleared on any manual character input.
@@ -77,7 +77,6 @@ pub enum Action {
     Redraw,
     Submit { content: Content, display: String },
     SubmitEmpty,
-    MenuResult(MenuResult),
     ToggleMode,
     CycleReasoning,
     EditInEditor,
@@ -85,6 +84,32 @@ pub enum Action {
     Resize { width: usize, height: usize },
     NotifyError(String),
     Noop,
+}
+
+/// Outcome of an `ArgPicker` interaction that the app needs to route
+/// back into the Lua runtime. Queued on `PromptState.pending_arg_events`
+/// and drained once per frame by the app loop. Keeping this out of
+/// `Action` keeps the hot event path allocation-free for the common
+/// non-picker keys.
+pub enum ArgPickerEvent {
+    /// Navigation — fire the live-preview callback with the now-
+    /// selected item's index (1-based to match Lua).
+    Preview { callback_id: u64, index: usize },
+    /// User accepted the selection (Tab or Enter). Resume the parked
+    /// Lua task with `{index, item, action}` and release both
+    /// callback ids (select + accept).
+    Accept {
+        task_id: u64,
+        index: usize,
+        /// `"tab"` when the user pressed Tab (label was inserted into
+        /// the prompt, caller shouldn't also submit) or `"enter"`
+        /// (caller runs the command).
+        action: &'static str,
+        release_ids: Vec<u64>,
+    },
+    /// User dismissed (Esc / Ctrl-C). Resume the task with `nil` and
+    /// release callback ids.
+    Dismiss { task_id: u64, release_ids: Vec<u64> },
 }
 
 impl Default for PromptState {
@@ -96,7 +121,7 @@ impl Default for PromptState {
 impl PromptState {
     pub fn new() -> Self {
         let mut win = ui::Window::new(
-            ui::WinId(0),
+            ui::PROMPT_WIN,
             ui::BufId(0),
             ui::WinConfig::Split(ui::SplitConfig {
                 region: "prompt".into(),
@@ -109,8 +134,7 @@ impl PromptState {
             store: AttachmentStore::new(),
             completer: None,
             pending_picker_close: Vec::new(),
-            menu: None,
-            history_saved_buf: None,
+            pending_arg_events: Vec::new(),
             stash: None,
             from_paste: false,
             pending_ctrl_x: false,
@@ -157,11 +181,62 @@ impl PromptState {
     /// End the active completer session, queueing its Picker float for
     /// close on the next frame. Replaces bare `self.completer = None`
     /// so the associated `ui::WinId` doesn't leak.
+    ///
+    /// When the session was an ArgPicker with Lua-side coupling, the
+    /// implicit close is treated as a dismiss: the parked Lua task is
+    /// resumed with `nil` and its callback ids are released. Plugin
+    /// callers can always trust that opening a picker eventually
+    /// resolves the task.
     pub fn close_completer(&mut self) {
         if let Some(session) = self.completer.take() {
             if let Some(win) = session.picker_win {
                 self.pending_picker_close.push(win);
             }
+            if let Some(handles) = session.arg_picker {
+                let release_ids: Vec<u64> = handles
+                    .on_select
+                    .into_iter()
+                    .chain(handles.on_accept)
+                    .map(|k| k.0)
+                    .collect();
+                self.pending_arg_events.push(ArgPickerEvent::Dismiss {
+                    task_id: handles.task_id,
+                    release_ids,
+                });
+            }
+        }
+    }
+
+    /// Install a fresh completer, retiring any previous session's picker
+    /// float. Every site that creates a new `CompleterSession` must go
+    /// through this — bare `self.completer = Some(...)` orphans the old
+    /// `ui::WinId` and leaves a stale picker painted above the prompt.
+    pub fn set_completer(&mut self, comp: crate::completer::Completer) {
+        self.close_completer();
+        self.completer = Some(CompleterSession::new(comp));
+    }
+
+    /// Open an ArgPicker session with Lua callback coupling. Closes any
+    /// prior session first (resolving its task if it was also an
+    /// ArgPicker). Seeds the filter with the current buffer contents
+    /// (the prompt *is* the query) and fires an initial `Preview`
+    /// event so the live-preview callback — if any — sees the first
+    /// selection.
+    pub fn set_arg_picker(
+        &mut self,
+        mut comp: crate::completer::Completer,
+        handles: ArgPickerHandles,
+    ) {
+        self.close_completer();
+        let initial_query = self.win.edit_buf.buf.clone();
+        comp.update_query(initial_query);
+        let initial_preview = handles.on_select.map(|k| ArgPickerEvent::Preview {
+            callback_id: k.0,
+            index: 1,
+        });
+        self.completer = Some(CompleterSession::new(comp).with_arg_picker(handles));
+        if let Some(ev) = initial_preview {
+            self.pending_arg_events.push(ev);
         }
     }
 
@@ -275,8 +350,6 @@ impl PromptState {
         self.win.cpos = 0;
         self.win.edit_buf.attachment_ids.clear();
         self.close_completer();
-        self.menu = None;
-        self.history_saved_buf = None;
         self.from_paste = false;
         self.win.win_cursor.clear_anchor();
         // Note: stash and store are intentionally NOT cleared here.
@@ -325,7 +398,6 @@ impl PromptState {
                 from_paste: self.from_paste,
             });
             self.close_completer();
-            self.history_saved_buf = None;
         }
     }
 
@@ -359,31 +431,6 @@ impl PromptState {
         self.win.edit_buf.buf = text;
         self.win.cpos = self.win.edit_buf.buf.len();
         self.win.edit_buf.attachment_ids = ids;
-    }
-
-    pub fn has_modal(&self) -> bool {
-        self.menu.is_some()
-            || self.completer.as_ref().is_some_and(|c| {
-                matches!(
-                    c.kind,
-                    CompleterKind::Model
-                        | CompleterKind::Theme
-                        | CompleterKind::Color
-                        | CompleterKind::Settings
-                        | CompleterKind::History
-                )
-            })
-    }
-
-    /// Returns the history search query if a history completer is active.
-    pub fn history_search_query(&self) -> Option<&str> {
-        self.completer.as_ref().and_then(|c| {
-            if c.kind == CompleterKind::History {
-                Some(c.query.as_str())
-            } else {
-                None
-            }
-        })
     }
 
     pub fn cursor_char(&self) -> usize {
@@ -551,7 +598,6 @@ impl PromptState {
             KeyAction::Quit => Action::Noop,        // caller checks
             KeyAction::CancelAgent => Action::Noop, // caller checks
             KeyAction::OpenHelp => Action::Noop,    // caller checks
-            KeyAction::OpenHistorySearch => Action::Noop, // caller checks
             KeyAction::AcceptGhostText => Action::Noop, // caller checks
 
             // ── App control ─────────────────────────────────────────────
@@ -947,21 +993,16 @@ impl PromptState {
 
     /// Process a terminal event. Returns what the caller should do next.
     ///
-    /// Priority ladder: menu → completer → vim → paste → resize → keymap → insert.
+    /// Priority ladder: completer → vim → paste → resize → keymap → insert.
     pub fn handle_event(&mut self, ev: Event, mut history: Option<&mut History>) -> Action {
-        // 1. Menu intercepts all keys when open.
-        if self.menu.is_some() {
-            return self.handle_menu_event(&ev);
-        }
-
-        // 2. Completer intercepts navigation keys when active.
+        // 1. Completer intercepts navigation keys when active.
         if self.completer.is_some() {
             if let Some(action) = self.handle_completer_event(&ev) {
                 return action;
             }
         }
 
-        // 3. Vim mode intercepts key events.
+        // 2. Vim mode intercepts key events.
         match self.dispatch_vim(&ev, &mut history) {
             VimBridgeResult::Handled(action) => return action,
             VimBridgeResult::Passthrough => {
@@ -972,7 +1013,7 @@ impl PromptState {
             }
         }
 
-        // 4. Paste events.
+        // 3. Paste events.
         if let Event::Paste(data) = ev {
             self.save_undo();
             if self.selection_range().is_some() {
@@ -1002,7 +1043,7 @@ impl PromptState {
             return Action::Redraw;
         }
 
-        // 5. Resize events.
+        // 4. Resize events.
         if let Event::Resize(w, h) = ev {
             return Action::Resize {
                 width: w as usize,
@@ -1010,7 +1051,7 @@ impl PromptState {
             };
         }
 
-        // 6. Key events — look up in the keymap.
+        // 5. Key events — look up in the keymap.
         if let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = ev
