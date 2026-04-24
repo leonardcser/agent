@@ -245,6 +245,42 @@ pub(crate) fn parse_keybind(spec: &str) -> Option<ui::KeyBind> {
     Some(ui::KeyBind::new(code, mods))
 }
 
+/// Normalize a mode string from a Lua plugin into the canonical
+/// single-char form the dispatcher stores (`"n" | "i" | "v" | ""`).
+/// Accepts long names (`"normal"`, `"insert"`, `"visual"`), short
+/// names (`"n"`, `"i"`, `"v"`), the empty string (mode-independent),
+/// or `"any" / "*"` as aliases for "". Case-insensitive. Returns
+/// `None` on unknown input so the caller surfaces a Lua error.
+pub(crate) fn normalize_mode(mode: &str) -> Option<String> {
+    Some(
+        match mode.trim().to_ascii_lowercase().as_str() {
+            "" | "*" | "any" | "all" => "",
+            "n" | "normal" => "n",
+            "i" | "insert" => "i",
+            "v" | "visual" => "v",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
+/// Canonicalize a Lua-supplied chord string into the nvim-angle-bracket
+/// form that `chord_string` emits from key events. Accepts plain Lua
+/// shorthand (`"c-r"`, `"s-tab"`, `"enter"`) *and* already-canonical
+/// (`"<C-r>"`, `"<S-Tab>"`) input. Plain printable chars stay plain
+/// (`"j"`). Returns `None` on unknown keys so the caller raises a Lua
+/// error at registration.
+pub(crate) fn canonicalize_chord(chord: &str) -> Option<String> {
+    use crossterm::event::KeyEvent;
+    let stripped = chord
+        .trim()
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(chord.trim());
+    let kb = parse_keybind(stripped)?;
+    chord_string(KeyEvent::new(kb.code, kb.mods))
+}
+
 /// Parse a Lua-facing window-event name into a [`ui::WinEvent`]. Names
 /// match the Neovim-adjacent naming Lua plugins use for autocmd-style
 /// hooks. Returns `None` for unknown names so the caller surfaces a
@@ -1877,6 +1913,75 @@ mod tests {
         assert_eq!(parse_keybind("bogus"), None);
         assert_eq!(parse_keybind("ctrl-nope"), None);
         assert_eq!(parse_keybind(""), None);
+    }
+
+    #[test]
+    fn normalize_mode_accepts_long_and_short_names() {
+        assert_eq!(normalize_mode("n").as_deref(), Some("n"));
+        assert_eq!(normalize_mode("normal").as_deref(), Some("n"));
+        assert_eq!(normalize_mode("Normal").as_deref(), Some("n"));
+        assert_eq!(normalize_mode("INSERT").as_deref(), Some("i"));
+        assert_eq!(normalize_mode("visual").as_deref(), Some("v"));
+        assert_eq!(normalize_mode("").as_deref(), Some(""));
+        assert_eq!(normalize_mode("*").as_deref(), Some(""));
+        assert_eq!(normalize_mode("any").as_deref(), Some(""));
+        assert_eq!(normalize_mode("bogus"), None);
+    }
+
+    #[test]
+    fn canonicalize_chord_folds_all_supported_forms() {
+        assert_eq!(canonicalize_chord("c-r").as_deref(), Some("<C-r>"));
+        assert_eq!(canonicalize_chord("C-r").as_deref(), Some("<C-r>"));
+        assert_eq!(canonicalize_chord("<C-r>").as_deref(), Some("<C-r>"));
+        assert_eq!(canonicalize_chord("<c-r>").as_deref(), Some("<C-r>"));
+        assert_eq!(canonicalize_chord("enter").as_deref(), Some("<CR>"));
+        assert_eq!(canonicalize_chord("<Enter>").as_deref(), Some("<CR>"));
+        assert_eq!(canonicalize_chord("esc").as_deref(), Some("<Esc>"));
+        assert_eq!(canonicalize_chord("s-tab").as_deref(), Some("<Tab>"));
+        assert_eq!(canonicalize_chord("j").as_deref(), Some("j"));
+        assert_eq!(canonicalize_chord("bogus"), None);
+    }
+
+    #[test]
+    fn keymap_accepts_plugin_friendly_spellings() {
+        // The Ctrl-R class of bug: history_search.lua registers
+        // `"normal" + "c-r"` but dispatch uses `"n" + "<C-r>"`.
+        // Canonicalization at registration closes the gap.
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                    for _, mode in ipairs({ "normal", "insert", "visual" }) do
+                        smelt.keymap.set(mode, "c-r", function()
+                            smelt.notify("history: " .. mode)
+                        end)
+                    end
+                "#,
+            )
+            .exec()
+            .expect("exec");
+        assert!(rt.run_keymap("<C-r>", Some("Normal")));
+        assert!(rt.run_keymap("<C-r>", Some("Insert")));
+        assert!(rt.run_keymap("<C-r>", Some("Visual")));
+        let msgs = drain_notifications(&rt);
+        assert_eq!(msgs.len(), 3);
+    }
+
+    #[test]
+    fn keymap_set_errors_on_bad_input() {
+        let rt = LuaRuntime::new();
+        let err = rt
+            .lua
+            .load(r#"smelt.keymap.set("bogus", "c-r", function() end)"#)
+            .exec()
+            .expect_err("should error on unknown mode");
+        assert!(format!("{err}").contains("unknown mode"), "err: {err}");
+        let err = rt
+            .lua
+            .load(r#"smelt.keymap.set("n", "c-wtf", function() end)"#)
+            .exec()
+            .expect_err("should error on unknown chord");
+        assert!(format!("{err}").contains("unknown chord"), "err: {err}");
     }
 
     #[test]

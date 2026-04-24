@@ -1440,9 +1440,31 @@ impl LuaRuntime {
                 "set",
                 lua.create_function(
                     move |lua, (mode, chord, handler): (String, String, mlua::Function)| {
+                        // Canonicalize at registration so `"normal"` / `"n"`
+                        // / `""` and `"c-r"` / `"<C-r>"` / `"<c-r>"` all
+                        // land as the same lookup key as the dispatcher
+                        // produces from a crossterm KeyEvent. Unknown
+                        // mode or chord → raise immediately, not silent
+                        // miss at dispatch.
+                        let canonical_mode = crate::lua::normalize_mode(&mode).ok_or_else(
+                            || {
+                                LuaError::RuntimeError(format!(
+                                    "keymap.set: unknown mode `{mode}` (expected \"n\"|\"i\"|\"v\"|\"\" or \"normal\"|\"insert\"|\"visual\")"
+                                ))
+                            },
+                        )?;
+                        let canonical_chord = crate::lua::canonicalize_chord(&chord)
+                            .ok_or_else(|| {
+                                LuaError::RuntimeError(format!(
+                                    "keymap.set: unknown chord `{chord}`"
+                                ))
+                            })?;
                         let key = lua.create_registry_value(handler)?;
                         if let Ok(mut map) = s.keymaps.lock() {
-                            map.insert((mode, chord), LuaHandle { key });
+                            map.insert(
+                                (canonical_mode, canonical_chord),
+                                LuaHandle { key },
+                            );
                         }
                         Ok(())
                     },
