@@ -381,8 +381,6 @@ pub(crate) fn drop_displaced_lua_handle(
     }
 }
 
-pub use crate::app::ops::{Deferred, OpsHandle};
-
 /// Snapshot of engine-level state (model, mode, cost, tokens).
 /// Populated by `snapshot_engine_context` in the app loop.
 #[derive(Clone, Default)]
@@ -409,17 +407,10 @@ pub struct EngineSnapshot {
     pub permission_session_entries: Vec<(String, String)>,
 }
 
-/// Shared state between Lua closures and the app loop.
-///
-/// **Reads**: snapshot fields populated by `set_context()` before a
-/// handler runs. Lua reads these via `smelt.transcript.text()` etc.
-///
-/// **Writes**: `ops` collects deferred mutations (`AppOp`) that the
-/// app drains and applies after the handler returns.
-///
-/// One `Arc<Mutex<LuaOps>>` replaces the old separate
-/// `LuaContext` + `pending_notifications` + `pending_commands` +
-/// `lua_errors`.
+/// Snapshot fields populated by `set_context()` before a handler
+/// runs. Lua reads these via `smelt.transcript.text()`,
+/// `smelt.engine.snapshot()`, etc. Writes go through `with_app` —
+/// Lua callbacks reach `&mut App` directly and don't queue here.
 #[derive(Default)]
 pub struct LuaOps {
     // ── reads (snapshot) — UI state ─────────────────────────────────
@@ -441,12 +432,6 @@ pub struct LuaOps {
     /// via `smelt.history.entries()` and scored by `smelt.history.search()`.
     /// Refreshed on every submit + at startup.
     pub input_history: Vec<String>,
-    // ── writes (deferred closures) ──────────────────────────────────
-    /// Closures pushed by Rust dialog callbacks that hold `&mut Ui`
-    /// when they fire and need `&mut App` access after dispatch
-    /// returns. Lua bindings reach App via `with_app` directly and
-    /// don't push here.
-    pub deferred: Vec<Deferred>,
 }
 
 impl LuaOps {
@@ -468,10 +453,6 @@ impl LuaOps {
         self.prompt_text = None;
         self.focused_window = None;
         self.vim_mode = None;
-    }
-
-    pub fn drain(&mut self) -> Vec<Deferred> {
-        std::mem::take(&mut self.deferred)
     }
 }
 
@@ -784,23 +765,6 @@ impl LuaRuntime {
         if let Ok(mut o) = self.shared.ops.lock() {
             o.clear_context();
         }
-    }
-
-    /// Drain all pending deferred closures queued by Rust dialog
-    /// callbacks (Lua bindings reach `App` directly via `with_app`).
-    pub fn drain_ops(&self) -> Vec<Deferred> {
-        let Ok(mut o) = self.shared.ops.lock() else {
-            return Vec::new();
-        };
-        o.drain()
-    }
-
-    /// Get a cloneable handle to the shared `AppOp` queue. Rust
-    /// dialog callbacks clone this and push typed effects from
-    /// inside their closures. Lua and Rust share the same channel
-    /// so the reducer in `App::apply_ops` drains them uniformly.
-    pub fn ops_handle(&self) -> OpsHandle {
-        OpsHandle(self.shared.clone())
     }
 
     /// Invoke a registered command by name. Returns `true` when the
@@ -1351,7 +1315,10 @@ mod tests {
             .sequence_values::<String>()
             .filter_map(|r| r.ok())
             .collect();
-        let _ = rt.lua.globals().set("test_log", rt.lua.create_table().unwrap());
+        let _ = rt
+            .lua
+            .globals()
+            .set("test_log", rt.lua.create_table().unwrap());
         out
     }
 
@@ -1370,7 +1337,6 @@ mod tests {
             .set("test_err", rt.lua.create_table().unwrap());
         out
     }
-
 
     #[test]
     fn invoke_callback_runs_registered_fn_with_selection_payload() {
@@ -2171,7 +2137,6 @@ mod tests {
             .expect("eval");
         assert_eq!(window, 128000);
     }
-
 
     #[test]
     fn emit_data_passes_table_to_handler() {

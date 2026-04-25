@@ -635,30 +635,27 @@ impl LuaRuntime {
             lua.create_function(|_, spec: mlua::Table| {
                 let mut session_entries: Vec<crate::app::transcript_model::PermissionEntry> =
                     Vec::new();
-                    if let Ok(arr) = spec.get::<mlua::Table>("session") {
-                        for row in arr.sequence_values::<mlua::Table>().flatten() {
-                            let tool: String = row.get("tool").unwrap_or_default();
-                            let pattern: String = row.get("pattern").unwrap_or_default();
-                            session_entries.push(crate::app::transcript_model::PermissionEntry {
-                                tool,
-                                pattern,
-                            });
-                        }
+                if let Ok(arr) = spec.get::<mlua::Table>("session") {
+                    for row in arr.sequence_values::<mlua::Table>().flatten() {
+                        let tool: String = row.get("tool").unwrap_or_default();
+                        let pattern: String = row.get("pattern").unwrap_or_default();
+                        session_entries
+                            .push(crate::app::transcript_model::PermissionEntry { tool, pattern });
                     }
-                    let mut workspace_rules: Vec<crate::workspace_permissions::Rule> = Vec::new();
-                    if let Ok(arr) = spec.get::<mlua::Table>("workspace") {
-                        for row in arr.sequence_values::<mlua::Table>().flatten() {
-                            let tool: String = row.get("tool").unwrap_or_default();
-                            let mut patterns: Vec<String> = Vec::new();
-                            if let Ok(pats) = row.get::<mlua::Table>("patterns") {
-                                for p in pats.sequence_values::<String>().flatten() {
-                                    patterns.push(p);
-                                }
+                }
+                let mut workspace_rules: Vec<crate::workspace_permissions::Rule> = Vec::new();
+                if let Ok(arr) = spec.get::<mlua::Table>("workspace") {
+                    for row in arr.sequence_values::<mlua::Table>().flatten() {
+                        let tool: String = row.get("tool").unwrap_or_default();
+                        let mut patterns: Vec<String> = Vec::new();
+                        if let Ok(pats) = row.get::<mlua::Table>("patterns") {
+                            for p in pats.sequence_values::<String>().flatten() {
+                                patterns.push(p);
                             }
-                            workspace_rules
-                                .push(crate::workspace_permissions::Rule { tool, patterns });
                         }
+                        workspace_rules.push(crate::workspace_permissions::Rule { tool, patterns });
                     }
+                }
                 crate::lua::with_app(|app| {
                     app.sync_permissions_from_lua(session_entries, workspace_rules)
                 });

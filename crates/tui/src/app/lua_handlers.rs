@@ -67,11 +67,7 @@ impl App {
 
     /// Rewind to a transcript block (Rewind dialog) or, when
     /// `block_idx` is `None`, optionally restore Vim Insert mode.
-    pub(crate) fn rewind_to_block(
-        &mut self,
-        block_idx: Option<usize>,
-        restore_vim_insert: bool,
-    ) {
+    pub(crate) fn rewind_to_block(&mut self, block_idx: Option<usize>, restore_vim_insert: bool) {
         if let Some(bidx) = block_idx {
             if self.agent.is_some() {
                 self.cancel_agent();
@@ -156,8 +152,7 @@ impl App {
         call_id: &str,
         tool_name: &str,
     ) {
-        let should_cancel =
-            self.resolve_confirm((choice, message), call_id, request_id, tool_name);
+        let should_cancel = self.resolve_confirm((choice, message), call_id, request_id, tool_name);
         if should_cancel {
             self.finish_turn(true);
             self.agent = None;
@@ -179,5 +174,4 @@ impl App {
             is_error,
         });
     }
-
 }

@@ -303,19 +303,39 @@ Canonicalization (Ctrl-R and friends):
   - **6.7 Inline `apply_ops`.** `ops_apply.rs` was a 12-line
     file with a 3-line method; folded into
     `lua_bridge.rs::apply_lua_ops` and deleted.
-- **Step 7 — Migrate Confirm to Lua.** Queued after Step 6. The
-  mechanical migration is clear (add `smelt.confirm._build_{title,
-  summary,preview}_buf`, `smelt.confirm.resolve`, `smelt.confirm.
-  back_tab` sync primitives, port `app/dialogs/confirm.rs` +
-  `confirm_preview.rs`'s panel layout / keymap wiring to
-  `confirm.lua`, change `agent.rs:1381` to fire `smelt.confirm.
-  open(req_tbl)`, delete the Rust dialog files). With Step 6
-  landed, the Rust closure queue from 5 also disappears — Lua
-  callbacks are deferred natively.
-
-  Reason to sequence after 6, not before: the migration is much
-  cleaner without an enum + reducer to thread `ConfirmChoice` /
-  `ApprovalScope` through. Smoke-test discipline still matters
-  here — Confirm is the only security-critical dialog (tool
-  approval), so the approval-scope / pattern / BackTab
-  mode-toggle paths need a live cycle before merge.
+- **Step 7 — Migrate Confirm to Lua.** ✅ Landed.
+  - **7.1 Confirm-request registry + Rust primitives.** Added
+    `App::confirm_requests: HashMap<u64, ConfirmEntry>` keyed by
+    handle id; rewrote `app/dialogs/confirm.rs` as buffer/option
+    builders only (`build_title_buf`, `build_summary_buf`,
+    `build_preview_buf`, `build_options`); created
+    `lua/confirm_ops.rs` exposing 8 `smelt.confirm._*` primitives
+    (`_build_*_buf`, `_option_labels`, `_scroll_preview`,
+    `_focus_reason`, `_back_tab`, `_resolve`, `_info`).
+  - **7.2 `runtime/lua/smelt/confirm.lua`.** Default
+    `smelt.confirm.open(handle_id)` composes panels via
+    `smelt.ui.dialog._open` (dock_bottom, 60% height) and wires up
+    keymaps (page_up/down, e, s-tab) plus submit/dismiss handlers.
+    Plugins can override the function for a custom UI.
+  - **7.3 Agent.rs fires the Lua entry point.** The
+    `RequestPermission` arm in `agent.rs:1379` allocates a handle,
+    inserts a `ConfirmEntry`, and calls
+    `self.lua.fire_confirm_open(handle_id)`. No Rust dialog setup
+    survives.
+  - **7.4 Delete Rust dialog orchestration.** Removed the old
+    panel-builder / keymap-wiring code from `confirm.rs`, the
+    matching `confirm_preview.rs` helpers, the `BackTab` /
+    `Resolve` enum threading, and the `Decision`/`HashMap` imports
+    that fell off.
+  - **7.5 Delete `OpsHandle` / closure queue.** With Confirm
+    migrated, no Rust caller queues deferred closures anymore.
+    Deleted `crates/tui/src/app/ops.rs`, `pub mod ops;` in
+    `app/mod.rs`, the `pub use Deferred/OpsHandle` re-export,
+    `LuaOps.deferred`, `LuaOps::drain`, `LuaRuntime::drain_ops`,
+    `LuaRuntime::ops_handle`, and the drain loop inside
+    `apply_lua_ops`. The `apply_lua_ops` body is now just
+    `drain_lua_invocations` + `pump_task_events`.
+  - 358 tests passing, clippy clean. The neovim-FFI architecture
+    is the only path now: Lua callbacks reach `App` directly via
+    `with_app`; nothing routes through a typed effect log or a
+    closure queue.

@@ -4,9 +4,7 @@
 //! the `LuaTaskRuntime` bridge (`drive_tasks`), and plugin-tool
 //! execution (`plugin_tool_defs`, `execute_plugin_tool`).
 
-use super::{
-    LuaHandle, LuaRuntime, TaskCompletion, TaskDriveOutput, TaskEvent, ToolExecResult,
-};
+use super::{LuaHandle, LuaRuntime, TaskCompletion, TaskDriveOutput, TaskEvent, ToolExecResult};
 use mlua::prelude::*;
 use std::sync::atomic::Ordering;
 use std::time::Instant;

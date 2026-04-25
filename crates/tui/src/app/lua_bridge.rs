@@ -119,9 +119,6 @@ impl App {
     pub(super) fn apply_lua_ops(&mut self) {
         self.drain_lua_invocations();
         self.lua.pump_task_events();
-        for f in self.lua.drain_ops() {
-            f(self);
-        }
     }
 
     /// Drain the pending-invocation queue built up during

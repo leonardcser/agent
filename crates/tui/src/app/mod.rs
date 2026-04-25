@@ -14,7 +14,6 @@ mod history;
 mod lua_bridge;
 mod lua_handlers;
 mod mouse;
-pub mod ops;
 mod pane_focus;
 mod render_loop;
 mod status_bar;
@@ -215,8 +214,7 @@ pub struct App {
     /// `agent.rs` inserts a request before firing `smelt.confirm.open
     /// (handle_id)`; the Lua dialog reads it back through Rust
     /// primitives and removes it on resolve / dismiss.
-    pub(crate) confirm_requests:
-        HashMap<u64, crate::app::dialogs::confirm::ConfirmEntry>,
+    pub(crate) confirm_requests: HashMap<u64, crate::app::dialogs::confirm::ConfirmEntry>,
     pub(crate) next_confirm_handle: u64,
     /// Ghost text prediction for the input field.
     pub input_prediction: Option<String>,

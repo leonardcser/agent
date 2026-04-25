@@ -154,9 +154,7 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let tool_name = entry.req.tool_name.clone();
                 let args = entry.req.args.clone();
                 app.toggle_mode();
-                if app
-                    .permissions
-                    .decide(app.mode, &tool_name, &args, false)
+                if app.permissions.decide(app.mode, &tool_name, &args, false)
                     == engine::permissions::Decision::Allow
                 {
                     app.set_active_status(

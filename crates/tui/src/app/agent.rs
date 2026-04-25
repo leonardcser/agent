@@ -1386,10 +1386,7 @@ impl App {
                 let (_labels, choices) = crate::app::dialogs::confirm::build_options(&req);
                 self.confirm_requests.insert(
                     handle_id,
-                    crate::app::dialogs::confirm::ConfirmEntry {
-                        req: *req,
-                        choices,
-                    },
+                    crate::app::dialogs::confirm::ConfirmEntry { req: *req, choices },
                 );
                 self.lua.fire_confirm_open(handle_id);
                 LoopAction::Continue
