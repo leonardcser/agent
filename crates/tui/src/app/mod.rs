@@ -298,6 +298,12 @@ pub struct App {
     /// column. The stored value records which surface's scrollbar owns
     /// the gesture.
     pub drag_on_scrollbar: Option<ScrollbarDragTarget>,
+    /// Layer that captured the mouse on its last `Down(Left)` (because
+    /// `Component::handle_mouse` returned `KeyResult::Capture`).
+    /// Subsequent `Drag` and `Up` events route to that layer until
+    /// release, so a component (e.g. `TextInput` drag-select) can
+    /// extend a gesture even when the pointer wanders off its rect.
+    pub drag_on_layer: Option<ui::WinId>,
     /// Prompt vim mode at the start of a mouse-drag. Set on mouse-down
     /// inside the prompt viewport (only when vim is enabled) before the
     /// drag enters `Visual`, restored on mouse-up so a drag from Insert
@@ -720,6 +726,7 @@ impl App {
             drag_anchor_line: None,
             drag_autoscroll_since: None,
             drag_on_scrollbar: None,
+            drag_on_layer: None,
             prompt_drag_return_vim_mode: None,
             lua: crate::lua::LuaRuntime::new(),
             extra_instructions: None,

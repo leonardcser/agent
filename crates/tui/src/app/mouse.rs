@@ -88,10 +88,51 @@ impl App {
                      panels: &[ui::PanelSnapshot]| {
                         lua.queue_invocation(handle, win, payload, panels);
                     };
-                let _ = self.ui.handle_mouse_with_lua(me, &mut lua_invoke);
+                if let Some((win, ui::KeyResult::Capture)) =
+                    self.ui.handle_mouse_with_lua(me, &mut lua_invoke)
+                {
+                    // Component asked for drag capture (e.g. TextInput
+                    // text-select). Subsequent `Drag` / `Up` route to
+                    // the same layer regardless of pointer position.
+                    self.drag_on_layer = Some(win);
+                    self.mouse_drag_active = true;
+                }
                 self.flush_lua_callbacks();
                 return EventOutcome::Redraw;
             }
+        }
+
+        // Drag / Up while a layer holds capture: route directly to that
+        // layer, bypassing pane drag-select logic. Same model as the
+        // existing scrollbar drag above.
+        if self.drag_on_layer.is_some()
+            && matches!(
+                me.kind,
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            )
+        {
+            let win = self.drag_on_layer.unwrap();
+            let lua = &self.lua;
+            let mut lua_invoke =
+                |handle: ui::LuaHandle,
+                 win: ui::WinId,
+                 payload: &ui::Payload,
+                 panels: &[ui::PanelSnapshot]| {
+                    lua.queue_invocation(handle, win, payload, panels);
+                };
+            let r = self.ui.handle_mouse_for(win, me, &mut lua_invoke);
+            // Layer drag-select on release → copy yanked text to the
+            // system clipboard. App owns the clipboard so the ui crate
+            // stays platform-agnostic.
+            if let Some(ui::KeyResult::Action(ui::WidgetEvent::Yank(text))) = r {
+                let _ = crate::app::commands::copy_to_clipboard(&text);
+            }
+            if matches!(me.kind, MouseEventKind::Up(MouseButton::Left)) {
+                self.drag_on_layer = None;
+                self.mouse_drag_active = false;
+            }
+            self.flush_lua_callbacks();
+            return EventOutcome::Redraw;
         }
 
         if self.layout.hit_test(me.row, me.column) == render::HitRegion::Status {

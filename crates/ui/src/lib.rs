@@ -822,16 +822,39 @@ impl Ui {
     /// Dispatch a mouse event through the compositor, then fan widget
     /// actions out to the dispatched-to window's `WinEvent` callbacks
     /// (mirrors the keyboard path in `handle_key_with_lua`). Returns
-    /// `None` when no float was hit — the host then routes the event
-    /// to its own pane mouse logic (transcript/prompt drag-select).
+    /// `(WinId, KeyResult)` for the dispatched-to layer, or `None` when
+    /// no float was hit — the host then routes the event to its own
+    /// pane mouse logic (transcript/prompt drag-select).
     pub fn handle_mouse_with_lua(
         &mut self,
         event: crossterm::event::MouseEvent,
         lua_invoke: &mut LuaInvoke,
-    ) -> Option<KeyResult> {
+    ) -> Option<(WinId, KeyResult)> {
         let (layer_id, result) = self.compositor.handle_mouse(event)?;
-        let win = parse_float_layer_id(&layer_id);
-        if let (KeyResult::Action(action), Some(win)) = (&result, win) {
+        let win = parse_float_layer_id(&layer_id)?;
+        if let KeyResult::Action(action) = &result {
+            if let Some((ev, payload)) = classify_widget_action(action) {
+                if self.callbacks.has_event(win, ev) {
+                    self.dispatch_event(win, ev, payload, lua_invoke);
+                    return Some((win, KeyResult::Consumed));
+                }
+            }
+        }
+        Some((win, result))
+    }
+
+    /// Dispatch a mouse event directly to `win`'s component, bypassing
+    /// hit-testing. Used while a drag-capture is in flight to deliver
+    /// `Drag` and `Up` events to the same layer that received `Down`.
+    pub fn handle_mouse_for(
+        &mut self,
+        win: WinId,
+        event: crossterm::event::MouseEvent,
+        lua_invoke: &mut LuaInvoke,
+    ) -> Option<KeyResult> {
+        let layer_id = float_layer_id(win);
+        let result = self.compositor.handle_mouse_to(&layer_id, event)?;
+        if let KeyResult::Action(action) = &result {
             if let Some((ev, payload)) = classify_widget_action(action) {
                 if self.callbacks.has_event(win, ev) {
                     self.dispatch_event(win, ev, payload, lua_invoke);
@@ -968,6 +991,9 @@ fn classify_widget_action(ev: &WidgetEvent) -> Option<(WinEvent, Payload)> {
                 content: content.clone(),
             },
         ),
+        // `Yank` is App-side only (clipboard copy) — caller handles it
+        // off the returned `KeyResult::Action`, no dispatch path.
+        Yank(_) => return None,
     })
 }
 

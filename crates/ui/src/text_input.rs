@@ -11,9 +11,16 @@ pub struct TextInput {
     placeholder: Option<String>,
     placeholder_style: Style,
     text_style: Style,
+    /// Background style for the click-drag selection range. Applied to
+    /// chars between `anchor` and `cursor_col` when both are set.
+    selection_style: Style,
     /// Rect from the last `prepare` — needed by `handle_mouse` to
     /// translate absolute click columns into a text offset.
     last_area: Rect,
+    /// Selection anchor (char index) for click-drag text selection.
+    /// `None` outside a drag. Set on first `Drag` after `Down`; cleared
+    /// on `Up` or any keyboard edit.
+    anchor: Option<usize>,
 }
 
 impl TextInput {
@@ -28,8 +35,45 @@ impl TextInput {
                 ..Style::default()
             },
             text_style: Style::default(),
+            selection_style: Style {
+                bg: Some(crossterm::style::Color::DarkGrey),
+                ..Style::default()
+            },
             last_area: Rect::new(0, 0, 0, 0),
+            anchor: None,
         }
+    }
+
+    pub fn with_selection_style(mut self, style: Style) -> Self {
+        self.selection_style = style;
+        self
+    }
+
+    /// Resolved (start, end) char indices when a drag-select is active,
+    /// `None` otherwise. `start <= end` regardless of drag direction.
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor?;
+        if anchor == self.cursor_col {
+            return None;
+        }
+        let (s, e) = if anchor < self.cursor_col {
+            (anchor, self.cursor_col)
+        } else {
+            (self.cursor_col, anchor)
+        };
+        Some((s, e))
+    }
+
+    fn clear_selection(&mut self) {
+        self.anchor = None;
+    }
+
+    /// Translate a click column relative to the widget's rect into a
+    /// char index (clamped). Used by `handle_mouse` for both initial
+    /// `Down` and subsequent `Drag` extension.
+    fn char_index_at_local_col(&self, local_col: u16) -> usize {
+        let target = self.scroll_offset + local_col as usize;
+        target.min(self.char_count())
     }
 
     pub fn with_placeholder(mut self, text: impl Into<String>) -> Self {
@@ -66,6 +110,7 @@ impl TextInput {
     }
 
     fn insert_char(&mut self, ch: char) {
+        self.clear_selection();
         let byte_pos = self
             .text
             .char_indices()
@@ -77,6 +122,7 @@ impl TextInput {
     }
 
     fn delete_back(&mut self) {
+        self.clear_selection();
         if self.cursor_col > 0 {
             self.cursor_col -= 1;
             let byte_pos = self
@@ -95,6 +141,7 @@ impl TextInput {
     }
 
     fn delete_forward(&mut self) {
+        self.clear_selection();
         if self.cursor_col < self.char_count() {
             let byte_pos = self
                 .text
@@ -137,6 +184,7 @@ impl TextInput {
     }
 
     fn delete_word_back(&mut self) {
+        self.clear_selection();
         if self.cursor_col == 0 {
             return;
         }
@@ -194,8 +242,21 @@ impl Component for TextInput {
         let chars: Vec<char> = self.text.chars().collect();
         let visible_start = self.scroll_offset;
         let visible_end = (visible_start + w as usize).min(chars.len());
+        let selection = self.selection_range();
         for (col, &ch) in chars[visible_start..visible_end].iter().enumerate() {
-            grid.set(col as u16, 0, ch, self.text_style);
+            let abs_idx = visible_start + col;
+            let in_selection = selection
+                .map(|(s, e)| abs_idx >= s && abs_idx < e)
+                .unwrap_or(false);
+            let style = if in_selection {
+                Style {
+                    bg: self.selection_style.bg,
+                    ..self.text_style
+                }
+            } else {
+                self.text_style
+            };
+            grid.set(col as u16, 0, ch, style);
         }
     }
 
@@ -248,18 +309,55 @@ impl Component for TextInput {
     }
 
     fn handle_mouse(&mut self, event: MouseEvent) -> KeyResult {
-        let MouseEventKind::Down(MouseButton::Left) = event.kind else {
-            return KeyResult::Ignored;
-        };
         let rect = self.last_area;
-        if rect.width == 0 || !rect.contains(event.row, event.column) {
-            return KeyResult::Ignored;
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if rect.width == 0 || !rect.contains(event.row, event.column) {
+                    return KeyResult::Ignored;
+                }
+                let local_col = event.column - rect.left;
+                self.cursor_col = self.char_index_at_local_col(local_col);
+                self.clear_selection();
+                // Capture so subsequent Drag/Up route here even if the
+                // pointer slides off the rect.
+                KeyResult::Capture
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if rect.width == 0 {
+                    return KeyResult::Ignored;
+                }
+                // First drag tick: pin the anchor at the cursor's
+                // current position (== where Down landed). Clamp
+                // pointer column to the rect so a drag past the right
+                // edge selects to end-of-text instead of nothing.
+                if self.anchor.is_none() {
+                    self.anchor = Some(self.cursor_col);
+                }
+                let clamped_col = event
+                    .column
+                    .clamp(rect.left, rect.left + rect.width.saturating_sub(1));
+                let local_col = clamped_col - rect.left;
+                self.cursor_col = self.char_index_at_local_col(local_col);
+                KeyResult::Consumed
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let yank = self.selection_range().map(|(s, e)| {
+                    self.text
+                        .chars()
+                        .skip(s)
+                        .take(e - s)
+                        .collect::<String>()
+                });
+                self.clear_selection();
+                match yank {
+                    Some(text) if !text.is_empty() => {
+                        KeyResult::Action(WidgetEvent::Yank(text))
+                    }
+                    _ => KeyResult::Consumed,
+                }
+            }
+            _ => KeyResult::Ignored,
         }
-        let local_col = (event.column - rect.left) as usize;
-        let target = self.scroll_offset + local_col;
-        let count = self.char_count();
-        self.cursor_col = target.min(count);
-        KeyResult::Consumed
     }
 
     fn cursor(&self) -> Option<CursorInfo> {
@@ -376,6 +474,63 @@ mod tests {
         Component::draw(&ti, Rect::new(0, 0, 10, 1), &mut slice, &ctx);
         assert_eq!(grid.cell(0, 0).symbol, 'h');
         assert_eq!(grid.cell(4, 0).symbol, 'o');
+    }
+
+    fn mouse_event(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            row,
+            column: col,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn click_positions_cursor_and_requests_capture() {
+        let mut ti = TextInput::new();
+        ti.set_text("hello world");
+        ti.last_area = Rect::new(2, 5, 20, 1);
+        let r = ti.handle_mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            8,
+        ));
+        assert_eq!(r, KeyResult::Capture);
+        assert_eq!(ti.cursor_col(), 3);
+    }
+
+    #[test]
+    fn drag_extends_selection_and_release_yanks() {
+        let mut ti = TextInput::new();
+        ti.set_text("hello world");
+        ti.last_area = Rect::new(2, 5, 20, 1);
+        ti.handle_mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            5,
+        ));
+        // Drag to col 10 → cursor at char 5; anchor pinned at 0.
+        ti.handle_mouse(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            2,
+            10,
+        ));
+        assert_eq!(ti.selection_range(), Some((0, 5)));
+        let r = ti.handle_mouse(mouse_event(MouseEventKind::Up(MouseButton::Left), 2, 10));
+        assert_eq!(r, KeyResult::Action(WidgetEvent::Yank("hello".into())));
+        // Selection clears on release.
+        assert_eq!(ti.selection_range(), None);
+    }
+
+    #[test]
+    fn typing_clears_selection() {
+        let mut ti = TextInput::new();
+        ti.set_text("hello");
+        ti.anchor = Some(0);
+        ti.cursor_col = 3;
+        assert!(ti.selection_range().is_some());
+        ti.handle_key(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(ti.selection_range(), None);
     }
 
     #[test]

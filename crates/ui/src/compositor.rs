@@ -280,6 +280,16 @@ impl Compositor {
         Some((id, result))
     }
 
+    /// Dispatch a mouse event directly to a known layer, bypassing
+    /// hit-testing. Used during drag capture: after a layer returns
+    /// `KeyResult::Capture` on its `Down`, App routes subsequent
+    /// `Drag` / `Up` events here so the gesture continues even when
+    /// the pointer leaves the layer's rect.
+    pub fn handle_mouse_to(&mut self, id: &str, event: MouseEvent) -> Option<KeyResult> {
+        let layer = self.layers.iter_mut().find(|l| l.id == id)?;
+        Some(layer.component.handle_mouse(event))
+    }
+
     pub fn force_redraw(&mut self) {
         self.force_redraw = true;
     }

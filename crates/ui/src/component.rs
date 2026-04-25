@@ -26,6 +26,10 @@ pub enum WidgetEvent {
     SelectDefault,
     /// Text content changed (per keystroke on TextInput).
     TextChanged,
+    /// Component wants its text payload copied to the system clipboard
+    /// (`TextInput` drag-select on release). Not auto-classified to a
+    /// `WinEvent` — App matches on it directly.
+    Yank(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +37,12 @@ pub enum KeyResult {
     Consumed,
     Ignored,
     Action(WidgetEvent),
+    /// Mouse-only: the component handled a `Down` event AND wants drag
+    /// capture — App should route subsequent `Drag` and `Up` events to
+    /// this layer regardless of pointer position until release. Used by
+    /// `TextInput` for click-drag text selection. Returned only from
+    /// `handle_mouse`; treated as `Consumed` in key paths.
+    Capture,
 }
 
 pub struct DrawContext {
