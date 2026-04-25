@@ -175,6 +175,180 @@ dialogs.
 
 Resolution after 5e: every original user complaint addressed end-to-end.
 
+### ⬜ Step 6 — nvim-style highlight registry, drop ad-hoc theme module
+
+Replaces `crates/tui/src/theme.rs` (flat module of hardcoded color
+constants/functions) and the one-off `Ui::selection_bg` slot with a
+real **highlight group registry** modeled on nvim. Same indirection
+nvim uses: code references *names* (`Visual`, `SmeltAgent`); users
+override *names* via Lua; new plugins extend the registry without
+touching core. After this, "the selection background" is just one
+entry in a map — no longer special.
+
+#### 6a — `ui::Theme` registry
+
+New `crates/ui/src/theme.rs`:
+
+```rust
+pub struct Theme {
+    groups: HashMap<String, Style>,
+    links: HashMap<String, String>,
+}
+
+impl Theme {
+    pub fn set(&mut self, name: &str, style: Style);
+    pub fn link(&mut self, from: &str, to: &str);
+    /// Chases links until a real entry is hit; falls back to
+    /// `Style::default()` for unknown names. No panics on typos —
+    /// nvim's policy too.
+    pub fn get(&self, name: &str) -> Style;
+}
+```
+
+Color parsing: `"#3a3a3a"` (hex), `"darkgrey"` (named, mapped through
+`crossterm::style::Color`), `"196"` (palette index 0–255). Done at
+`set` time so `get` returns a ready-to-paint `Style`.
+
+#### 6b — Plumb `&Theme` through `DrawContext`
+
+```rust
+pub struct DrawContext<'a> {
+    pub terminal_width: u16,
+    pub terminal_height: u16,
+    pub focused: bool,
+    pub theme: &'a Theme,
+}
+```
+
+Cascades a lifetime through `Component::draw`/`prepare`. Mechanical;
+touches every widget (`TextInput`, `Notification`, `OptionList`,
+`Picker`, `Dialog`, `BufferList`, `BufferView`, `StatusBar`,
+`Cmdline`, …) but only the signature, not the body.
+
+`Compositor::render` borrows `&self.ui.theme()` (or holds an
+`Arc<Theme>` clone refreshed when `Ui::theme_mut` is called) and
+embeds the reference into both `DrawContext` builds.
+
+Drops:
+- `Ui::selection_bg` field, `set_selection_bg`, `selection_style`.
+- `Compositor::selection_style` field, `set_selection_style`.
+- `DrawContext::selection_style`.
+- `DialogConfig::selection_style` (Dialog reads `theme.get("Visual")`
+  during `sync_from_bufs_mut` — need to thread `&Theme` into that
+  call too).
+
+Everything that used to read `selection_style` now reads
+`theme.get("Visual")`.
+
+#### 6c — Migrate `crate::theme::*` call sites
+
+Delete `crates/tui/src/theme.rs` as a module of constants. Replace
+each call:
+
+```rust
+// before
+crate::theme::selection_bg()
+crate::theme::accent()
+crate::theme::AGENT
+crate::theme::PLAN
+crate::theme::APPLY
+crate::theme::YOLO
+crate::theme::ERROR
+crate::theme::muted()
+crate::theme::slug_color()
+
+// after
+ctx.theme.get("Visual").bg.unwrap_or_default()
+ctx.theme.get("SmeltAccent").fg.unwrap_or_default()
+ctx.theme.get("SmeltAgent").fg.unwrap_or_default()
+ctx.theme.get("SmeltModePlan").fg.unwrap_or_default()
+ctx.theme.get("SmeltModeApply").fg.unwrap_or_default()
+ctx.theme.get("SmeltModeYolo").fg.unwrap_or_default()
+ctx.theme.get("ErrorMsg").fg.unwrap_or_default()
+ctx.theme.get("Comment").fg.unwrap_or_default()  // or SmeltMuted
+ctx.theme.get("SmeltSlug").bg.unwrap_or_default()
+```
+
+For host-side code that builds spans without a `DrawContext` (e.g.,
+`App::refresh_status_bar`): take `&Theme` as a parameter or read
+`self.ui.theme()` at frame start.
+
+#### 6d — Default smelt theme
+
+New `crates/tui/src/theme.rs` (much smaller) becomes a single
+function:
+
+```rust
+pub fn default_smelt_theme() -> ui::Theme {
+    let mut t = ui::Theme::new();
+    // nvim-stock groups smelt uses
+    t.set("Normal",     Style { fg: …, bg: … });
+    t.set("Visual",     Style { bg: Some(Color::AnsiValue(237)), .. });
+    t.set("Search",     …);
+    t.set("Comment",    …);
+    t.set("Statement",  …);
+    t.set("Function",   …);
+    t.set("Keyword",    …);
+    t.set("LineNr",     …);
+    t.set("CursorLine", …);
+    t.set("StatusLine", …);
+    t.set("Pmenu",      …);
+    t.set("PmenuSel",   …);
+    t.set("ErrorMsg",   …);
+    t.set("WarningMsg", …);
+    // smelt-specific groups
+    t.set("SmeltSlug",         …);
+    t.set("SmeltAccent",       …);
+    t.set("SmeltMuted",        …);
+    t.set("SmeltAgent",        …);
+    t.set("SmeltModePlan",     …);
+    t.set("SmeltModeApply",    …);
+    t.set("SmeltModeYolo",     …);
+    t.set("SmeltModeNormal",   …);
+    t.set("SmeltScrollbar",    …);
+    t.set("SmeltStatusBg",     …);
+    // links — code refers to one name, theme can move them around
+    t.link("SmeltMuted", "Comment");
+    t
+}
+```
+
+`App::new` calls `ui.theme_mut().extend(default_smelt_theme())`
+once at startup.
+
+#### 6e — Lua bindings: `smelt.theme.*`
+
+```lua
+smelt.theme.set("Visual", { bg = "#3a3a3a", fg = "#eeeeee", bold = false })
+smelt.theme.link("ErrorMsg", "SmeltAccent")
+smelt.theme.get("Visual")  -- → { bg = "#3a3a3a", fg = "#eeeeee", … }
+smelt.theme.colorscheme("retrobox")  -- runs runtime/lua/smelt/colorschemes/retrobox.lua
+```
+
+Implementation:
+- `smelt.theme.set(name, style_table)` → parse colors (hex / name /
+  palette index → `crossterm::style::Color`), call `Theme::set`.
+- `smelt.theme.link(from, to)` → `Theme::link`.
+- `smelt.theme.get(name)` → serialize `Style` back to a table.
+- `smelt.theme.colorscheme(name)` → `dofile` resolution against a
+  search path (built-in `runtime/lua/smelt/colorschemes/<name>.lua`
+  + user's config dir).
+
+A theme-mutation triggers `Compositor::force_redraw = true` so the
+next frame repaints from scratch (no diff-based partial updates that
+still show the old palette).
+
+#### 6f — Starter colorschemes
+
+Ship one or two `runtime/lua/smelt/colorschemes/*.lua` files (e.g.
+`default.lua` mirroring `default_smelt_theme()`, plus one alternate
+like `retrobox` or `tokyonight`). Each is a flat list of
+`smelt.theme.set` calls — same shape as nvim colorschemes, instantly
+familiar.
+
+User config can `smelt.theme.colorscheme("custom")` and ship their
+own file in `~/.config/smelt/colorschemes/custom.lua`.
+
 ### Net deletion target
 
 After all steps:
@@ -189,6 +363,11 @@ After all steps:
 - `OptionList` detail-field code — gone (≈350 lines if we count the
   stash's additions).
 - `BufferPane` — already gone (stashed).
+- `crates/tui/src/theme.rs` constants module — replaced by
+  `default_smelt_theme()` builder (≈80 lines net negative).
+- `Ui::selection_bg`, `Compositor::selection_style`,
+  `DrawContext::selection_style`, `DialogConfig::selection_style` —
+  all collapse into `theme.get("Visual")` (≈40 lines).
 
 Estimated: ~1000 lines lighter, three "almost-Windows" merged into one
 real Window, every buffer surface gets transcript-grade interaction.
