@@ -69,7 +69,30 @@ impl EditBuffer {
         pos: usize,
         transparent: &[usize],
     ) -> Option<(usize, usize)> {
-        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        self.token_range_at_transparent(pos, transparent, |c| c.is_alphanumeric() || c == '_')
+    }
+
+    /// Vim "WORD" (capital W) variant of [`Self::word_range_at_transparent`]:
+    /// a token is any contiguous run of non-whitespace characters,
+    /// punctuation included. Used by the transcript double-click
+    /// selector so e.g. `foo.bar(baz)` selects as one unit.
+    pub fn big_word_range_at_transparent(
+        &self,
+        pos: usize,
+        transparent: &[usize],
+    ) -> Option<(usize, usize)> {
+        self.token_range_at_transparent(pos, transparent, |c| !c.is_whitespace())
+    }
+
+    fn token_range_at_transparent<F>(
+        &self,
+        pos: usize,
+        transparent: &[usize],
+        is_word: F,
+    ) -> Option<(usize, usize)>
+    where
+        F: Fn(char) -> bool,
+    {
         let is_trans = |p: usize| transparent.binary_search(&p).is_ok();
         if pos >= self.buf.len() {
             return None;

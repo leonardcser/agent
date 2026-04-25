@@ -464,8 +464,10 @@ impl App {
                     let rel_row = row
                         .saturating_sub(region.rect.top)
                         .min(region.rect.height.saturating_sub(1));
-                    let col = col.min(region.content_width.saturating_sub(1));
-                    self.position_content_cursor_from_hit(rel_row, col);
+                    let rel_col = col
+                        .saturating_sub(region.rect.left)
+                        .min(region.content_width.saturating_sub(1));
+                    self.position_content_cursor_from_hit(rel_row, rel_col);
                 } else {
                     self.position_content_cursor_from_hit(row, col);
                 }
@@ -655,17 +657,20 @@ impl App {
     }
 
     /// Double-click on the content pane: enter vim Visual over the
-    /// word under the cursor and copy it. Treats soft-wrap `\n` as
-    /// transparent so a word split by display wrapping still selects
-    /// as one unit. Records the word span so a subsequent drag extends
-    /// by full-word units while keeping the original word inside.
+    /// "WORD" (vim `W`, whitespace-delimited) under the cursor and
+    /// copy it. Punctuation is part of the WORD so e.g. `foo.bar(baz)`
+    /// selects as one unit. Treats soft-wrap `\n` as transparent so a
+    /// word split by display wrapping still selects as one unit.
+    /// Records the word span so a subsequent drag extends by full-word
+    /// units while keeping the original word inside.
     fn select_and_copy_word_in_content(&mut self) {
         let rows = self.full_transcript_display_text(self.settings.show_thinking);
         let (soft, _hard) = self.transcript_line_breaks(self.settings.show_thinking);
         let cpos = self.transcript_window.compute_cpos(&rows);
+        let viewport = self.viewport_rows_estimate();
         if let Some((s, e)) = self
             .transcript_window
-            .select_word_at_transparent(cpos, &soft)
+            .select_big_word_at_transparent(cpos, &soft, &rows, viewport)
         {
             self.drag_anchor_word = Some((s, e));
             self.drag_anchor_line = None;
@@ -686,7 +691,11 @@ impl App {
         let rows = self.full_transcript_display_text(self.settings.show_thinking);
         let (_soft, hard) = self.transcript_line_breaks(self.settings.show_thinking);
         let cpos = self.transcript_window.compute_cpos(&rows);
-        if let Some((s, e)) = self.transcript_window.select_line_at(cpos, &hard) {
+        let viewport = self.viewport_rows_estimate();
+        if let Some((s, e)) = self
+            .transcript_window
+            .select_line_at(cpos, &hard, &rows, viewport)
+        {
             self.drag_anchor_line = Some((s, e));
             self.drag_anchor_word = None;
             let text = self.copy_display_range(s, e, self.settings.show_thinking);
@@ -851,9 +860,11 @@ impl App {
     /// (line, col) in the full transcript and jump the content cursor
     /// there. Reads geometry from the `Viewport` recorded at
     /// paint time so viewport rows, content width and scroll offset
-    /// all match what the user is actually looking at. `rel_row` and
-    /// `col` are already clamped against the region by the caller.
-    fn position_content_cursor_from_hit(&mut self, rel_row: u16, abs_col: u16) {
+    /// all match what the user is actually looking at. Both `rel_row`
+    /// and `rel_col` are relative to the viewport's content area
+    /// (already clamped + gutter-stripped by the caller), matching
+    /// what `Viewport::hit` returns.
+    fn position_content_cursor_from_hit(&mut self, rel_row: u16, rel_col: u16) {
         let rows = self.full_transcript_display_text(self.settings.show_thinking);
         if rows.is_empty() {
             return;
@@ -861,8 +872,7 @@ impl App {
         let Some(region) = self.transcript_viewport else {
             return;
         };
-        let pad_left = self.transcript_gutters.pad_left;
-        let display_col = abs_col.saturating_sub(pad_left) as usize;
+        let display_col = rel_col as usize;
         let viewport_rows = region.rect.height;
         let total = rows.len().min(u16::MAX as usize) as u16;
         let geom =

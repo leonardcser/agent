@@ -250,26 +250,37 @@ impl Window {
         self.win_cursor.range(cpos)
     }
 
-    pub fn select_word_at(&mut self, _rows: &[String], cpos: usize) -> Option<(usize, usize)> {
-        self.select_word_at_transparent(cpos, &[])
-    }
-
-    /// Like `select_word_at` but with `transparent` byte positions that
-    /// the word-boundary walk crosses as if they were word chars
-    /// (used for soft-wrap `\n` so a word broken across display rows
-    /// selects as one unit). `transparent` must be sorted ascending.
+    /// Select the word at `cpos` (vim "w" semantics: alphanumeric +
+    /// underscore). `transparent` byte positions are crossed by the
+    /// boundary walk as if they were word chars (used for soft-wrap
+    /// `\n` so a word broken across display rows selects as one unit);
+    /// must be sorted ascending. Cursor lands at the last char of the
+    /// selection so the visual-range render covers the whole word.
     pub fn select_word_at_transparent(
         &mut self,
         cpos: usize,
         transparent: &[usize],
+        rows: &[String],
+        viewport_rows: u16,
     ) -> Option<(usize, usize)> {
         let (start, end) = self.edit_buf.word_range_at_transparent(cpos, transparent)?;
-        self.cpos = end.saturating_sub(1).max(start);
-        if let Some(vim) = self.vim.as_mut() {
-            vim.begin_visual(ViMode::Visual, start);
-        } else {
-            self.win_cursor.set_anchor(Some(start));
-        }
+        self.finish_range_select(start, end, rows, viewport_rows);
+        Some((start, end))
+    }
+
+    /// Vim "WORD" (capital W) variant of [`Self::select_word_at_transparent`]:
+    /// the token is any whitespace-delimited run, punctuation included.
+    pub fn select_big_word_at_transparent(
+        &mut self,
+        cpos: usize,
+        transparent: &[usize],
+        rows: &[String],
+        viewport_rows: u16,
+    ) -> Option<(usize, usize)> {
+        let (start, end) = self
+            .edit_buf
+            .big_word_range_at_transparent(cpos, transparent)?;
+        self.finish_range_select(start, end, rows, viewport_rows);
         Some((start, end))
     }
 
@@ -281,15 +292,38 @@ impl Window {
     /// (every `\n`), which would collapse selection to a single
     /// wrapped row for soft-wrapped content. Returns the byte range of
     /// the selected source line.
-    pub fn select_line_at(&mut self, cpos: usize, hard_breaks: &[usize]) -> Option<(usize, usize)> {
+    pub fn select_line_at(
+        &mut self,
+        cpos: usize,
+        hard_breaks: &[usize],
+        rows: &[String],
+        viewport_rows: u16,
+    ) -> Option<(usize, usize)> {
         let (start, end) = self.edit_buf.line_range_at(cpos, hard_breaks)?;
+        self.finish_range_select(start, end, rows, viewport_rows);
+        Some((start, end))
+    }
+
+    /// Park the cursor at the last char of `[start, end)` and anchor a
+    /// Visual selection at `start`. Re-syncs `cursor_line`/`cursor_col`
+    /// from the new `cpos` so the selection-highlight pass (which
+    /// derives cpos via `compute_cpos`) sees the moved cursor — without
+    /// this, the highlight extends only to the original click position.
+    fn finish_range_select(
+        &mut self,
+        start: usize,
+        end: usize,
+        rows: &[String],
+        viewport_rows: u16,
+    ) {
         self.cpos = end.saturating_sub(1).max(start);
+        let offsets = Self::line_start_offsets(rows);
+        self.sync_from_cpos(rows, &offsets, viewport_rows);
         if let Some(vim) = self.vim.as_mut() {
             vim.begin_visual(ViMode::Visual, start);
         } else {
             self.win_cursor.set_anchor(Some(start));
         }
-        Some((start, end))
     }
 
     pub fn resync(&mut self, rows: &[String], viewport_rows: u16) {
