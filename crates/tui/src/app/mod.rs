@@ -12,6 +12,7 @@ pub(crate) mod dialogs;
 mod events;
 mod history;
 mod lua_bridge;
+mod lua_handlers;
 mod mouse;
 pub mod ops;
 mod ops_apply;

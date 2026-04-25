@@ -7,7 +7,6 @@ use super::{
     lua_commands_snapshot, messages_to_lua, parse_keybind, parse_win_event, AutocmdEvent,
     LuaHandle, LuaRuntime, LuaShared, TaskCompletion, TaskEvent,
 };
-use crate::app::ops::DomainOp;
 use mlua::prelude::*;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -35,27 +34,6 @@ impl LuaRuntime {
             }};
         }
 
-        macro_rules! push_op {
-            ($lua:expr, $s:expr, |$val:ident : $ty:ty| $op:expr) => {{
-                let s = $s.clone();
-                $lua.create_function(move |_, $val: $ty| {
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push($op);
-                    }
-                    Ok(())
-                })?
-            }};
-            ($lua:expr, $s:expr, || $op:expr) => {{
-                let s = $s.clone();
-                $lua.create_function(move |_, ()| {
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push($op);
-                    }
-                    Ok(())
-                })?
-            }};
-        }
-
         // smelt.transcript.text()
         let transcript_tbl = lua.create_table()?;
         transcript_tbl.set(
@@ -67,7 +45,10 @@ impl LuaRuntime {
         )?;
         transcript_tbl.set(
             "yank_block",
-            push_op!(lua, shared, || DomainOp::YankBlockAtCursor),
+            lua.create_function(|_, ()| {
+                crate::lua::with_app(|app| app.yank_current_block());
+                Ok(())
+            })?,
         )?;
         smelt.set("transcript", transcript_tbl)?;
 
@@ -121,7 +102,10 @@ impl LuaRuntime {
         }
         cmd_tbl.set(
             "run",
-            push_op!(lua, shared, |line: String| DomainOp::RunCommand(line)),
+            lua.create_function(|_, line: String| {
+                crate::lua::with_app(|app| app.apply_lua_command(&line));
+                Ok(())
+            })?,
         )?;
         {
             let s = shared.clone();
@@ -206,26 +190,18 @@ impl LuaRuntime {
                 })?,
             )?;
         }
-        {
-            let s = shared.clone();
-            session_tbl.set(
-                "rewind_to",
-                lua.create_function(
-                    move |_, (block_idx, opts): (Option<usize>, Option<mlua::Table>)| {
-                        let restore_vim_insert = opts
-                            .and_then(|t| t.get::<bool>("restore_vim_insert").ok())
-                            .unwrap_or(false);
-                        if let Ok(mut o) = s.ops.lock() {
-                            o.push(DomainOp::RewindToBlock {
-                                block_idx,
-                                restore_vim_insert,
-                            });
-                        }
-                        Ok(())
-                    },
-                )?,
-            )?;
-        }
+        session_tbl.set(
+            "rewind_to",
+            lua.create_function(
+                |_, (block_idx, opts): (Option<usize>, Option<mlua::Table>)| {
+                    let restore_vim_insert = opts
+                        .and_then(|t| t.get::<bool>("restore_vim_insert").ok())
+                        .unwrap_or(false);
+                    crate::lua::with_app(|app| app.rewind_to_block(block_idx, restore_vim_insert));
+                    Ok(())
+                },
+            )?,
+        )?;
         {
             let s = shared.clone();
             session_tbl.set(
@@ -263,7 +239,10 @@ impl LuaRuntime {
         }
         session_tbl.set(
             "load",
-            push_op!(lua, shared, |id: String| DomainOp::LoadSession(id)),
+            lua.create_function(|_, id: String| {
+                crate::lua::with_app(|app| app.load_session_by_id(&id));
+                Ok(())
+            })?,
         )?;
         session_tbl.set(
             "delete",
@@ -342,18 +321,13 @@ impl LuaRuntime {
                 Ok(())
             })?,
         )?;
-        {
-            let s = shared.clone();
-            engine_tbl.set(
-                "compact",
-                lua.create_function(move |_, instructions: Option<String>| {
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(DomainOp::Compact(instructions));
-                    }
-                    Ok(())
-                })?,
-            )?;
-        }
+        engine_tbl.set(
+            "compact",
+            lua.create_function(|_, instructions: Option<String>| {
+                crate::lua::with_app(|app| app.compact_or_notify(instructions));
+                Ok(())
+            })?,
+        )?;
 
         // smelt.engine.ask({ system, messages?, question?, task?, on_response })
         {
@@ -408,14 +382,7 @@ impl LuaRuntime {
                         }
                     }
 
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(DomainOp::EngineAsk {
-                            id,
-                            system,
-                            messages,
-                            task,
-                        });
-                    }
+                    crate::lua::with_app(|app| app.engine_ask(id, system, messages, task));
                     Ok(id)
                 })?,
             )?;
@@ -663,13 +630,11 @@ impl LuaRuntime {
                 })?,
             )?;
         }
-        {
-            let s = shared.clone();
-            permissions_tbl.set(
-                "sync",
-                lua.create_function(move |_, spec: mlua::Table| {
-                    let mut session_entries: Vec<crate::app::transcript_model::PermissionEntry> =
-                        Vec::new();
+        permissions_tbl.set(
+            "sync",
+            lua.create_function(|_, spec: mlua::Table| {
+                let mut session_entries: Vec<crate::app::transcript_model::PermissionEntry> =
+                    Vec::new();
                     if let Ok(arr) = spec.get::<mlua::Table>("session") {
                         for row in arr.sequence_values::<mlua::Table>().flatten() {
                             let tool: String = row.get("tool").unwrap_or_default();
@@ -694,16 +659,12 @@ impl LuaRuntime {
                                 .push(crate::workspace_permissions::Rule { tool, patterns });
                         }
                     }
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(DomainOp::SyncPermissions {
-                            session_entries,
-                            workspace_rules,
-                        });
-                    }
-                    Ok(())
-                })?,
-            )?;
-        }
+                crate::lua::with_app(|app| {
+                    app.sync_permissions_from_lua(session_entries, workspace_rules)
+                });
+                Ok(())
+            })?,
+        )?;
         smelt.set("permissions", permissions_tbl)?;
 
         // smelt.keymap.help_sections()
@@ -1136,7 +1097,10 @@ impl LuaRuntime {
             }
             settings_tbl.set(
                 "toggle",
-                push_op!(lua, shared, |v: String| DomainOp::ToggleSetting(v)),
+                lua.create_function(|_, v: String| {
+                    crate::lua::with_app(|app| app.toggle_named_setting(&v));
+                    Ok(())
+                })?,
             )?;
             smelt.set("settings", settings_tbl)?;
         }
@@ -1251,27 +1215,19 @@ impl LuaRuntime {
                 })?,
             )?;
         }
-        {
-            let s = shared.clone();
-            tools_tbl.set(
-                "resolve",
-                lua.create_function(
-                    move |_, (request_id, call_id, result): (u64, String, mlua::Table)| {
-                        let content: String = result.get("content").unwrap_or_default();
-                        let is_error: bool = result.get("is_error").unwrap_or(false);
-                        if let Ok(mut o) = s.ops.lock() {
-                            o.push(DomainOp::ResolveToolResult {
-                                request_id,
-                                call_id,
-                                content,
-                                is_error,
-                            });
-                        }
-                        Ok(())
-                    },
-                )?,
-            )?;
-        }
+        tools_tbl.set(
+            "resolve",
+            lua.create_function(
+                |_, (request_id, call_id, result): (u64, String, mlua::Table)| {
+                    let content: String = result.get("content").unwrap_or_default();
+                    let is_error: bool = result.get("is_error").unwrap_or(false);
+                    crate::lua::with_app(|app| {
+                        app.resolve_tool_result(request_id, call_id, content, is_error)
+                    });
+                    Ok(())
+                },
+            )?,
+        )?;
         smelt.set("tools", tools_tbl)?;
 
         // smelt.fuzzy.score

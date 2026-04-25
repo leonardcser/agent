@@ -1342,15 +1342,6 @@ mod tests {
             .collect()
     }
 
-    fn drain_commands(rt: &LuaRuntime) -> Vec<String> {
-        rt.drain_ops()
-            .into_iter()
-            .filter_map(|op| match op {
-                AppOp::Domain(DomainOp::RunCommand(line)) => Some(line),
-                _ => None,
-            })
-            .collect()
-    }
 
     #[test]
     fn invoke_callback_runs_registered_fn_with_selection_payload() {
@@ -1894,18 +1885,6 @@ mod tests {
     }
 
     #[test]
-    fn cmd_run_queues_for_dispatch() {
-        let rt = LuaRuntime::new();
-        rt.lua
-            .load(r#"smelt.cmd.run("/compact")"#)
-            .exec()
-            .expect("exec");
-        let queued = drain_commands(&rt);
-        assert_eq!(queued, vec!["/compact".to_string()]);
-        assert!(drain_commands(&rt).is_empty());
-    }
-
-    #[test]
     fn chord_string_formats_nvim_style() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as M};
         let ev = |code, mods| KeyEvent::new(code, mods);
@@ -2163,17 +2142,6 @@ mod tests {
         assert_eq!(window, 128000);
     }
 
-    #[test]
-    fn engine_compact_queues_op() {
-        let rt = LuaRuntime::new();
-        rt.lua
-            .load(r#"smelt.engine.compact("keep tests")"#)
-            .exec()
-            .expect("exec");
-        let ops = rt.drain_ops();
-        assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], AppOp::Domain(DomainOp::Compact(Some(s))) if s == "keep tests"));
-    }
 
     #[test]
     fn emit_data_passes_table_to_handler() {
