@@ -180,11 +180,18 @@ pub struct PanelSpec {
     pub focus_initial: bool,
     /// Hide the panel when its buffer has zero non-blank content.
     pub collapse_when_empty: bool,
+    /// Buffer panels only: route mouse + nav keys through the panel's
+    /// internal `Window` so the user gets transcript-grade interaction
+    /// (click-to-position, double/triple-click word/line select,
+    /// drag-extend, vim Visual modes, theme selection bg). Widget
+    /// panels ignore this flag — widgets own their interaction.
+    pub interactive: bool,
 }
 
 impl PanelSpec {
     /// Buffer-backed read-only content (preview, header, body text).
-    /// Defaults to non-focusable; flip with [`PanelSpec::focusable`].
+    /// Defaults to non-focusable; flip with [`PanelSpec::focusable`]
+    /// or [`PanelSpec::interactive`].
     pub fn content(buf: BufId, height: PanelHeight) -> Self {
         Self {
             content: PanelContent::Buffer(buf),
@@ -194,6 +201,25 @@ impl PanelSpec {
             focusable: false,
             focus_initial: false,
             collapse_when_empty: false,
+            interactive: false,
+        }
+    }
+
+    /// Buffer panel that behaves like the transcript pane: focusable,
+    /// click-to-position cursor, double/triple click word/line select,
+    /// drag-extend with theme selection background, vim Visual modes
+    /// when the host has vim enabled. Same primitive as transcript
+    /// (`ui::Window`), no separate widget type — that's the unification.
+    pub fn interactive_content(buf: BufId, height: PanelHeight) -> Self {
+        Self {
+            content: PanelContent::Buffer(buf),
+            height,
+            separator_above: None,
+            pad_left: 1,
+            focusable: true,
+            focus_initial: false,
+            collapse_when_empty: false,
+            interactive: true,
         }
     }
 
@@ -212,6 +238,7 @@ impl PanelSpec {
             focusable: true,
             focus_initial: false,
             collapse_when_empty: false,
+            interactive: false,
         }
     }
 
@@ -248,6 +275,11 @@ pub struct DialogConfig {
     pub scrollbar_track_style: Style,
     /// Background color for scrollbar thumb.
     pub scrollbar_thumb_style: Style,
+    /// Background applied to chars inside an active selection on
+    /// interactive buffer panels. Sourced from `Ui::selection_style()`
+    /// at dialog open time so the look stays consistent with the
+    /// transcript and prompt.
+    pub selection_style: Style,
     /// Extra keys that dismiss the dialog (beyond Esc).
     pub dismiss_keys: Vec<(KeyCode, KeyModifiers)>,
     /// Hints row content. `None` hides the row.
@@ -265,6 +297,7 @@ pub(crate) struct DialogPanel {
     pub focusable: bool,
     pub focus_initial: bool,
     pub collapse_when_empty: bool,
+    pub interactive: bool,
     pub content: DialogPanelContent,
     /// Rows the content wants to render. For buffers, `buf.line_count`
     /// at last sync. For widgets, `widget.content_rows()`.
@@ -282,6 +315,11 @@ pub(crate) enum DialogPanelContent {
         buf: BufId,
         view: BufferView,
         win: Window,
+        /// Cached buffer rows shared with the source `Buffer` via
+        /// `Arc`. Refreshed in `sync_from_bufs_mut` so `handle_mouse`
+        /// has rows available without re-borrowing the `Ui` buffer
+        /// registry.
+        rows: std::sync::Arc<Vec<String>>,
     },
     Widget(Box<dyn PanelWidget>),
 }
@@ -303,6 +341,12 @@ pub struct Dialog {
     /// panel-relative cursor positions back to coords relative to the
     /// dialog (what the compositor expects from `Component::cursor`).
     area: Rect,
+    /// Click cadence on the focused panel. `(panel_idx, instant, row,
+    /// col, count)`. Successive Down events on the same cell within
+    /// 400ms increment the count up to 3, then wrap. Used to translate
+    /// raw mouse Down events into 1/2/3-click semantics in
+    /// `Window::handle_mouse`. Cross-panel clicks reset the count.
+    last_click: Option<(usize, std::time::Instant, u16, u16, u8)>,
 }
 
 impl Dialog {
@@ -325,6 +369,7 @@ impl Dialog {
             panels,
             focused,
             area: Rect::new(0, 0, 0, 0),
+            last_click: None,
         }
     }
 
@@ -457,13 +502,32 @@ impl Dialog {
         let default_style = self.config.background_style;
         for panel in &mut self.panels {
             match &mut panel.content {
-                DialogPanelContent::Buffer { buf, view, .. } => {
+                DialogPanelContent::Buffer {
+                    buf,
+                    view,
+                    win,
+                    rows,
+                    ..
+                } => {
                     if let Some(b) = bufs.get(*buf) {
                         b.ensure_rendered_at(content_width);
-                        panel.line_count = b.line_count();
+                        // `Buffer::set_all_lines` normalises empty
+                        // input to a single empty line; treat that
+                        // as 0 rows so `collapse_when_empty` actually
+                        // hides the panel (and its separator).
+                        let n = b.line_count();
+                        panel.line_count = if n == 1 && b.lines()[0].is_empty() {
+                            0
+                        } else {
+                            n
+                        };
                         view.sync_from_buffer(b);
+                        *rows = std::sync::Arc::clone(b.lines_arc());
                     }
                     view.set_default_style(default_style);
+                    if panel.interactive {
+                        paint_selection_overlay(view, win, rows, self.config.selection_style);
+                    }
                 }
                 DialogPanelContent::Widget(widget) => {
                     // List-shaped widgets that mirror a `Buffer`
@@ -497,10 +561,19 @@ impl Dialog {
             .saturating_sub(hints_rows);
 
         // Per-panel separator cost (1 row if separator_above is set).
+        // A collapsed-empty panel suppresses its own separator too,
+        // otherwise a stray dashed line floats over the gap.
         let sep_cost: Vec<u16> = self
             .panels
             .iter()
-            .map(|p| if p.separator_above.is_some() { 1 } else { 0 })
+            .map(|p| {
+                let hidden = p.collapse_when_empty && p.line_count == 0;
+                if p.separator_above.is_some() && !hidden {
+                    1
+                } else {
+                    0
+                }
+            })
             .collect();
 
         // Pass 1: resolve Fixed + Fit heights, keep Fill to pass 2.
@@ -567,7 +640,7 @@ impl Dialog {
         // Pass 2: assign rects top-down.
         let mut y = content_top;
         for (i, panel) in self.panels.iter_mut().enumerate() {
-            if panel.separator_above.is_some() {
+            if panel.separator_above.is_some() && sep_cost[i] > 0 {
                 y = y.saturating_add(1);
             }
             let h = heights[i].unwrap_or(0);
@@ -857,6 +930,75 @@ impl Dialog {
         }
         None
     }
+
+    /// Update the in-flight click cadence for `panel_idx` at
+    /// `(row, col)`. Returns `1`/`2`/`3` based on how many clicks fired
+    /// on the same cell within 400ms; resets to `1` on a new cell or
+    /// after `3`. Cross-panel clicks always reset.
+    fn tick_click_count(&mut self, panel_idx: usize, row: u16, col: u16) -> u8 {
+        let now = std::time::Instant::now();
+        let count = match self.last_click {
+            Some((p, t, r, c, n))
+                if p == panel_idx
+                    && now.duration_since(t) < std::time::Duration::from_millis(400)
+                    && r == row
+                    && c == col
+                    && n < 3 =>
+            {
+                n + 1
+            }
+            _ => 1,
+        };
+        self.last_click = Some((panel_idx, now, row, col, count));
+        count
+    }
+
+    /// Build a [`MouseCtx`] for `panel_idx`'s buffer panel and call
+    /// `Window::handle_mouse`. Translates the returned [`MouseAction`]
+    /// into a `KeyResult` understood by the compositor (host's clipboard
+    /// hook listens for the `Yank` payload).
+    fn dispatch_buffer_mouse(
+        &mut self,
+        panel_idx: usize,
+        event: MouseEvent,
+        click_count: u8,
+    ) -> KeyResult {
+        let Some(panel) = self.panels.get_mut(panel_idx) else {
+            return KeyResult::Ignored;
+        };
+        let viewport = match panel.viewport {
+            Some(v) => v,
+            None => return KeyResult::Ignored,
+        };
+        let DialogPanelContent::Buffer { win, rows, .. } = &mut panel.content else {
+            return KeyResult::Ignored;
+        };
+        // Buffer panels in dialogs aren't soft-wrapped (rows == display
+        // lines), so `soft_breaks` is empty. Hard breaks are the byte
+        // positions of the implicit `\n`s in `rows.join("\n")`.
+        let mut hard: Vec<usize> = Vec::with_capacity(rows.len().saturating_sub(1));
+        let mut acc = 0usize;
+        for (i, row) in rows.iter().enumerate() {
+            if i + 1 < rows.len() {
+                acc += row.len();
+                hard.push(acc);
+                acc += 1; // for the `\n`
+            }
+        }
+        let ctx = crate::window::MouseCtx {
+            rows: rows.as_slice(),
+            soft_breaks: &[],
+            hard_breaks: &hard,
+            viewport,
+            click_count,
+        };
+        match win.handle_mouse(event, ctx) {
+            crate::window::MouseAction::Capture => KeyResult::Capture,
+            crate::window::MouseAction::Consumed => KeyResult::Consumed,
+            crate::window::MouseAction::Ignored => KeyResult::Ignored,
+            crate::window::MouseAction::Yank(text) => KeyResult::Action(WidgetEvent::Yank(text)),
+        }
+    }
 }
 
 impl Component for Dialog {
@@ -884,6 +1026,11 @@ impl Component for Dialog {
         self.draw_top_rule(area, grid);
 
         for panel in &self.panels {
+            // Hidden panels (collapse_when_empty + empty buffer)
+            // shouldn't paint chrome over the gap they vacated.
+            if panel.rect.height == 0 {
+                continue;
+            }
             if let Some(sep) = panel.separator_above {
                 let sep_row = panel.rect.top.saturating_sub(area.top).saturating_sub(1);
                 if sep_row < h {
@@ -1034,6 +1181,21 @@ impl Component for Dialog {
                     // beneath, but do nothing.
                     return KeyResult::Consumed;
                 };
+                if self.panels[panel_idx].interactive
+                    && matches!(
+                        &self.panels[panel_idx].content,
+                        DialogPanelContent::Buffer { .. }
+                    )
+                {
+                    // Interactive buffer panel: focus it, count this
+                    // click in cadence, and dispatch through
+                    // `Window::handle_mouse` for cursor / selection /
+                    // word & line yank — same primitive the transcript
+                    // uses.
+                    self.focus_panel(panel_idx);
+                    let click_count = self.tick_click_count(panel_idx, event.row, event.column);
+                    return self.dispatch_buffer_mouse(panel_idx, event, click_count);
+                }
                 if let DialogPanelContent::Widget(w) = &mut self.panels[panel_idx].content {
                     // List-shaped widgets (`BufferList`, `OptionList`)
                     // get fzf-style click: forward the event but leave
@@ -1050,11 +1212,28 @@ impl Component for Dialog {
                     }
                     return KeyResult::Consumed;
                 }
-                // Buffer-backed content panel: click focuses it (no-op
-                // for non-focusable title/preview panels) so subsequent
-                // j/k scrolls the right panel.
+                // Buffer-backed content panel (non-interactive): click
+                // focuses it so subsequent j/k scrolls the right panel.
                 self.focus_panel(panel_idx);
                 KeyResult::Consumed
+            }
+            // Drag / Up arrive here when the App-level capture state
+            // routes them to this layer (an interactive buffer panel
+            // returned `Capture` on `Down`). Forward to the focused
+            // panel's window.
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
+                let panel_idx = self.focused;
+                if self.panels.get(panel_idx).is_some_and(|p| {
+                    p.interactive && matches!(p.content, DialogPanelContent::Buffer { .. })
+                }) {
+                    return self.dispatch_buffer_mouse(panel_idx, event, 1);
+                }
+                if let Some(panel) = self.panels.get_mut(panel_idx) {
+                    if let DialogPanelContent::Widget(widget) = &mut panel.content {
+                        return widget.handle_mouse(event);
+                    }
+                }
+                KeyResult::Ignored
             }
             _ => KeyResult::Ignored,
         }
@@ -1065,28 +1244,48 @@ impl Component for Dialog {
         // row (painted inside `draw_panel`), not via a terminal
         // cursor glyph. Widgets may expose a hardware cursor.
         let panel = self.panels.get(self.focused)?;
-        if let DialogPanelContent::Widget(widget) = &panel.content {
-            let ci = widget.cursor()?;
-            // Widget returns coords relative to its own draw area
-            // (panel.rect). Translate to dialog-relative so the
-            // compositor can add this layer's absolute rect.
-            let rel_col = panel
-                .rect
-                .left
-                .saturating_sub(self.area.left)
-                .saturating_add(ci.col);
-            let rel_row = panel
-                .rect
-                .top
-                .saturating_sub(self.area.top)
-                .saturating_add(ci.row);
-            return Some(CursorInfo {
-                col: rel_col,
-                row: rel_row,
-                style: ci.style,
-            });
+        match &panel.content {
+            DialogPanelContent::Widget(widget) => {
+                let ci = widget.cursor()?;
+                let rel_col = panel
+                    .rect
+                    .left
+                    .saturating_sub(self.area.left)
+                    .saturating_add(ci.col);
+                let rel_row = panel
+                    .rect
+                    .top
+                    .saturating_sub(self.area.top)
+                    .saturating_add(ci.row);
+                Some(CursorInfo {
+                    col: rel_col,
+                    row: rel_row,
+                    style: ci.style,
+                })
+            }
+            DialogPanelContent::Buffer { win, .. } if panel.interactive => {
+                // Window's cursor_line/cursor_col are viewport-local
+                // already (0 = panel top); translate into dialog coords
+                // and clamp so a scrolled-out cursor stops rendering
+                // (matches transcript blur-on-scroll behaviour).
+                if win.cursor_line >= panel.rect.height {
+                    return None;
+                }
+                let rel_col = panel
+                    .rect
+                    .left
+                    .saturating_sub(self.area.left)
+                    .saturating_add(panel.pad_left)
+                    .saturating_add(win.cursor_col);
+                let rel_row = panel
+                    .rect
+                    .top
+                    .saturating_sub(self.area.top)
+                    .saturating_add(win.cursor_line);
+                Some(CursorInfo::hardware(rel_col, rel_row))
+            }
+            DialogPanelContent::Buffer { .. } => None,
         }
-        None
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1095,6 +1294,34 @@ impl Component for Dialog {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+/// Add a transient selection-bg highlight to `view` covering the
+/// window's current `selection_range` against `rows`. Called each
+/// frame after `view.sync_from_buffer` (which clears transients) so
+/// the overlay tracks live cursor + scroll. Pure no-op when the
+/// window has no active selection.
+fn paint_selection_overlay(view: &mut BufferView, win: &Window, rows: &[String], style: Style) {
+    let Some((start, end)) = win.selection_range(rows) else {
+        return;
+    };
+    if start >= end {
+        return;
+    }
+    let mut line_start = 0usize;
+    for (idx, row) in rows.iter().enumerate() {
+        let line_end = line_start + row.len();
+        if end > line_start && start <= line_end {
+            let clip_s = start.saturating_sub(line_start).min(row.len());
+            let clip_e = end.saturating_sub(line_start).min(row.len());
+            let start_cell = crate::text::byte_to_cell(row, clip_s) as u16;
+            let end_cell = crate::text::byte_to_cell(row, clip_e) as u16;
+            if end_cell > start_cell {
+                view.add_highlight(idx, start_cell, end_cell, style);
+            }
+        }
+        line_start = line_end + 1;
     }
 }
 
@@ -1114,9 +1341,13 @@ pub(crate) fn build_panels(
                 PanelContent::Buffer(buf_id) => {
                     let line_count = bufs.get(&buf_id).map(|b| b.line_count()).unwrap_or(0);
                     let mut view = BufferView::new();
-                    if let Some(buf) = bufs.get(&buf_id) {
-                        view.sync_from_buffer(buf);
-                    }
+                    let rows = match bufs.get(&buf_id) {
+                        Some(buf) => {
+                            view.sync_from_buffer(buf);
+                            std::sync::Arc::clone(buf.lines_arc())
+                        }
+                        None => std::sync::Arc::new(Vec::new()),
+                    };
                     let win = Window::new(
                         WinId(u64::MAX - i as u64),
                         buf_id,
@@ -1127,6 +1358,7 @@ pub(crate) fn build_panels(
                             buf: buf_id,
                             view,
                             win,
+                            rows,
                         },
                         line_count,
                     )
@@ -1156,6 +1388,7 @@ pub(crate) fn build_panels(
                 focusable: spec.focusable,
                 focus_initial: spec.focus_initial,
                 collapse_when_empty: spec.collapse_when_empty,
+                interactive: spec.interactive,
                 content,
                 line_count,
                 rect: Rect::new(0, 0, 0, 0),

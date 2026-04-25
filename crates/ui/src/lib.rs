@@ -67,7 +67,8 @@ pub use text_input::TextInput;
 pub use undo::{UndoEntry, UndoHistory};
 pub use vim::{ViMode, Vim};
 pub use window::{
-    FloatConfig, ScrollbarState, SplitConfig, ViewportHit, WinConfig, Window, WindowViewport,
+    FloatConfig, MouseAction, MouseCtx, ScrollbarState, SplitConfig, ViewportHit, WinConfig,
+    Window, WindowViewport,
 };
 pub use window_cursor::WindowCursor;
 
@@ -94,6 +95,12 @@ pub struct Ui {
     /// same dispatch path used by floats. Floats use the `"float:N"`
     /// layer-id prefix instead of this map.
     splits: HashMap<String, WinId>,
+    /// Theme-resolved background color used by every `Window`-driven
+    /// selection overlay (transcript, prompt, dialog content panels).
+    /// Populated by the host once at startup; one source of truth so
+    /// the look stays consistent across surfaces. `None` falls back to
+    /// `DarkGrey` at the call site.
+    selection_bg: Option<crossterm::style::Color>,
 }
 
 /// Reserved `WinId` for the main prompt input window. The prompt is
@@ -122,6 +129,28 @@ impl Ui {
             callbacks: Callbacks::new(),
             split_rects: HashMap::new(),
             splits: HashMap::new(),
+            selection_bg: None,
+        }
+    }
+
+    /// Set the background color used for selection overlays across
+    /// every `Window`-backed surface. Call once at host startup with
+    /// `theme::selection_bg()`; future theme overrides flow through
+    /// the same slot.
+    pub fn set_selection_bg(&mut self, color: crossterm::style::Color) {
+        self.selection_bg = Some(color);
+    }
+
+    /// Selection overlay background as a `Style` ready to feed into
+    /// `BufferView::add_highlight`. Falls back to `DarkGrey` if the
+    /// host never set one.
+    pub fn selection_style(&self) -> grid::Style {
+        grid::Style {
+            bg: Some(
+                self.selection_bg
+                    .unwrap_or(crossterm::style::Color::DarkGrey),
+            ),
+            ..grid::Style::default()
         }
     }
 
@@ -469,7 +498,7 @@ impl Ui {
     pub fn dialog_open(
         &mut self,
         float_config: FloatConfig,
-        dialog_config: dialog::DialogConfig,
+        mut dialog_config: dialog::DialogConfig,
         panels: Vec<dialog::PanelSpec>,
     ) -> Option<WinId> {
         let all_bufs_registered = panels.iter().all(|p| match &p.content {
@@ -478,6 +507,12 @@ impl Ui {
         });
         if !all_bufs_registered {
             return None;
+        }
+        // Inherit the host's selection style so interactive buffer
+        // panels paint their highlight with the same bg the transcript
+        // and prompt use.
+        if dialog_config.selection_style == grid::Style::default() {
+            dialog_config.selection_style = self.selection_style();
         }
         let id = WinId(self.next_win_id);
         self.next_win_id += 1;
@@ -1276,5 +1311,94 @@ mod tests {
         assert_eq!(rects.len(), 2);
         assert_eq!(rects[0].0, w2);
         assert_eq!(rects[1].0, w1);
+    }
+
+    /// Dismiss dispatch chain regression: dialog widget on Esc /
+    /// Ctrl-C → `WidgetEvent::Dismiss` → `WinEvent::Dismiss` →
+    /// registered callback fires via `lua_invoke`. Guards against
+    /// silent breakage of the path Lua dialogs use to know when the
+    /// user backed out.
+    #[test]
+    fn focused_dialog_esc_invokes_dismiss_callback() {
+        use crate::dialog::{DialogConfig, PanelHeight, PanelSpec};
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts {
+            buftype: buffer::BufType::Scratch,
+            modifiable: false,
+        });
+        let win = ui
+            .dialog_open(
+                FloatConfig {
+                    focusable: true,
+                    placement: Placement::DockBottom {
+                        above_rows: 0,
+                        full_width: true,
+                        max_width: Constraint::Pct(100),
+                        max_height: Constraint::Pct(100),
+                    },
+                    ..Default::default()
+                },
+                DialogConfig::default(),
+                vec![PanelSpec::content(buf, PanelHeight::Fit)],
+            )
+            .unwrap();
+
+        let invoked = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let invoked_cb = invoked.clone();
+        ui.win_on_event(
+            win,
+            WinEvent::Dismiss,
+            Callback::Rust(Box::new(move |_| {
+                *invoked_cb.lock().unwrap() += 1;
+                CallbackResult::Consumed
+            })),
+        );
+
+        let _ = ui.handle_key_with_lua(KeyCode::Esc, KeyModifiers::NONE, &mut |_, _, _, _| {});
+        assert_eq!(
+            *invoked.lock().unwrap(),
+            1,
+            "Esc should invoke the registered Dismiss callback exactly once"
+        );
+
+        // Reopen and confirm Ctrl-C does the same.
+        let buf2 = ui.buf_create(buffer::BufCreateOpts {
+            buftype: buffer::BufType::Scratch,
+            modifiable: false,
+        });
+        let win2 = ui
+            .dialog_open(
+                FloatConfig {
+                    focusable: true,
+                    placement: Placement::DockBottom {
+                        above_rows: 0,
+                        full_width: true,
+                        max_width: Constraint::Pct(100),
+                        max_height: Constraint::Pct(100),
+                    },
+                    ..Default::default()
+                },
+                DialogConfig::default(),
+                vec![PanelSpec::content(buf2, PanelHeight::Fit)],
+            )
+            .unwrap();
+        let invoked2 = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let invoked2_cb = invoked2.clone();
+        ui.win_on_event(
+            win2,
+            WinEvent::Dismiss,
+            Callback::Rust(Box::new(move |_| {
+                *invoked2_cb.lock().unwrap() += 1;
+                CallbackResult::Consumed
+            })),
+        );
+        let _ = ui.handle_key_with_lua(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            &mut |_, _, _, _| {},
+        );
+        assert_eq!(*invoked2.lock().unwrap(), 1, "Ctrl-C should fire Dismiss");
     }
 }

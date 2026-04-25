@@ -572,6 +572,10 @@ impl App {
             let (w, h) = terminal::size().unwrap_or((80, 24));
             let mut ui = ui::Ui::new();
             ui.set_terminal_size(w, h);
+            // One source of truth for selection bg: theme resolves it
+            // once, every Window-driven surface (transcript, prompt,
+            // dialog content panels) reads from here.
+            ui.set_selection_bg(crate::theme::selection_bg());
             ui.set_layout(ui::LayoutTree::Split {
                 direction: ui::layout::Direction::Vertical,
                 children: vec![

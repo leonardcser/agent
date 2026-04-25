@@ -791,6 +791,9 @@ impl App {
                 bg: Some(crate::theme::scrollbar_thumb()),
                 ..Default::default()
             },
+            // Sourced from `Ui::selection_style()` at dialog open time
+            // — leave default here so `dialog_open` overrides.
+            selection_style: ui::grid::Style::default(),
             dismiss_keys,
             hints,
         }

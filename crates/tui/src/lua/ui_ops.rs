@@ -54,12 +54,23 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                     make_content_buffer(app, &text, format)
                 };
                 let focusable: bool = panel.get("focusable").unwrap_or(false);
+                let interactive: bool = panel.get("interactive").unwrap_or(false);
                 let pad_left: u16 = panel.get("pad_left").unwrap_or(0);
-                let mut spec = PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit));
+                // `interactive` upgrades the panel to a transcript-style
+                // window: click + double/triple click + drag select all
+                // ride on the same `ui::Window` primitive as the
+                // transcript pane. Implies focusable.
+                let mut spec = if interactive {
+                    PanelSpec::interactive_content(buf, height.unwrap_or(PanelHeight::Fit))
+                } else {
+                    PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit))
+                };
                 if pad_left > 0 {
                     spec = spec.with_pad_left(pad_left);
                 }
-                spec = spec.focusable(focusable).with_initial_focus(initial_focus);
+                spec = spec
+                    .focusable(focusable || interactive)
+                    .with_initial_focus(initial_focus);
                 if let Some(sep) = parse_separator(&panel)? {
                     spec = spec.with_separator(sep);
                 }
