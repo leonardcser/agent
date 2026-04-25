@@ -7,10 +7,10 @@
 //! prompt's `/` command completer, the cmdline's `:` completer, the
 //! Lua `smelt.ui.picker.open` primitive.
 
-use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
+use crate::component::{Component, CursorInfo, DrawContext, KeyResult, WidgetEvent};
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 #[derive(Clone, Debug, Default)]
 pub struct PickerItem {
@@ -88,6 +88,9 @@ pub struct Picker {
     /// the prompt (completer `/`, cmdline `:`): the best match is
     /// closest to where the user is typing.
     reversed: bool,
+    /// Rect from the last `prepare` — used by `handle_mouse` to map
+    /// click rows to item indices (accounting for `reversed`).
+    last_area: Rect,
 }
 
 impl Picker {
@@ -99,7 +102,26 @@ impl Picker {
             max_visible_rows: u16::MAX,
             scroll_top: 0,
             reversed: false,
+            last_area: Rect::new(0, 0, 0, 0),
         }
+    }
+
+    /// Resolve the item index at visual row `rel_row` (0 = top of the
+    /// picker rect). Honors the `reversed` flag — reversed pickers
+    /// paint logical 0 at the bottom row, so click row N maps to
+    /// scroll_top + (h - 1 - N). Returns `None` when the row is past
+    /// the last rendered item.
+    fn item_at_visual_row(&self, rel_row: u16, height: u16) -> Option<usize> {
+        if self.items.is_empty() || height == 0 {
+            return None;
+        }
+        let row_i = if self.reversed {
+            (height - 1).checked_sub(rel_row)?
+        } else {
+            rel_row
+        };
+        let idx = self.scroll_top + row_i as usize;
+        (idx < self.items.len()).then_some(idx)
     }
 
     pub fn with_style(mut self, style: PickerStyle) -> Self {
@@ -204,6 +226,7 @@ impl Component for Picker {
     fn prepare(&mut self, area: Rect, _ctx: &DrawContext) {
         let rows = area.height as usize;
         self.scroll_top = self.compute_scroll_top(rows);
+        self.last_area = area;
     }
 
     fn draw(&self, _area: Rect, slice: &mut GridSlice<'_>, _ctx: &DrawContext) {
@@ -320,6 +343,27 @@ impl Component for Picker {
         // Picker is non-interactive. Selection is driven externally by
         // whichever surface owns input (prompt InputState, cmdline, Lua).
         KeyResult::Ignored
+    }
+
+    fn handle_mouse(&mut self, event: MouseEvent) -> KeyResult {
+        let MouseEventKind::Down(MouseButton::Left) = event.kind else {
+            return KeyResult::Ignored;
+        };
+        let rect = self.last_area;
+        if rect.width == 0 || !rect.contains(event.row, event.column) {
+            return KeyResult::Ignored;
+        }
+        let rel_row = event.row - rect.top;
+        let Some(idx) = self.item_at_visual_row(rel_row, rect.height) else {
+            return KeyResult::Consumed;
+        };
+        // Update internal selection so a subsequent re-render before the
+        // caller's sync still draws the user's pick highlighted.
+        self.selected = idx;
+        // Submit the click outward — caller (prompt completer, Lua)
+        // commits the selection. `Select(idx)` carries the index so the
+        // caller doesn't need a separate read.
+        KeyResult::Action(WidgetEvent::Select(idx))
     }
 
     fn cursor(&self) -> Option<CursorInfo> {

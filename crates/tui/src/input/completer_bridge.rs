@@ -109,6 +109,29 @@ impl PromptState {
         }
     }
 
+    /// Commit the active completer's `idx`th item — same semantics as
+    /// the user pressing Tab, but with an explicit index (used by
+    /// click-to-select on the picker float). Returns the picker WinId
+    /// the caller must close, plus whether the completer was the
+    /// `/command` flavour (caller may want to re-sync after).
+    pub(crate) fn commit_completer_at(
+        &mut self,
+        idx: usize,
+    ) -> Option<(Option<ui::WinId>, bool)> {
+        let mut session = self.completer.take()?;
+        if idx < session.completer.results.len() {
+            session.completer.selected = idx;
+        }
+        let picker_win = session.picker_win;
+        let comp = session.completer;
+        let was_command = comp.kind == CompleterKind::Command;
+        self.accept_completion(&comp);
+        if was_command {
+            self.sync_completer();
+        }
+        Some((picker_win, was_command))
+    }
+
     fn accept_completion(&mut self, comp: &Completer) {
         if let Some(label) = comp.accept() {
             let end = self.win.cpos;
