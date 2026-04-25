@@ -238,47 +238,71 @@ Canonicalization (Ctrl-R and friends):
   `settings` migrate to the new entry point. Plugins also gain a
   visual `prefix = "● "` pill on theme/color items and lavender /
   lilac descriptions deduplicate to "cool purple" / "warm purple".
-- **Step 6 — Rip out `LuaOps` entirely.** Active. The `LuaOps`
-  struct holds two intermediate layers between Lua and App: snapshot
-  reads (`set_context` populates `transcript_text` / `engine` /
-  `settings` / `input_history` / `available_models` from App at tick
-  start; Lua bindings read via `s.ops.lock().some_field`) and queued
-  writes (`ops.push(DomainOp::Foo)` → `App::apply_ops` reducer arm
-  calls method). Both are vestigial now that Lua reaches `&mut App`
-  via `with_app`. End state: `lua.create_function(|_, v| { with_app(
-  |app| app.method(v)) })` — uniform direct calls.
+- **Step 6 — Rip out the `AppOp` queue.** Done. Lua bindings
+  reached `&mut App` through a typed enum queue (`UiOp` /
+  `DomainOp` → `App::apply_ops` reducer); now they call methods
+  directly via `with_app`, and the queue payload reduced to plain
+  `Box<dyn FnOnce(&mut App) + Send>` closures used by the one
+  remaining Rust caller (Confirm dialog). Net delete of ~410 LOC
+  across `ops.rs` (~150) + `ops_apply.rs` (~230) + the
+  `push_op!` / `snap_read!` macros plus the redundant reducer
+  variants in `lua/api.rs`. Landed in seven sub-steps:
 
-  Migration order, each green on build/test/clippy:
-  1. Bump `pub(super)` App methods to `pub(crate)` for the ones Lua
-     bindings will call (`apply_model`, `set_mode`, `set_settings`,
-     `toggle_mode`, `set_reasoning_effort`, `sync_permissions`,
-     `resolve_confirm`, `finish_turn`, `cancel_agent`,
-     `send_permission_decision`, …). No behaviour change.
-  2. Migrate the five `UiOp` variants to direct `with_app`:
-     `Notify`, `NotifyError`, `SetGhostText`, `ClearGhostText`,
-     `CloseFloat`. Delete the `UiOp` enum + its reducer arm.
-  3. Migrate the simple `DomainOp` variants (single-method-call
-     ones: `SetModel`, `SetMode`, `SetReasoningEffort`, `Submit`,
-     `Cancel`, `LoadSession`, `DeleteSession`, `KillAgent`,
-     `KillProcess`, `YankBlockAtCursor`, `RemovePromptSection`,
-     `SetPromptSection`).
-  4. Migrate the complex `DomainOp` variants (with inline logic:
-     `RunCommand`, `Compact`, `ToggleSetting`, `SyncPermissions`,
-     `RewindToBlock`, `EngineAsk`, `ResolveToolResult`).
-  5. Replace remaining `confirm.rs` ops (`ConfirmBackTab`,
-     `ResolveConfirm`, `CloseFloat`) with a small closure queue
-     (`Vec<Box<dyn FnOnce(&mut App) + Send>>`) — confirm.rs's three
-     callbacks fire from inside `&mut Ui` dispatch and need
-     deferral. Keep the queue, replace the enum payload.
-  6. Migrate snapshot reads to live reads. Each `snap_read!(lua,
-     shared, |o| o.transcript_text.clone()…)` becomes
-     `lua.create_function(|_, ()| { with_app(|app| app.transcript.
-     text()) })`. Delete `set_context` / `clear_context` /
-     `LuaOps`'s read fields.
-  7. Delete `ops.rs`, `ops_apply.rs`, `LuaOps`, `OpsHandle`. Rename
-     the closure queue to a focused `DeferredQueue` (or fold it
-     into `App` as a private `Vec`). Drop the `push_op!` /
-     `snap_read!` macros.
+  - **6.1 Visibility bumps.** `apply_model`, `set_mode`,
+    `set_settings`, `toggle_mode`, `set_reasoning_effort`,
+    `sync_permissions`, `resolve_confirm`, `finish_turn`,
+    `cancel_agent`, `send_permission_decision` and the
+    `pending_quit` / `agent` fields go from `pub(super)` to
+    `pub(crate)`. No behaviour change.
+  - **6.2 UiOp → with_app.** `Notify`, `NotifyError`,
+    `SetGhostText`, `ClearGhostText` (5 binding sites + 1
+    `record_error` route through `smelt.notify_error`). Tests
+    that observed via the queue now use a Lua override
+    (`install_test_notify` writes to `_G.test_log` /
+    `_G.test_err`).
+  - **6.3 Simple DomainOp → with_app.** `SetModel`, `SetMode`,
+    `SetReasoningEffort`, `Submit`, `Cancel`, `LoadSession`,
+    `DeleteSession`, `KillAgent`, `KillProcess`,
+    `YankBlockAtCursor`, `RemovePromptSection`,
+    `SetPromptSection` (12 binding sites). Snapshot-queueing
+    tests (`engine_*_queues_op`) deleted — they exercised the
+    old contract.
+  - **6.4 Complex DomainOp → wrapper methods.** Reducer arms
+    that did multi-step work (`RunCommand`, `Compact`,
+    `ToggleSetting`, `SyncPermissions`, `RewindToBlock`,
+    `EngineAsk`, `ResolveToolResult`) lifted into
+    `pub(crate) fn` methods on `App` in a new
+    `crates/tui/src/app/lua_handlers.rs`. Lua bindings call
+    them through `with_app`. Each method is named for the
+    semantic (`apply_lua_command`, `toggle_named_setting`,
+    `compact_or_notify`, `rewind_to_block`,
+    `load_session_by_id`, `yank_current_block`,
+    `sync_permissions_from_lua`, `engine_ask`,
+    `resolve_tool_result`).
+  - **6.5 Closure queue + Confirm migration.** `AppOp` enum,
+    `UiOp`, `DomainOp` deleted. Replaced with `pub type
+    Deferred = Box<dyn FnOnce(&mut App) + Send + 'static>`.
+    `OpsHandle::push` now takes a closure. `confirm.rs`'s
+    three callbacks (BackTab, Submit, Dismiss) push closures
+    that call two new wrapper methods
+    (`handle_confirm_back_tab`, `handle_confirm_resolve`).
+    `fire_callback` and `pump_task_events` now return `()`
+    (Lua bindings reach `&mut App` directly, no ops to
+    propagate). `record_error` routes through
+    `smelt.notify_error` so test overrides catch internal
+    errors too.
+  - **6.6 Snapshot-read migration.** Deferred. Lua bindings
+    still read via `LuaOps`'s pre-tick snapshot fields
+    (`transcript_text`, `engine`, `settings`,
+    `available_models`, `input_history`); migrating each to a
+    live `with_app` read churns ~20 readers + ~7 snapshot
+    tests for marginal architectural gain. The snapshot is
+    arguably correct caching — Lua bindings see consistent
+    state during a tick. Park this until there's a concrete
+    pain point that demands live reads.
+  - **6.7 Inline `apply_ops`.** `ops_apply.rs` was a 12-line
+    file with a 3-line method; folded into
+    `lua_bridge.rs::apply_lua_ops` and deleted.
 - **Step 7 — Migrate Confirm to Lua.** Queued after Step 6. The
   mechanical migration is clear (add `smelt.confirm._build_{title,
   summary,preview}_buf`, `smelt.confirm.resolve`, `smelt.confirm.
