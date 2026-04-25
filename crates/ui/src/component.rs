@@ -1,6 +1,6 @@
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseEvent};
 
 /// Semantic events emitted by widgets when a key resolves into a
 /// high-level action. Replaces the old stringly-typed
@@ -80,6 +80,14 @@ pub trait Component: 'static {
     fn prepare(&mut self, _area: Rect, _ctx: &DrawContext) {}
     fn draw(&self, area: Rect, grid: &mut GridSlice<'_>, ctx: &DrawContext);
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult;
+    /// Handle a mouse event. Coordinates in `event` are absolute
+    /// (terminal-relative). Components that care about clicks/drags
+    /// override this; default returns `Ignored`. Wheel scroll is
+    /// routed by App through dedicated scroll methods, not here, so
+    /// implementations can ignore `ScrollUp/Down` variants.
+    fn handle_mouse(&mut self, _event: MouseEvent) -> KeyResult {
+        KeyResult::Ignored
+    }
     fn cursor(&self) -> Option<CursorInfo> {
         None
     }

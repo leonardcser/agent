@@ -22,7 +22,7 @@ use crate::layout::Rect;
 use crate::status_bar::StatusBar;
 use crate::window::{ScrollbarState, Window, WindowViewport};
 use crate::BufId;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 /// Mutable buffer lookup shim used by `Dialog::sync_from_bufs_mut` so
 /// dialogs can drive formatter-backed buffers without inlining the
@@ -1155,6 +1155,78 @@ impl Component for Dialog {
         }
     }
 
+    fn handle_mouse(&mut self, event: MouseEvent) -> KeyResult {
+        let row = event.row;
+        let col = event.column;
+
+        match event.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let delta: isize = match event.kind {
+                    MouseEventKind::ScrollUp => -3,
+                    MouseEventKind::ScrollDown => 3,
+                    _ => 0,
+                };
+                let panel_idx = self.panel_at(row, col).unwrap_or(self.focused);
+                self.panel_scroll_by(panel_idx, delta);
+                KeyResult::Consumed
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(panel_idx) = self.panel_at(row, col) else {
+                    // Click landed on dialog chrome (top rule, hints).
+                    // Absorb so it doesn't fall through to layers
+                    // beneath, but do nothing.
+                    return KeyResult::Consumed;
+                };
+                let kind = self.panels[panel_idx].kind;
+                let is_widget = matches!(
+                    self.panels[panel_idx].content,
+                    DialogPanelContent::Widget(_)
+                );
+
+                match (is_widget, kind) {
+                    (true, _) => {
+                        self.focus_panel(panel_idx);
+                        if let Some(panel) = self.panels.get_mut(panel_idx) {
+                            if let DialogPanelContent::Widget(w) = &mut panel.content {
+                                let r = w.handle_mouse(event);
+                                if !matches!(r, KeyResult::Ignored) {
+                                    return r;
+                                }
+                            }
+                        }
+                        KeyResult::Consumed
+                    }
+                    (false, PanelKind::List { .. }) => {
+                        // fzf-style: clicking a list row updates the
+                        // selection but does NOT change keyboard focus
+                        // — keymaps stay on the input above (if any).
+                        let panel = &self.panels[panel_idx];
+                        let scroll_top = panel.win().map(|w| w.scroll_top).unwrap_or(0) as isize;
+                        let rel = (row as isize) - (panel.rect.top as isize);
+                        if rel < 0 || rel >= panel.rect.height as isize {
+                            return KeyResult::Consumed;
+                        }
+                        let target = scroll_top + rel;
+                        let cur = panel.selection_abs as isize;
+                        let delta = target - cur;
+                        if delta != 0 {
+                            self.move_selection_at(panel_idx, delta);
+                        }
+                        KeyResult::Consumed
+                    }
+                    (false, PanelKind::Content) => {
+                        // Buffer-backed content panel: click focuses it
+                        // (no-op for non-focusable title/preview panels)
+                        // so subsequent j/k scrolls the right panel.
+                        self.focus_panel(panel_idx);
+                        KeyResult::Consumed
+                    }
+                }
+            }
+            _ => KeyResult::Ignored,
+        }
+    }
+
     fn cursor(&self) -> Option<CursorInfo> {
         // List panels show selection as fg-accent tint on the cursor
         // row (painted inside `draw_panel`), not via a terminal
@@ -1515,5 +1587,104 @@ mod tests {
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         dlg.resolve_panel_rects(Rect::new(0, 0, 20, 3));
         assert!(!dlg.apply_panel_scrollbar_drag(0, 5));
+    }
+
+    fn mouse_event(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            row,
+            column: col,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn click_on_list_row_updates_selection_without_focus_change() {
+        use crate::text_input::TextInput;
+        let mut bufs = std::collections::HashMap::new();
+        bufs.insert(BufId(1), make_buf(1, &["a", "b", "c", "d"]));
+        // fzf-style: input on top is focused, list below is the
+        // passive picker. Click on a list row should move selection
+        // but keep focus on the input so typing keeps filtering.
+        let panels = build_panels(
+            vec![
+                PanelSpec::widget(Box::new(TextInput::new()), PanelHeight::Fixed(1))
+                    .with_initial_focus(true),
+                PanelSpec::list(BufId(1), PanelHeight::Fill).with_pad_left(0),
+            ],
+            &bufs,
+        );
+        let mut dlg = Dialog::new(DialogConfig::default(), panels);
+        let area = Rect::new(0, 0, 20, 10);
+        let ctx = ctx(20, 10);
+        dlg.prepare(area, &ctx);
+        let initial_focus = dlg.focused_panel();
+        // Top rule row 0; input row 1; list rows 2..end. Click row 4
+        // (list row index 2 = item "c").
+        let r = dlg.handle_mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            4,
+            5,
+        ));
+        assert_eq!(r, KeyResult::Consumed);
+        assert_eq!(dlg.selected_index_at(1), Some(2));
+        // Focus stays on the input panel (fzf-style).
+        assert_eq!(dlg.focused_panel(), initial_focus);
+    }
+
+    #[test]
+    fn click_on_widget_panel_focuses_it_and_forwards() {
+        use crate::text_input::TextInput;
+        let mut bufs = std::collections::HashMap::new();
+        bufs.insert(BufId(1), make_buf(1, &["a", "b", "c"]));
+        let mut ti = TextInput::new();
+        ti.set_text("hello");
+        let panels = build_panels(
+            vec![
+                PanelSpec::list(BufId(1), PanelHeight::Fixed(3))
+                    .with_pad_left(0)
+                    .with_initial_focus(true),
+                PanelSpec::widget(Box::new(ti), PanelHeight::Fixed(1)),
+            ],
+            &bufs,
+        );
+        let mut dlg = Dialog::new(DialogConfig::default(), panels);
+        let area = Rect::new(0, 0, 20, 10);
+        let ctx = ctx(20, 10);
+        dlg.prepare(area, &ctx);
+        // Top rule row 0; list rows 1..3; widget row 4. Widget panel
+        // has the default pad_left=1, so click at column 4 lands on
+        // char index 3 ("hello"[3] = 'l').
+        dlg.handle_mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            4,
+            4,
+        ));
+        assert_eq!(dlg.focused_panel(), 1);
+        let widget = dlg
+            .panel_widget_mut::<TextInput>(1)
+            .expect("widget panel");
+        assert_eq!(widget.cursor_col(), 3);
+    }
+
+    #[test]
+    fn wheel_scrolls_panel_under_cursor() {
+        let mut bufs = std::collections::HashMap::new();
+        bufs.insert(BufId(1), make_buf(1, &["row"; 40]));
+        let panels = build_panels(
+            vec![PanelSpec::content(BufId(1), PanelHeight::Fill).with_pad_left(0)],
+            &bufs,
+        );
+        let mut dlg = Dialog::new(DialogConfig::default(), panels);
+        let area = Rect::new(0, 0, 20, 10);
+        let ctx = ctx(20, 10);
+        dlg.prepare(area, &ctx);
+        let r = dlg.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 5, 5));
+        assert_eq!(r, KeyResult::Consumed);
+        let scroll = match &dlg.panels[0].content {
+            DialogPanelContent::Buffer { win, .. } => win.scroll_top,
+            _ => unreachable!(),
+        };
+        assert!(scroll > 0, "wheel should advance scroll_top");
     }
 }

@@ -803,6 +803,29 @@ impl Ui {
         result
     }
 
+    /// Dispatch a mouse event through the compositor, then fan widget
+    /// actions out to the dispatched-to window's `WinEvent` callbacks
+    /// (mirrors the keyboard path in `handle_key_with_lua`). Returns
+    /// `None` when no float was hit — the host then routes the event
+    /// to its own pane mouse logic (transcript/prompt drag-select).
+    pub fn handle_mouse_with_lua(
+        &mut self,
+        event: crossterm::event::MouseEvent,
+        lua_invoke: &mut LuaInvoke,
+    ) -> Option<KeyResult> {
+        let (layer_id, result) = self.compositor.handle_mouse(event)?;
+        let win = parse_float_layer_id(&layer_id);
+        if let (KeyResult::Action(action), Some(win)) = (&result, win) {
+            if let Some((ev, payload)) = classify_widget_action(action) {
+                if self.callbacks.has_event(win, ev) {
+                    self.dispatch_event(win, ev, payload, lua_invoke);
+                    return Some(KeyResult::Consumed);
+                }
+            }
+        }
+        Some(result)
+    }
+
     /// Fire `WinEvent::Tick` on every window that has a registered
     /// Tick callback. Used by the app event loop to drive per-frame
     /// refresh of dialogs with live external state (subagent list,

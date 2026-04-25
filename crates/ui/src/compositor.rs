@@ -2,7 +2,7 @@ use crate::component::{Component, DrawContext, KeyResult};
 use crate::flush::flush_diff;
 use crate::grid::Grid;
 use crate::layout::Rect;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use crossterm::QueueableCommand;
 use std::io::Write;
@@ -12,6 +12,32 @@ struct Layer {
     component: Box<dyn Component>,
     rect: Rect,
     zindex: u16,
+    /// On `Down(Left)` inside this layer's rect, mark it focused
+    /// before dispatching the event to it.
+    focus_on_click: bool,
+    /// On `Down(Left)` inside this layer's rect, bump its zindex
+    /// above its current siblings so it rises to the top.
+    raise_on_click: bool,
+}
+
+/// Per-layer interaction policy passed to `Compositor::add_with_opts`.
+/// Defaults to focus + raise on click, which is what every interactive
+/// float (Dialog, Picker focused-mode) wants. Notifications and
+/// status overlays should opt out with `focus_on_click = false` and
+/// `raise_on_click = false`.
+#[derive(Clone, Copy, Debug)]
+pub struct LayerOpts {
+    pub focus_on_click: bool,
+    pub raise_on_click: bool,
+}
+
+impl Default for LayerOpts {
+    fn default() -> Self {
+        Self {
+            focus_on_click: true,
+            raise_on_click: true,
+        }
+    }
 }
 
 pub struct Compositor {
@@ -44,12 +70,25 @@ impl Compositor {
         rect: Rect,
         zindex: u16,
     ) {
+        self.add_with_opts(id, component, rect, zindex, LayerOpts::default());
+    }
+
+    pub fn add_with_opts(
+        &mut self,
+        id: impl Into<String>,
+        component: Box<dyn Component>,
+        rect: Rect,
+        zindex: u16,
+        opts: LayerOpts,
+    ) {
         let id = id.into();
         self.layers.push(Layer {
             id,
             component,
             rect,
             zindex,
+            focus_on_click: opts.focus_on_click,
+            raise_on_click: opts.raise_on_click,
         });
         self.sort_layers();
     }
@@ -191,6 +230,54 @@ impl Compositor {
             }
         }
         KeyResult::Ignored
+    }
+
+    /// Route a mouse event to the topmost layer whose rect contains the
+    /// pointer. Returns `None` when no layer is hit (caller falls back
+    /// to its own routing — transcript/prompt for App). On `Down(Left)`,
+    /// applies per-layer `focus_on_click` and `raise_on_click` policy
+    /// before the event reaches the component, so a click both selects
+    /// the layer and raises it within its z-band. Returns the id of
+    /// the dispatched-to layer so the caller can fan out widget actions
+    /// to that layer's callbacks.
+    pub fn handle_mouse(&mut self, event: MouseEvent) -> Option<(String, KeyResult)> {
+        let row = event.row;
+        let col = event.column;
+        let id = self
+            .layers
+            .iter()
+            .rev()
+            .find(|l| l.rect.contains(row, col))
+            .map(|l| l.id.clone())?;
+
+        if let MouseEventKind::Down(MouseButton::Left) = event.kind {
+            // Snapshot policy before mutating; iter_mut + later lookups
+            // would conflict with the borrow checker otherwise.
+            let (focus, raise) = self
+                .layers
+                .iter()
+                .find(|l| l.id == id)
+                .map(|l| (l.focus_on_click, l.raise_on_click))
+                .unwrap_or((false, false));
+            if focus {
+                self.focused = Some(id.clone());
+            }
+            if raise {
+                let max_z = self.layers.iter().map(|l| l.zindex).max().unwrap_or(0);
+                let target_z = max_z.saturating_add(1);
+                if let Some(layer) = self.layers.iter_mut().find(|l| l.id == id) {
+                    if layer.zindex != target_z {
+                        layer.zindex = target_z;
+                        self.sort_layers();
+                        self.force_redraw = true;
+                    }
+                }
+            }
+        }
+
+        let layer = self.layers.iter_mut().find(|l| l.id == id)?;
+        let result = layer.component.handle_mouse(event);
+        Some((id, result))
     }
 
     pub fn force_redraw(&mut self) {

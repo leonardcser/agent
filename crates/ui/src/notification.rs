@@ -5,10 +5,10 @@
 //! (info/error). Caller controls lifecycle (open → dismiss on any key,
 //! via `win_close`).
 
-use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
+use crate::component::{Component, CursorInfo, DrawContext, KeyResult, WidgetEvent};
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotificationLevel {
@@ -119,6 +119,15 @@ impl Component for Notification {
     }
 
     fn handle_key(&mut self, _code: KeyCode, _mods: KeyModifiers) -> KeyResult {
+        KeyResult::Ignored
+    }
+
+    fn handle_mouse(&mut self, event: MouseEvent) -> KeyResult {
+        // Click-to-dismiss: any primary click on the toast resolves
+        // its lifecycle (caller closes the float on `Dismiss`).
+        if let MouseEventKind::Down(MouseButton::Left) = event.kind {
+            return KeyResult::Action(WidgetEvent::Dismiss);
+        }
         KeyResult::Ignored
     }
 

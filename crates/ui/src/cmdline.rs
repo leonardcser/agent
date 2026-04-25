@@ -17,7 +17,7 @@
 use crate::component::{Component, CursorInfo, DrawContext, KeyResult, WidgetEvent};
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 #[derive(Clone, Debug, Default)]
 pub struct CmdlineStyle {
@@ -39,6 +39,9 @@ pub struct Cmdline {
     history_idx: Option<usize>,
     stash: String,
     style: CmdlineStyle,
+    /// Rect from the last `prepare` — used by `handle_mouse` to map an
+    /// absolute click column to a byte offset in `buf`.
+    last_area: Rect,
 }
 
 impl Default for Cmdline {
@@ -57,6 +60,7 @@ impl Cmdline {
             history_idx: None,
             stash: String::new(),
             style: CmdlineStyle::default(),
+            last_area: Rect::new(0, 0, 0, 0),
         }
     }
 
@@ -235,6 +239,10 @@ impl Cmdline {
 }
 
 impl Component for Cmdline {
+    fn prepare(&mut self, area: Rect, _ctx: &DrawContext) {
+        self.last_area = area;
+    }
+
     fn draw(&self, _area: Rect, slice: &mut GridSlice<'_>, _ctx: &DrawContext) {
         let w = slice.width();
         let h = slice.height();
@@ -328,6 +336,45 @@ impl Component for Cmdline {
             }
             _ => KeyResult::Ignored,
         }
+    }
+
+    fn handle_mouse(&mut self, event: MouseEvent) -> KeyResult {
+        let MouseEventKind::Down(MouseButton::Left) = event.kind else {
+            return KeyResult::Ignored;
+        };
+        let rect = self.last_area;
+        if rect.width == 0 || !rect.contains(event.row, event.column) {
+            return KeyResult::Ignored;
+        }
+        // Column 0 within rect is the prompt glyph; text starts at 1.
+        let local = event.column - rect.left;
+        if local < 1 {
+            self.cursor = 0;
+            return KeyResult::Consumed;
+        }
+        let target_cell = (local - 1) as usize;
+        // Walk text chars, summing display width, find the byte offset
+        // whose cumulative width exceeds the click cell. Land on the
+        // start of that char (so the cursor sits before it).
+        let mut acc: usize = 0;
+        let mut byte_off: usize = 0;
+        for (i, ch) in self.buf.char_indices() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch)
+                .unwrap_or(1)
+                .max(1);
+            if acc + cw > target_cell {
+                byte_off = i;
+                self.cursor = byte_off;
+                self.reset_history_browse();
+                return KeyResult::Consumed;
+            }
+            acc += cw;
+            byte_off = i + ch.len_utf8();
+        }
+        // Past end of text: clamp to end.
+        self.cursor = byte_off;
+        self.reset_history_browse();
+        KeyResult::Consumed
     }
 
     fn cursor(&self) -> Option<CursorInfo> {

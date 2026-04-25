@@ -9,7 +9,7 @@ use crate::component::{Component, CursorInfo, DrawContext, KeyResult, WidgetEven
 use crate::dialog::PanelWidget;
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 #[derive(Clone, Debug)]
 pub struct OptionItem {
@@ -47,6 +47,9 @@ pub struct OptionList {
     /// Per-item wrapped label lines computed in `prepare`. Each item
     /// occupies `wrapped[i].len().max(1)` visual rows.
     wrapped: Vec<Vec<String>>,
+    /// Rect from the last `prepare` — used by `handle_mouse` to map
+    /// absolute click rows into a visual row offset.
+    last_area: Rect,
 }
 
 impl OptionList {
@@ -64,7 +67,30 @@ impl OptionList {
             checkbox_style: Style::default(),
             viewport_rows: 0,
             wrapped: Vec::new(),
+            last_area: Rect::new(0, 0, 0, 0),
         }
+    }
+
+    /// Resolve which item index lives at the visual row `rel_row`
+    /// (counted from the top of the widget's draw area). Walks the
+    /// wrapped-line layout starting from `scroll_top`. Returns `None`
+    /// when the row is past the last item.
+    fn item_at_visual_row(&self, rel_row: u16) -> Option<usize> {
+        let mut row_acc: u16 = 0;
+        let mut idx = self.scroll_top;
+        while idx < self.items.len() {
+            let span = self
+                .wrapped
+                .get(idx)
+                .map(|w| w.len().max(1))
+                .unwrap_or(1) as u16;
+            if rel_row < row_acc + span {
+                return Some(idx);
+            }
+            row_acc += span;
+            idx += 1;
+        }
+        None
     }
 
     /// Byte width of the checkbox/shortcut prefix before the label.
@@ -164,6 +190,7 @@ impl OptionList {
 impl Component for OptionList {
     fn prepare(&mut self, area: Rect, _ctx: &DrawContext) {
         self.viewport_rows = area.height;
+        self.last_area = area;
         // Re-wrap labels for the current width so multi-line items
         // render correctly. `prefix_cols` depends on `multi` +
         // per-item shortcut; both are stable for a widget instance.
@@ -324,6 +351,23 @@ impl Component for OptionList {
             }
             _ => KeyResult::Ignored,
         }
+    }
+
+    fn handle_mouse(&mut self, event: MouseEvent) -> KeyResult {
+        let MouseEventKind::Down(MouseButton::Left) = event.kind else {
+            return KeyResult::Ignored;
+        };
+        let rect = self.last_area;
+        if rect.width == 0 || !rect.contains(event.row, event.column) {
+            return KeyResult::Ignored;
+        }
+        let rel_row = event.row - rect.top;
+        let Some(idx) = self.item_at_visual_row(rel_row) else {
+            return KeyResult::Consumed;
+        };
+        self.cursor = idx;
+        self.ensure_visible();
+        KeyResult::Consumed
     }
 
     fn cursor(&self) -> Option<CursorInfo> {

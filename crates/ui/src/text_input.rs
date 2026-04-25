@@ -2,7 +2,7 @@ use crate::component::{Component, CursorInfo, DrawContext, KeyResult, WidgetEven
 use crate::dialog::PanelWidget;
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 pub struct TextInput {
     text: String,
@@ -11,6 +11,9 @@ pub struct TextInput {
     placeholder: Option<String>,
     placeholder_style: Style,
     text_style: Style,
+    /// Rect from the last `prepare` — needed by `handle_mouse` to
+    /// translate absolute click columns into a text offset.
+    last_area: Rect,
 }
 
 impl TextInput {
@@ -25,6 +28,7 @@ impl TextInput {
                 ..Style::default()
             },
             text_style: Style::default(),
+            last_area: Rect::new(0, 0, 0, 0),
         }
     }
 
@@ -170,6 +174,10 @@ impl Default for TextInput {
 }
 
 impl Component for TextInput {
+    fn prepare(&mut self, area: Rect, _ctx: &DrawContext) {
+        self.last_area = area;
+    }
+
     fn draw(&self, _area: Rect, grid: &mut GridSlice<'_>, _ctx: &DrawContext) {
         let w = grid.width();
         if w == 0 || grid.height() == 0 {
@@ -237,6 +245,21 @@ impl Component for TextInput {
             (KeyCode::Esc, _) => KeyResult::Action(WidgetEvent::Cancel),
             _ => KeyResult::Ignored,
         }
+    }
+
+    fn handle_mouse(&mut self, event: MouseEvent) -> KeyResult {
+        let MouseEventKind::Down(MouseButton::Left) = event.kind else {
+            return KeyResult::Ignored;
+        };
+        let rect = self.last_area;
+        if rect.width == 0 || !rect.contains(event.row, event.column) {
+            return KeyResult::Ignored;
+        }
+        let local_col = (event.column - rect.left) as usize;
+        let target = self.scroll_offset + local_col;
+        let count = self.char_count();
+        self.cursor_col = target.min(count);
+        KeyResult::Consumed
     }
 
     fn cursor(&self) -> Option<CursorInfo> {

@@ -59,6 +59,41 @@ impl App {
                 return EventOutcome::Noop;
             }
         }
+
+        // Down inside a float: scrollbar drag still pre-empts (App
+        // owns the latching state machine), but anything else routes
+        // through the compositor so each layer's `handle_mouse` runs
+        // — click-to-focus widget panels, click-to-select list rows,
+        // click-to-position TextInput cursor, etc. Wheel keeps the
+        // direct path above because the focused-float-absorbs-wheel
+        // policy needs App-level focus knowledge.
+        if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if let Some(hit_win) = self.ui.float_at(me.row, me.column) {
+                if self.begin_dialog_scrollbar_drag_if_hit(me.row, me.column) {
+                    self.mouse_drag_active = true;
+                    return EventOutcome::Redraw;
+                }
+                // Notification toast click-to-dismiss bypasses the
+                // generic dispatch path — there's no widget callback,
+                // App owns the toast lifecycle directly.
+                if self.notification == Some(hit_win) {
+                    self.dismiss_notification();
+                    return EventOutcome::Redraw;
+                }
+                let lua = &self.lua;
+                let mut lua_invoke =
+                    |handle: ui::LuaHandle,
+                     win: ui::WinId,
+                     payload: &ui::Payload,
+                     panels: &[ui::PanelSnapshot]| {
+                        lua.queue_invocation(handle, win, payload, panels);
+                    };
+                let _ = self.ui.handle_mouse_with_lua(me, &mut lua_invoke);
+                self.flush_lua_callbacks();
+                return EventOutcome::Redraw;
+            }
+        }
+
         if self.layout.hit_test(me.row, me.column) == render::HitRegion::Status {
             return EventOutcome::Noop;
         }
