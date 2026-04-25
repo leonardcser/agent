@@ -95,22 +95,15 @@ impl App {
         };
         if let Some(sp) = spinner_char {
             spans.push(StatusSpan {
-                text: format!(" {sp} "),
+                text: format!(" {sp}"),
                 style: pill_style.clone(),
                 priority: 0,
                 ..StatusSpan::default()
             });
         }
         if let Some(label) = pill_label {
-            // Add a leading space when the spinner span isn't present
-            // so the label doesn't butt against the prior pill.
-            let text = if spinner_char.is_some() {
-                format!("{label} ")
-            } else {
-                format!(" {label} ")
-            };
             spans.push(StatusSpan {
-                text,
+                text: format!(" {label} "),
                 style: pill_style,
                 priority: 5,
                 truncatable: true,
