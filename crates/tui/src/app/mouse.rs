@@ -111,12 +111,10 @@ impl App {
                             .and_then(|c| c.picker_win)
                             == Some(win);
                         if is_completer_picker {
-                            if let Some((picker_win, _was_command)) =
+                            if let Some((Some(pwin), _was_command)) =
                                 self.input.commit_completer_at(idx)
                             {
-                                if let Some(pwin) = picker_win {
-                                    self.input.pending_picker_close.push(pwin);
-                                }
+                                self.input.pending_picker_close.push(pwin);
                             }
                         }
                     }
