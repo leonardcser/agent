@@ -3,9 +3,9 @@
 //! the `SpanCollector` projection pipeline. `app/dialogs/confirm.rs`
 //! consumes `from_tool` + `render_into_buffer`.
 
-use crate::render::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
-use crate::render::layout_out::LayoutSink;
-use crate::render::wrap_line;
+use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
+use crate::content::layout_out::LayoutSink;
+use crate::content::wrap_line;
 use crate::theme;
 use engine::tools::NotebookRenderData;
 use std::collections::HashMap;
@@ -89,7 +89,7 @@ impl ConfirmPreview {
         width: u16,
         theme: &crate::theme::Theme,
     ) {
-        use crate::render::to_buffer::render_into_buffer;
+        use crate::content::to_buffer::render_into_buffer;
         render_into_buffer(buf, width, theme, |sink| match self {
             ConfirmPreview::None => {}
             ConfirmPreview::Diff { old, new, path } => {
@@ -254,7 +254,7 @@ fn render_notebook_preview<S: LayoutSink>(
     viewport: u16,
 ) {
     let title = data.title();
-    let title_lines = wrap_line(&title, crate::render::term_width().saturating_sub(4));
+    let title_lines = wrap_line(&title, crate::content::term_width().saturating_sub(4));
     let mut skipped = skip;
     let mut emitted = 0u16;
 

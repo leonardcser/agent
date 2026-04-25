@@ -6,7 +6,7 @@ pub(crate) fn render_markdown_inner<S: LayoutSink>(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&crate::render::BoxContext>,
+    bctx: Option<&crate::content::BoxContext>,
 ) -> u16 {
     let _perf = crate::perf::begin("render:markdown");
     let max_cols = if let Some(b) = bctx {
@@ -96,7 +96,7 @@ pub(crate) fn render_markdown_inner<S: LayoutSink>(
             }
             let trimmed = lines[i].trim_start();
             {
-                use crate::render::highlight::{
+                use crate::content::highlight::{
                     emit_inline_spans, inline_spans_width, parse_inline_spans, wrap_inline_spans,
                     InlineSpan, InlineStyle,
                 };
@@ -253,7 +253,7 @@ pub(super) fn is_horizontal_rule(line: &str) -> bool {
 /// only renders 3 of them to match the visual weight of list markers.
 fn render_horizontal_rule<S: LayoutSink>(
     out: &mut S,
-    bctx: Option<&crate::render::BoxContext>,
+    bctx: Option<&crate::content::BoxContext>,
     indent: &str,
 ) -> u16 {
     // Use box-drawing character, render only 3 chars (like list markers)
@@ -268,7 +268,7 @@ fn render_horizontal_rule<S: LayoutSink>(
     out.push_dim();
     out.print_with_meta(
         &hr,
-        crate::render::display::SpanMeta {
+        crate::content::display::SpanMeta {
             selectable: true,
             copy_as: Some("---".into()),
         },
@@ -288,12 +288,12 @@ fn render_markdown_table_from_lines<S: LayoutSink>(
     out: &mut S,
     lines: &[&str],
     dim: bool,
-    bctx: Option<&crate::render::BoxContext>,
+    bctx: Option<&crate::content::BoxContext>,
     indent: &str,
 ) -> u16 {
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     for line in lines {
-        if crate::render::is_table_separator(line) {
+        if crate::content::is_table_separator(line) {
             continue;
         }
         let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
@@ -346,22 +346,22 @@ impl<S: LayoutSink> LayoutSink for SourceTextOnFirstRow<'_, S> {
     fn mark_wrapped(&mut self) {
         self.inner.mark_wrapped();
     }
-    fn fill_line_bg(&mut self, bg: crate::render::display::ColorValue, right_margin: u16) {
+    fn fill_line_bg(&mut self, bg: crate::content::display::ColorValue, right_margin: u16) {
         self.inner.fill_line_bg(bg, right_margin);
     }
-    fn snapshot_style(&self) -> crate::render::display::SpanStyle {
+    fn snapshot_style(&self) -> crate::content::display::SpanStyle {
         self.inner.snapshot_style()
     }
-    fn apply_style(&mut self, style: crate::render::display::SpanStyle) {
+    fn apply_style(&mut self, style: crate::content::display::SpanStyle) {
         self.inner.apply_style(style);
     }
-    fn push_style(&mut self, style: crate::render::display::SpanStyle) {
+    fn push_style(&mut self, style: crate::content::display::SpanStyle) {
         self.inner.push_style(style);
     }
     fn pop_style(&mut self) {
         self.inner.pop_style();
     }
-    fn set_gutter_bg(&mut self, bg: crate::render::display::ColorValue) {
+    fn set_gutter_bg(&mut self, bg: crate::content::display::ColorValue) {
         self.inner.set_gutter_bg(bg);
     }
     fn mark_soft_wrap_continuation(&mut self) {
@@ -370,7 +370,7 @@ impl<S: LayoutSink> LayoutSink for SourceTextOnFirstRow<'_, S> {
     fn set_source_text(&mut self, text: &str) {
         self.inner.set_source_text(text);
     }
-    fn print_with_meta(&mut self, text: &str, meta: crate::render::display::SpanMeta) {
+    fn print_with_meta(&mut self, text: &str, meta: crate::content::display::SpanMeta) {
         self.inner.print_with_meta(text, meta);
     }
 }
@@ -378,7 +378,7 @@ impl<S: LayoutSink> LayoutSink for SourceTextOnFirstRow<'_, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::layout_out::SpanCollector;
+    use crate::content::layout_out::SpanCollector;
 
     #[test]
     fn rendered_table_attaches_raw_source_to_first_row() {

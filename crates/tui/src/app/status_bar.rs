@@ -5,7 +5,7 @@
 use super::*;
 
 impl App {
-    fn compute_status_position(&mut self) -> Option<render::StatusPosition> {
+    fn compute_status_position(&mut self) -> Option<content::StatusPosition> {
         match self.app_focus {
             crate::app::AppFocus::Prompt => {
                 use ui::text::byte_to_cell;
@@ -20,7 +20,7 @@ impl App {
                 } else {
                     ((line_idx as u64 * 100) / (total_lines.saturating_sub(1) as u64)) as u8
                 };
-                Some(render::StatusPosition {
+                Some(content::StatusPosition {
                     line: (line_idx as u32) + 1,
                     col: col_cells as u32 + 1,
                     scroll_pct: pct.min(100),
@@ -39,7 +39,7 @@ impl App {
                 } else {
                     ((line_idx as u64 * 100) / (total_lines.saturating_sub(1) as u64)) as u8
                 };
-                Some(render::StatusPosition {
+                Some(content::StatusPosition {
                     line: (line_idx as u32) + 1,
                     col: self.transcript_window.cursor_col as u32 + 1,
                     scroll_pct: pct.min(100),
@@ -49,8 +49,8 @@ impl App {
     }
 
     pub(super) fn refresh_status_bar(&mut self) {
+        use content::status::{spans_to_segments, StatusSpan};
         use crossterm::style::Color;
-        use render::status::{spans_to_segments, StatusSpan};
         use ui::grid::Style;
 
         let (term_w, _) = self.ui.terminal_size();
@@ -66,10 +66,10 @@ impl App {
         } else {
             crate::theme::slug_color()
         };
-        let pill_style = render::StyleState {
+        let pill_style = content::StyleState {
             fg: Some(Color::Black),
             bg: Some(pill_bg),
-            ..render::StyleState::default()
+            ..content::StyleState::default()
         };
 
         let spinner_char = self.working.spinner_char();
@@ -124,7 +124,7 @@ impl App {
             }
         };
         if vim_enabled {
-            let vim_label = render::status::vim_mode_label(vim_mode).unwrap_or("NORMAL");
+            let vim_label = content::status::vim_mode_label(vim_mode).unwrap_or("NORMAL");
             let vim_fg = match vim_mode {
                 Some(crate::vim::ViMode::Insert) => Color::AnsiValue(78),
                 Some(crate::vim::ViMode::Visual) | Some(crate::vim::ViMode::VisualLine) => {
@@ -134,10 +134,10 @@ impl App {
             };
             spans.push(StatusSpan {
                 text: format!(" {vim_label} "),
-                style: render::StyleState {
+                style: content::StyleState {
                     fg: Some(vim_fg),
                     bg: Some(Color::AnsiValue(236)),
-                    ..render::StyleState::default()
+                    ..content::StyleState::default()
                 },
                 priority: 3,
                 ..StatusSpan::default()
@@ -154,10 +154,10 @@ impl App {
         };
         spans.push(StatusSpan {
             text: format!(" {mode_icon}{mode_name} "),
-            style: render::StyleState {
+            style: content::StyleState {
                 fg: Some(mode_fg),
                 bg: Some(Color::AnsiValue(234)),
-                ..render::StyleState::default()
+                ..content::StyleState::default()
             },
             priority: 1,
             ..StatusSpan::default()
@@ -181,12 +181,12 @@ impl App {
             };
             spans.push(StatusSpan {
                 text: bar_span.text.clone(),
-                style: render::StyleState {
+                style: content::StyleState {
                     fg: Some(bar_span.color),
                     bg: Some(status_bg),
                     bold: bar_span.bold,
                     dim: bar_span.dim,
-                    ..render::StyleState::default()
+                    ..content::StyleState::default()
                 },
                 priority,
                 ..StatusSpan::default()
@@ -197,11 +197,11 @@ impl App {
         if self.pending_dialog && !self.focused_float_blocks_agent() {
             spans.push(StatusSpan {
                 text: "permission pending".into(),
-                style: render::StyleState {
+                style: content::StyleState {
                     fg: Some(crate::theme::accent()),
                     bg: Some(status_bg),
                     bold: true,
-                    ..render::StyleState::default()
+                    ..content::StyleState::default()
                 },
                 priority: 2,
                 group: true,
@@ -219,10 +219,10 @@ impl App {
             };
             spans.push(StatusSpan {
                 text: label,
-                style: render::StyleState {
+                style: content::StyleState {
                     fg: Some(crate::theme::accent()),
                     bg: Some(status_bg),
-                    ..render::StyleState::default()
+                    ..content::StyleState::default()
                 },
                 priority: 2,
                 group: true,
@@ -240,10 +240,10 @@ impl App {
             };
             spans.push(StatusSpan {
                 text: label,
-                style: render::StyleState {
+                style: content::StyleState {
                     fg: Some(crate::theme::AGENT),
                     bg: Some(status_bg),
-                    ..render::StyleState::default()
+                    ..content::StyleState::default()
                 },
                 priority: 2,
                 group: true,
@@ -256,10 +256,10 @@ impl App {
         if let Some(p) = position {
             spans.push(StatusSpan {
                 text: p.render(),
-                style: render::StyleState {
+                style: content::StyleState {
                     fg: Some(crate::theme::muted()),
                     bg: Some(status_bg),
-                    ..render::StyleState::default()
+                    ..content::StyleState::default()
                 },
                 priority: 3,
                 align_right: true,

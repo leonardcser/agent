@@ -711,7 +711,7 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::display::SpanMeta;
+    use crate::content::display::SpanMeta;
 
     fn cell(ch: char) -> SnapshotCell {
         SnapshotCell {

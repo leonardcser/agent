@@ -42,7 +42,7 @@ pub(crate) use crate::app::transcript_model::{
 pub(crate) use crate::app::working::{TurnOutcome, TurnPhase};
 use crate::input::{resolve_agent_esc, Action, EscAction, History, PromptState};
 use crate::session::Session;
-use crate::{render, session, state, vim};
+use crate::{content, session, state, vim};
 use engine::tools::tool_arg_summary;
 use engine::{permissions::Decision, EngineHandle, Permissions};
 use protocol::{Content, EngineEvent, Message, Mode, ReasoningEffort, Role, UiCommand};
@@ -113,11 +113,11 @@ pub struct App {
     pub mode: Mode,
     pub mode_cycle: Vec<Mode>,
     /// Block history, tool states, layout cache — the committed transcript.
-    pub(crate) transcript: crate::render::transcript::Transcript,
+    pub(crate) transcript: crate::content::transcript::Transcript,
     /// Streaming parser state (active text/thinking/tool/agent/exec blocks).
-    pub(crate) parser: crate::render::stream_parser::StreamParser,
+    pub(crate) parser: crate::content::stream_parser::StreamParser,
     /// Buffer-backed projection of the transcript into a ui::Buffer.
-    pub(crate) transcript_projection: crate::render::transcript_buf::TranscriptProjection,
+    pub(crate) transcript_projection: crate::content::transcript_buf::TranscriptProjection,
     /// Plain-text snapshot of each visible row (top to bottom) captured
     /// during `project_transcript_buffer`. Read by
     /// `compute_transcript_cursor` to look up the glyph under the soft
@@ -152,7 +152,7 @@ pub struct App {
     /// Items returned by Lua-registered statusline sources. Appended
     /// after the Rust-side built-in spans each frame; priority /
     /// align_right on each item controls layout.
-    pub custom_status_items: Vec<render::status::StatusItem>,
+    pub custom_status_items: Vec<content::status::StatusItem>,
     /// Last error message reported per statusline source. Used to
     /// rate-limit notifications so a perpetually-broken source doesn't
     /// spam one toast per frame — only re-notify when the message
@@ -189,7 +189,7 @@ pub struct App {
     /// Last-computed viewport layout (status / transcript / prompt
     /// rows). Updated each frame in `render_normal`; read by mouse
     /// hit-testing and viewport-rows estimation.
-    pub layout: render::layout::LayoutState,
+    pub layout: content::layout::LayoutState,
     /// Persisted scroll offset for the multi-line prompt input
     /// (vim-style viewport). `usize::MAX` is a sentinel used by `zz`
     /// that asks the next paint to re-center on the cursor.
@@ -589,9 +589,9 @@ impl App {
                 modifiable: true,
                 buftype: ui::buffer::BufType::Prompt,
             });
-            let transcript_view = crate::render::window_view::WindowView::new();
-            let prompt_chrome_view = crate::render::window_view::WindowView::new();
-            let prompt_input_view = crate::render::window_view::WindowView::new();
+            let transcript_view = crate::content::window_view::WindowView::new();
+            let prompt_chrome_view = crate::content::window_view::WindowView::new();
+            let prompt_input_view = crate::content::window_view::WindowView::new();
             let status_bar = ui::StatusBar::new();
             ui.add_layer(
                 "transcript",
@@ -633,9 +633,9 @@ impl App {
             reasoning_cycle,
             mode,
             mode_cycle,
-            transcript: crate::render::transcript::Transcript::new(),
-            parser: crate::render::stream_parser::StreamParser::new(),
-            transcript_projection: crate::render::transcript_buf::TranscriptProjection::new(
+            transcript: crate::content::transcript::Transcript::new(),
+            parser: crate::content::stream_parser::StreamParser::new(),
+            transcript_projection: crate::content::transcript_buf::TranscriptProjection::new(
                 ui::buffer::Buffer::new(
                     ui::BufId(0),
                     ui::buffer::BufCreateOpts {
@@ -670,7 +670,7 @@ impl App {
             term_focused: true,
             working: working::WorkingState::new(),
             transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,
-            layout: render::layout::LayoutState::compute(&render::layout::LayoutInput {
+            layout: content::layout::LayoutState::compute(&content::layout::LayoutInput {
                 term_width: 80,
                 term_height: 24,
                 prompt_height: 3,

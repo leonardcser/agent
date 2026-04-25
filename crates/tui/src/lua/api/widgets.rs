@@ -397,11 +397,11 @@ fn register_spinner(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     let spinner_tbl = lua.create_table()?;
     spinner_tbl.set(
         "glyph",
-        lua.create_function(|_, ()| Ok(crate::render::spinner_glyph()))?,
+        lua.create_function(|_, ()| Ok(crate::content::spinner_glyph()))?,
     )?;
     spinner_tbl.set(
         "period_ms",
-        lua.create_function(|_, ()| Ok(crate::render::SPINNER_FRAME_MS))?,
+        lua.create_function(|_, ()| Ok(crate::content::SPINNER_FRAME_MS))?,
     )?;
     smelt_ui.set("spinner", spinner_tbl)?;
     Ok(())

@@ -349,7 +349,7 @@ impl RenderOut {
         }
         self.line_cols = self
             .line_cols
-            .saturating_add(crate::render::layout_out::display_width(text) as u16);
+            .saturating_add(crate::content::layout_out::display_width(text) as u16);
         let _ = self.queue(Print(text));
     }
 

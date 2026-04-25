@@ -7,8 +7,8 @@ pub use history::History;
 
 use crate::attachment::{Attachment, AttachmentId, AttachmentStore};
 use crate::completer::CompleterSession;
+use crate::content;
 use crate::keymap::{self, KeyAction, KeyContext};
-use crate::render;
 use crate::vim::{ViMode, Vim};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use protocol::Content;
@@ -782,14 +782,14 @@ impl PromptState {
 
             // ── Vim half-page scroll ────────────────────────────────────
             KeyAction::VimHalfPageUp => {
-                let half = render::term_height() / 2;
+                let half = content::term_height() / 2;
                 let line = current_line(&self.win.edit_buf.buf, self.win.cpos);
                 let target = line.saturating_sub(half);
                 self.move_to_line(target);
                 Action::Redraw
             }
             KeyAction::VimHalfPageDown => {
-                let half = render::term_height() / 2;
+                let half = content::term_height() / 2;
                 let line = current_line(&self.win.edit_buf.buf, self.win.cpos);
                 let total = self.win.edit_buf.buf.chars().filter(|&c| c == '\n').count() + 1;
                 let target = (line + half).min(total - 1);

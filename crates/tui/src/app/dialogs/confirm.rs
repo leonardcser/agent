@@ -18,8 +18,8 @@
 use super::super::App;
 use crate::app::dialogs::confirm_preview::ConfirmPreview;
 use crate::app::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
-use crate::render::display::{ColorRole, ColorValue};
-use crate::render::layout_out::{LayoutSink, SpanCollector};
+use crate::content::display::{ColorRole, ColorValue};
+use crate::content::layout_out::{LayoutSink, SpanCollector};
 use crate::theme;
 use ui::buffer::BufCreateOpts;
 use ui::BufId;
@@ -38,7 +38,7 @@ pub(crate) struct ConfirmEntry {
 /// line in the title; the rest goes in the preview panel).
 pub(crate) fn build_title_buf(app: &mut App, req: &ConfirmRequest) -> BufId {
     let theme_snap = theme::snapshot();
-    let width = crate::render::term_width() as u16;
+    let width = crate::content::term_width() as u16;
     let preview = ConfirmPreview::from_tool(&req.tool_name, &req.desc, &req.args);
     let is_bash = matches!(preview, ConfirmPreview::BashBody { .. }) || req.tool_name == "bash";
 
@@ -47,7 +47,7 @@ pub(crate) fn build_title_buf(app: &mut App, req: &ConfirmRequest) -> BufId {
         modifiable: false,
     });
     if let Some(buf) = app.ui.buf_mut(buf_id) {
-        crate::render::to_buffer::render_into_buffer(buf, width, &theme_snap, |sink| {
+        crate::content::to_buffer::render_into_buffer(buf, width, &theme_snap, |sink| {
             render_title(
                 sink,
                 &req.tool_name,
@@ -66,14 +66,14 @@ pub(crate) fn build_title_buf(app: &mut App, req: &ConfirmRequest) -> BufId {
 /// summary. The Lua dialog hides the panel via `collapse_when_empty`.
 pub(crate) fn build_summary_buf(app: &mut App, req: &ConfirmRequest) -> BufId {
     let theme_snap = theme::snapshot();
-    let width = crate::render::term_width() as u16;
+    let width = crate::content::term_width() as u16;
     let buf_id = app.ui.buf_create(BufCreateOpts {
         buftype: ui::buffer::BufType::Scratch,
         modifiable: false,
     });
     if let Some(ref summary) = req.summary {
         if let Some(buf) = app.ui.buf_mut(buf_id) {
-            crate::render::to_buffer::render_into_buffer(buf, width, &theme_snap, |sink| {
+            crate::content::to_buffer::render_into_buffer(buf, width, &theme_snap, |sink| {
                 sink.print(" ");
                 sink.push_fg(ColorValue::Role(ColorRole::Muted));
                 sink.print(summary);
@@ -90,7 +90,7 @@ pub(crate) fn build_summary_buf(app: &mut App, req: &ConfirmRequest) -> BufId {
 /// no preview; the Lua dialog hides the panel via `collapse_when_empty`.
 pub(crate) fn build_preview_buf(app: &mut App, req: &ConfirmRequest) -> BufId {
     let theme_snap = theme::snapshot();
-    let width = crate::render::term_width() as u16;
+    let width = crate::content::term_width() as u16;
     let preview = ConfirmPreview::from_tool(&req.tool_name, &req.desc, &req.args);
     let buf_id = app.ui.buf_create(BufCreateOpts {
         buftype: ui::buffer::BufType::Scratch,
@@ -111,7 +111,7 @@ fn render_title(
     bash_body: bool,
     is_bash: bool,
 ) {
-    use crate::render::highlight::BashHighlighter;
+    use crate::content::highlight::BashHighlighter;
     let shown = if bash_body {
         desc.lines().next().unwrap_or("")
     } else {

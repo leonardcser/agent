@@ -70,7 +70,7 @@ pub(crate) trait LayoutSink {
     /// Print text with explicit `SpanMeta`. Block renderers use this
     /// for padding and decorations that should not be selectable or
     /// should have custom copy behavior.
-    fn print_with_meta(&mut self, text: &str, meta: crate::render::display::SpanMeta) {
+    fn print_with_meta(&mut self, text: &str, meta: crate::content::display::SpanMeta) {
         let _ = meta;
         self.print(text);
     }
@@ -80,7 +80,7 @@ pub(crate) trait LayoutSink {
     fn print_gutter(&mut self, text: &str) {
         self.print_with_meta(
             text,
-            crate::render::display::SpanMeta {
+            crate::content::display::SpanMeta {
                 selectable: false,
                 copy_as: None,
             },
@@ -215,7 +215,7 @@ impl LayoutSink for SpanCollector {
         });
     }
 
-    fn print_with_meta(&mut self, text: &str, meta: crate::render::display::SpanMeta) {
+    fn print_with_meta(&mut self, text: &str, meta: crate::content::display::SpanMeta) {
         if text.is_empty() {
             return;
         }

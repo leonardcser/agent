@@ -18,9 +18,9 @@
 use std::sync::Arc;
 use ui::buffer::{Buffer, BufferFormatter};
 
-use crate::render::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
-use crate::render::layout_out::{LayoutSink, SpanCollector};
-use crate::render::to_buffer::render_into_buffer;
+use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
+use crate::content::layout_out::{LayoutSink, SpanCollector};
+use crate::content::to_buffer::render_into_buffer;
 
 /// Content kind a formatter-backed buffer renders. Constructed from a
 /// Lua `mode` string or chosen by a Rust caller, handed to

@@ -150,7 +150,7 @@ impl App {
             return EventOutcome::Redraw;
         }
 
-        if self.layout.hit_test(me.row, me.column) == render::HitRegion::Status {
+        if self.layout.hit_test(me.row, me.column) == content::HitRegion::Status {
             return EventOutcome::Noop;
         }
         // Drag + release drive tmux-style click-drag-copy. Works in
@@ -246,7 +246,7 @@ impl App {
                             return EventOutcome::Redraw;
                         }
                         self.drag_on_scrollbar = None;
-                        if let Some(render::ViewportHit::Content { row, col }) =
+                        if let Some(content::ViewportHit::Content { row, col }) =
                             vp.hit(me.row, me.column)
                         {
                             self.position_prompt_cursor_from_click(
@@ -285,7 +285,7 @@ impl App {
 
                 if matches!(
                     self.layout.hit_test(me.row, me.column),
-                    render::HitRegion::Prompt | render::HitRegion::Status
+                    content::HitRegion::Prompt | content::HitRegion::Status
                 ) {
                     if self.app_focus != crate::app::AppFocus::Prompt {
                         self.app_focus = crate::app::AppFocus::Prompt;
@@ -315,11 +315,11 @@ impl App {
                     .transcript_viewport
                     .and_then(|r| r.hit(me.row, me.column))
                 {
-                    Some(render::ViewportHit::Scrollbar) => {
+                    Some(content::ViewportHit::Scrollbar) => {
                         // Unreachable: begin_scrollbar_drag_if_hit above
                         // handles Scrollbar hits. Kept for exhaustiveness.
                     }
-                    Some(render::ViewportHit::Content { row, col }) => {
+                    Some(content::ViewportHit::Content { row, col }) => {
                         self.position_content_cursor_from_hit(row, col);
                     }
                     None => {}
@@ -354,7 +354,7 @@ impl App {
     /// keeps wheel behaviour consistent with the "buffer scroll is
     /// cursor motion" model used by keyboard navigation.
     pub(super) fn scroll_under_mouse(&mut self, row: u16, delta: isize) {
-        if matches!(self.layout.hit_test(row, 0), render::HitRegion::Prompt) {
+        if matches!(self.layout.hit_test(row, 0), content::HitRegion::Prompt) {
             self.app_focus = crate::app::AppFocus::Prompt;
             self.scroll_prompt_by_lines(delta);
             return;
@@ -482,7 +482,7 @@ impl App {
             }
             crate::app::AppFocus::Prompt => {
                 if let Some(vp) = self.prompt_viewport {
-                    if let Some(render::ViewportHit::Content { row: r, col: c }) = vp.hit(row, col)
+                    if let Some(content::ViewportHit::Content { row: r, col: c }) = vp.hit(row, col)
                     {
                         self.position_prompt_cursor_from_click(
                             r,
@@ -866,7 +866,7 @@ impl App {
         let viewport_rows = region.rect.height;
         let total = rows.len().min(u16::MAX as usize) as u16;
         let geom =
-            render::ViewportGeom::new(total, viewport_rows, self.transcript_window.scroll_top);
+            content::ViewportGeom::new(total, viewport_rows, self.transcript_window.scroll_top);
         let line_idx = geom.line_of_row(rel_row).unwrap_or(total.saturating_sub(1)) as usize;
         let line_idx = line_idx.min(rows.len() - 1);
         let snapped =

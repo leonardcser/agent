@@ -121,7 +121,7 @@ pub(crate) fn apply_to_buffer(buf: &mut Buffer, lines: &[ProjectedLine]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::display::{ColorValue, DisplaySpan, SpanStyle as DSpanStyle};
+    use crate::content::display::{ColorValue, DisplaySpan, SpanStyle as DSpanStyle};
     use crossterm::style::Color;
     use ui::buffer::BufCreateOpts;
     use ui::BufId;

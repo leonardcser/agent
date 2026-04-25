@@ -123,7 +123,7 @@ pub(super) fn render_plan_output<S: LayoutSink>(
     rows += 1;
 
     // Body: markdown rendering inside the plan box.
-    let bctx = crate::render::BoxContext {
+    let bctx = crate::content::BoxContext {
         left: "  \u{2502} ",
         right: " \u{2502}",
         color: theme::PLAN.into(),

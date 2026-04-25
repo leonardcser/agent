@@ -7,7 +7,7 @@
 
 use crate::app::transcript_cache::ToolOutputRenderCache;
 use crate::app::transcript_present::{gap_between, layout_block, Element};
-use crate::render::{DisplayBlock, LayoutContext};
+use crate::content::{DisplayBlock, LayoutContext};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 

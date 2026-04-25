@@ -11,8 +11,8 @@ use crate::app::transcript_present as blocks;
 use crate::app::transcript_present::{
     gap_between, render_thinking_summary, thinking_summary, Element,
 };
-use crate::render::layout_out::{LayoutSink, SpanCollector};
-use crate::render::selection::wrap_and_locate_cursor;
+use crate::content::layout_out::{LayoutSink, SpanCollector};
+use crate::content::selection::wrap_and_locate_cursor;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +27,7 @@ pub(crate) struct TranscriptData {
 pub(crate) struct TranscriptCursor {
     pub clamped_line: u16,
     pub clamped_col: u16,
-    pub soft_cursor: Option<crate::render::window_view::SoftCursor>,
+    pub soft_cursor: Option<crate::content::window_view::SoftCursor>,
 }
 
 impl App {
@@ -608,7 +608,7 @@ impl App {
         if let (Some(elapsed), Some(prev_frame)) =
             (self.working.elapsed(), self.working.last_spinner_frame())
         {
-            let frame = crate::render::spinner_frame_index(elapsed);
+            let frame = crate::content::spinner_frame_index(elapsed);
             if frame != prev_frame {
                 self.working.set_last_spinner_frame(frame);
                 changed = true;
@@ -631,7 +631,7 @@ impl App {
         let tw = (gutters.content_width(width as u16) as usize).max(1);
         let theme = crate::theme::snapshot();
 
-        let ephemeral_lines: Vec<crate::render::display::DisplayLine> =
+        let ephemeral_lines: Vec<crate::content::display::DisplayLine> =
             if self.has_ephemeral(show_thinking) {
                 let mut col = SpanCollector::new(tw as u16);
                 self.render_ephemeral_into(&mut col, tw, show_thinking);
@@ -651,7 +651,7 @@ impl App {
         let total_rows = self.transcript_projection.total_lines() as u16;
 
         let geom =
-            crate::render::viewport::ViewportGeom::new(total_rows, viewport_rows, scroll_top);
+            crate::content::viewport::ViewportGeom::new(total_rows, viewport_rows, scroll_top);
         let clamped_scroll = geom.clamped_scroll();
 
         let layer_w = gutters.layer_width(width as u16);
@@ -724,7 +724,7 @@ impl App {
         TranscriptCursor {
             clamped_line: line,
             clamped_col: history_cursor_col,
-            soft_cursor: Some(crate::render::window_view::SoftCursor {
+            soft_cursor: Some(crate::content::window_view::SoftCursor {
                 col,
                 row: line,
                 glyph: under,
@@ -832,7 +832,7 @@ impl App {
         }
         if !combined.is_empty() {
             let (label, line_count) = thinking_summary(&combined);
-            crate::render::emit_newlines(out, self.thinking_summary_gap());
+            crate::content::emit_newlines(out, self.thinking_summary_gap());
             render_thinking_summary(out, width, &label, line_count, true);
         }
     }
@@ -853,7 +853,7 @@ impl App {
         for msg in queued {
             let geom = blocks::UserBlockGeometry::new(msg, text_w);
             for line in &geom.lines {
-                let w = crate::render::layout_out::display_width(line);
+                let w = crate::content::layout_out::display_width(line);
                 queued_rows += if w == 0 { 1 } else { w.div_ceil(text_w) as u16 };
             }
         }

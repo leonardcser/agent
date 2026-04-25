@@ -10,15 +10,15 @@ use super::transcript_model::{
     AgentBlockStatus, ApprovalScope, Block, ConfirmChoice, ToolOutput, ToolState, ToolStatus,
     ViewState,
 };
-use crate::render::display::{
+use crate::content::display::{
     ColorRole, ColorValue, DisplayBlock, NamedColor, SpanMeta, SpanStyle,
 };
-use crate::render::highlight::{
+use crate::content::highlight::{
     print_cached_inline_diff, print_inline_diff, print_syntax_file, print_syntax_file_ext,
     render_code_block, render_markdown_table, BashHighlighter,
 };
-use crate::render::layout_out::{display_width, LayoutSink, SpanCollector};
-use crate::render::{truncate_str, wrap_line, LayoutContext};
+use crate::content::layout_out::{display_width, LayoutSink, SpanCollector};
+use crate::content::{truncate_str, wrap_line, LayoutContext};
 use crate::theme;
 use crate::utils::format_duration;
 use engine::tools::NotebookRenderData;
@@ -110,8 +110,8 @@ pub(crate) fn layout_block(
 
 /// Truncate / collapse the laid-out block according to its view state.
 /// Runs post-layout so every block variant gets the same treatment.
-fn apply_view_state(display: &mut crate::render::display::DisplayBlock, state: ViewState) {
-    use crate::render::display::{ColorRole, ColorValue, DisplayLine, DisplaySpan, SpanStyle};
+fn apply_view_state(display: &mut crate::content::display::DisplayBlock, state: ViewState) {
+    use crate::content::display::{ColorRole, ColorValue, DisplayLine, DisplaySpan, SpanStyle};
     let total = display.lines.len();
     let ellipsis_line = |text: String| -> DisplayLine {
         DisplayLine {
@@ -458,7 +458,7 @@ pub(super) fn render_block<S: LayoutSink>(
             out.print(&header);
             out.pop_style();
             out.newline();
-            let bctx = crate::render::BoxContext {
+            let bctx = crate::content::BoxContext {
                 left: "\u{2502} ",
                 right: "",
                 color: crate::theme::AGENT.into(),
@@ -537,7 +537,7 @@ pub(super) fn print_user_highlights<S: LayoutSink>(
         }
 
         // @path references validated against the filesystem.
-        if let Some((token, end)) = crate::render::try_at_ref(&chars, i) {
+        if let Some((token, end)) = crate::content::try_at_ref(&chars, i) {
             flush(out, &mut plain);
             accent(out, token);
             i = end;

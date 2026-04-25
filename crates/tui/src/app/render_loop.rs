@@ -32,7 +32,7 @@ impl App {
         // ── Layout ──
         let natural_prompt_height =
             self.measure_prompt_height(&self.input, width, queued, prediction);
-        self.layout = render::layout::LayoutState::compute(&render::layout::LayoutInput {
+        self.layout = content::layout::LayoutState::compute(&content::layout::LayoutInput {
             term_width: term_w,
             term_height: term_h,
             prompt_height: natural_prompt_height,
@@ -144,7 +144,7 @@ impl App {
 
         if let Some(tv) = self
             .ui
-            .layer_mut::<render::window_view::WindowView>("transcript")
+            .layer_mut::<content::window_view::WindowView>("transcript")
         {
             tv.sync_from_buffer(
                 self.transcript_projection.buf(),
@@ -180,7 +180,7 @@ impl App {
     ) -> ui::Rect {
         // Pull all immutable data out before the mutable buf borrow.
         let prev_input_scroll = self.prompt_input_scroll;
-        let bar_info = render::prompt_data::BarInfo {
+        let bar_info = content::prompt_data::BarInfo {
             model_label: Some(self.model.clone()),
             reasoning_effort: self.reasoning_effort,
             show_tokens: self.settings.show_tokens,
@@ -191,7 +191,7 @@ impl App {
         };
 
         let prompt_output = {
-            let mut prompt_input = render::prompt_data::PromptInput {
+            let mut prompt_input = content::prompt_data::PromptInput {
                 queued,
                 stash: &self.input.stash,
                 input: &self.input,
@@ -206,7 +206,7 @@ impl App {
                 .ui
                 .buf_mut(self.input_display_buf)
                 .expect("input_display_buf must be registered at startup");
-            render::prompt_data::compute_prompt(&mut prompt_input, input_buf)
+            content::prompt_data::compute_prompt(&mut prompt_input, input_buf)
         };
 
         let chrome_rows = prompt_output.chrome_rows;
@@ -244,7 +244,7 @@ impl App {
 
         if let Some(pv) = self
             .ui
-            .layer_mut::<render::window_view::WindowView>("prompt")
+            .layer_mut::<content::window_view::WindowView>("prompt")
         {
             pv.set_rows(chrome_rows);
             pv.set_viewport(None);
@@ -256,7 +256,7 @@ impl App {
         let buf_snapshot = self.ui.buf(input_buf_id).cloned();
         if let (Some(pv), Some(buf)) = (
             self.ui
-                .layer_mut::<render::window_view::WindowView>("prompt_input"),
+                .layer_mut::<content::window_view::WindowView>("prompt_input"),
             buf_snapshot,
         ) {
             // `compute_input_area` already wrote only the visible slice
