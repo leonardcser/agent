@@ -5,7 +5,7 @@
 //! execution (`plugin_tool_defs`, `execute_plugin_tool`).
 
 use super::{
-    AppOp, LuaHandle, LuaRuntime, TaskCompletion, TaskDriveOutput, TaskEvent, ToolExecResult, UiOp,
+    AppOp, LuaHandle, LuaRuntime, TaskCompletion, TaskDriveOutput, TaskEvent, ToolExecResult,
 };
 use mlua::prelude::*;
 use std::sync::atomic::Ordering;
@@ -28,9 +28,7 @@ impl LuaRuntime {
             return vec![];
         };
         if let Err(e) = func.call::<()>(content.to_string()) {
-            if let Ok(mut o) = self.shared.ops.lock() {
-                o.push(UiOp::NotifyError(format!("ask callback: {e}")));
-            }
+            crate::lua::try_with_app(|app| app.notify_error(format!("ask callback: {e}")));
         }
         self.drain_ops()
     }

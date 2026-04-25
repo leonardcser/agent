@@ -1297,17 +1297,42 @@ mod tests {
     use super::api::lua_table_to_json;
     use super::*;
 
+    /// Install a Lua-level `smelt.notify` / `smelt.notify_error` stub
+    /// that pushes into `_G.test_log` instead of routing through `App`
+    /// (no App exists in unit tests). Tests that observe handler
+    /// behaviour through these calls should call this once at the
+    /// start, then read [`drain_notifications`] / [`drain_errors`].
+    fn install_test_notify(rt: &LuaRuntime) {
+        rt.lua
+            .load(
+                r#"
+                    _G.test_log = {}
+                    _G.test_err = {}
+                    smelt.notify = function(msg) table.insert(_G.test_log, msg) end
+                    smelt.notify_error = function(msg) table.insert(_G.test_err, msg) end
+                "#,
+            )
+            .exec()
+            .expect("install_test_notify");
+    }
+
     fn drain_notifications(rt: &LuaRuntime) -> Vec<String> {
-        rt.drain_ops()
-            .into_iter()
-            .filter_map(|op| match op {
-                AppOp::Ui(UiOp::Notify(msg)) => Some(msg),
-                _ => None,
-            })
-            .collect()
+        let log: mlua::Table = match rt.lua.globals().get("test_log") {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
+        };
+        let out: Vec<String> = log
+            .sequence_values::<String>()
+            .filter_map(|r| r.ok())
+            .collect();
+        let _ = rt.lua.globals().set("test_log", rt.lua.create_table().unwrap());
+        out
     }
 
     fn drain_errors(rt: &LuaRuntime) -> Vec<String> {
+        // `record_error` still routes through the AppOp queue (it's
+        // hit from runtime internals, not user-facing Lua), so unit
+        // tests read from the queue here.
         rt.drain_ops()
             .into_iter()
             .filter_map(|op| match op {
@@ -1748,6 +1773,7 @@ mod tests {
     #[test]
     fn notify_queues_for_drain() {
         let rt = LuaRuntime::new();
+        install_test_notify(&rt);
         rt.lua
             .load("smelt.notify('hello from lua')")
             .exec()
@@ -1769,6 +1795,7 @@ mod tests {
     #[test]
     fn cmd_register_and_run() {
         let rt = LuaRuntime::new();
+        install_test_notify(&rt);
         rt.lua
             .load(
                 r#"
@@ -1788,6 +1815,7 @@ mod tests {
     #[test]
     fn keymap_register_and_run() {
         let rt = LuaRuntime::new();
+        install_test_notify(&rt);
         rt.lua
             .load(
                 r#"
@@ -1807,6 +1835,7 @@ mod tests {
     #[test]
     fn keymap_wildcard_mode() {
         let rt = LuaRuntime::new();
+        install_test_notify(&rt);
         rt.lua
             .load(
                 r#"
@@ -1826,6 +1855,7 @@ mod tests {
     #[test]
     fn autocmd_emit_fires_handlers() {
         let rt = LuaRuntime::new();
+        install_test_notify(&rt);
         rt.lua
             .load(
                 r#"
@@ -1846,6 +1876,7 @@ mod tests {
     #[test]
     fn defer_timer_fires_after_deadline() {
         let rt = LuaRuntime::new();
+        install_test_notify(&rt);
         rt.lua
             .load(
                 r#"
@@ -1967,6 +1998,7 @@ mod tests {
         // `"normal" + "c-r"` but dispatch uses `"n" + "<C-r>"`.
         // Canonicalization at registration closes the gap.
         let rt = LuaRuntime::new();
+        install_test_notify(&rt);
         rt.lua
             .load(
                 r#"
@@ -2191,6 +2223,7 @@ mod tests {
     #[test]
     fn emit_data_passes_table_to_handler() {
         let rt = LuaRuntime::new();
+        install_test_notify(&rt);
         rt.lua
             .load(
                 r#"
@@ -2216,6 +2249,7 @@ mod tests {
     #[test]
     fn legacy_stream_start_maps_to_turn_start() {
         let rt = LuaRuntime::new();
+        install_test_notify(&rt);
         rt.lua
             .load(
                 r#"

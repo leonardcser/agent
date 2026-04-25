@@ -7,7 +7,7 @@ use super::{
     lua_commands_snapshot, messages_to_lua, parse_keybind, parse_win_event, AutocmdEvent,
     LuaHandle, LuaRuntime, LuaShared, TaskCompletion, TaskEvent,
 };
-use crate::app::ops::{DomainOp, UiOp};
+use crate::app::ops::DomainOp;
 use mlua::prelude::*;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -705,9 +705,18 @@ impl LuaRuntime {
         let ghost_text_tbl = lua.create_table()?;
         ghost_text_tbl.set(
             "set",
-            push_op!(lua, shared, |text: String| UiOp::SetGhostText(text)),
+            lua.create_function(|_, text: String| {
+                crate::lua::with_app(|app| app.input_prediction = Some(text));
+                Ok(())
+            })?,
         )?;
-        ghost_text_tbl.set("clear", push_op!(lua, shared, || UiOp::ClearGhostText))?;
+        ghost_text_tbl.set(
+            "clear",
+            lua.create_function(|_, ()| {
+                crate::lua::with_app(|app| app.input_prediction = None);
+                Ok(())
+            })?,
+        )?;
         smelt_ui.set("ghost_text", ghost_text_tbl)?;
 
         // smelt.ui.spinner — same glyph set and cadence the status bar
@@ -730,11 +739,17 @@ impl LuaRuntime {
         // smelt.notify / smelt.notify_error (top-level convenience).
         smelt.set(
             "notify",
-            push_op!(lua, shared, |msg: String| UiOp::Notify(msg)),
+            lua.create_function(|_, msg: String| {
+                crate::lua::with_app(|app| app.notify(msg));
+                Ok(())
+            })?,
         )?;
         smelt.set(
             "notify_error",
-            push_op!(lua, shared, |msg: String| UiOp::NotifyError(msg)),
+            lua.create_function(|_, msg: String| {
+                crate::lua::with_app(|app| app.notify_error(msg));
+                Ok(())
+            })?,
         )?;
 
         // smelt.theme
