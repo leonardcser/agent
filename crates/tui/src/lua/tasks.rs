@@ -53,6 +53,43 @@ impl LuaRuntime {
         rt.resolve_external(external_id, value)
     }
 
+    /// Resume a Lua coroutine that's parked on a `smelt.tools.call`
+    /// side-call with the engine's `CoreToolResult`. Builds the
+    /// `{ content, is_error, metadata }` table on the runtime's Lua
+    /// context.
+    pub fn resolve_core_tool_call(
+        &self,
+        request_id: u64,
+        content: String,
+        is_error: bool,
+        metadata: Option<serde_json::Value>,
+    ) {
+        let table = match self.lua.create_table() {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tools.call result table: {e}"));
+                return;
+            }
+        };
+        if let Err(e) = table.set("content", content) {
+            self.record_error(format!("tools.call result.content: {e}"));
+            return;
+        }
+        if let Err(e) = table.set("is_error", is_error) {
+            self.record_error(format!("tools.call result.is_error: {e}"));
+            return;
+        }
+        if let Some(meta) = metadata {
+            match super::json_to_lua(&self.lua, &meta) {
+                Ok(v) => {
+                    let _ = table.set("metadata", v);
+                }
+                Err(e) => self.record_error(format!("tools.call result.metadata: {e}")),
+            }
+        }
+        self.resolve_external(request_id, mlua::Value::Table(table));
+    }
+
     /// Drain the task-runtime inbox and apply each event.
     pub fn pump_task_events(&self) {
         let events: Vec<TaskEvent> = {

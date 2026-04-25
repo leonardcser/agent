@@ -22,6 +22,20 @@ function smelt.task.wait(id)
   return coroutine.yield({ __yield = "external", id = id })
 end
 
+-- Side-call from a plugin tool's `execute` into a core (or another plugin)
+-- tool. Suspends the running coroutine until the engine returns the
+-- result. Pass `parent_call_id` (from the `ctx` table) so streamed output
+-- groups under the visible plugin invocation. Returns the result table
+-- `{ content, is_error, metadata? }`.
+function smelt.tools.call(name, args, parent_call_id)
+  if not coroutine.isyieldable() then
+    error("smelt.tools.call: call from inside tool.execute", 2)
+  end
+  local id = smelt.task.alloc()
+  smelt.tools.__send_call(id, parent_call_id or "", name, args or {})
+  return coroutine.yield({ __yield = "external", id = id })
+end
+
 -- Fuzzy-rank a list against `query`. Returns an array of 1-based indices
 -- into `items`, best matches first. `key_fn(item) -> haystack_string` is
 -- optional; omit to score the raw item (must be a string). An empty query

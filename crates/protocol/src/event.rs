@@ -251,6 +251,17 @@ pub enum EngineEvent {
         args: HashMap<String, serde_json::Value>,
         mode: Mode,
     },
+
+    /// Result of a core-tool side call requested by a Lua plugin via
+    /// `smelt.tools.call`. Streamed back so the suspended Lua coroutine
+    /// can resume with the tool's output.
+    CoreToolResult {
+        request_id: u64,
+        content: String,
+        is_error: bool,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        metadata: Option<serde_json::Value>,
+    },
 }
 
 /// Commands sent from the UI to the engine.
@@ -377,6 +388,18 @@ pub enum UiCommand {
     PluginToolHooksResult {
         request_id: u64,
         hooks: PluginToolHooks,
+    },
+
+    /// Side-call from a Lua plugin to a core (or another plugin) tool.
+    /// The engine runs the named tool and replies with
+    /// `EngineEvent::CoreToolResult`. The plugin's parent `call_id` is
+    /// reused so streamed output (e.g. `ToolOutput`) is grouped under
+    /// the visible plugin invocation.
+    CallCoreTool {
+        request_id: u64,
+        parent_call_id: String,
+        tool_name: String,
+        args: HashMap<String, serde_json::Value>,
     },
 
     /// Cancel the current turn.

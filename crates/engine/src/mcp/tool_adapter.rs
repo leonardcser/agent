@@ -49,7 +49,7 @@ impl Tool for McpTool {
     fn execute<'a>(
         &'a self,
         args: HashMap<String, Value>,
-        _ctx: &'a ToolContext<'a>,
+        _ctx: &'a ToolContext,
     ) -> ToolFuture<'a> {
         let args_value = serde_json::to_value(&args).unwrap_or(Value::Object(Default::default()));
         Box::pin(async move {

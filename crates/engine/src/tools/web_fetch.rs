@@ -70,11 +70,7 @@ impl Tool for WebFetchTool {
         domain_pattern(&str_arg(args, "url")).into_iter().collect()
     }
 
-    fn execute<'a>(
-        &'a self,
-        args: HashMap<String, Value>,
-        ctx: &'a ToolContext<'a>,
-    ) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             // Fetch the page (blocking IO)
             let raw = tokio::task::block_in_place(|| self.fetch_raw(&args));
@@ -86,11 +82,11 @@ impl Tool for WebFetchTool {
             let prompt = str_arg(&args, "prompt");
             match ctx
                 .provider
-                .extract_web_content(&raw.content, &prompt, ctx.model)
+                .extract_web_content(&raw.content, &prompt, &ctx.model)
                 .await
             {
                 Ok((extracted, usage)) => {
-                    crate::agent::emit_usage(ctx.event_tx, ctx.engine_config, ctx.model, usage);
+                    crate::agent::emit_usage(&ctx.event_tx, &ctx.api, &ctx.model, usage);
                     ToolResult::ok(extracted)
                 }
                 Err(_) => raw,

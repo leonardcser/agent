@@ -26,7 +26,7 @@ impl Tool for ListAgentsTool {
     fn execute<'a>(
         &'a self,
         _args: HashMap<String, Value>,
-        _ctx: &'a ToolContext<'a>,
+        _ctx: &'a ToolContext,
     ) -> ToolFuture<'a> {
         Box::pin(async move {
             let entries = crate::registry::discover(&self.scope);

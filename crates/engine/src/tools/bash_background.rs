@@ -44,11 +44,7 @@ impl Tool for ReadProcessOutputTool {
         })
     }
 
-    fn execute<'a>(
-        &'a self,
-        args: HashMap<String, Value>,
-        ctx: &'a ToolContext<'a>,
-    ) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let id = str_arg(&args, "id");
             let block = args.get("block").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -133,7 +129,7 @@ impl Tool for StopProcessTool {
     fn execute<'a>(
         &'a self,
         args: HashMap<String, Value>,
-        _ctx: &'a ToolContext<'a>,
+        _ctx: &'a ToolContext,
     ) -> ToolFuture<'a> {
         Box::pin(async move {
             let id = str_arg(&args, "id");

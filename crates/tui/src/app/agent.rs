@@ -710,6 +710,16 @@ impl App {
                     .send(protocol::UiCommand::PluginToolHooksResult { request_id, hooks });
                 SessionControl::Continue
             }
+            EngineEvent::CoreToolResult {
+                request_id,
+                content,
+                is_error,
+                metadata,
+            } => {
+                self.lua
+                    .resolve_core_tool_call(request_id, content, is_error, metadata);
+                SessionControl::Continue
+            }
         }
     }
 

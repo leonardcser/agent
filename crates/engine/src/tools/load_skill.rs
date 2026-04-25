@@ -37,7 +37,7 @@ impl Tool for LoadSkillTool {
     fn execute<'a>(
         &'a self,
         args: HashMap<String, Value>,
-        _ctx: &'a ToolContext<'a>,
+        _ctx: &'a ToolContext,
     ) -> ToolFuture<'a> {
         Box::pin(async move {
             let name = str_arg(&args, "name");

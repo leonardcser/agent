@@ -53,7 +53,7 @@ pub(crate) fn kill_process_group(child: &tokio::process::Child) {
 }
 
 pub use background::{ProcessInfo, ProcessRegistry};
-pub use bash::BashTool;
+pub use bash::{check_interactive, check_shell_background_operator, BashTool};
 pub use bash_background::{format_read_result, ReadProcessOutputTool, StopProcessTool};
 pub use edit_file::EditFileTool;
 
@@ -99,18 +99,22 @@ impl ToolResult {
 /// Context provided to tools during execution, giving them access to
 /// engine facilities (event streaming, cancellation, background processes,
 /// and the LLM provider for tools that need secondary LLM calls).
-pub struct ToolContext<'a> {
-    pub event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
-    pub call_id: &'a str,
-    pub cancel: &'a CancellationToken,
-    pub processes: &'a ProcessRegistry,
-    pub proc_done_tx: &'a mpsc::UnboundedSender<(String, Option<i32>)>,
-    pub provider: &'a Provider,
-    pub model: &'a str,
-    pub session_id: &'a str,
-    pub session_dir: &'a std::path::Path,
-    pub file_locks: &'a FileLocks,
-    pub engine_config: &'a crate::EngineConfig,
+///
+/// All fields are owned (Arc-backed where shared) so a fresh context can be
+/// constructed per call without lifetime gymnastics — this enables side calls
+/// like `smelt.tools.call("bash", args)` from Lua plugin tools.
+pub struct ToolContext {
+    pub event_tx: mpsc::UnboundedSender<EngineEvent>,
+    pub call_id: String,
+    pub cancel: CancellationToken,
+    pub processes: ProcessRegistry,
+    pub proc_done_tx: mpsc::UnboundedSender<(String, Option<i32>)>,
+    pub provider: Provider,
+    pub model: String,
+    pub session_id: String,
+    pub session_dir: std::path::PathBuf,
+    pub file_locks: FileLocks,
+    pub api: crate::ApiConfig,
 }
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
@@ -119,11 +123,7 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> Value;
-    fn execute<'a>(
-        &'a self,
-        args: HashMap<String, Value>,
-        ctx: &'a ToolContext<'a>,
-    ) -> ToolFuture<'a>;
+    fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a>;
     fn needs_confirm(&self, _args: &HashMap<String, Value>) -> Option<String> {
         None
     }

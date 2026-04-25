@@ -1347,21 +1347,30 @@ impl<'a> Turn<'a> {
             .slots
             .iter()
             .map(|s| ToolContext {
-                event_tx: self.event_tx,
-                call_id: &s.tc.id,
-                cancel: &self.cancel,
-                processes: self.processes,
-                proc_done_tx: self.proc_done_tx,
-                provider: &self.provider,
-                model: &self.model,
-                session_id: &self.session_id,
-                session_dir: &self.session_dir,
-                file_locks: self.file_locks,
-                engine_config: self.config,
+                event_tx: self.event_tx.clone(),
+                call_id: s.tc.id.clone(),
+                cancel: self.cancel.clone(),
+                processes: self.processes.clone(),
+                proc_done_tx: self.proc_done_tx.clone(),
+                provider: self.provider.clone(),
+                model: self.model.clone(),
+                session_id: self.session_id.clone(),
+                session_dir: self.session_dir.clone(),
+                file_locks: self.file_locks.clone(),
+                api: self.config.api.clone(),
             })
             .collect();
 
         let mut futs: futures_util::stream::FuturesUnordered<TaggedFut<'_>> =
+            futures_util::stream::FuturesUnordered::new();
+
+        // Side-call futures from `smelt.tools.call` invocations.
+        // Tracked separately from `outstanding` since they don't fill a tool
+        // slot — they belong to a parent plugin invocation that's already
+        // counted via `pending_plugins`.
+        type SideFut<'x> =
+            std::pin::Pin<Box<dyn std::future::Future<Output = (u64, ToolResult)> + Send + 'x>>;
+        let mut side_futs: futures_util::stream::FuturesUnordered<SideFut<'_>> =
             futures_util::stream::FuturesUnordered::new();
 
         for &i in &plan.ready {
@@ -1389,6 +1398,14 @@ impl<'a> Turn<'a> {
                 Some((idx, result)) = futs.next(), if !futs.is_empty() => {
                     completed[idx] = Some(result);
                     outstanding -= 1;
+                }
+                Some((req_id, result)) = side_futs.next(), if !side_futs.is_empty() => {
+                    let _ = self.event_tx.send(EngineEvent::CoreToolResult {
+                        request_id: req_id,
+                        content: result.content,
+                        is_error: result.is_error,
+                        metadata: result.metadata,
+                    });
                 }
                 _ = cancel.cancelled() => break true,
                 Some(cmd) = cmd_rx.recv() => match cmd {
@@ -1621,6 +1638,34 @@ impl<'a> Turn<'a> {
                             });
                             plugin_results.push((call_id, content, is_error));
                             outstanding -= 1;
+                        }
+                    }
+                    UiCommand::CallCoreTool { request_id, parent_call_id, tool_name, args } => {
+                        if let Some(tool) = self.registry.get(&tool_name) {
+                            let ctx = ToolContext {
+                                event_tx: self.event_tx.clone(),
+                                call_id: parent_call_id,
+                                cancel: self.cancel.clone(),
+                                processes: self.processes.clone(),
+                                proc_done_tx: self.proc_done_tx.clone(),
+                                provider: self.provider.clone(),
+                                model: self.model.clone(),
+                                session_id: self.session_id.clone(),
+                                session_dir: self.session_dir.clone(),
+                                file_locks: self.file_locks.clone(),
+                                api: self.config.api.clone(),
+                            };
+                            side_futs.push(Box::pin(async move {
+                                let r = tool.execute(args, &ctx).await;
+                                (request_id, r)
+                            }));
+                        } else {
+                            let _ = self.event_tx.send(EngineEvent::CoreToolResult {
+                                request_id,
+                                content: format!("tool not found: {tool_name}"),
+                                is_error: true,
+                                metadata: None,
+                            });
                         }
                     }
                     UiCommand::AgentMessage { .. }
@@ -2016,14 +2061,14 @@ fn send_usage(
 /// Calculate cost from token usage and emit a `TokenUsage` event.
 pub fn emit_usage(
     tx: &mpsc::UnboundedSender<EngineEvent>,
-    config: &EngineConfig,
+    api: &crate::ApiConfig,
     model: &str,
     usage: protocol::TokenUsage,
 ) {
     send_usage(
         tx,
-        &config.api.provider_type,
-        &config.api.model_config,
+        &api.provider_type,
+        &api.model_config,
         model,
         usage,
         None,

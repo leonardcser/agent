@@ -431,7 +431,76 @@ impl LuaRuntime {
                 }
             })?,
         )?;
+        // smelt.process.spawn_bg(command) → string id, or raises on
+        // spawn error. Adds the child to the same `ProcessRegistry`
+        // that the engine uses, so `smelt.process.list/read_output/kill`
+        // (and the core `read_process_output` / `stop_process` tools)
+        // observe it the same way as `bash run_in_background=true`.
+        process_tbl.set(
+            "spawn_bg",
+            lua.create_function(|_, command: String| -> LuaResult<String> {
+                let registry = crate::lua::try_with_app(|app| app.engine.processes.clone())
+                    .ok_or_else(|| mlua::Error::external("process.spawn_bg: app unavailable"))?;
+                let mut cmd = tokio::process::Command::new("sh");
+                cmd.arg("-c")
+                    .arg(&command)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+                #[cfg(unix)]
+                cmd.process_group(0);
+                let child = cmd
+                    .spawn()
+                    .map_err(|e| mlua::Error::external(e.to_string()))?;
+                let id = registry.next_id();
+                // Discard channel — plugin-spawned processes don't
+                // emit `EngineEvent::ProcessCompleted` today.
+                let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel();
+                registry.spawn(id.clone(), &command, child, done_tx);
+                Ok(id)
+            })?,
+        )?;
         smelt.set("process", process_tbl)?;
+
+        // smelt.shell.* — pure parsing helpers reused from the core
+        // bash tool. Plugins that wrap `bash` (like background_commands)
+        // call these to validate commands the same way before spawning.
+        let shell_tbl = lua.create_table()?;
+        shell_tbl.set(
+            "split",
+            lua.create_function(|_, command: String| {
+                Ok(engine::permissions::split_shell_commands(&command))
+            })?,
+        )?;
+        shell_tbl.set(
+            "split_with_ops",
+            lua.create_function(|lua, command: String| {
+                let parts = engine::permissions::split_shell_commands_with_ops(&command);
+                let out = lua.create_table()?;
+                for (i, (cmd, op)) in parts.into_iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("command", cmd)?;
+                    if let Some(op) = op {
+                        row.set("op", op)?;
+                    }
+                    out.set(i + 1, row)?;
+                }
+                Ok(out)
+            })?,
+        )?;
+        shell_tbl.set(
+            "check_interactive",
+            lua.create_function(|_, command: String| {
+                Ok(engine::tools::check_interactive(&command).map(String::from))
+            })?,
+        )?;
+        shell_tbl.set(
+            "check_background_op",
+            lua.create_function(|_, command: String| {
+                Ok(engine::tools::check_shell_background_operator(&command))
+            })?,
+        )?;
+        smelt.set("shell", shell_tbl)?;
 
         // smelt.agent.*
         let agent_tbl = lua.create_table()?;
@@ -1228,6 +1297,35 @@ impl LuaRuntime {
                             call_id,
                             content,
                             is_error,
+                        })
+                    });
+                    Ok(())
+                },
+            )?,
+        )?;
+        // Internal: dispatch a `smelt.tools.call` side request to the
+        // engine. The Lua wrapper in `_bootstrap.lua` mints `request_id`
+        // via `smelt.task.alloc` and yields after this returns.
+        tools_tbl.set(
+            "__send_call",
+            lua.create_function(
+                |lua,
+                 (request_id, parent_call_id, tool_name, args): (
+                    u64,
+                    String,
+                    String,
+                    mlua::Table,
+                )| {
+                    let arg_map = match lua_table_to_json(lua, &args) {
+                        serde_json::Value::Object(map) => map.into_iter().collect(),
+                        _ => std::collections::HashMap::new(),
+                    };
+                    crate::lua::with_app(|app| {
+                        app.engine.send(protocol::UiCommand::CallCoreTool {
+                            request_id,
+                            parent_call_id,
+                            tool_name,
+                            args: arg_map,
                         })
                     });
                     Ok(())

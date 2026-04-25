@@ -58,11 +58,7 @@ impl Tool for BashTool {
         patterns
     }
 
-    fn execute<'a>(
-        &'a self,
-        args: HashMap<String, Value>,
-        ctx: &'a ToolContext<'a>,
-    ) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let command = str_arg(&args, "command");
 
@@ -92,7 +88,7 @@ const INTERACTIVE_BINS: &[&str] = &[
 /// Git subcommands whose `-i`/`--interactive` flag requires a TTY.
 const GIT_INTERACTIVE_SUBCMDS: &[&str] = &["rebase", "add", "checkout", "clean", "stash"];
 
-fn check_interactive(command: &str) -> Option<&'static str> {
+pub fn check_interactive(command: &str) -> Option<&'static str> {
     let cmds = crate::permissions::split_shell_commands(command);
     for subcmd in &cmds {
         let parts: Vec<&str> = subcmd.split_whitespace().collect();
@@ -120,7 +116,7 @@ fn check_interactive(command: &str) -> Option<&'static str> {
     None
 }
 
-fn check_shell_background_operator(command: &str) -> Option<String> {
+pub fn check_shell_background_operator(command: &str) -> Option<String> {
     let has_background_operator = crate::permissions::split_shell_commands_with_ops(command)
         .iter()
         .any(|(_, op)| op.as_deref() == Some("&"));
@@ -135,7 +131,7 @@ fn check_shell_background_operator(command: &str) -> Option<String> {
     }
 }
 
-async fn execute_background(command: &str, ctx: &ToolContext<'_>) -> ToolResult {
+async fn execute_background(command: &str, ctx: &ToolContext) -> ToolResult {
     match tokio::process::Command::new("sh")
         .arg("-c")
         .arg(command)
@@ -158,7 +154,7 @@ async fn execute_background(command: &str, ctx: &ToolContext<'_>) -> ToolResult 
 async fn execute_streaming(
     command: &str,
     args: &HashMap<String, Value>,
-    ctx: &ToolContext<'_>,
+    ctx: &ToolContext,
 ) -> ToolResult {
     let timeout = timeout_arg(args, 120);
 
