@@ -73,6 +73,26 @@ impl App {
         };
 
         let spinner_char = self.working.spinner_char();
+        let live = self.working.is_animating();
+        // Pill label: live → "compacting" / slug / "working"; otherwise
+        // the slug. Decoupled from the spinner so a paused turn (no
+        // glyph) still shows the label.
+        let pill_label: Option<String> = if live {
+            Some(if is_compacting {
+                "compacting".into()
+            } else if self.settings.show_slug {
+                self.task_label
+                    .as_deref()
+                    .map(String::from)
+                    .unwrap_or_else(|| "working".into())
+            } else {
+                "working".into()
+            })
+        } else if self.settings.show_slug {
+            self.task_label.as_deref().map(String::from)
+        } else {
+            None
+        };
         if let Some(sp) = spinner_char {
             spans.push(StatusSpan {
                 text: format!(" {sp} "),
@@ -80,33 +100,22 @@ impl App {
                 priority: 0,
                 ..StatusSpan::default()
             });
-            let label = if is_compacting {
-                "compacting ".into()
-            } else if self.settings.show_slug {
-                self.task_label
-                    .as_deref()
-                    .map(|l| format!("{l} "))
-                    .unwrap_or_else(|| "working ".into())
+        }
+        if let Some(label) = pill_label {
+            // Add a leading space when the spinner span isn't present
+            // so the label doesn't butt against the prior pill.
+            let text = if spinner_char.is_some() {
+                format!("{label} ")
             } else {
-                "working ".into()
+                format!(" {label} ")
             };
             spans.push(StatusSpan {
-                text: label,
+                text,
                 style: pill_style,
                 priority: 5,
                 truncatable: true,
                 ..StatusSpan::default()
             });
-        } else if self.settings.show_slug {
-            if let Some(label) = self.task_label.as_deref() {
-                spans.push(StatusSpan {
-                    text: format!(" {label} "),
-                    style: pill_style,
-                    priority: 5,
-                    truncatable: true,
-                    ..StatusSpan::default()
-                });
-            }
         }
 
         // Vim mode.

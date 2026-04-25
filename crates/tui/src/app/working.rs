@@ -215,11 +215,14 @@ impl WorkingState {
     }
 
     /// Spinner glyph for the active live turn, or `None` when
-    /// nothing is animating. While paused (blocking dialog), the
-    /// frame index is computed against the frozen `effective_elapsed`,
-    /// so the glyph stays static.
+    /// nothing is animating *or* the turn is paused by a blocking
+    /// dialog. The status bar uses `None` to drop the spinner span
+    /// entirely while paused — the label still renders.
     pub fn spinner_char(&self) -> Option<&'static str> {
         let live = self.live.as_ref()?;
+        if live.pause_started.is_some() {
+            return None;
+        }
         Some(SPINNER_FRAMES[crate::content::spinner_frame_index(live.effective_elapsed())])
     }
 
