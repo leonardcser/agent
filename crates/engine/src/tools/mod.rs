@@ -1,6 +1,5 @@
 pub(crate) mod background;
 mod bash;
-mod bash_background;
 mod edit_file;
 
 mod file_state;
@@ -54,7 +53,6 @@ pub(crate) fn kill_process_group(child: &tokio::process::Child) {
 
 pub use background::{ProcessInfo, ProcessRegistry};
 pub use bash::{check_interactive, check_shell_background_operator, BashTool};
-pub use bash_background::{format_read_result, ReadProcessOutputTool, StopProcessTool};
 pub use edit_file::EditFileTool;
 
 pub use glob::GlobTool;
@@ -505,7 +503,7 @@ pub struct MultiAgentToolConfig {
 }
 
 pub fn build_tools(
-    processes: ProcessRegistry,
+    _processes: ProcessRegistry,
     ma: Option<MultiAgentToolConfig>,
     skills: Option<std::sync::Arc<crate::skills::SkillLoader>>,
 ) -> ToolRegistry {
@@ -527,12 +525,6 @@ pub fn build_tools(
     r.register(Box::new(WebSearchTool));
     r.register(Box::new(NotebookEditTool {
         files: files.clone(),
-    }));
-    r.register(Box::new(ReadProcessOutputTool {
-        registry: processes.clone(),
-    }));
-    r.register(Box::new(StopProcessTool {
-        registry: processes,
     }));
 
     // Skill loader tool (conditionally registered).

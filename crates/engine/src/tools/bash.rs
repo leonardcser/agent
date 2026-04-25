@@ -1,6 +1,4 @@
-use super::{
-    bool_arg, kill_process_group, str_arg, timeout_arg, Tool, ToolContext, ToolFuture, ToolResult,
-};
+use super::{kill_process_group, str_arg, timeout_arg, Tool, ToolContext, ToolFuture, ToolResult};
 use protocol::EngineEvent;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -18,7 +16,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). For long-running processes set run_in_background=true. Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves."
+        "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves."
     }
 
     fn parameters(&self) -> Value {
@@ -27,8 +25,7 @@ impl Tool for BashTool {
             "properties": {
                 "command": {"type": "string", "description": "Shell command to execute"},
                 "description": {"type": "string", "description": "Short (max 10 words) description of what this command does"},
-                "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (default: 120000, max: 600000)"},
-                "run_in_background": {"type": "boolean", "description": "Run the command in the background and return a process ID. Use read_process_output to check output and stop_process to kill it."}
+                "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (default: 120000, max: 600000)"}
             },
             "required": ["command"]
         })
@@ -68,10 +65,6 @@ impl Tool for BashTool {
 
             if let Some(msg) = check_shell_background_operator(&command) {
                 return ToolResult::err(msg);
-            }
-
-            if bool_arg(&args, "run_in_background") {
-                return execute_background(&command, ctx).await;
             }
 
             execute_streaming(&command, &args, ctx).await
@@ -128,26 +121,6 @@ pub fn check_shell_background_operator(command: &str) -> Option<String> {
         )
     } else {
         None
-    }
-}
-
-async fn execute_background(command: &str, ctx: &ToolContext) -> ToolResult {
-    match tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .process_group(0)
-        .spawn()
-    {
-        Ok(child) => {
-            let id = ctx.processes.next_id();
-            ctx.processes
-                .spawn(id.clone(), command, child, ctx.proc_done_tx.clone());
-            ToolResult::ok(format!("background process started with id: {id}"))
-        }
-        Err(e) => ToolResult::err(e.to_string()),
     }
 }
 

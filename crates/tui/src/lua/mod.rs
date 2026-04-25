@@ -1024,8 +1024,8 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/plugins/rewind.lua"),
     ),
     (
-        "smelt.plugins.ps",
-        include_str!("../../../../runtime/lua/smelt/plugins/ps.lua"),
+        "smelt.plugins.background_commands",
+        include_str!("../../../../runtime/lua/smelt/plugins/background_commands.lua"),
     ),
     (
         "smelt.plugins.help",
@@ -1077,7 +1077,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.btw",
     "smelt.plugins.export",
     "smelt.plugins.rewind",
-    "smelt.plugins.ps",
+    "smelt.plugins.background_commands",
     "smelt.plugins.help",
     "smelt.plugins.permissions",
     "smelt.plugins.resume",
