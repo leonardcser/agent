@@ -416,6 +416,24 @@ impl Dialog {
     /// transcript-style cursor/selection/vim mode). `None` for
     /// non-interactive chrome buffer panels and for widget panels —
     /// matches nvim's "no mode in widget windows" model.
+    /// Toggle vim mode on every interactive buffer panel — keeps the
+    /// dialog's selection model identical to the transcript's, which
+    /// always uses vim Visual when the host has vim enabled. Without
+    /// vim, selection runs through `WindowCursor::range` (exclusive of
+    /// the cursor cell), so dragging "hello" by clicking 'h' and
+    /// releasing on 'o' would yank "hell" instead of "hello". The
+    /// host calls this once, right after opening, with its current
+    /// vim setting.
+    pub fn set_vim_enabled_on_interactive(&mut self, enabled: bool) {
+        for panel in &mut self.panels {
+            if panel.interactive {
+                if let DialogPanelContent::Buffer { win, .. } = &mut panel.content {
+                    win.set_vim_enabled(enabled);
+                }
+            }
+        }
+    }
+
     pub fn focused_buffer_window(&self) -> Option<&Window> {
         let panel = self.panels.get(self.focused)?;
         if !panel.interactive {
@@ -1284,6 +1302,8 @@ impl Component for Dialog {
                 // already (0 = panel top); translate into dialog coords
                 // and clamp so a scrolled-out cursor stops rendering
                 // (matches transcript blur-on-scroll behaviour).
+                // `panel.rect.left` already includes `pad_left` (see
+                // resolve_panel_rects), so don't add it again.
                 if win.cursor_line >= panel.rect.height {
                     return None;
                 }
@@ -1291,7 +1311,6 @@ impl Component for Dialog {
                     .rect
                     .left
                     .saturating_sub(self.area.left)
-                    .saturating_add(panel.pad_left)
                     .saturating_add(win.cursor_col);
                 let rel_row = panel
                     .rect

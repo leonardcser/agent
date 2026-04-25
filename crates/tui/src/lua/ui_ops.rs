@@ -198,7 +198,9 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
     let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
     let placement = parse_dialog_placement(&opts);
 
-    app.ui
+    let vim_enabled = app.input.vim_enabled();
+    let win_id = app
+        .ui
         .dialog_open(
             FloatConfig {
                 title,
@@ -210,7 +212,14 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
             dialog_config,
             panel_specs,
         )
-        .ok_or_else(|| "failed to open dialog window".to_string())
+        .ok_or_else(|| "failed to open dialog window".to_string())?;
+    // Mirror the transcript's selection model on interactive buffer
+    // panels — vim Visual gives inclusive selection so dragging
+    // "hello" yanks all five chars, not "hell".
+    if let Some(dialog) = app.ui.dialog_mut(win_id) {
+        dialog.set_vim_enabled_on_interactive(vim_enabled);
+    }
+    Ok(win_id)
 }
 
 fn parse_separator(panel: &mlua::Table) -> Result<Option<SeparatorStyle>, String> {
