@@ -89,25 +89,27 @@ Net deletion: ~300 lines from `app/mouse.rs` (`extend_word_anchored_drag`,
 
 Drag-edge autoscroll stays App-side (frame-tick-driven).
 
-### ⬜ Step 4 — Switch prompt path + drop per-widget selection styles
+### ✅ Step 4 — Drop per-widget selection styles (4b only)
 
-Prompt has its own quirks: `position_prompt_cursor_from_click` does a
-custom char-wrap walk because the prompt buffer is a single multi-line
-edit string instead of a `&[String]`. At click time, wrap the prompt
-buffer into rows once and feed `Window::handle_mouse`.
+Prompt-side mouse unification (4a) was deferred: `Window::handle_mouse`
+assumes `rows.join("\n") == edit_buf.buf` (transcript model), but the
+prompt's source buffer doesn't match the wrapped display rows. Adding a
+row-space ↔ source-space translation layer would be net-zero on code
+size with new bug surface, so the prompt keeps its existing
+`position_prompt_cursor_from_click`.
 
-Net deletion: `position_prompt_cursor_from_click`, the prompt branches in
-`extend_selection_to`, `select_and_copy_word_in_prompt`,
-`copy_prompt_selection_on_release`.
+Done (4b):
+- `TextInput::selection_style` field + `with_selection_style` builder
+  dropped; reads `ctx.selection_style` at draw time.
+- `NotificationStyle::selection` field dropped; reads `ctx.selection_style`.
+- `Compositor` carries `selection_style: Style` populated via
+  `Ui::set_selection_bg`, propagated into every `DrawContext` it builds.
+- `DrawContext` gains `selection_style: Style` (with `#[derive(Default)]`
+  so test sites can `..Default::default()`).
 
-Then drop per-widget `selection_style` overrides:
-- `TextInput::selection_style` → reads `Ui::selection_style()`.
-- `InlineEditField` (if still around after Step 5) → same.
-- `NotificationStyle::selection` → already plumbed; check it's the only
-  consumer.
-
-One source of truth: theme resolves selection bg/fg, `Ui` slot stores it,
-every Window-driven surface reads from there.
+One source of truth: `theme::selection_bg()` flows into `Ui::set_selection_bg`,
+which seeds both the dialog config slot (used by buffer panel overlays)
+and the compositor slot (used by every widget via `DrawContext`).
 
 ### ⬜ Step 5 — Confirm dialog cleanup (the big one)
 

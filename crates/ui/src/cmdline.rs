@@ -404,6 +404,7 @@ mod tests {
             terminal_width: w,
             terminal_height: h,
             focused: true,
+            selection_style: Default::default(),
         }
     }
 

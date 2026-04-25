@@ -11,9 +11,6 @@ pub struct TextInput {
     placeholder: Option<String>,
     placeholder_style: Style,
     text_style: Style,
-    /// Background style for the click-drag selection range. Applied to
-    /// chars between `anchor` and `cursor_col` when both are set.
-    selection_style: Style,
     /// Rect from the last `prepare` — needed by `handle_mouse` to
     /// translate absolute click columns into a text offset.
     last_area: Rect,
@@ -35,18 +32,9 @@ impl TextInput {
                 ..Style::default()
             },
             text_style: Style::default(),
-            selection_style: Style {
-                bg: Some(crossterm::style::Color::DarkGrey),
-                ..Style::default()
-            },
             last_area: Rect::new(0, 0, 0, 0),
             anchor: None,
         }
-    }
-
-    pub fn with_selection_style(mut self, style: Style) -> Self {
-        self.selection_style = style;
-        self
     }
 
     /// Resolved (start, end) char indices when a drag-select is active,
@@ -226,7 +214,7 @@ impl Component for TextInput {
         self.last_area = area;
     }
 
-    fn draw(&self, _area: Rect, grid: &mut GridSlice<'_>, _ctx: &DrawContext) {
+    fn draw(&self, _area: Rect, grid: &mut GridSlice<'_>, ctx: &DrawContext) {
         let w = grid.width();
         if w == 0 || grid.height() == 0 {
             return;
@@ -250,7 +238,7 @@ impl Component for TextInput {
                 .unwrap_or(false);
             let style = if in_selection {
                 Style {
-                    bg: self.selection_style.bg,
+                    bg: ctx.selection_style.bg,
                     ..self.text_style
                 }
             } else {
@@ -463,6 +451,7 @@ mod tests {
             terminal_width: 10,
             terminal_height: 1,
             focused: true,
+            selection_style: Default::default(),
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
         Component::draw(&ti, Rect::new(0, 0, 10, 1), &mut slice, &ctx);
@@ -523,6 +512,7 @@ mod tests {
             terminal_width: 20,
             terminal_height: 1,
             focused: true,
+            selection_style: Default::default(),
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 1));
         Component::draw(&ti, Rect::new(0, 0, 20, 1), &mut slice, &ctx);

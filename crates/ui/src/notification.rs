@@ -29,8 +29,6 @@ pub struct NotificationStyle {
     pub message: Style,
     /// Background fill behind the row.
     pub background: Style,
-    /// Background applied to chars inside the active selection.
-    pub selection: Style,
 }
 
 impl Default for NotificationStyle {
@@ -46,10 +44,6 @@ impl Default for NotificationStyle {
             },
             message: Style::dim(),
             background: Style::default(),
-            selection: Style {
-                bg: Some(crossterm::style::Color::DarkGrey),
-                ..Style::default()
-            },
         }
     }
 }
@@ -148,7 +142,7 @@ impl Component for Notification {
         self.last_area = area;
     }
 
-    fn draw(&self, _area: Rect, slice: &mut GridSlice<'_>, _ctx: &DrawContext) {
+    fn draw(&self, _area: Rect, slice: &mut GridSlice<'_>, ctx: &DrawContext) {
         let w = slice.width();
         let h = slice.height();
         if w == 0 || h == 0 {
@@ -183,7 +177,7 @@ impl Component for Notification {
             let is_selected = selection.is_some_and(|(s, e)| i >= s && i < e);
             let style = if is_selected {
                 Style {
-                    bg: self.style.selection.bg,
+                    bg: ctx.selection_style.bg,
                     ..self.style.message
                 }
             } else {
@@ -261,6 +255,7 @@ mod tests {
             terminal_width: w,
             terminal_height: h,
             focused: false,
+            selection_style: Default::default(),
         }
     }
 
@@ -287,7 +282,6 @@ mod tests {
             error_label: Style::fg(Color::Red),
             message: Style::dim(),
             background: Style::default(),
-            selection: Style::default(),
         });
         let mut grid = Grid::new(30, 1);
         let area = Rect::new(0, 0, 30, 1);

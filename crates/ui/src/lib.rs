@@ -139,6 +139,8 @@ impl Ui {
     /// the same slot.
     pub fn set_selection_bg(&mut self, color: crossterm::style::Color) {
         self.selection_bg = Some(color);
+        let style = self.selection_style();
+        self.compositor.set_selection_style(style);
     }
 
     /// Selection overlay background as a `Style` ready to feed into

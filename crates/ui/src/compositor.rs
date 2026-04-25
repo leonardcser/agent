@@ -1,6 +1,6 @@
 use crate::component::{Component, DrawContext, KeyResult};
 use crate::flush::flush_diff;
-use crate::grid::Grid;
+use crate::grid::{Grid, Style};
 use crate::layout::Rect;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
@@ -48,6 +48,11 @@ pub struct Compositor {
     width: u16,
     height: u16,
     force_redraw: bool,
+    /// Selection background propagated into every `DrawContext` built
+    /// during `render`. Set once via `Ui::set_selection_bg` so widgets
+    /// (TextInput, Notification, dialog buffer overlays) all paint the
+    /// same theme-resolved color instead of each carrying its own slot.
+    selection_style: Style,
 }
 
 impl Compositor {
@@ -60,6 +65,14 @@ impl Compositor {
             width,
             height,
             force_redraw: true,
+            selection_style: Style::default(),
+        }
+    }
+
+    pub fn set_selection_style(&mut self, style: Style) {
+        if self.selection_style != style {
+            self.selection_style = style;
+            self.force_redraw = true;
         }
     }
 
@@ -164,6 +177,7 @@ impl Compositor {
                 terminal_width: self.width,
                 terminal_height: self.height,
                 focused: focused_id.as_deref() == Some(&layer.id),
+                selection_style: self.selection_style,
             };
             layer.component.prepare(layer.rect, &ctx);
         }
@@ -173,6 +187,7 @@ impl Compositor {
                 terminal_width: self.width,
                 terminal_height: self.height,
                 focused: focused_id.as_deref() == Some(&layer.id),
+                selection_style: self.selection_style,
             };
             let mut slice = self.current.slice_mut(layer.rect);
             layer.component.draw(layer.rect, &mut slice, &ctx);

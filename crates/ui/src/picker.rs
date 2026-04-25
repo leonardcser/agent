@@ -389,6 +389,7 @@ mod tests {
             terminal_width: w,
             terminal_height: h,
             focused: false,
+            selection_style: Default::default(),
         }
     }
 
