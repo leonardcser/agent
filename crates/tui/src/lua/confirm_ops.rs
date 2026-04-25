@@ -2,12 +2,21 @@
 //! `runtime/lua/smelt/confirm.lua`.
 //!
 //! The Lua side owns dialog orchestration (open the float, attach
-//! keymaps, route Submit / Dismiss). Rust owns the heavy rendering
-//! and the canonical request state — buffers go through
-//! `crate::app::dialogs::confirm::build_*_buf`, choices through
-//! `build_options`, and resolution through `App::handle_confirm_*`
-//! methods on `lua_handlers`. Each primitive looks up the live
-//! request by `handle_id` against `App::confirm_requests`.
+//! keymaps, route Submit / Dismiss) and now composes the summary +
+//! preview buffers itself via `smelt.{diff,syntax,bash,notebook}.render`.
+//! Rust exposes:
+//!
+//! - `_get(handle_id)` — full request snapshot (tool_name, desc,
+//!   summary, args, outside_dir, approval_patterns, cwd_label, options).
+//!   `options` is the pre-built label array; index into it on resolve.
+//! - `_render_title(buf_id, handle_id)` — fills the title buffer.
+//!   Stays Rust-side because the title's inline bash-highlight on the
+//!   desc needs span-level composition we don't expose to Lua yet.
+//! - `_scroll_preview` / `_focus_reason` — panel-targeted helpers
+//!   collapsed away in 5c (typed panel handles).
+//! - `_back_tab` — toggles app mode + auto-allows when the new mode
+//!   covers this request.
+//! - `_resolve` — final pick, removes the registry entry.
 
 use mlua::prelude::*;
 
@@ -21,96 +30,49 @@ const PANEL_REASON: usize = 4;
 pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let confirm_tbl = lua.create_table()?;
 
-    // smelt.confirm._info(handle_id) → { tool_name, desc, summary }.
-    // Lua reads this for the dialog title / hints; absent handle =>
-    // nil so callers can guard.
+    // smelt.confirm._get(handle_id) → full request snapshot or nil.
     confirm_tbl.set(
-        "_info",
+        "_get",
         lua.create_function(|lua, handle_id: u64| {
-            let info = crate::lua::with_app(|app| {
+            let snapshot = crate::lua::with_app(|app| {
                 let entry = app.confirm_requests.get(&handle_id)?;
-                Some((
-                    entry.req.tool_name.clone(),
-                    entry.req.desc.clone(),
-                    entry.req.summary.clone(),
-                ))
+                let req = &entry.req;
+                let (labels, _) = confirm::build_options(req);
+                Some(RequestSnapshot {
+                    tool_name: req.tool_name.clone(),
+                    desc: req.desc.clone(),
+                    summary: req.summary.clone(),
+                    outside_dir: req.outside_dir.as_ref().map(|p| p.to_string_lossy().into()),
+                    approval_patterns: req.approval_patterns.clone(),
+                    args: req.args.clone(),
+                    cwd_label: cwd_label(),
+                    options: labels,
+                })
             });
-            match info {
-                Some((tool, desc, summary)) => {
-                    let t = lua.create_table()?;
-                    t.set("tool_name", tool)?;
-                    t.set("desc", desc)?;
-                    t.set("summary", summary.unwrap_or_default())?;
-                    Ok(mlua::Value::Table(t))
-                }
+            match snapshot {
+                Some(s) => Ok(mlua::Value::Table(s.into_lua_table(lua)?)),
                 None => Ok(mlua::Value::Nil),
             }
         })?,
     )?;
 
-    // smelt.confirm._build_title_buf(handle_id) → buf_id.
+    // smelt.confirm._render_title(buf_id, handle_id) — fill an
+    // existing buffer with the title line.
     confirm_tbl.set(
-        "_build_title_buf",
-        lua.create_function(|_, handle_id: u64| {
-            let buf_id = crate::lua::with_app(|app| {
-                let req = app.confirm_requests.get(&handle_id)?.req.clone();
-                Some(confirm::build_title_buf(app, &req).0)
+        "_render_title",
+        lua.create_function(|_, (buf_id, handle_id): (u64, u64)| {
+            crate::lua::with_app(|app| {
+                let req = match app.confirm_requests.get(&handle_id) {
+                    Some(e) => e.req.clone(),
+                    None => return,
+                };
+                confirm::render_title_into_buf(app, ui::BufId(buf_id), &req);
             });
-            Ok(buf_id)
-        })?,
-    )?;
-
-    // smelt.confirm._build_summary_buf(handle_id) → buf_id.
-    confirm_tbl.set(
-        "_build_summary_buf",
-        lua.create_function(|_, handle_id: u64| {
-            let buf_id = crate::lua::with_app(|app| {
-                let req = app.confirm_requests.get(&handle_id)?.req.clone();
-                Some(confirm::build_summary_buf(app, &req).0)
-            });
-            Ok(buf_id)
-        })?,
-    )?;
-
-    // smelt.confirm._build_preview_buf(handle_id) → buf_id.
-    confirm_tbl.set(
-        "_build_preview_buf",
-        lua.create_function(|_, handle_id: u64| {
-            let buf_id = crate::lua::with_app(|app| {
-                let req = app.confirm_requests.get(&handle_id)?.req.clone();
-                Some(confirm::build_preview_buf(app, &req).0)
-            });
-            Ok(buf_id)
-        })?,
-    )?;
-
-    // smelt.confirm._option_labels(handle_id) → { "yes", "no", … }.
-    // Choices are registered when `agent.rs` inserts the request, so
-    // this just rebuilds the parallel labels array.
-    confirm_tbl.set(
-        "_option_labels",
-        lua.create_function(|lua, handle_id: u64| {
-            let labels = crate::lua::with_app(|app| {
-                let req = app.confirm_requests.get(&handle_id)?.req.clone();
-                let (labels, _) = confirm::build_options(&req);
-                Some(labels)
-            });
-            match labels {
-                Some(labels) => {
-                    let out = lua.create_table()?;
-                    for (i, l) in labels.into_iter().enumerate() {
-                        out.set(i + 1, l)?;
-                    }
-                    Ok(mlua::Value::Table(out))
-                }
-                None => Ok(mlua::Value::Nil),
-            }
+            Ok(())
         })?,
     )?;
 
     // smelt.confirm._scroll_preview(win_id, dir).
-    // dir: -1 = page up, 1 = page down. Half-page steps to mirror
-    // the previous Rust behaviour.
     confirm_tbl.set(
         "_scroll_preview",
         lua.create_function(|_, (win_id, dir): (u64, i64)| {
@@ -201,4 +163,61 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     smelt.set("confirm", confirm_tbl)?;
     Ok(())
+}
+
+struct RequestSnapshot {
+    tool_name: String,
+    desc: String,
+    summary: Option<String>,
+    outside_dir: Option<String>,
+    approval_patterns: Vec<String>,
+    args: std::collections::HashMap<String, serde_json::Value>,
+    cwd_label: String,
+    options: Vec<String>,
+}
+
+impl RequestSnapshot {
+    fn into_lua_table(self, lua: &Lua) -> LuaResult<mlua::Table> {
+        let t = lua.create_table()?;
+        t.set("tool_name", self.tool_name)?;
+        t.set("desc", self.desc)?;
+        t.set("summary", self.summary.unwrap_or_default())?;
+        match self.outside_dir {
+            Some(s) => t.set("outside_dir", s)?,
+            None => t.set("outside_dir", mlua::Value::Nil)?,
+        }
+        let patterns = lua.create_table()?;
+        for (i, p) in self.approval_patterns.into_iter().enumerate() {
+            patterns.set(i + 1, p)?;
+        }
+        t.set("approval_patterns", patterns)?;
+        let args = lua.create_table()?;
+        for (k, v) in &self.args {
+            args.set(k.as_str(), crate::lua::json_to_lua(lua, v)?)?;
+        }
+        t.set("args", args)?;
+        t.set("cwd_label", self.cwd_label)?;
+        let opts = lua.create_table()?;
+        for (i, label) in self.options.into_iter().enumerate() {
+            opts.set(i + 1, label)?;
+        }
+        t.set("options", opts)?;
+        Ok(t)
+    }
+}
+
+/// Same `~/path` rewrite the Rust-side `build_options` uses, hoisted
+/// here so the Lua snapshot can compose extra labels without hopping
+/// back into Rust.
+fn cwd_label() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| {
+            let home = engine::home_dir();
+            if let Ok(rel) = p.strip_prefix(&home) {
+                return Some(format!("~/{}", rel.display()));
+            }
+            p.to_str().map(String::from)
+        })
+        .unwrap_or_default()
 }

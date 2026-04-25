@@ -1,17 +1,17 @@
 //! Confirm dialog — built-in tool approvals.
 //!
 //! The dialog itself lives in `runtime/lua/smelt/confirm.lua`. This
-//! file is just the Rust-side primitives the Lua orchestrator calls
-//! through `smelt.confirm._*`:
+//! file holds the Rust-side primitives the Lua orchestrator calls:
 //!
-//! - [`build_title_buf`] — bash-syntax-highlit ` tool: desc` line.
-//! - [`build_summary_buf`] — optional one-line muted summary.
-//! - [`build_preview_buf`] — diff / notebook / file / bash-body
-//!   preview, depending on the tool.
+//! - [`render_title_into_buf`] — fills the title buffer with
+//!   ` tool: desc Allow?` (bash-highlit when the tool is `bash`).
 //! - [`build_options`] — yes / no + dynamic "always allow …" entries
 //!   per approval scope. Returns the labels (for the OptionList
 //!   widget) and the parallel `ConfirmChoice` array (looked up on
 //!   resolve by index).
+//!
+//! Summary + preview buffers are composed in Lua via
+//! `smelt.{diff,syntax,bash,notebook}.render`.
 //!
 //! Plugin tools drive their own dialogs through `smelt.ui.dialog.open`.
 
@@ -21,7 +21,6 @@ use crate::app::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest}
 use crate::content::display::{ColorRole, ColorValue};
 use crate::content::layout_out::{LayoutSink, SpanCollector};
 use crate::theme;
-use ui::buffer::BufCreateOpts;
 use ui::BufId;
 
 /// Live Confirm request held in `App::confirm_requests` while the
@@ -32,20 +31,20 @@ pub(crate) struct ConfirmEntry {
     pub choices: Vec<ConfirmChoice>,
 }
 
-/// Title buffer: ` tool: desc Allow?` with the tool name in the accent
-/// color and the desc bash-highlit when the tool is `bash` (or the
-/// preview is a bash body — multi-line commands show only the first
-/// line in the title; the rest goes in the preview panel).
-pub(crate) fn build_title_buf(app: &mut App, req: &ConfirmRequest) -> BufId {
+/// Render the ` tool: desc Allow?` title into `buf_id`. The tool name
+/// shows in the accent color; the desc is bash-highlit when the tool
+/// is `bash` (or the preview is a bash body — multi-line commands
+/// show only the first line, rest goes in the preview panel).
+///
+/// Lua creates the buffer via `smelt.buf.create` and asks Rust to
+/// fill it; the inline bash highlight on the desc keeps title
+/// composition Rust-side until we have a span-level Lua API.
+pub(crate) fn render_title_into_buf(app: &mut App, buf_id: BufId, req: &ConfirmRequest) {
     let theme_snap = theme::snapshot();
     let width = crate::content::term_width() as u16;
     let preview = ConfirmPreview::from_tool(&req.tool_name, &req.desc, &req.args);
     let is_bash = matches!(preview, ConfirmPreview::BashBody { .. }) || req.tool_name == "bash";
 
-    let buf_id = app.ui.buf_create(BufCreateOpts {
-        buftype: ui::buffer::BufType::Scratch,
-        modifiable: false,
-    });
     if let Some(buf) = app.ui.buf_mut(buf_id) {
         crate::content::to_buffer::render_into_buffer(buf, width, &theme_snap, |sink| {
             render_title(
@@ -59,49 +58,6 @@ pub(crate) fn build_title_buf(app: &mut App, req: &ConfirmRequest) -> BufId {
             sink.newline();
         });
     }
-    buf_id
-}
-
-/// Summary buffer: ` <muted summary>` or empty when the request has no
-/// summary. The Lua dialog hides the panel via `collapse_when_empty`.
-pub(crate) fn build_summary_buf(app: &mut App, req: &ConfirmRequest) -> BufId {
-    let theme_snap = theme::snapshot();
-    let width = crate::content::term_width() as u16;
-    let buf_id = app.ui.buf_create(BufCreateOpts {
-        buftype: ui::buffer::BufType::Scratch,
-        modifiable: false,
-    });
-    if let Some(ref summary) = req.summary {
-        if let Some(buf) = app.ui.buf_mut(buf_id) {
-            crate::content::to_buffer::render_into_buffer(buf, width, &theme_snap, |sink| {
-                sink.print(" ");
-                sink.push_fg(ColorValue::Role(ColorRole::Muted));
-                sink.print(summary);
-                sink.pop_style();
-                sink.newline();
-            });
-        }
-    }
-    buf_id
-}
-
-/// Preview buffer: tool-specific syntax-highlit content (diff,
-/// notebook diff, file content, bash body). Empty when the tool has
-/// no preview; the Lua dialog hides the panel via `collapse_when_empty`.
-pub(crate) fn build_preview_buf(app: &mut App, req: &ConfirmRequest) -> BufId {
-    let theme_snap = theme::snapshot();
-    let width = crate::content::term_width() as u16;
-    let preview = ConfirmPreview::from_tool(&req.tool_name, &req.desc, &req.args);
-    let buf_id = app.ui.buf_create(BufCreateOpts {
-        buftype: ui::buffer::BufType::Scratch,
-        modifiable: false,
-    });
-    if preview.is_some() {
-        if let Some(buf) = app.ui.buf_mut(buf_id) {
-            preview.render_into_buffer(buf, width, &theme_snap);
-        }
-    }
-    buf_id
 }
 
 fn render_title(

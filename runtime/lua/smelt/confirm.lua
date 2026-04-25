@@ -1,8 +1,8 @@
 -- `smelt.confirm.open(handle_id)` — built-in tool-approval dialog.
 --
--- Fired from the agent loop (`agent.rs:1379`-ish) after registering a
--- request in `App::confirm_requests`. Plugins can override this
--- function in their init.lua to swap the default UI.
+-- Fired from the agent loop after registering a request in
+-- `App::confirm_requests`. Plugins can override this function in
+-- their init.lua to swap the default UI.
 --
 -- Panels (top → bottom, indices below match the keymap callbacks):
 --   1 title    — bash-syntax-highlit ` tool: desc Allow?`
@@ -22,15 +22,44 @@
 local PANEL_OPTIONS = 4
 local PANEL_REASON  = 5
 
+-- Tools whose preview is rendered into the preview buffer. The Lua
+-- side dispatches by tool_name onto the matching renderer primitive.
+local function fill_preview(buf, req)
+  local tool = req.tool_name
+  if tool == "edit_file" then
+    smelt.diff.render(buf, {
+      old  = req.args.old_string or "",
+      new  = req.args.new_string or "",
+      path = req.args.file_path or "",
+    })
+  elseif tool == "write_file" then
+    smelt.syntax.render(buf, {
+      content = req.args.content or "",
+      path    = req.args.file_path or "",
+    })
+  elseif tool == "edit_notebook" then
+    smelt.notebook.render(buf, req.args)
+  elseif tool == "bash" and req.desc:find("\n") then
+    smelt.bash.render(buf, req.desc)
+  end
+end
+
 function smelt.confirm.open(handle_id)
-  local title_buf   = smelt.confirm._build_title_buf(handle_id)
-  local summary_buf = smelt.confirm._build_summary_buf(handle_id)
-  local preview_buf = smelt.confirm._build_preview_buf(handle_id)
-  local labels      = smelt.confirm._option_labels(handle_id)
-  if not labels then return end  -- registry entry vanished
+  local req = smelt.confirm._get(handle_id)
+  if not req then return end  -- registry entry vanished
+
+  local title_buf   = smelt.buf.create()
+  local summary_buf = smelt.buf.create()
+  local preview_buf = smelt.buf.create()
+
+  smelt.confirm._render_title(title_buf, handle_id)
+  if req.summary and req.summary ~= "" then
+    smelt.buf.set_lines(summary_buf, { " " .. req.summary })
+  end
+  fill_preview(preview_buf, req)
 
   local items = {}
-  for i, label in ipairs(labels) do
+  for i, label in ipairs(req.options) do
     items[i] = { label = label }
   end
 

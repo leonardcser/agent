@@ -137,14 +137,21 @@ is the confirm title line (` tool: command Allow?`), and that lands
 cleanest as a single Rust-side composition rather than two Lua calls.
 5b will keep the title rendering Rust-side.
 
-#### 5b — Confirm request as data + label policy in Lua
+#### ✅ 5b — Confirm request as data, Lua composes buffers
 
-Replace `_build_title_buf`/`_build_summary_buf`/`_build_preview_buf`/
-`_option_labels`/`_back_tab` opaque-handle wrappers with a single
-`smelt.confirm.requests[handle]` table exposing the request fields
-(`tool_name`, `desc`, `summary`, `outside_dir`, `approval_patterns`,
-`cwd_label`, `args`). Lua composes the buffers and labels using the
-renderer primitives from 5a and standard `smelt.buf.*` helpers.
+`smelt.confirm._get(handle_id)` returns a single snapshot table with
+`tool_name`, `desc`, `summary`, `outside_dir`, `approval_patterns`,
+`args`, `cwd_label`, `options`. Lua dispatches the preview by tool
+name onto the matching renderer primitive (`smelt.diff.render`,
+`smelt.syntax.render`, `smelt.bash.render`, `smelt.notebook.render`)
+and `smelt.buf.set_lines` for the summary; the title still goes
+through `smelt.confirm._render_title(buf, handle)` because the
+inline bash-highlight on `desc` needs span-level composition.
+
+Dropped: `_build_title_buf`, `_build_summary_buf`,
+`_build_preview_buf`, `_option_labels`, `_info`. Kept (collapse in
+5c/typed panel handles): `_scroll_preview`, `_focus_reason`,
+`_back_tab`, `_resolve`.
 
 #### 5c — Panel handles, not index pokes
 
