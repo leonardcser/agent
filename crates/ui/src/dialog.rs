@@ -93,6 +93,27 @@ pub trait PanelWidget: Component + Send {
     fn text_value(&self) -> Option<String> {
         None
     }
+    /// Cast to `&mut dyn ListWidget` if this widget is list-shaped.
+    /// Default returns `None`. Implementors override with `Some(self)`.
+    fn as_list_widget(&mut self) -> Option<&mut dyn ListWidget> {
+        None
+    }
+}
+
+/// Selectable-list contract that buffer-backed lists (future
+/// `BufferList`) and item-backed lists (`OptionList`) both satisfy.
+/// Lets callers route uniform list operations — click-to-select,
+/// keyboard nav, scroll — without knowing the backing store. Widgets
+/// expose themselves through `PanelWidget::as_list_widget`.
+pub trait ListWidget {
+    fn row_count(&self) -> usize;
+    fn selected(&self) -> Option<usize>;
+    fn set_selected(&mut self, idx: usize);
+    fn scroll_top(&self) -> usize;
+    fn set_scroll_top(&mut self, top: usize);
+    /// Resolve the row index at `rel_row` rows below the widget's draw
+    /// area top. Returns `None` if the row is past the last item.
+    fn row_at(&self, rel_row: u16) -> Option<usize>;
 }
 
 /// Live snapshot of a dialog panel's widget state. Built on-demand by

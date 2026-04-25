@@ -6,7 +6,7 @@
 //! widget-managed cursor state.
 
 use crate::component::{Component, CursorInfo, DrawContext, KeyResult, WidgetEvent};
-use crate::dialog::PanelWidget;
+use crate::dialog::{ListWidget, PanelWidget};
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -395,6 +395,34 @@ impl PanelWidget for OptionList {
         } else {
             Some(self.cursor)
         }
+    }
+    fn as_list_widget(&mut self) -> Option<&mut dyn ListWidget> {
+        Some(self)
+    }
+}
+
+impl ListWidget for OptionList {
+    fn row_count(&self) -> usize {
+        self.items.len()
+    }
+    fn selected(&self) -> Option<usize> {
+        if self.items.is_empty() {
+            None
+        } else {
+            Some(self.cursor)
+        }
+    }
+    fn set_selected(&mut self, idx: usize) {
+        self.set_cursor(idx);
+    }
+    fn scroll_top(&self) -> usize {
+        self.scroll_top
+    }
+    fn set_scroll_top(&mut self, top: usize) {
+        self.scroll_top = top.min(self.items.len().saturating_sub(1));
+    }
+    fn row_at(&self, rel_row: u16) -> Option<usize> {
+        self.item_at_visual_row(rel_row)
     }
 }
 
