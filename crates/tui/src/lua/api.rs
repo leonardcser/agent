@@ -1316,10 +1316,7 @@ impl LuaRuntime {
                     String,
                     mlua::Table,
                 )| {
-                    let arg_map = match lua_table_to_json(lua, &args) {
-                        serde_json::Value::Object(map) => map.into_iter().collect(),
-                        _ => std::collections::HashMap::new(),
-                    };
+                    let arg_map = lua_table_to_args(lua, &args);
                     crate::lua::with_app(|app| {
                         app.engine.send(protocol::UiCommand::CallCoreTool {
                             request_id,
@@ -1817,4 +1814,22 @@ fn lua_value_to_json(lua: &Lua, val: &mlua::Value) -> serde_json::Value {
         mlua::Value::Table(t) => lua_table_to_json(lua, t),
         _ => serde_json::Value::Null,
     }
+}
+
+/// Treat a Lua table as a `{ string => json }` arg map, the shape every
+/// tool call accepts. Skips non-string keys.
+pub(super) fn lua_table_to_args(
+    lua: &Lua,
+    table: &mlua::Table,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    let mut out = std::collections::HashMap::new();
+    for pair in table.pairs::<mlua::Value, mlua::Value>().flatten() {
+        let (k, v) = pair;
+        let key = match k {
+            mlua::Value::String(s) => s.to_string_lossy().to_string(),
+            _ => continue,
+        };
+        out.insert(key, lua_value_to_json(lua, &v));
+    }
+    out
 }
