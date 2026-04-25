@@ -238,20 +238,60 @@ Canonicalization (Ctrl-R and friends):
   `settings` migrate to the new entry point. Plugins also gain a
   visual `prefix = "● "` pill on theme/color items and lavender /
   lilac descriptions deduplicate to "cool purple" / "warm purple".
-- **Step 6 — Migrate Confirm to Lua.** Deferred. The mechanical
-  migration is clear (add `smelt.confirm.build_{title,summary,preview}
-  _buf`, `smelt.confirm.resolve`, `smelt.confirm.back_tab` sync
-  primitives, port `app/dialogs/confirm.rs` + `confirm_preview.rs`'s
-  panel layout / keymap wiring to `confirm.lua`, change
-  `agent.rs:1381` to fire `smelt.confirm.open(req_tbl)` instead of
-  calling `dialogs::confirm::open`, delete the Rust dialog file plus
-  `DomainOp::ConfirmBackTab` / `DomainOp::ResolveConfirm`). The
-  reason to defer: Confirm is the only security-critical dialog —
-  getting the approval-scope / pattern / BackTab mode-toggle paths
-  wrong bypasses permission checks. Worth a focused session with
-  live smoke-testing, not a rush at the end of a bigger refactor.
-  Confirm.rs's `DomainOp`s (ConfirmBackTab, ResolveConfirm) are
-  legitimate domain ops while the dialog is Rust-authored — the
-  Rust BackTab keymap closure holds `&mut Ui` when it fires, so it
-  can't use `with_app` directly; the DomainOp queue is the correct
-  funnel until the closure itself moves to Lua.
+- **Step 6 — Rip out `LuaOps` entirely.** Active. The `LuaOps`
+  struct holds two intermediate layers between Lua and App: snapshot
+  reads (`set_context` populates `transcript_text` / `engine` /
+  `settings` / `input_history` / `available_models` from App at tick
+  start; Lua bindings read via `s.ops.lock().some_field`) and queued
+  writes (`ops.push(DomainOp::Foo)` → `App::apply_ops` reducer arm
+  calls method). Both are vestigial now that Lua reaches `&mut App`
+  via `with_app`. End state: `lua.create_function(|_, v| { with_app(
+  |app| app.method(v)) })` — uniform direct calls.
+
+  Migration order, each green on build/test/clippy:
+  1. Bump `pub(super)` App methods to `pub(crate)` for the ones Lua
+     bindings will call (`apply_model`, `set_mode`, `set_settings`,
+     `toggle_mode`, `set_reasoning_effort`, `sync_permissions`,
+     `resolve_confirm`, `finish_turn`, `cancel_agent`,
+     `send_permission_decision`, …). No behaviour change.
+  2. Migrate the five `UiOp` variants to direct `with_app`:
+     `Notify`, `NotifyError`, `SetGhostText`, `ClearGhostText`,
+     `CloseFloat`. Delete the `UiOp` enum + its reducer arm.
+  3. Migrate the simple `DomainOp` variants (single-method-call
+     ones: `SetModel`, `SetMode`, `SetReasoningEffort`, `Submit`,
+     `Cancel`, `LoadSession`, `DeleteSession`, `KillAgent`,
+     `KillProcess`, `YankBlockAtCursor`, `RemovePromptSection`,
+     `SetPromptSection`).
+  4. Migrate the complex `DomainOp` variants (with inline logic:
+     `RunCommand`, `Compact`, `ToggleSetting`, `SyncPermissions`,
+     `RewindToBlock`, `EngineAsk`, `ResolveToolResult`).
+  5. Replace remaining `confirm.rs` ops (`ConfirmBackTab`,
+     `ResolveConfirm`, `CloseFloat`) with a small closure queue
+     (`Vec<Box<dyn FnOnce(&mut App) + Send>>`) — confirm.rs's three
+     callbacks fire from inside `&mut Ui` dispatch and need
+     deferral. Keep the queue, replace the enum payload.
+  6. Migrate snapshot reads to live reads. Each `snap_read!(lua,
+     shared, |o| o.transcript_text.clone()…)` becomes
+     `lua.create_function(|_, ()| { with_app(|app| app.transcript.
+     text()) })`. Delete `set_context` / `clear_context` /
+     `LuaOps`'s read fields.
+  7. Delete `ops.rs`, `ops_apply.rs`, `LuaOps`, `OpsHandle`. Rename
+     the closure queue to a focused `DeferredQueue` (or fold it
+     into `App` as a private `Vec`). Drop the `push_op!` /
+     `snap_read!` macros.
+- **Step 7 — Migrate Confirm to Lua.** Queued after Step 6. The
+  mechanical migration is clear (add `smelt.confirm._build_{title,
+  summary,preview}_buf`, `smelt.confirm.resolve`, `smelt.confirm.
+  back_tab` sync primitives, port `app/dialogs/confirm.rs` +
+  `confirm_preview.rs`'s panel layout / keymap wiring to
+  `confirm.lua`, change `agent.rs:1381` to fire `smelt.confirm.
+  open(req_tbl)`, delete the Rust dialog files). With Step 6
+  landed, the Rust closure queue from 5 also disappears — Lua
+  callbacks are deferred natively.
+
+  Reason to sequence after 6, not before: the migration is much
+  cleaner without an enum + reducer to thread `ConfirmChoice` /
+  `ApprovalScope` through. Smoke-test discipline still matters
+  here — Confirm is the only security-critical dialog (tool
+  approval), so the approval-scope / pattern / BackTab
+  mode-toggle paths need a live cycle before merge.
