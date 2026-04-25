@@ -30,6 +30,7 @@ pub mod ui_ops;
 pub use app_ref::{install_app_ptr, try_with_app, with_app, AppPtrGuard};
 
 pub use task::{LuaTaskRuntime, TaskCompletion, TaskDriveOutput};
+pub use tasks::PluginToolEnv;
 
 /// Outcome of invoking a plugin tool handler.
 pub enum ToolExecResult {
@@ -351,6 +352,19 @@ pub(crate) struct LuaHandle {
     key: mlua::RegistryKey,
 }
 
+/// Per-plugin-tool callable handles. `execute` is mandatory; the rest
+/// are optional permission hooks the plugin opts in to via
+/// `smelt.tools.register{ needs_confirm = fn, approval_patterns = fn,
+/// preflight = fn }`. When at least one hook is set, the engine
+/// round-trips through `EvaluatePluginToolHooks` per call before
+/// dispatching the tool — same Allow / Deny / Ask flow core tools use.
+pub(crate) struct PluginToolHandles {
+    pub execute: LuaHandle,
+    pub needs_confirm: Option<LuaHandle>,
+    pub approval_patterns: Option<LuaHandle>,
+    pub preflight: Option<LuaHandle>,
+}
+
 /// Stash a Lua callable in `shared.callbacks` under a fresh u64 id.
 /// Used by every `smelt.win.*` binding that takes a callback — pulls
 /// the registry-value + atomic-id + insert dance out of the bindings.
@@ -406,7 +420,7 @@ pub(crate) struct LuaShared {
     /// spam one toast per frame — only re-notify when the message
     /// changes; clear the entry on a successful tick.
     pub(crate) statusline_last_errors: Mutex<HashMap<String, String>>,
-    pub(crate) plugin_tools: Mutex<HashMap<String, LuaHandle>>,
+    pub(crate) plugin_tools: Mutex<HashMap<String, PluginToolHandles>>,
     pub(crate) callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub(crate) next_id: AtomicU64,
     /// Separate counter for buffer IDs minted by `smelt.buf.create`.
@@ -1132,6 +1146,16 @@ mod tests {
             .expect("install_test_notify");
     }
 
+    fn test_env() -> PluginToolEnv<'static> {
+        static EMPTY_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let p = EMPTY_PATH.get_or_init(std::path::PathBuf::new);
+        PluginToolEnv {
+            mode: protocol::Mode::Apply,
+            session_id: "",
+            session_dir: p,
+        }
+    }
+
     fn drain_notifications(rt: &LuaRuntime) -> Vec<String> {
         let log: mlua::Table = match rt.lua.globals().get("test_log") {
             Ok(t) => t,
@@ -1524,7 +1548,7 @@ mod tests {
             .unwrap();
         let mut args = std::collections::HashMap::new();
         args.insert("who".into(), serde_json::json!("world"));
-        match rt.execute_plugin_tool("echo", &args, 1, "c1") {
+        match rt.execute_plugin_tool("echo", &args, 1, "c1", test_env()) {
             ToolExecResult::Immediate { content, is_error } => {
                 assert_eq!(content, "hi world");
                 assert!(!is_error);
@@ -1553,7 +1577,7 @@ mod tests {
             .exec()
             .unwrap();
         let args = std::collections::HashMap::new();
-        match rt.execute_plugin_tool("wait_then_yes", &args, 7, "c9") {
+        match rt.execute_plugin_tool("wait_then_yes", &args, 7, "c9", test_env()) {
             ToolExecResult::Pending => {}
             ToolExecResult::Immediate { .. } => panic!("expected pending after yield"),
         }

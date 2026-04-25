@@ -51,6 +51,60 @@ pub struct PluginToolDef {
     pub modes: Option<Vec<Mode>>,
     #[serde(default)]
     pub execution_mode: ToolExecutionMode,
+    /// When `true`, this plugin tool replaces the core Rust tool of the
+    /// same name. The engine drops the core definition from the LLM
+    /// schema and dispatches calls to the plugin instead. When `false`
+    /// (default), registering a name that collides with a core tool
+    /// is an error reported back to the user.
+    #[serde(default)]
+    pub override_core: bool,
+    /// Hook signals declared by the plugin. Each `true` flag tells the
+    /// engine to round-trip through `EvaluatePluginToolHooks` before
+    /// dispatching the tool — to ask the user for permission, run a
+    /// preflight check, etc. When all flags are false the engine
+    /// dispatches the tool directly (today's behavior, no permission
+    /// gate). Plugin tools that touch security-sensitive surfaces
+    /// (bash, file mutation) MUST opt in.
+    #[serde(default)]
+    pub hooks: PluginToolHookFlags,
+}
+
+/// Which permission hooks a plugin tool has registered. Sent with
+/// `PluginToolDef` so the engine knows whether to ask the TUI to
+/// evaluate them per-call.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginToolHookFlags {
+    #[serde(default)]
+    pub needs_confirm: bool,
+    #[serde(default)]
+    pub approval_patterns: bool,
+    #[serde(default)]
+    pub preflight: bool,
+}
+
+impl PluginToolHookFlags {
+    /// True when at least one hook is registered — i.e. the engine must
+    /// round-trip through `EvaluatePluginToolHooks` before dispatch.
+    pub fn any(&self) -> bool {
+        self.needs_confirm || self.approval_patterns || self.preflight
+    }
+}
+
+/// Result of evaluating a plugin tool's permission hooks for a specific
+/// invocation. Returned by the TUI in response to
+/// `EngineEvent::EvaluatePluginToolHooks`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginToolHooks {
+    /// Confirm dialog message; `None` falls back to the tool name.
+    #[serde(default)]
+    pub needs_confirm: Option<String>,
+    /// Approval patterns to offer "always allow" for.
+    #[serde(default)]
+    pub approval_patterns: Vec<String>,
+    /// Pre-flight error; `Some` fails the call immediately without
+    /// asking the user.
+    #[serde(default)]
+    pub preflight_error: Option<String>,
 }
 
 /// Events emitted by the engine. The UI consumes these to update its display.
@@ -184,6 +238,19 @@ pub enum EngineEvent {
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
     },
+
+    /// Engine asks the TUI to evaluate a plugin tool's permission
+    /// hooks (`needs_confirm`, `approval_patterns`, `preflight`) for a
+    /// specific invocation. The TUI replies with
+    /// `UiCommand::PluginToolHooksResult`, after which the engine
+    /// resumes the standard Allow / Deny / Ask flow.
+    EvaluatePluginToolHooks {
+        request_id: u64,
+        call_id: String,
+        tool_name: String,
+        args: HashMap<String, serde_json::Value>,
+        mode: Mode,
+    },
 }
 
 /// Commands sent from the UI to the engine.
@@ -303,6 +370,13 @@ pub enum UiCommand {
         call_id: String,
         content: String,
         is_error: bool,
+    },
+
+    /// Result of evaluating a plugin tool's permission hooks (response
+    /// to `EngineEvent::EvaluatePluginToolHooks`).
+    PluginToolHooksResult {
+        request_id: u64,
+        hooks: PluginToolHooks,
     },
 
     /// Cancel the current turn.

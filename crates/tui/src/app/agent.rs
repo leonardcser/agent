@@ -697,6 +697,19 @@ impl App {
                 self.handle_plugin_tool(request_id, call_id, tool_name, args);
                 SessionControl::Continue
             }
+            EngineEvent::EvaluatePluginToolHooks {
+                request_id,
+                tool_name,
+                args,
+                ..
+            } => {
+                let _guard = crate::lua::install_app_ptr(self);
+                let hooks = self.lua.evaluate_plugin_hooks(&tool_name, &args);
+                drop(_guard);
+                self.engine
+                    .send(protocol::UiCommand::PluginToolHooksResult { request_id, hooks });
+                SessionControl::Continue
+            }
         }
     }
 
@@ -714,10 +727,20 @@ impl App {
         tool_name: String,
         args: std::collections::HashMap<String, serde_json::Value>,
     ) {
-        match self
-            .lua
-            .execute_plugin_tool(&tool_name, &args, request_id, &call_id)
-        {
+        let mode = self.mode;
+        let session_id = self.session.id.clone();
+        let session_dir = crate::session::dir_for(&self.session);
+        match self.lua.execute_plugin_tool(
+            &tool_name,
+            &args,
+            request_id,
+            &call_id,
+            crate::lua::PluginToolEnv {
+                mode,
+                session_id: &session_id,
+                session_dir: &session_dir,
+            },
+        ) {
             crate::lua::ToolExecResult::Immediate { content, is_error } => {
                 self.engine.send(protocol::UiCommand::PluginToolResult {
                     request_id,

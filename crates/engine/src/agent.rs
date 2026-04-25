@@ -557,6 +557,24 @@ struct ToolExecutionPlan<'a> {
     /// until after the concurrent phase, then dispatched one at a time.
     /// (tool_call, args, start)
     sequential_plugins: Vec<(&'a protocol::ToolCall, HashMap<String, Value>, Instant)>,
+    /// Plugin tools whose permission hooks are being evaluated by the
+    /// TUI. Resolved by `UiCommand::PluginToolHooksResult`, after which
+    /// the call transitions into `pending_plugins` (Allow), into
+    /// `pending_plugin_perms` (Ask), or into a synthetic deny result.
+    pending_plugin_hooks: Vec<(u64, PendingPluginCall<'a>)>,
+    /// Plugin tools awaiting a user permission decision after their
+    /// hooks evaluated to `Ask`. Resolved by
+    /// `UiCommand::PermissionDecision`.
+    pending_plugin_perms: Vec<(u64, PendingPluginCall<'a>)>,
+}
+
+/// In-flight plugin tool call carried through the hooks→permission
+/// pipeline. Mirrors the data `ToolSlot` carries for core tools.
+struct PendingPluginCall<'a> {
+    tc: &'a protocol::ToolCall,
+    args: HashMap<String, Value>,
+    tool_start: Instant,
+    is_sequential: bool,
 }
 
 /// Encapsulates the state of a single agent turn.
@@ -939,6 +957,18 @@ impl<'a> Turn<'a> {
                 let mut defs =
                     self.registry
                         .definitions(self.permissions, self.mode, self.config.interactive);
+                // Plugin tools with `override_core` shadow the core
+                // definition of the same name — drop the core one so
+                // the LLM only sees a single schema for that tool name.
+                let overridden: std::collections::HashSet<&str> = self
+                    .plugin_tools
+                    .iter()
+                    .filter(|pt| pt.override_core)
+                    .map(|pt| pt.name.as_str())
+                    .collect();
+                if !overridden.is_empty() {
+                    defs.retain(|d| !overridden.contains(d.function.name.as_str()));
+                }
                 for pt in &self.plugin_tools {
                     if let Some(ref modes) = pt.modes {
                         if !modes.contains(&self.mode) {
@@ -1131,6 +1161,8 @@ impl<'a> Turn<'a> {
             pending_perms: Vec::new(),
             pending_plugins: Vec::new(),
             sequential_plugins: Vec::new(),
+            pending_plugin_hooks: Vec::new(),
+            pending_plugin_perms: Vec::new(),
         };
 
         for tc in tool_calls {
@@ -1151,32 +1183,57 @@ impl<'a> Turn<'a> {
                 summary,
             });
 
+            // Plugin-tool dispatch. A plugin tool with `override_core`
+            // shadows the same-named core tool here AND in `definitions()`
+            // — the LLM only sees the plugin's schema and we never reach
+            // the core-tool path for that name. Without the flag, the
+            // core tool wins on dispatch (and the engine errors at
+            // schema-emit time for collisions, see `definitions()`).
+            let plugin_tool = self.plugin_tools.iter().find(|pt| {
+                pt.name == tc.function.name
+                    && (pt.override_core || self.registry.get(&tc.function.name).is_none())
+            });
+            if let Some(pt) = plugin_tool {
+                let is_sequential =
+                    matches!(pt.execution_mode, protocol::ToolExecutionMode::Sequential);
+                if pt.hooks.any() {
+                    // Round-trip through the TUI for permission hooks.
+                    let request_id = next_request_id();
+                    self.emit(EngineEvent::EvaluatePluginToolHooks {
+                        request_id,
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function.name.clone(),
+                        args: args.clone(),
+                        mode: self.mode,
+                    });
+                    plan.pending_plugin_hooks.push((
+                        request_id,
+                        PendingPluginCall {
+                            tc,
+                            args: args.clone(),
+                            tool_start,
+                            is_sequential,
+                        },
+                    ));
+                } else if is_sequential {
+                    plan.sequential_plugins.push((tc, args.clone(), tool_start));
+                } else {
+                    let request_id = next_request_id();
+                    self.emit(EngineEvent::ExecutePluginTool {
+                        request_id,
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function.name.clone(),
+                        args: args.clone(),
+                    });
+                    plan.pending_plugins
+                        .push((request_id, tc.id.clone(), tool_start));
+                }
+                continue;
+            }
+
             let tool = match self.registry.get(&tc.function.name) {
                 Some(t) => t,
                 None => {
-                    if let Some(pt) = self
-                        .plugin_tools
-                        .iter()
-                        .find(|pt| pt.name == tc.function.name)
-                    {
-                        match pt.execution_mode {
-                            protocol::ToolExecutionMode::Concurrent => {
-                                let request_id = next_request_id();
-                                self.emit(EngineEvent::ExecutePluginTool {
-                                    request_id,
-                                    call_id: tc.id.clone(),
-                                    tool_name: tc.function.name.clone(),
-                                    args: args.clone(),
-                                });
-                                plan.pending_plugins
-                                    .push((request_id, tc.id.clone(), tool_start));
-                            }
-                            protocol::ToolExecutionMode::Sequential => {
-                                plan.sequential_plugins.push((tc, args.clone(), tool_start));
-                            }
-                        }
-                        continue;
-                    }
                     self.push_tool_result(
                         &tc.id,
                         &format!("unknown tool: {}", tc.function.name),
@@ -1314,8 +1371,11 @@ impl<'a> Turn<'a> {
             futs.push(Box::pin(async move { (i, fut.await) }));
         }
 
-        let mut outstanding =
-            plan.ready.len() + plan.pending_perms.len() + plan.pending_plugins.len();
+        let mut outstanding = plan.ready.len()
+            + plan.pending_perms.len()
+            + plan.pending_plugins.len()
+            + plan.pending_plugin_hooks.len()
+            + plan.pending_plugin_perms.len();
         let cancel = &self.cancel;
         let cmd_rx = &mut self.cmd_rx;
         let mut deferred: Vec<UiCommand> = Vec::new();
@@ -1361,6 +1421,184 @@ impl<'a> Turn<'a> {
                                     metadata: None,
                                 });
                                 outstanding -= 1;
+                            }
+                        } else if let Some(pos) = plan
+                            .pending_plugin_perms
+                            .iter()
+                            .position(|(rid, _)| *rid == request_id)
+                        {
+                            // Plugin tool whose hooks evaluated to Ask
+                            // and is now hearing back from the user.
+                            let (_, pending) = plan.pending_plugin_perms.swap_remove(pos);
+                            if approved {
+                                if pending.is_sequential {
+                                    plan.sequential_plugins.push((
+                                        pending.tc,
+                                        pending.args,
+                                        pending.tool_start,
+                                    ));
+                                } else {
+                                    let rid = next_request_id();
+                                    let _ = self.event_tx.send(EngineEvent::ExecutePluginTool {
+                                        request_id: rid,
+                                        call_id: pending.tc.id.clone(),
+                                        tool_name: pending.tc.function.name.clone(),
+                                        args: pending.args.clone(),
+                                    });
+                                    plan.pending_plugins.push((
+                                        rid,
+                                        pending.tc.id.clone(),
+                                        pending.tool_start,
+                                    ));
+                                }
+                            } else {
+                                let denial = match message {
+                                    Some(msg) => format!(
+                                        "The user denied this tool call with message: {msg}"
+                                    ),
+                                    None => "The user denied this tool call. Try a different \
+                                             approach or ask the user for guidance."
+                                        .to_string(),
+                                };
+                                let elapsed_ms =
+                                    Some(pending.tool_start.elapsed().as_millis() as u64);
+                                let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                                    call_id: pending.tc.id.clone(),
+                                    result: ToolOutcome {
+                                        content: denial.clone(),
+                                        is_error: false,
+                                        metadata: None,
+                                    },
+                                    elapsed_ms,
+                                });
+                                plugin_results.push((pending.tc.id.clone(), denial, false));
+                                outstanding -= 1;
+                            }
+                        }
+                    }
+                    UiCommand::PluginToolHooksResult { request_id, hooks } => {
+                        if let Some(pos) = plan
+                            .pending_plugin_hooks
+                            .iter()
+                            .position(|(rid, _)| *rid == request_id)
+                        {
+                            let (_, pending) = plan.pending_plugin_hooks.swap_remove(pos);
+                            // Preflight: bail immediately on hook error.
+                            if let Some(err) = hooks.preflight_error {
+                                let elapsed_ms =
+                                    Some(pending.tool_start.elapsed().as_millis() as u64);
+                                let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                                    call_id: pending.tc.id.clone(),
+                                    result: ToolOutcome {
+                                        content: err.clone(),
+                                        is_error: true,
+                                        metadata: None,
+                                    },
+                                    elapsed_ms,
+                                });
+                                plugin_results.push((pending.tc.id.clone(), err, true));
+                                outstanding -= 1;
+                            } else {
+                                // Same Decision flow core tools use, keyed on tool
+                                // name. Plugin tools that shadow a core name
+                                // (override_core) inherit that name's permission
+                                // ruleset by design — e.g. a plugin "bash" goes
+                                // through the bash subcommand-split machinery in
+                                // permissions::decide_base.
+                                let mut decision = self.permissions.decide(
+                                    self.mode,
+                                    &pending.tc.function.name,
+                                    &pending.args,
+                                    false,
+                                );
+                                if decision == Decision::Ask {
+                                    let rt = self.runtime_approvals.read().unwrap();
+                                    let desc = hooks
+                                        .needs_confirm
+                                        .clone()
+                                        .unwrap_or_else(|| pending.tc.function.name.clone());
+                                    if rt.is_auto_approved(
+                                        self.permissions,
+                                        self.mode,
+                                        &pending.tc.function.name,
+                                        &pending.args,
+                                        &desc,
+                                    ) {
+                                        decision = Decision::Allow;
+                                    }
+                                }
+                                match decision {
+                                    Decision::Allow => {
+                                        if pending.is_sequential {
+                                            plan.sequential_plugins.push((
+                                                pending.tc,
+                                                pending.args,
+                                                pending.tool_start,
+                                            ));
+                                        } else {
+                                            let rid = next_request_id();
+                                            let _ = self
+                                                .event_tx
+                                                .send(EngineEvent::ExecutePluginTool {
+                                                    request_id: rid,
+                                                    call_id: pending.tc.id.clone(),
+                                                    tool_name: pending.tc.function.name.clone(),
+                                                    args: pending.args.clone(),
+                                                });
+                                            plan.pending_plugins.push((
+                                                rid,
+                                                pending.tc.id.clone(),
+                                                pending.tool_start,
+                                            ));
+                                        }
+                                    }
+                                    Decision::Deny => {
+                                        let denial = "The user's permission settings blocked \
+                                                      this tool call. Try a different approach \
+                                                      or ask the user for guidance."
+                                            .to_string();
+                                        let elapsed_ms = Some(
+                                            pending.tool_start.elapsed().as_millis() as u64,
+                                        );
+                                        let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                                            call_id: pending.tc.id.clone(),
+                                            result: ToolOutcome {
+                                                content: denial.clone(),
+                                                is_error: false,
+                                                metadata: None,
+                                            },
+                                            elapsed_ms,
+                                        });
+                                        plugin_results.push((pending.tc.id.clone(), denial, false));
+                                        outstanding -= 1;
+                                    }
+                                    Decision::Ask => {
+                                        let cmd_summary =
+                                            if pending.tc.function.name == "bash" {
+                                                let d = tools::str_arg(&pending.args, "description");
+                                                (!d.is_empty()).then_some(d)
+                                            } else {
+                                                None
+                                            };
+                                        let confirm_msg = hooks
+                                            .needs_confirm
+                                            .clone()
+                                            .unwrap_or_else(|| pending.tc.function.name.clone());
+                                        let rid = next_request_id();
+                                        let _ = self
+                                            .event_tx
+                                            .send(EngineEvent::RequestPermission {
+                                                request_id: rid,
+                                                call_id: pending.tc.id.clone(),
+                                                tool_name: pending.tc.function.name.clone(),
+                                                args: pending.args.clone(),
+                                                confirm_message: confirm_msg,
+                                                approval_patterns: hooks.approval_patterns,
+                                                summary: cmd_summary,
+                                            });
+                                        plan.pending_plugin_perms.push((rid, pending));
+                                    }
+                                }
                             }
                         }
                     }
@@ -1409,6 +1647,32 @@ impl<'a> Turn<'a> {
                     elapsed_ms,
                 });
                 plugin_results.push((call_id, "cancelled".to_string(), true));
+            }
+            for (_, pending) in plan.pending_plugin_hooks.drain(..) {
+                let elapsed_ms = Some(pending.tool_start.elapsed().as_millis() as u64);
+                let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                    call_id: pending.tc.id.clone(),
+                    result: ToolOutcome {
+                        content: "cancelled".to_string(),
+                        is_error: true,
+                        metadata: None,
+                    },
+                    elapsed_ms,
+                });
+                plugin_results.push((pending.tc.id.clone(), "cancelled".to_string(), true));
+            }
+            for (_, pending) in plan.pending_plugin_perms.drain(..) {
+                let elapsed_ms = Some(pending.tool_start.elapsed().as_millis() as u64);
+                let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                    call_id: pending.tc.id.clone(),
+                    result: ToolOutcome {
+                        content: "cancelled".to_string(),
+                        is_error: true,
+                        metadata: None,
+                    },
+                    elapsed_ms,
+                });
+                plugin_results.push((pending.tc.id.clone(), "cancelled".to_string(), true));
             }
         }
 

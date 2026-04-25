@@ -28,13 +28,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// What a parked task is waiting for. When the wait is satisfied the
-/// driver resumes the thread with the stored value.
+/// driver resumes the thread with the stored values.
 enum TaskWait {
-    /// Resume on next drive tick with this value. New tasks start
-    /// with `Ready(Nil)` (fire-and-forget) or `Ready(args_table)`
-    /// (initial args for tool execute). External resolvers also set
-    /// this (`resolve_external` stores the answer here).
-    Ready(LuaValue),
+    /// Resume on next drive tick with these values. Tool-execute tasks
+    /// start with `Ready(args, ctx)`; bare `smelt.spawn(fn)` kickoffs
+    /// start with `Ready()`. External resolvers also set this
+    /// (`resolve_external` stores the answer here).
+    Ready(LuaMultiValue),
     /// Resume with `nil` once `Instant` has passed.
     Sleep(Instant),
     /// Waiting for `resolve_external(id, …)` — either from a Lua
@@ -94,15 +94,15 @@ impl LuaTaskRuntime {
     }
 
     /// Spawn a task from a Lua function. The task runs on the next
-    /// `drive` call; `initial_arg` is passed to the handler on first
-    /// resume (i.e. becomes its first argument). Pass `Nil` for
-    /// zero-arg kickoffs (`smelt.spawn(fn)`) and the args table for
-    /// tool execute.
+    /// `drive` call; `initial_args` are passed positionally to the
+    /// handler on first resume. Pass `LuaMultiValue::new()` for
+    /// zero-arg kickoffs (`smelt.spawn(fn)`); `(args, ctx)` for tool
+    /// execute.
     pub fn spawn(
         &mut self,
         lua: &Lua,
         func: mlua::Function,
-        initial_arg: LuaValue,
+        initial_args: LuaMultiValue,
         completion: TaskCompletion,
     ) -> LuaResult<u64> {
         let thread = lua.create_thread(func)?;
@@ -110,7 +110,7 @@ impl LuaTaskRuntime {
         self.tasks.push(LuaTask {
             id,
             thread,
-            wait: TaskWait::Ready(initial_arg),
+            wait: TaskWait::Ready(initial_args),
             completion,
         });
         Ok(id)
@@ -121,7 +121,9 @@ impl LuaTaskRuntime {
     pub fn resolve_external(&mut self, external_id: u64, value: LuaValue) -> bool {
         for task in &mut self.tasks {
             if matches!(&task.wait, TaskWait::External(id) if *id == external_id) {
-                task.wait = TaskWait::Ready(value);
+                let mut mv = LuaMultiValue::new();
+                mv.push_back(value);
+                task.wait = TaskWait::Ready(mv);
                 return true;
             }
         }
@@ -158,13 +160,14 @@ impl LuaTaskRuntime {
     /// be dropped (finished or errored).
     fn step_task(&mut self, lua: &Lua, idx: usize, outputs: &mut Vec<TaskDriveOutput>) -> bool {
         let task = &mut self.tasks[idx];
-        let resume_arg = match std::mem::replace(&mut task.wait, TaskWait::Ready(LuaValue::Nil)) {
-            TaskWait::Ready(v) => v,
-            TaskWait::Sleep(_) => LuaValue::Nil,
-            // unreachable per ready check above:
-            TaskWait::External(_) => LuaValue::Nil,
-        };
-        let result: LuaResult<LuaValue> = task.thread.resume(resume_arg);
+        let resume_args =
+            match std::mem::replace(&mut task.wait, TaskWait::Ready(LuaMultiValue::new())) {
+                TaskWait::Ready(mv) => mv,
+                TaskWait::Sleep(_) => LuaMultiValue::new(),
+                // unreachable per ready check above:
+                TaskWait::External(_) => LuaMultiValue::new(),
+            };
+        let result: LuaResult<LuaValue> = task.thread.resume(resume_args);
 
         match result {
             Ok(v) => {
@@ -320,8 +323,13 @@ mod tests {
         let lua = lua_with_sleep();
         let mut rt = LuaTaskRuntime::new();
         let func: mlua::Function = lua.load("function() end").eval().unwrap();
-        rt.spawn(&lua, func, LuaValue::Nil, TaskCompletion::FireAndForget)
-            .unwrap();
+        rt.spawn(
+            &lua,
+            func,
+            LuaMultiValue::new(),
+            TaskCompletion::FireAndForget,
+        )
+        .unwrap();
         let out = rt.drive(&lua, Instant::now());
         assert!(out.is_empty());
         assert_eq!(rt.tasks.len(), 0);
@@ -340,8 +348,13 @@ mod tests {
             )
             .eval()
             .unwrap();
-        rt.spawn(&lua, func, LuaValue::Nil, TaskCompletion::FireAndForget)
-            .unwrap();
+        rt.spawn(
+            &lua,
+            func,
+            LuaMultiValue::new(),
+            TaskCompletion::FireAndForget,
+        )
+        .unwrap();
 
         // First drive: task runs, yields sleep, parks.
         let t0 = Instant::now();
@@ -369,7 +382,7 @@ mod tests {
         rt.spawn(
             &lua,
             func,
-            LuaValue::Nil,
+            LuaMultiValue::new(),
             TaskCompletion::ToolResult {
                 request_id: 7,
                 call_id: "c1".into(),
@@ -405,7 +418,7 @@ mod tests {
         rt.spawn(
             &lua,
             func,
-            LuaValue::Nil,
+            LuaMultiValue::new(),
             TaskCompletion::ToolResult {
                 request_id: 1,
                 call_id: "x".into(),
@@ -427,7 +440,7 @@ mod tests {
         rt.spawn(
             &lua,
             func,
-            LuaValue::Nil,
+            LuaMultiValue::new(),
             TaskCompletion::ToolResult {
                 request_id: 2,
                 call_id: "y".into(),

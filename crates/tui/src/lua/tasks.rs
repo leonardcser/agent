@@ -9,6 +9,15 @@ use mlua::prelude::*;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+/// Per-call environment passed to a plugin tool's `execute` handler.
+/// Mirrors the call-scoped fields of the Rust `ToolContext` and is
+/// surfaced to Lua as the second argument of `execute(args, ctx)`.
+pub struct PluginToolEnv<'a> {
+    pub mode: protocol::Mode,
+    pub session_id: &'a str,
+    pub session_dir: &'a std::path::Path,
+}
+
 impl LuaRuntime {
     /// Fire the `on_response` callback for a completed `engine.ask()`
     /// call. Errors surface as `notify_error` toasts.
@@ -243,16 +252,116 @@ impl LuaRuntime {
                         _ => None,
                     })
                     .unwrap_or_default();
+                let hooks = protocol::PluginToolHookFlags {
+                    needs_confirm: meta_table.get("hook_needs_confirm").unwrap_or(false),
+                    approval_patterns: meta_table.get("hook_approval_patterns").unwrap_or(false),
+                    preflight: meta_table.get("hook_preflight").unwrap_or(false),
+                };
+                let override_core: bool = meta_table.get("override_core").unwrap_or(false);
                 defs.push(protocol::PluginToolDef {
                     name: name.clone(),
                     description,
                     parameters,
                     modes,
                     execution_mode,
+                    override_core,
+                    hooks,
                 });
             }
         }
         defs
+    }
+
+    /// Run the plugin tool's permission hooks for one invocation. Each
+    /// hook is called synchronously and its result packaged into
+    /// `PluginToolHooks`. Errors raised by a hook are recorded and the
+    /// hook is treated as if it returned its no-op default (None /
+    /// empty). The engine consumes the result via
+    /// `UiCommand::PluginToolHooksResult`.
+    pub fn evaluate_plugin_hooks(
+        &self,
+        tool_name: &str,
+        args: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> protocol::PluginToolHooks {
+        let mut out = protocol::PluginToolHooks::default();
+
+        // Resolve hook functions inside the lock, then release before
+        // calling — mlua functions are clonable Lua values, registry
+        // keys are not.
+        let (needs_confirm_fn, approval_patterns_fn, preflight_fn) = {
+            let handlers = self
+                .shared
+                .plugin_tools
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let Some(h) = handlers.get(tool_name) else {
+                return out;
+            };
+            let nc = h
+                .needs_confirm
+                .as_ref()
+                .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok());
+            let ap = h
+                .approval_patterns
+                .as_ref()
+                .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok());
+            let pf = h
+                .preflight
+                .as_ref()
+                .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok());
+            (nc, ap, pf)
+        };
+
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("plugin hooks: build args: {e}"));
+                return out;
+            }
+        };
+
+        if let Some(func) = needs_confirm_fn {
+            match func.call::<Option<String>>(args_table.clone()) {
+                Ok(s) => out.needs_confirm = s,
+                Err(e) => self.record_error(format!("plugin hook needs_confirm: {e}")),
+            }
+        }
+        if let Some(func) = approval_patterns_fn {
+            match func.call::<Option<mlua::Table>>(args_table.clone()) {
+                Ok(Some(t)) => {
+                    out.approval_patterns = t
+                        .sequence_values::<String>()
+                        .filter_map(|r| r.ok())
+                        .collect();
+                }
+                Ok(None) => {}
+                Err(e) => self.record_error(format!("plugin hook approval_patterns: {e}")),
+            }
+        }
+        if let Some(func) = preflight_fn {
+            match func.call::<Option<String>>(args_table) {
+                Ok(s) => out.preflight_error = s,
+                Err(e) => self.record_error(format!("plugin hook preflight: {e}")),
+            }
+        }
+
+        out
+    }
+
+    /// Build a Lua args table from a serde_json args map. Pulled out of
+    /// `execute_plugin_tool` so `evaluate_plugin_hooks` shares the same
+    /// conversion path.
+    fn args_to_lua_table(
+        &self,
+        args: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> mlua::Result<mlua::Table> {
+        let t = self.lua.create_table()?;
+        for (k, v) in args {
+            if let Ok(lua_val) = super::json_to_lua(&self.lua, v) {
+                let _ = t.set(k.as_str(), lua_val);
+            }
+        }
+        Ok(t)
     }
 
     /// Execute a plugin tool by spawning a `LuaTask` around the
@@ -265,7 +374,13 @@ impl LuaRuntime {
         args: &std::collections::HashMap<String, serde_json::Value>,
         request_id: u64,
         call_id: &str,
+        env: PluginToolEnv<'_>,
     ) -> ToolExecResult {
+        let PluginToolEnv {
+            mode,
+            session_id,
+            session_dir,
+        } = env;
         let func = {
             let handlers = self
                 .shared
@@ -278,7 +393,10 @@ impl LuaRuntime {
                     is_error: true,
                 };
             };
-            match self.lua.registry_value::<mlua::Function>(&handle.key) {
+            match self
+                .lua
+                .registry_value::<mlua::Function>(&handle.execute.key)
+            {
                 Ok(f) => f,
                 Err(_) => {
                     return ToolExecResult::Immediate {
@@ -289,7 +407,7 @@ impl LuaRuntime {
             }
         };
 
-        let args_table = match self.lua.create_table() {
+        let args_table = match self.args_to_lua_table(args) {
             Ok(t) => t,
             Err(e) => {
                 return ToolExecResult::Immediate {
@@ -298,11 +416,23 @@ impl LuaRuntime {
                 };
             }
         };
-        for (k, v) in args {
-            if let Ok(lua_val) = super::json_to_lua(&self.lua, v) {
-                let _ = args_table.set(k.as_str(), lua_val);
+
+        // Per-call ctx table — equivalent to ToolContext for core tools.
+        // call_id, mode, session_dir, session_id let the plugin tool
+        // route output, scope filesystem operations, etc.
+        let ctx_table = match build_plugin_ctx(&self.lua, call_id, mode, session_id, session_dir) {
+            Ok(t) => t,
+            Err(e) => {
+                return ToolExecResult::Immediate {
+                    content: format!("plugin tool ctx table: {e}"),
+                    is_error: true,
+                };
             }
-        }
+        };
+
+        let mut initial = mlua::MultiValue::new();
+        initial.push_back(mlua::Value::Table(args_table));
+        initial.push_back(mlua::Value::Table(ctx_table));
 
         let mut rt = match self.shared.tasks.lock() {
             Ok(g) => g,
@@ -316,7 +446,7 @@ impl LuaRuntime {
         if let Err(e) = rt.spawn(
             &self.lua,
             func,
-            mlua::Value::Table(args_table),
+            initial,
             TaskCompletion::ToolResult {
                 request_id,
                 call_id: call_id.to_string(),
@@ -367,6 +497,27 @@ fn populate_payload_table(table: &mlua::Table, payload: &ui::Payload) -> mlua::R
         ui::Payload::Selection { index } => table.set("index", *index + 1),
         ui::Payload::Text { content } => table.set("text", content.clone()),
     }
+}
+
+/// Build the per-call ctx table passed as the second argument to
+/// plugin tool `execute` handlers. Mirrors the shape of `ToolContext`
+/// for core Rust tools but only exposes call-scoped data — fields
+/// `event_tx`, `cancel`, `processes`, `file_locks` are reached via
+/// dedicated `smelt.process.*` / `smelt.fs.*` primitives that resolve
+/// the App state internally.
+fn build_plugin_ctx(
+    lua: &Lua,
+    call_id: &str,
+    mode: protocol::Mode,
+    session_id: &str,
+    session_dir: &std::path::Path,
+) -> mlua::Result<mlua::Table> {
+    let t = lua.create_table()?;
+    t.set("call_id", call_id.to_string())?;
+    t.set("mode", mode.as_str())?;
+    t.set("session_id", session_id.to_string())?;
+    t.set("session_dir", session_dir.to_string_lossy().into_owned())?;
+    Ok(t)
 }
 
 /// Build a Lua sequence describing a dialog window's panels at

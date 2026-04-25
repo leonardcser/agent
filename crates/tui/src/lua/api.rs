@@ -5,7 +5,7 @@
 
 use super::{
     lua_commands_snapshot, messages_to_lua, parse_keybind, parse_win_event, AutocmdEvent,
-    LuaHandle, LuaRuntime, LuaShared, TaskCompletion, TaskEvent,
+    LuaHandle, LuaRuntime, LuaShared, PluginToolHandles, TaskCompletion, TaskEvent,
 };
 use mlua::prelude::*;
 use std::sync::atomic::Ordering;
@@ -1144,6 +1144,24 @@ impl LuaRuntime {
             let handler: mlua::Function = def.get("execute")?;
             let key = lua.create_registry_value(handler)?;
 
+            // Optional permission hooks. When present, the engine asks
+            // the TUI to evaluate them before deciding Allow / Deny / Ask.
+            let needs_confirm_handle = def
+                .get::<mlua::Function>("needs_confirm")
+                .ok()
+                .map(|f| lua.create_registry_value(f).map(|key| LuaHandle { key }))
+                .transpose()?;
+            let approval_patterns_handle = def
+                .get::<mlua::Function>("approval_patterns")
+                .ok()
+                .map(|f| lua.create_registry_value(f).map(|key| LuaHandle { key }))
+                .transpose()?;
+            let preflight_handle = def
+                .get::<mlua::Function>("preflight")
+                .ok()
+                .map(|f| lua.create_registry_value(f).map(|key| LuaHandle { key }))
+                .transpose()?;
+
             let meta = lua.create_table()?;
             let desc: String = def.get("description").unwrap_or_default();
             meta.set("description", desc)?;
@@ -1158,10 +1176,30 @@ impl LuaRuntime {
             if let Ok(mode_str) = def.get::<String>("execution_mode") {
                 meta.set("execution_mode", mode_str)?;
             }
+            // Hook flag bits — let `plugin_tool_defs` build
+            // `PluginToolHookFlags` without reaching back into the
+            // handles map.
+            meta.set("hook_needs_confirm", needs_confirm_handle.is_some())?;
+            meta.set("hook_approval_patterns", approval_patterns_handle.is_some())?;
+            meta.set("hook_preflight", preflight_handle.is_some())?;
+            // override_core: explicit signal that this plugin shadows a
+            // core Rust tool of the same name. The engine drops the
+            // colliding core definition from the LLM schema and routes
+            // dispatch to the plugin.
+            let override_core: bool = def.get::<bool>("override").unwrap_or(false);
+            meta.set("override_core", override_core)?;
             lua.set_named_registry_value(&format!("__pt_meta_{name}"), meta)?;
 
             if let Ok(mut map) = s.plugin_tools.lock() {
-                map.insert(name, LuaHandle { key });
+                map.insert(
+                    name,
+                    PluginToolHandles {
+                        execute: LuaHandle { key },
+                        needs_confirm: needs_confirm_handle,
+                        approval_patterns: approval_patterns_handle,
+                        preflight: preflight_handle,
+                    },
+                );
             }
             Ok(())
         })?;
@@ -1478,7 +1516,12 @@ impl LuaRuntime {
                 "spawn",
                 lua.create_function(move |lua, handler: mlua::Function| {
                     if let Ok(mut rt) = s.tasks.lock() {
-                        rt.spawn(lua, handler, LuaValue::Nil, TaskCompletion::FireAndForget)?;
+                        rt.spawn(
+                            lua,
+                            handler,
+                            mlua::MultiValue::new(),
+                            TaskCompletion::FireAndForget,
+                        )?;
                     }
                     Ok(())
                 })?,
