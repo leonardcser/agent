@@ -753,7 +753,7 @@ impl App {
         self.prompt_sections.assemble()
     }
 
-    pub fn settings_state(&self) -> crate::input::SettingsState {
+    pub fn settings_state(&self) -> state::ResolvedSettings {
         let mut s = self.settings.clone();
         s.vim = self.input.vim_enabled();
         s

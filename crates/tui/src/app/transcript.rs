@@ -715,7 +715,7 @@ impl App {
             .last_viewport_text
             .get(line as usize)
             .map(|row| {
-                let byte = crate::text_utils::cell_to_byte(row, col as usize);
+                let byte = ui::text::cell_to_byte(row, col as usize);
                 row[byte..].chars().next()
             })
             .and_then(|c| c)
@@ -795,8 +795,8 @@ impl App {
             if e > line_start && s <= line_end {
                 let clip_s = s.saturating_sub(line_start).min(row.len());
                 let clip_e = e.saturating_sub(line_start).min(row.len());
-                let start_cell = crate::text_utils::byte_to_cell(row, clip_s) as u16;
-                let end_cell = crate::text_utils::byte_to_cell(row, clip_e) as u16;
+                let start_cell = ui::text::byte_to_cell(row, clip_s) as u16;
+                let end_cell = ui::text::byte_to_cell(row, clip_e) as u16;
                 if end_cell > start_cell {
                     out.push((idx, start_cell, end_cell));
                 } else if row.is_empty() && s <= line_start && e > line_start {

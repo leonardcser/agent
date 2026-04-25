@@ -139,36 +139,37 @@ impl App {
             }
             let buf = self.transcript_window.edit_buf.buf.clone();
             let mv: Option<usize> = match action {
-                KeyAction::MoveLeft | KeyAction::SelectLeft => Some(
-                    crate::text_utils::prev_char_boundary(&buf, self.transcript_window.cpos),
-                ),
+                KeyAction::MoveLeft | KeyAction::SelectLeft => Some(ui::text::prev_char_boundary(
+                    &buf,
+                    self.transcript_window.cpos,
+                )),
                 KeyAction::MoveRight | KeyAction::SelectRight => Some(
-                    crate::text_utils::next_char_boundary(&buf, self.transcript_window.cpos),
+                    ui::text::next_char_boundary(&buf, self.transcript_window.cpos),
                 ),
-                KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => Some(
-                    crate::text_utils::line_start(&buf, self.transcript_window.cpos),
-                ),
-                KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => Some(
-                    crate::text_utils::line_end(&buf, self.transcript_window.cpos),
-                ),
+                KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => {
+                    Some(ui::text::line_start(&buf, self.transcript_window.cpos))
+                }
+                KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
+                    Some(ui::text::line_end(&buf, self.transcript_window.cpos))
+                }
                 KeyAction::MoveWordForward | KeyAction::SelectWordForward => {
-                    Some(crate::text_utils::word_forward_pos(
+                    Some(ui::text::word_forward_pos(
                         &buf,
                         self.transcript_window.cpos,
-                        crate::text_utils::CharClass::Word,
+                        ui::text::CharClass::Word,
                     ))
                 }
                 KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => {
-                    Some(crate::text_utils::word_backward_pos(
+                    Some(ui::text::word_backward_pos(
                         &buf,
                         self.transcript_window.cpos,
-                        crate::text_utils::CharClass::Word,
+                        ui::text::CharClass::Word,
                     ))
                 }
                 KeyAction::CopySelection => {
                     if let Some((s, e)) = self.transcript_window.selection_range(&rows) {
-                        let s = crate::text_utils::snap(&buf, s);
-                        let e = crate::text_utils::snap(&buf, e);
+                        let s = ui::text::snap(&buf, s);
+                        let e = ui::text::snap(&buf, e);
                         if s < e {
                             let copy = self.copy_display_range(s, e, self.settings.show_thinking);
                             let _ = crate::app::commands::copy_to_clipboard(&copy);

@@ -19,14 +19,11 @@ impl PromptState {
                 return; // insert session groups all edits into one undo step
             }
         }
-        self.win
-            .edit_buf
-            .history
-            .save(crate::undo::UndoEntry::snapshot(
-                &self.win.edit_buf.buf,
-                self.win.cpos,
-                &self.win.edit_buf.attachment_ids,
-            ));
+        self.win.edit_buf.history.save(ui::UndoEntry::snapshot(
+            &self.win.edit_buf.buf,
+            self.win.cpos,
+            &self.win.edit_buf.attachment_ids,
+        ));
     }
 
     pub(super) fn insert_char(&mut self, c: char) {
@@ -96,10 +93,10 @@ impl PromptState {
         if self.win.cpos == 0 {
             return;
         }
-        let target = crate::text_utils::word_backward_pos(
+        let target = ui::text::word_backward_pos(
             &self.win.edit_buf.buf,
             self.win.cpos,
-            crate::text_utils::CharClass::Word,
+            ui::text::CharClass::Word,
         );
         if target == 0 {
             self.from_paste = false;
@@ -128,10 +125,10 @@ impl PromptState {
         if self.win.cpos >= self.win.edit_buf.buf.len() {
             return;
         }
-        let target = crate::text_utils::word_forward_pos(
+        let target = ui::text::word_forward_pos(
             &self.win.edit_buf.buf,
             self.win.cpos,
-            crate::text_utils::CharClass::Word,
+            ui::text::CharClass::Word,
         );
         self.remove_attachments_in_range(self.win.cpos, target);
         self.win.edit_buf.buf.drain(self.win.cpos..target);
@@ -175,10 +172,10 @@ impl PromptState {
     }
 
     pub(super) fn uppercase_word(&mut self) {
-        let end = crate::text_utils::word_forward_pos(
+        let end = ui::text::word_forward_pos(
             &self.win.edit_buf.buf,
             self.win.cpos,
-            crate::text_utils::CharClass::Word,
+            ui::text::CharClass::Word,
         );
         if end == self.win.cpos {
             return;
@@ -193,10 +190,10 @@ impl PromptState {
     }
 
     pub(super) fn lowercase_word(&mut self) {
-        let end = crate::text_utils::word_forward_pos(
+        let end = ui::text::word_forward_pos(
             &self.win.edit_buf.buf,
             self.win.cpos,
-            crate::text_utils::CharClass::Word,
+            ui::text::CharClass::Word,
         );
         if end == self.win.cpos {
             return;
@@ -211,10 +208,10 @@ impl PromptState {
     }
 
     pub(super) fn capitalize_word(&mut self) {
-        let end = crate::text_utils::word_forward_pos(
+        let end = ui::text::word_forward_pos(
             &self.win.edit_buf.buf,
             self.win.cpos,
-            crate::text_utils::CharClass::Word,
+            ui::text::CharClass::Word,
         );
         if end == self.win.cpos {
             return;
@@ -239,7 +236,7 @@ impl PromptState {
     }
 
     pub(super) fn undo(&mut self) {
-        let current = crate::undo::UndoEntry::snapshot(
+        let current = ui::UndoEntry::snapshot(
             &self.win.edit_buf.buf,
             self.win.cpos,
             &self.win.edit_buf.attachment_ids,
@@ -256,10 +253,10 @@ impl PromptState {
         if self.win.cpos >= self.win.edit_buf.buf.len() {
             return false;
         }
-        let target = crate::text_utils::word_forward_pos(
+        let target = ui::text::word_forward_pos(
             &self.win.edit_buf.buf,
             self.win.cpos,
-            crate::text_utils::CharClass::Word,
+            ui::text::CharClass::Word,
         );
         if target != self.win.cpos {
             self.win.cpos = target;
@@ -274,10 +271,10 @@ impl PromptState {
         if self.win.cpos == 0 {
             return false;
         }
-        let target = crate::text_utils::word_backward_pos(
+        let target = ui::text::word_backward_pos(
             &self.win.edit_buf.buf,
             self.win.cpos,
-            crate::text_utils::CharClass::Word,
+            ui::text::CharClass::Word,
         );
         if target != self.win.cpos {
             self.win.cpos = target;

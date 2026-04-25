@@ -8,7 +8,7 @@ impl App {
     fn compute_status_position(&mut self) -> Option<render::StatusPosition> {
         match self.app_focus {
             crate::app::AppFocus::Prompt => {
-                use crate::text_utils::byte_to_cell;
+                use ui::text::byte_to_cell;
                 let buf = &self.input.buf;
                 let cpos = self.input.win.cpos.min(buf.len());
                 let line_idx = buf[..cpos].bytes().filter(|&b| b == b'\n').count();

@@ -20,11 +20,11 @@ pub const VERSION: &str = "1";
 
 /// Buffer-level operations — text, attachments, whole-buffer replace.
 pub mod buf {
-    use crate::buffer::Buffer;
     use crate::input::PromptState;
+    use ui::EditBuffer;
 
     /// Read the text of a buffer.
-    pub fn get_text(buffer: &Buffer) -> &str {
+    pub fn get_text(buffer: &EditBuffer) -> &str {
         &buffer.buf
     }
 

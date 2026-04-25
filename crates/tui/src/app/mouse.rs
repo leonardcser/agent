@@ -712,8 +712,8 @@ impl App {
                 self.transcript_window.selection_range(&rows)
             };
             if let Some((s, e)) = range {
-                let s = crate::text_utils::snap(&buf, s);
-                let e = crate::text_utils::snap(&buf, e);
+                let s = ui::text::snap(&buf, s);
+                let e = ui::text::snap(&buf, e);
                 if s < e {
                     let copy = self.copy_display_range(s, e, self.settings.show_thinking);
                     if crate::app::commands::copy_to_clipboard(&copy).is_ok() {

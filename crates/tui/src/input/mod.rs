@@ -1,13 +1,9 @@
 mod buffer;
 mod completer_bridge;
 mod history;
-mod kill_ring;
-mod settings;
 mod vim_bridge;
 
 pub use history::History;
-pub use kill_ring::KillRing;
-pub use settings::SettingsState;
 
 use crate::attachment::{Attachment, AttachmentId, AttachmentStore};
 use crate::completer::CompleterSession;
@@ -62,8 +58,8 @@ pub struct PromptState {
 }
 
 impl std::ops::Deref for PromptState {
-    type Target = crate::buffer::Buffer;
-    fn deref(&self) -> &crate::buffer::Buffer {
+    type Target = ui::EditBuffer;
+    fn deref(&self) -> &ui::EditBuffer {
         &self.win.edit_buf
     }
 }
@@ -98,7 +94,7 @@ impl PromptState {
                 gutters: ui::Gutters::default(),
             }),
         );
-        win.edit_buf = crate::buffer::Buffer::new();
+        win.edit_buf = ui::EditBuffer::new();
         Self {
             win,
             store: AttachmentStore::new(),
@@ -636,13 +632,12 @@ impl PromptState {
                 }
             }
             KeyAction::MoveStartOfLine => {
-                self.win.cpos =
-                    crate::text_utils::line_start(&self.win.edit_buf.buf, self.win.cpos);
+                self.win.cpos = ui::text::line_start(&self.win.edit_buf.buf, self.win.cpos);
                 self.recompute_completer();
                 Action::Redraw
             }
             KeyAction::MoveEndOfLine => {
-                self.win.cpos = crate::text_utils::line_end(&self.win.edit_buf.buf, self.win.cpos);
+                self.win.cpos = ui::text::line_end(&self.win.edit_buf.buf, self.win.cpos);
                 self.recompute_completer();
                 Action::Redraw
             }
@@ -888,31 +883,30 @@ impl PromptState {
             }
             KeyAction::SelectWordForward => {
                 self.extend_selection();
-                self.win.cpos = crate::text_utils::word_forward_pos(
+                self.win.cpos = ui::text::word_forward_pos(
                     &self.win.edit_buf.buf,
                     self.win.cpos,
-                    crate::text_utils::CharClass::Word,
+                    ui::text::CharClass::Word,
                 );
                 Action::Redraw
             }
             KeyAction::SelectWordBackward => {
                 self.extend_selection();
-                self.win.cpos = crate::text_utils::word_backward_pos(
+                self.win.cpos = ui::text::word_backward_pos(
                     &self.win.edit_buf.buf,
                     self.win.cpos,
-                    crate::text_utils::CharClass::Word,
+                    ui::text::CharClass::Word,
                 );
                 Action::Redraw
             }
             KeyAction::SelectStartOfLine => {
                 self.extend_selection();
-                self.win.cpos =
-                    crate::text_utils::line_start(&self.win.edit_buf.buf, self.win.cpos);
+                self.win.cpos = ui::text::line_start(&self.win.edit_buf.buf, self.win.cpos);
                 Action::Redraw
             }
             KeyAction::SelectEndOfLine => {
                 self.extend_selection();
-                self.win.cpos = crate::text_utils::line_end(&self.win.edit_buf.buf, self.win.cpos);
+                self.win.cpos = ui::text::line_end(&self.win.edit_buf.buf, self.win.cpos);
                 Action::Redraw
             }
         }
