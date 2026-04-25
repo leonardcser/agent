@@ -77,6 +77,9 @@ impl LuaRuntime {
 
         // smelt.confirm.* primitives consumed by confirm.lua.
         crate::lua::confirm_ops::register(lua, &smelt)?;
+        // smelt.{diff,syntax,…} renderer primitives shared by every
+        // plugin that wants to draw highlit content into a buffer.
+        crate::lua::render_ops::register(lua, &smelt)?;
 
         lua.globals().set("smelt", smelt)?;
 
