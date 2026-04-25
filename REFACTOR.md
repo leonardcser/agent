@@ -117,20 +117,25 @@ Separate architectural concern from Window unification. Drops 1000+ lines
 across `crates/tui/src/app/dialogs/confirm.rs`,
 `crates/tui/src/lua/confirm_ops.rs`, and confirm-specific OptionList flags.
 
-#### 5a — Renderer primitives
+#### ✅ 5a — Renderer primitives
 
-Promote confirm-private renderers to general-purpose `smelt.*` modules
-that any plugin can use:
+Promoted to `smelt.{diff,syntax,bash,notebook}.render(buf, opts)` —
+any plugin can render syntax-highlit content into a buffer it owns.
+Underlying Rust functions stay (security-relevant rendering belongs
+in core); the wrappers live in `crates/tui/src/lua/render_ops.rs`.
 
-```lua
-smelt.diff.render_to_buf(buf, { old=, new=, path= })       -- print_inline_diff
-smelt.syntax.render_to_buf(buf, { content=, path= })       -- print_syntax_file
-smelt.bash.highlight_into(buf, line, col_start, col_end)   -- BashHighlighter
-smelt.notebook.render_to_buf(buf, args)                    -- notebook preview
-```
+Shipped:
+- `smelt.diff.render(buf, { old, new, path })` → `print_inline_diff`.
+- `smelt.syntax.render(buf, { content, path })` → `print_syntax_file`.
+- `smelt.bash.render(buf, command)` → `BashHighlighter` (multi-line).
+- `smelt.notebook.render(buf, args)` → `ConfirmPreview::Notebook`
+  (resolves the notebook diff against `args.notebook_path` on disk).
 
-Underlying Rust functions stay (security-relevant rendering belongs in
-core); confirm-specific wrappers around them go.
+Not shipped: `smelt.bash.highlight_into(buf, line, col_start, col_end)`
+(decorate an existing buffer span). Skipped because the only consumer
+is the confirm title line (` tool: command Allow?`), and that lands
+cleanest as a single Rust-side composition rather than two Lua calls.
+5b will keep the title rendering Rust-side.
 
 #### 5b — Confirm request as data + label policy in Lua
 
