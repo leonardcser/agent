@@ -98,6 +98,19 @@ pub trait PanelWidget: Component + Send {
     fn as_list_widget(&mut self) -> Option<&mut dyn ListWidget> {
         None
     }
+    /// Resolved viewport (rect + scrollbar geometry) for widgets with
+    /// scrollable content. Returned in absolute coords so App-side
+    /// scrollbar hit-tests use the same geometry the widget renders
+    /// with. `None` for widgets without a scrollable viewport.
+    fn viewport(&self) -> Option<WindowViewport> {
+        None
+    }
+    /// Snap scroll so the scrollbar thumb top lands at `thumb_top` rows
+    /// from the viewport top. Returns `true` if the widget consumed the
+    /// drag (i.e. it has a draggable scrollbar).
+    fn apply_scrollbar_drag(&mut self, _thumb_top: u16) -> bool {
+        false
+    }
 }
 
 /// Selectable-list contract that buffer-backed lists (future
@@ -114,6 +127,16 @@ pub trait ListWidget {
     /// Resolve the row index at `rel_row` rows below the widget's draw
     /// area top. Returns `None` if the row is past the last item.
     fn row_at(&self, rel_row: u16) -> Option<usize>;
+    /// Backing buffer when the list mirrors a `Buffer` (`BufferList`).
+    /// `OptionList` and other in-memory lists return `None`. The dialog
+    /// uses this to resolve a `Buffer` from its registry and feed it to
+    /// `sync_from_buffer` each frame.
+    fn buf_id(&self) -> Option<BufId> {
+        None
+    }
+    /// Mirror `buf` into the list's internal view. No-op for lists that
+    /// don't track a `Buffer`.
+    fn sync_from_buffer(&mut self, _buf: &Buffer) {}
 }
 
 /// Live snapshot of a dialog panel's widget state. Built on-demand by
@@ -373,10 +396,16 @@ impl Dialog {
         self.panels.iter().position(|p| p.rect.contains(row, col))
     }
 
-    /// Resolved viewport (rect + scrollbar geometry) for a buffer-backed
-    /// panel. `None` for widget panels or an out-of-range index.
+    /// Resolved viewport (rect + scrollbar geometry) for a panel.
+    /// Buffer-backed panels keep their viewport on `DialogPanel`;
+    /// widget panels delegate to `PanelWidget::viewport` so widgets
+    /// like `BufferList` can expose their own scrollable geometry.
     pub fn panel_viewport(&self, panel_idx: usize) -> Option<WindowViewport> {
-        self.panels.get(panel_idx).and_then(|p| p.viewport)
+        let panel = self.panels.get(panel_idx)?;
+        if let DialogPanelContent::Widget(w) = &panel.content {
+            return w.viewport();
+        }
+        panel.viewport
     }
 
     /// Snap the buffer-backed panel's scroll so its scrollbar thumb
@@ -388,6 +417,9 @@ impl Dialog {
         let Some(panel) = self.panels.get_mut(panel_idx) else {
             return false;
         };
+        if let DialogPanelContent::Widget(w) = &mut panel.content {
+            return w.apply_scrollbar_drag(thumb_top);
+        }
         let Some(viewport) = panel.viewport else {
             return false;
         };
@@ -460,6 +492,19 @@ impl Dialog {
                     view.set_default_style(default_style);
                 }
                 DialogPanelContent::Widget(widget) => {
+                    // List-shaped widgets that mirror a `Buffer`
+                    // (`BufferList`) need their internal view re-synced
+                    // when the source buffer changes — the `as_list_widget`
+                    // hop is how a Widget panel exposes its `BufId`.
+                    let buf_id = widget.as_list_widget().and_then(|lw| lw.buf_id());
+                    if let Some(buf_id) = buf_id {
+                        if let Some(b) = bufs.get(buf_id) {
+                            b.ensure_rendered_at(content_width);
+                            if let Some(lw) = widget.as_list_widget() {
+                                lw.sync_from_buffer(b);
+                            }
+                        }
+                    }
                     panel.line_count = widget.content_rows();
                 }
             }
