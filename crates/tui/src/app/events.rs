@@ -89,7 +89,7 @@ impl App {
                 let _ = self
                     .ui
                     .handle_key_with_lua(code, modifiers, &mut lua_invoke);
-                self.apply_lua_ops();
+                self.flush_lua_callbacks();
                 return false;
             }
             if !matches!(ev, Event::Mouse(_)) {
@@ -281,7 +281,7 @@ impl App {
                     self.ui
                         .try_window_keymap(ui::PROMPT_WIN, code, modifiers, &mut lua_invoke);
                 if matches!(result, ui::KeyResult::Consumed) {
-                    self.apply_lua_ops();
+                    self.flush_lua_callbacks();
                     return Some(EventOutcome::Noop);
                 }
             }
@@ -292,12 +292,10 @@ impl App {
         // to the built-in keymap dispatcher.
         if let Event::Key(k) = *ev {
             if let Some(chord) = crate::lua::chord_string(k) {
-                let (vim_mode, focused_window) = self.snapshot_lua_context();
+                let vim_mode = self.current_vim_mode_label();
                 let handled = self.lua.run_keymap(&chord, vim_mode.as_deref());
-                self.lua.clear_context();
                 if handled {
-                    let _ = focused_window;
-                    self.apply_lua_ops();
+                    self.flush_lua_callbacks();
                     return Some(EventOutcome::Noop);
                 }
             }
@@ -702,8 +700,6 @@ impl App {
 
         let trimmed = input.trim();
         self.input_history.push(input.to_string());
-        self.lua
-            .set_input_history(self.input_history.entries().to_vec());
 
         // Skip shell escape for pasted content
         let is_from_paste = self.input.skip_shell_escape();
@@ -739,7 +735,7 @@ impl App {
                 t.set("text", input_text)?;
                 Ok(t)
             });
-        self.apply_lua_ops();
+        self.flush_lua_callbacks();
 
         InputOutcome::StartAgent
     }
@@ -831,7 +827,7 @@ impl App {
             ui::Payload::None,
             &mut lua_invoke,
         );
-        self.apply_lua_ops();
+        self.flush_lua_callbacks();
     }
 
     /// True when the focused float pauses engine-event drain

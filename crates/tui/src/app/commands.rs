@@ -37,7 +37,6 @@ pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
         ),
         None => (name_arg, None),
     };
-    app.snapshot_lua_context();
     app.lua.emit(crate::lua::AutocmdEvent::CmdPre);
     let outcome = if !name.is_empty() && app.lua.has_command(name) {
         app.lua.run_command(name, arg);
@@ -46,8 +45,7 @@ pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
         app.handle_command(&normalized)
     };
     app.lua.emit(crate::lua::AutocmdEvent::CmdPost);
-    app.lua.clear_context();
-    app.apply_lua_ops();
+    app.flush_lua_callbacks();
     outcome
 }
 
@@ -401,7 +399,6 @@ impl App {
         if old != self.model {
             let from = old;
             let to = self.model.clone();
-            self.snapshot_engine_context(self.agent.is_some());
             self.lua
                 .emit_data(crate::lua::AutocmdEvent::ModelChange, |lua| {
                     let t = lua.create_table()?;
@@ -420,7 +417,6 @@ impl App {
         self.input.set_vim_enabled(self.settings.vim);
         self.transcript_window.set_vim_enabled(self.settings.vim);
         state::save_settings(&self.settings);
-        self.push_settings_snapshot_to_lua();
     }
 
     /// Replace all resolved settings at once (from a settings dialog result),
@@ -440,7 +436,6 @@ impl App {
         if old != mode {
             let from = old.as_str().to_string();
             let to = mode.as_str().to_string();
-            self.snapshot_engine_context(self.agent.is_some());
             self.lua
                 .emit_data(crate::lua::AutocmdEvent::ModeChange, |lua| {
                     let t = lua.create_table()?;

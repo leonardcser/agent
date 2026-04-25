@@ -3,10 +3,8 @@
 //! invokes as a single semantic action — `/<command>` dispatch,
 //! settings toggle, transcript yank, and so on.
 
-use super::transcript_model::{ConfirmChoice, PermissionEntry};
+use super::transcript_model::ConfirmChoice;
 use super::App;
-use crate::workspace_permissions::Rule;
-use protocol::UiCommand;
 
 impl App {
     /// Run a slash command. Mirrors the user typing `:<line>` into
@@ -113,34 +111,6 @@ impl App {
         }
     }
 
-    /// Sync the App's permission state with what the Permissions
-    /// dialog has in memory. Fired on dismiss.
-    pub(crate) fn sync_permissions_from_lua(
-        &mut self,
-        session_entries: Vec<PermissionEntry>,
-        workspace_rules: Vec<Rule>,
-    ) {
-        self.sync_permissions(session_entries, workspace_rules);
-    }
-
-    /// One-shot LLM call initiated by a Lua plugin
-    /// (`smelt.engine.ask`). Sends a matching `UiCommand::EngineAsk`
-    /// to the engine.
-    pub(crate) fn engine_ask(
-        &mut self,
-        id: u64,
-        system: String,
-        messages: Vec<protocol::Message>,
-        task: protocol::AuxiliaryTask,
-    ) {
-        self.engine.send(UiCommand::EngineAsk {
-            id,
-            system,
-            messages,
-            task,
-        });
-    }
-
     /// Resolve an open Confirm dialog with the user's choice. Heavy
     /// cancel (flush events, kill blocking subagents, drop the active
     /// turn) when the resolution asks the turn to cancel.
@@ -157,21 +127,5 @@ impl App {
             self.finish_turn(true);
             self.agent = None;
         }
-    }
-
-    /// Send a deferred plugin tool result to the engine.
-    pub(crate) fn resolve_tool_result(
-        &mut self,
-        request_id: u64,
-        call_id: String,
-        content: String,
-        is_error: bool,
-    ) {
-        self.engine.send(UiCommand::PluginToolResult {
-            request_id,
-            call_id,
-            content,
-            is_error,
-        });
     }
 }

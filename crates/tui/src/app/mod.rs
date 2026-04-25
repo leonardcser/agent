@@ -133,7 +133,7 @@ pub struct App {
     /// `RequestPermission`. The TUI writes to them when the user approves.
     pub runtime_approvals: Arc<std::sync::RwLock<engine::permissions::RuntimeApprovals>>,
     /// Current working directory (cached at startup).
-    cwd: String,
+    pub(crate) cwd: String,
     pub session: session::Session,
     pub shared_session: Arc<Mutex<Option<Session>>>,
     pub context_window: Option<u32>,
@@ -868,26 +868,19 @@ impl App {
             self.notify_error(message);
         }
 
-        // Seed the Lua snapshot *before* plugins load. Plugins that read
-        // these at registration time — e.g. `model.lua` declaring
-        // `args = <model keys>` — need real data, otherwise their arg
-        // picker stays empty for the session.
-        self.snapshot_engine_context(false);
-        self.lua.set_available_models(
-            self.available_models
-                .iter()
-                .map(|m| (m.key.clone(), m.model_name.clone(), m.provider_name.clone()))
-                .collect(),
-        );
-        self.push_settings_snapshot_to_lua();
-        self.lua
-            .set_input_history(self.input_history.entries().to_vec());
-        self.lua.load_plugins();
+        // Plugins read live App state via `with_app` at registration
+        // time — e.g. `model.lua` declares `args = smelt.engine.models()`
+        // for its arg picker. Install the TLS app pointer before any
+        // Lua runs at startup so those reads land on the real App.
+        {
+            let _guard = crate::lua::install_app_ptr(self);
+            self.lua.load_plugins();
+            self.lua.emit(crate::lua::AutocmdEvent::SessionStart);
+        }
         if let Some(err) = self.lua.load_error.take() {
             self.notify_error(format!("lua init: {err}"));
         }
-        self.lua.emit(crate::lua::AutocmdEvent::SessionStart);
-        self.apply_lua_ops();
+        self.flush_lua_callbacks();
         // Plugins have now registered their commands — pull every
         // declared `args = {...}` list so the CommandArg picker opens
         // when the user types `/name ` (space).
@@ -941,14 +934,13 @@ impl App {
             // is field-disjoint from whatever the binding writes.
             let _app_guard = crate::lua::install_app_ptr(self);
             // ── Lua timer + notification pump ────────────────────────────
-            self.snapshot_engine_context(self.agent.is_some());
             self.lua.tick_timers();
             self.drive_lua_tasks();
             self.custom_status_items = self.lua.tick_statusline();
             for _id in self.drain_finished_blocks() {
                 self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
             }
-            self.apply_lua_ops();
+            self.flush_lua_callbacks();
             // Fire `WinEvent::Tick` on every window with a registered
             // Tick callback — e.g. Agents pulls a fresh subagent
             // snapshot here each frame.
@@ -963,7 +955,7 @@ impl App {
                     };
                 self.ui.dispatch_tick(&mut lua_invoke);
             }
-            self.apply_lua_ops();
+            self.flush_lua_callbacks();
 
             // ── Background polls ─────────────────────────────────────────
             if let Some(ref mut rx) = ctx_rx {

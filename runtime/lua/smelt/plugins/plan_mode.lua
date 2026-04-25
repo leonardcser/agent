@@ -175,7 +175,7 @@ smelt.on("mode_change", function()
   end
 end)
 
--- If we're already in plan mode at load time, activate immediately.
-if smelt.engine.mode() == "plan" then
-  activate()
-end
+-- If we're already in plan mode at session start, activate.
+smelt.on("session_start", function()
+  if smelt.engine.mode() == "plan" then activate() end
+end)

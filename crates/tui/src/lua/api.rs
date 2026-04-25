@@ -20,16 +20,21 @@ impl LuaRuntime {
 
         smelt.set("version", crate::api::VERSION)?;
 
-        // Helper macro: lock shared.ops and read a snapshot field.
-        macro_rules! snap_read {
-            ($lua:expr, $s:expr, |$o:ident| $body:expr) => {{
-                let s = $s.clone();
-                $lua.create_function(move |_, ()| {
-                    let $o = s
-                        .ops
-                        .lock()
-                        .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
-                    Ok($body)
+        // Helper: register a 0-arg getter that reads live state from `App`
+        // via `try_with_app`. Replaces the old snapshot-mirror pattern —
+        // every read goes through the TLS pointer installed at the top of
+        // each tick / Lua-entry boundary.
+        //
+        // Reads use `try_with_app` (not `with_app`) so callers from a
+        // context without `install_app_ptr` get the type's `Default`
+        // instead of a panic. In production every Lua-entry path installs
+        // the pointer, so the fallback is dead; tests that exercise
+        // bindings without an App get empty/zeroed values rather than
+        // panics, which keeps autoload-registration tests trivial.
+        macro_rules! app_read {
+            ($lua:expr, |$app:ident| $body:expr) => {{
+                $lua.create_function(|_, ()| {
+                    Ok(crate::lua::try_with_app(|$app| $body).unwrap_or_default())
                 })?
             }};
         }
@@ -38,10 +43,9 @@ impl LuaRuntime {
         let transcript_tbl = lua.create_table()?;
         transcript_tbl.set(
             "text",
-            snap_read!(lua, shared, |o| o
-                .transcript_text
-                .clone()
-                .unwrap_or_default()),
+            app_read!(lua, |app| app
+                .full_transcript_display_text(app.settings.show_thinking)
+                .join("\n")),
         )?;
         transcript_tbl.set(
             "yank_block",
@@ -130,66 +134,46 @@ impl LuaRuntime {
         // smelt.engine.*
         let engine_tbl = lua.create_table()?;
 
-        engine_tbl.set("model", snap_read!(lua, shared, |o| o.engine.model.clone()))?;
-        engine_tbl.set("mode", snap_read!(lua, shared, |o| o.engine.mode.clone()))?;
+        engine_tbl.set("model", app_read!(lua, |app| app.model.clone()))?;
+        engine_tbl.set("mode", app_read!(lua, |app| app.mode.as_str().to_string()))?;
         engine_tbl.set(
             "reasoning_effort",
-            snap_read!(lua, shared, |o| o.engine.reasoning_effort.clone()),
+            app_read!(lua, |app| app.reasoning_effort.label().to_string()),
         )?;
-        engine_tbl.set("is_busy", snap_read!(lua, shared, |o| o.engine.is_busy))?;
-        engine_tbl.set("cost", snap_read!(lua, shared, |o| o.engine.session_cost))?;
-        engine_tbl.set(
-            "context_tokens",
-            snap_read!(lua, shared, |o| o.engine.context_tokens),
-        )?;
-        engine_tbl.set(
-            "context_window",
-            snap_read!(lua, shared, |o| o.engine.context_window),
-        )?;
+        engine_tbl.set("is_busy", app_read!(lua, |app| app.agent.is_some()))?;
+        engine_tbl.set("cost", app_read!(lua, |app| app.session_cost_usd))?;
+        engine_tbl.set("context_tokens", app_read!(lua, |app| app.context_tokens))?;
+        engine_tbl.set("context_window", app_read!(lua, |app| app.context_window))?;
         // smelt.session.*
         let session_tbl = lua.create_table()?;
-        session_tbl.set(
-            "title",
-            snap_read!(lua, shared, |o| o.engine.session_title.clone()),
-        )?;
-        session_tbl.set(
-            "cwd",
-            snap_read!(lua, shared, |o| o.engine.session_cwd.clone()),
-        )?;
+        session_tbl.set("title", app_read!(lua, |app| app.session.title.clone()))?;
+        session_tbl.set("cwd", app_read!(lua, |app| app.cwd.clone()))?;
         session_tbl.set(
             "created_at_ms",
-            snap_read!(lua, shared, |o| o.engine.session_created_at_ms),
+            app_read!(lua, |app| app.session.created_at_ms),
         )?;
-        session_tbl.set(
-            "id",
-            snap_read!(lua, shared, |o| o.engine.session_id.clone()),
-        )?;
+        session_tbl.set("id", app_read!(lua, |app| app.session.id.clone()))?;
         session_tbl.set(
             "dir",
-            snap_read!(lua, shared, |o| o.engine.session_dir.clone()),
+            app_read!(lua, |app| crate::session::dir_for(&app.session)
+                .display()
+                .to_string()),
         )?;
-        {
-            let s = shared.clone();
-            session_tbl.set(
-                "turns",
-                lua.create_function(move |lua, ()| {
-                    let turns = s
-                        .ops
-                        .lock()
-                        .map(|o| o.engine.session_turns.clone())
-                        .unwrap_or_default();
-                    let out = lua.create_table()?;
-                    for (i, (block_idx, text)) in turns.into_iter().enumerate() {
-                        let row = lua.create_table()?;
-                        row.set("block_idx", block_idx)?;
-                        let label = text.lines().next().unwrap_or("").to_string();
-                        row.set("label", label)?;
-                        out.set(i + 1, row)?;
-                    }
-                    Ok(out)
-                })?,
-            )?;
-        }
+        session_tbl.set(
+            "turns",
+            lua.create_function(|lua, ()| {
+                let turns = crate::lua::try_with_app(|app| app.user_turns()).unwrap_or_default();
+                let out = lua.create_table()?;
+                for (i, (block_idx, text)) in turns.into_iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("block_idx", block_idx)?;
+                    let label = text.lines().next().unwrap_or("").to_string();
+                    row.set("label", label)?;
+                    out.set(i + 1, row)?;
+                }
+                Ok(out)
+            })?,
+        )?;
         session_tbl.set(
             "rewind_to",
             lua.create_function(
@@ -202,41 +186,35 @@ impl LuaRuntime {
                 },
             )?,
         )?;
-        {
-            let s = shared.clone();
-            session_tbl.set(
-                "list",
-                lua.create_function(move |lua, ()| {
-                    let current_id = s
-                        .ops
-                        .lock()
-                        .map(|o| o.engine.session_id.clone())
-                        .unwrap_or_default();
-                    let sessions = crate::session::list_sessions();
-                    let out = lua.create_table()?;
-                    let mut idx = 1;
-                    for meta in sessions {
-                        if meta.id == current_id {
-                            continue;
-                        }
-                        let row = lua.create_table()?;
-                        row.set("id", meta.id)?;
-                        row.set("title", meta.title.unwrap_or_default())?;
-                        row.set("subtitle", meta.first_user_message.unwrap_or_default())?;
-                        row.set("cwd", meta.cwd.unwrap_or_default())?;
-                        row.set("parent_id", meta.parent_id.unwrap_or_default())?;
-                        row.set("updated_at_ms", meta.updated_at_ms)?;
-                        row.set("created_at_ms", meta.created_at_ms)?;
-                        if let Some(size) = meta.text_bytes {
-                            row.set("size_bytes", size)?;
-                        }
-                        out.set(idx, row)?;
-                        idx += 1;
+        session_tbl.set(
+            "list",
+            lua.create_function(|lua, ()| {
+                let current_id =
+                    crate::lua::try_with_app(|app| app.session.id.clone()).unwrap_or_default();
+                let sessions = crate::session::list_sessions();
+                let out = lua.create_table()?;
+                let mut idx = 1;
+                for meta in sessions {
+                    if meta.id == current_id {
+                        continue;
                     }
-                    Ok(out)
-                })?,
-            )?;
-        }
+                    let row = lua.create_table()?;
+                    row.set("id", meta.id)?;
+                    row.set("title", meta.title.unwrap_or_default())?;
+                    row.set("subtitle", meta.first_user_message.unwrap_or_default())?;
+                    row.set("cwd", meta.cwd.unwrap_or_default())?;
+                    row.set("parent_id", meta.parent_id.unwrap_or_default())?;
+                    row.set("updated_at_ms", meta.updated_at_ms)?;
+                    row.set("created_at_ms", meta.created_at_ms)?;
+                    if let Some(size) = meta.text_bytes {
+                        row.set("size_bytes", size)?;
+                    }
+                    out.set(idx, row)?;
+                    idx += 1;
+                }
+                Ok(out)
+            })?,
+        )?;
         session_tbl.set(
             "load",
             lua.create_function(|_, id: String| {
@@ -266,27 +244,25 @@ impl LuaRuntime {
         )?;
         // smelt.engine.models() → array of `{key, name, provider}`
         // for the prompt-docked `/model` picker.
-        {
-            let s = shared.clone();
-            engine_tbl.set(
-                "models",
-                lua.create_function(move |lua, ()| {
-                    let out = lua.create_table()?;
-                    let o = s
-                        .ops
-                        .lock()
-                        .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
-                    for (i, (key, name, provider)) in o.available_models.iter().enumerate() {
+        engine_tbl.set(
+            "models",
+            lua.create_function(|lua, ()| {
+                let out = lua.create_table()?;
+                if let Some(res) = crate::lua::try_with_app(|app| -> LuaResult<()> {
+                    for (i, m) in app.available_models.iter().enumerate() {
                         let entry = lua.create_table()?;
-                        entry.set("key", key.clone())?;
-                        entry.set("name", name.clone())?;
-                        entry.set("provider", provider.clone())?;
+                        entry.set("key", m.key.clone())?;
+                        entry.set("name", m.model_name.clone())?;
+                        entry.set("provider", m.provider_name.clone())?;
                         out.set(i + 1, entry)?;
                     }
-                    Ok(out)
-                })?,
-            )?;
-        }
+                    Ok(())
+                }) {
+                    res?;
+                }
+                Ok(out)
+            })?,
+        )?;
         engine_tbl.set(
             "set_mode",
             lua.create_function(|_, v: String| {
@@ -382,27 +358,28 @@ impl LuaRuntime {
                         }
                     }
 
-                    crate::lua::with_app(|app| app.engine_ask(id, system, messages, task));
+                    crate::lua::with_app(|app| {
+                        app.engine.send(protocol::UiCommand::EngineAsk {
+                            id,
+                            system,
+                            messages,
+                            task,
+                        })
+                    });
                     Ok(id)
                 })?,
             )?;
         }
 
         // smelt.engine.history() → [{role, content, tool_calls?, tool_call_id?}]
-        {
-            let s = shared.clone();
-            engine_tbl.set(
-                "history",
-                lua.create_function(move |lua, ()| {
-                    let Ok(guard) = s.history.lock() else {
-                        return lua.create_table();
-                    };
-                    let history = Arc::clone(&*guard);
-                    drop(guard);
-                    messages_to_lua(lua, &history)
-                })?,
-            )?;
-        }
+        engine_tbl.set(
+            "history",
+            lua.create_function(|lua, ()| {
+                let history =
+                    crate::lua::try_with_app(|app| app.history.clone()).unwrap_or_default();
+                messages_to_lua(lua, &history)
+            })?,
+        )?;
 
         smelt.set("engine", engine_tbl)?;
 
@@ -588,48 +565,45 @@ impl LuaRuntime {
 
         // smelt.permissions.*
         let permissions_tbl = lua.create_table()?;
-        {
-            let s = shared.clone();
-            permissions_tbl.set(
-                "list",
-                lua.create_function(move |lua, ()| {
-                    let (session_entries, cwd) = {
-                        let Ok(o) = s.ops.lock() else {
-                            return lua.create_table();
-                        };
-                        (
-                            o.engine.permission_session_entries.clone(),
-                            o.engine.session_cwd.clone(),
-                        )
-                    };
-                    let out = lua.create_table()?;
-                    let session_arr = lua.create_table()?;
-                    for (i, (tool, pattern)) in session_entries.into_iter().enumerate() {
-                        let row = lua.create_table()?;
-                        row.set("tool", tool)?;
-                        row.set("pattern", pattern)?;
-                        session_arr.set(i + 1, row)?;
-                    }
-                    out.set("session", session_arr)?;
-                    let workspace_arr = lua.create_table()?;
-                    for (i, rule) in crate::workspace_permissions::load(&cwd)
+        permissions_tbl.set(
+            "list",
+            lua.create_function(|lua, ()| {
+                let (session_entries, cwd) = crate::lua::try_with_app(|app| {
+                    let entries = app
+                        .session_permission_entries()
                         .into_iter()
-                        .enumerate()
-                    {
-                        let row = lua.create_table()?;
-                        row.set("tool", rule.tool)?;
-                        let pats = lua.create_table()?;
-                        for (j, p) in rule.patterns.into_iter().enumerate() {
-                            pats.set(j + 1, p)?;
-                        }
-                        row.set("patterns", pats)?;
-                        workspace_arr.set(i + 1, row)?;
+                        .map(|e| (e.tool, e.pattern))
+                        .collect::<Vec<_>>();
+                    (entries, app.cwd.clone())
+                })
+                .unwrap_or_default();
+                let out = lua.create_table()?;
+                let session_arr = lua.create_table()?;
+                for (i, (tool, pattern)) in session_entries.into_iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("tool", tool)?;
+                    row.set("pattern", pattern)?;
+                    session_arr.set(i + 1, row)?;
+                }
+                out.set("session", session_arr)?;
+                let workspace_arr = lua.create_table()?;
+                for (i, rule) in crate::workspace_permissions::load(&cwd)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let row = lua.create_table()?;
+                    row.set("tool", rule.tool)?;
+                    let pats = lua.create_table()?;
+                    for (j, p) in rule.patterns.into_iter().enumerate() {
+                        pats.set(j + 1, p)?;
                     }
-                    out.set("workspace", workspace_arr)?;
-                    Ok(out)
-                })?,
-            )?;
-        }
+                    row.set("patterns", pats)?;
+                    workspace_arr.set(i + 1, row)?;
+                }
+                out.set("workspace", workspace_arr)?;
+                Ok(out)
+            })?,
+        )?;
         permissions_tbl.set(
             "sync",
             lua.create_function(|_, spec: mlua::Table| {
@@ -656,9 +630,7 @@ impl LuaRuntime {
                         workspace_rules.push(crate::workspace_permissions::Rule { tool, patterns });
                     }
                 }
-                crate::lua::with_app(|app| {
-                    app.sync_permissions_from_lua(session_entries, workspace_rules)
-                });
+                crate::lua::with_app(|app| app.sync_permissions(session_entries, workspace_rules));
                 Ok(())
             })?,
         )?;
@@ -666,31 +638,29 @@ impl LuaRuntime {
 
         // smelt.keymap.help_sections()
         let keymap_tbl = lua.create_table()?;
-        {
-            let s = shared.clone();
-            keymap_tbl.set(
-                "help_sections",
-                lua.create_function(move |lua, ()| {
-                    let vim_enabled = s.ops.lock().map(|o| o.engine.vim_enabled).unwrap_or(false);
-                    let sections = crate::keymap::hints::help_sections(vim_enabled);
-                    let out = lua.create_table()?;
-                    for (i, (title, entries)) in sections.into_iter().enumerate() {
-                        let row = lua.create_table()?;
-                        row.set("title", title)?;
-                        let entries_tbl = lua.create_table()?;
-                        for (j, (label, detail)) in entries.into_iter().enumerate() {
-                            let entry = lua.create_table()?;
-                            entry.set("label", label)?;
-                            entry.set("detail", detail)?;
-                            entries_tbl.set(j + 1, entry)?;
-                        }
-                        row.set("entries", entries_tbl)?;
-                        out.set(i + 1, row)?;
+        keymap_tbl.set(
+            "help_sections",
+            lua.create_function(|lua, ()| {
+                let vim_enabled =
+                    crate::lua::try_with_app(|app| app.input.vim_enabled()).unwrap_or(false);
+                let sections = crate::keymap::hints::help_sections(vim_enabled);
+                let out = lua.create_table()?;
+                for (i, (title, entries)) in sections.into_iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("title", title)?;
+                    let entries_tbl = lua.create_table()?;
+                    for (j, (label, detail)) in entries.into_iter().enumerate() {
+                        let entry = lua.create_table()?;
+                        entry.set("label", label)?;
+                        entry.set("detail", detail)?;
+                        entries_tbl.set(j + 1, entry)?;
                     }
-                    Ok(out)
-                })?,
-            )?;
-        }
+                    row.set("entries", entries_tbl)?;
+                    out.set(i + 1, row)?;
+                }
+                Ok(out)
+            })?,
+        )?;
         smelt_keymap.set("help", keymap_tbl.get::<mlua::Function>("help_sections")?)?;
 
         // smelt.ui.ghost_text.{set, clear}
@@ -802,7 +772,7 @@ impl LuaRuntime {
         let buf_tbl = lua.create_table()?;
         buf_tbl.set(
             "text",
-            snap_read!(lua, shared, |o| o.prompt_text.clone().unwrap_or_default()),
+            app_read!(lua, |app| app.input.win.edit_buf.buf.clone()),
         )?;
         {
             let s = shared.clone();
@@ -968,14 +938,26 @@ impl LuaRuntime {
         let win_tbl = lua.create_table()?;
         win_tbl.set(
             "focus",
-            snap_read!(lua, shared, |o| o
-                .focused_window
-                .clone()
-                .unwrap_or_default()),
+            app_read!(lua, |app| match app.app_focus {
+                crate::app::AppFocus::Content => "transcript".to_string(),
+                crate::app::AppFocus::Prompt => "prompt".to_string(),
+            }),
         )?;
         win_tbl.set(
             "mode",
-            snap_read!(lua, shared, |o| o.vim_mode.clone().unwrap_or_default()),
+            app_read!(lua, |app| match app.app_focus {
+                crate::app::AppFocus::Content => app
+                    .transcript_window
+                    .vim
+                    .as_ref()
+                    .map(|v| format!("{:?}", v.mode()))
+                    .unwrap_or_default(),
+                crate::app::AppFocus::Prompt => app
+                    .input
+                    .vim_mode()
+                    .map(|m| format!("{m:?}"))
+                    .unwrap_or_default(),
+            }),
         )?;
         win_tbl.set(
             "close",
@@ -1075,23 +1057,29 @@ impl LuaRuntime {
         // its picker entirely in Lua.
         {
             let settings_tbl = lua.create_table()?;
-            {
-                let s = shared.clone();
-                settings_tbl.set(
-                    "snapshot",
-                    lua.create_function(move |lua, ()| {
-                        let t = lua.create_table()?;
-                        let o = s
-                            .ops
-                            .lock()
-                            .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
-                        for (k, v) in &o.settings {
-                            t.set(k.clone(), *v)?;
-                        }
-                        Ok(t)
-                    })?,
-                )?;
-            }
+            settings_tbl.set(
+                "snapshot",
+                lua.create_function(|lua, ()| {
+                    let t = lua.create_table()?;
+                    if let Some(res) = crate::lua::try_with_app(|app| -> LuaResult<()> {
+                        let s = app.settings_state();
+                        t.set("vim", s.vim)?;
+                        t.set("auto_compact", s.auto_compact)?;
+                        t.set("show_tps", s.show_tps)?;
+                        t.set("show_tokens", s.show_tokens)?;
+                        t.set("show_cost", s.show_cost)?;
+                        t.set("show_prediction", s.show_prediction)?;
+                        t.set("show_slug", s.show_slug)?;
+                        t.set("show_thinking", s.show_thinking)?;
+                        t.set("restrict_to_workspace", s.restrict_to_workspace)?;
+                        t.set("redact_secrets", s.redact_secrets)?;
+                        Ok(())
+                    }) {
+                        res?;
+                    }
+                    Ok(t)
+                })?,
+            )?;
             settings_tbl.set(
                 "toggle",
                 lua.create_function(|_, v: String| {
@@ -1143,7 +1131,7 @@ impl LuaRuntime {
         prompt_tbl.set("win_id", lua.create_function(|_, ()| Ok(ui::PROMPT_WIN.0))?)?;
         prompt_tbl.set(
             "text",
-            snap_read!(lua, shared, |o| o.prompt_text.clone().unwrap_or_default()),
+            app_read!(lua, |app| app.input.win.edit_buf.buf.clone()),
         )?;
         prompt_tbl.set(
             "set_text",
@@ -1219,7 +1207,12 @@ impl LuaRuntime {
                     let content: String = result.get("content").unwrap_or_default();
                     let is_error: bool = result.get("is_error").unwrap_or(false);
                     crate::lua::with_app(|app| {
-                        app.resolve_tool_result(request_id, call_id, content, is_error)
+                        app.engine.send(protocol::UiCommand::PluginToolResult {
+                            request_id,
+                            call_id,
+                            content,
+                            is_error,
+                        })
                     });
                     Ok(())
                 },
@@ -1248,68 +1241,58 @@ impl LuaRuntime {
         //                    recency bonus). 1-based index into entries().
         {
             let history_tbl = lua.create_table()?;
-            {
-                let s = shared.clone();
-                history_tbl.set(
-                    "entries",
-                    lua.create_function(move |lua, ()| {
-                        let out = lua.create_table()?;
-                        let o = s
-                            .ops
-                            .lock()
-                            .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
-                        for (i, entry) in o.input_history.iter().enumerate() {
-                            out.set(i + 1, entry.clone())?;
+            history_tbl.set(
+                "entries",
+                lua.create_function(|lua, ()| {
+                    let entries =
+                        crate::lua::try_with_app(|app| app.input_history.entries().to_vec())
+                            .unwrap_or_default();
+                    let out = lua.create_table()?;
+                    for (i, entry) in entries.into_iter().enumerate() {
+                        out.set(i + 1, entry)?;
+                    }
+                    Ok(out)
+                })?,
+            )?;
+            history_tbl.set(
+                "search",
+                lua.create_function(|lua, query: String| {
+                    let entries =
+                        crate::lua::try_with_app(|app| app.input_history.entries().to_vec())
+                            .unwrap_or_default();
+                    // Oldest first in the vec; the scorer wants
+                    // newest-first so "recent" ranks highest. Iterate
+                    // reversed and dedupe to match the old
+                    // `Completer::history` construction.
+                    let mut seen = std::collections::HashSet::new();
+                    let mut scored: Vec<(u32, usize, usize)> = Vec::new();
+                    for (rank, (orig_idx, entry)) in entries.iter().enumerate().rev().enumerate() {
+                        if !seen.insert(entry.as_str()) {
+                            continue;
                         }
-                        Ok(out)
-                    })?,
-                )?;
-            }
-            {
-                let s = shared.clone();
-                history_tbl.set(
-                    "search",
-                    lua.create_function(move |lua, query: String| {
-                        let out = lua.create_table()?;
-                        let o = s
-                            .ops
-                            .lock()
-                            .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
-                        // Oldest first in the vec; the scorer wants
-                        // newest-first so "recent" ranks highest. Iterate
-                        // reversed and dedupe to match the old
-                        // `Completer::history` construction.
-                        let mut seen = std::collections::HashSet::new();
-                        let mut scored: Vec<(u32, usize, usize)> = Vec::new();
-                        for (rank, (orig_idx, entry)) in
-                            o.input_history.iter().enumerate().rev().enumerate()
+                        let label = entry
+                            .trim_start()
+                            .lines()
+                            .map(str::trim)
+                            .find(|l| !l.is_empty())
+                            .unwrap_or("");
+                        if let Some(s) =
+                            crate::completer::history::history_score(label, &query, rank)
                         {
-                            if !seen.insert(entry.as_str()) {
-                                continue;
-                            }
-                            let label = entry
-                                .trim_start()
-                                .lines()
-                                .map(str::trim)
-                                .find(|l| !l.is_empty())
-                                .unwrap_or("");
-                            if let Some(s) =
-                                crate::completer::history::history_score(label, &query, rank)
-                            {
-                                scored.push((s, rank, orig_idx));
-                            }
+                            scored.push((s, rank, orig_idx));
                         }
-                        scored.sort_by_key(|(s, rank, _)| (*s, *rank));
-                        for (i, (score, _rank, orig_idx)) in scored.into_iter().enumerate() {
-                            let entry = lua.create_table()?;
-                            entry.set("index", orig_idx + 1)?;
-                            entry.set("score", score)?;
-                            out.set(i + 1, entry)?;
-                        }
-                        Ok(out)
-                    })?,
-                )?;
-            }
+                    }
+                    scored.sort_by_key(|(s, rank, _)| (*s, *rank));
+                    let out = lua.create_table()?;
+                    for (i, (score, _rank, orig_idx)) in scored.into_iter().enumerate() {
+                        let entry = lua.create_table()?;
+                        entry.set("index", orig_idx + 1)?;
+                        entry.set("score", score)?;
+                        out.set(i + 1, entry)?;
+                    }
+                    Ok(out)
+                })?,
+            )?;
             smelt.set("history", history_tbl)?;
         }
 

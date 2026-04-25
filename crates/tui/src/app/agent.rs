@@ -70,9 +70,8 @@ impl App {
         };
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
 
-        self.snapshot_engine_context(true);
         self.lua.emit(crate::lua::AutocmdEvent::TurnStart);
-        self.apply_lua_ops();
+        self.flush_lua_callbacks();
 
         let system_prompt = self.rebuild_system_prompt();
         let plugin_tools = self.lua.plugin_tool_defs(self.mode);
@@ -300,7 +299,6 @@ impl App {
             self.engine.send(UiCommand::Cancel);
             self.kill_blocking_agents();
         }
-        self.snapshot_engine_context(false);
         let was_cancelled = cancelled;
         let history = self.history.clone();
         self.lua
@@ -310,7 +308,7 @@ impl App {
                 t.set("messages", crate::lua::messages_to_lua(lua, &history)?)?;
                 Ok(t)
             });
-        self.apply_lua_ops();
+        self.flush_lua_callbacks();
         // Flush any in-flight streaming content before committing tools.
         self.flush_streaming_thinking();
         self.flush_streaming_text();
@@ -472,7 +470,7 @@ impl App {
                         t.set("args", args_tbl)?;
                         Ok(t)
                     });
-                self.apply_lua_ops();
+                self.flush_lua_callbacks();
                 pending.push(PendingTool {
                     call_id,
                     name: tool_name,
@@ -562,7 +560,7 @@ impl App {
                             t.set("elapsed_ms", elapsed)?;
                             Ok(t)
                         });
-                    self.apply_lua_ops();
+                    self.flush_lua_callbacks();
                 }
                 self.refresh_agent_counts();
                 SessionControl::Continue
@@ -1101,7 +1099,7 @@ impl App {
         self.push_block(Block::Text { content: msg });
     }
 
-    pub(super) fn session_permission_entries(&self) -> Vec<PermissionEntry> {
+    pub(crate) fn session_permission_entries(&self) -> Vec<PermissionEntry> {
         let rt = self.runtime_approvals.read().unwrap();
         let mut entries = Vec::new();
         for (tool, patterns) in rt.session_tool_entries() {

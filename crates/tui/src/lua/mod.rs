@@ -381,81 +381,6 @@ pub(crate) fn drop_displaced_lua_handle(
     }
 }
 
-/// Snapshot of engine-level state (model, mode, cost, tokens).
-/// Populated by `snapshot_engine_context` in the app loop.
-#[derive(Clone, Default)]
-pub struct EngineSnapshot {
-    pub model: String,
-    pub mode: String,
-    pub reasoning_effort: String,
-    pub is_busy: bool,
-    pub session_cost: f64,
-    pub context_tokens: Option<u32>,
-    pub context_window: Option<u32>,
-    pub session_dir: String,
-    pub session_id: String,
-    pub session_title: Option<String>,
-    pub session_cwd: String,
-    pub session_created_at_ms: u64,
-    /// User turn positions: `(block_idx, text)` for each `Block::User`.
-    pub session_turns: Vec<(usize, String)>,
-    /// Vim emulation setting (from settings, not the current vim mode).
-    pub vim_enabled: bool,
-    /// Current-session permission rules: `(tool, pattern)` with
-    /// `pattern = "*"` meaning blanket-allow for the tool, or `tool =
-    /// "directory"` for path-based approvals.
-    pub permission_session_entries: Vec<(String, String)>,
-}
-
-/// Snapshot fields populated by `set_context()` before a handler
-/// runs. Lua reads these via `smelt.transcript.text()`,
-/// `smelt.engine.snapshot()`, etc. Writes go through `with_app` —
-/// Lua callbacks reach `&mut App` directly and don't queue here.
-#[derive(Default)]
-pub struct LuaOps {
-    // ── reads (snapshot) — UI state ─────────────────────────────────
-    pub transcript_text: Option<String>,
-    pub prompt_text: Option<String>,
-    pub focused_window: Option<String>,
-    pub vim_mode: Option<String>,
-    // ── reads (snapshot) — engine state ─────────────────────────────
-    pub engine: EngineSnapshot,
-    /// `(key, display_name, provider_name)` for every model the user
-    /// can switch to — exposed via `smelt.engine.models()`. Written
-    /// once at startup; session-immutable.
-    pub available_models: Vec<(String, String, String)>,
-    /// User-facing boolean settings as `(key, is_on)`. Exposed via
-    /// `smelt.settings.snapshot()`. Refreshed only when settings
-    /// mutate (not every tick).
-    pub settings: Vec<(String, bool)>,
-    /// Input history (past submitted prompts, oldest first). Exposed
-    /// via `smelt.history.entries()` and scored by `smelt.history.search()`.
-    /// Refreshed on every submit + at startup.
-    pub input_history: Vec<String>,
-}
-
-impl LuaOps {
-    pub fn set_context(
-        &mut self,
-        transcript_text: Option<String>,
-        prompt_text: Option<String>,
-        focused_window: Option<String>,
-        vim_mode: Option<String>,
-    ) {
-        self.transcript_text = transcript_text;
-        self.prompt_text = prompt_text;
-        self.focused_window = focused_window;
-        self.vim_mode = vim_mode;
-    }
-
-    pub fn clear_context(&mut self) {
-        self.transcript_text = None;
-        self.prompt_text = None;
-        self.focused_window = None;
-        self.vim_mode = None;
-    }
-}
-
 /// One registered `smelt.statusline.register` entry. `default_align`
 /// applies to items the source returns without an explicit
 /// `align_right` field; items can still override per-item.
@@ -467,7 +392,6 @@ pub(crate) struct StatusSource {
 /// All shared state between Lua closures and the app loop.
 /// One `Arc<LuaShared>` replaces N separate `Arc<Mutex<…>>` fields.
 pub(crate) struct LuaShared {
-    pub(crate) ops: Mutex<LuaOps>,
     pub(crate) commands: Mutex<HashMap<String, LuaHandle>>,
     pub(crate) keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
     pub(crate) autocmds: Mutex<HashMap<AutocmdEvent, Vec<LuaHandle>>>,
@@ -495,7 +419,6 @@ pub(crate) struct LuaShared {
     /// *inside* `drive_tasks` — which already holds the `tasks` lock —
     /// can mint an id without re-entering the same mutex.
     pub(crate) next_external_id: AtomicU64,
-    pub(crate) history: Mutex<Arc<Vec<protocol::Message>>>,
     pub(crate) tasks: Mutex<LuaTaskRuntime>,
     /// Background process registry. Installed by `App::new` so Lua
     /// plugins (e.g. `/ps`) can enumerate and kill procs.
@@ -549,7 +472,6 @@ pub enum TaskEvent {
 impl Default for LuaShared {
     fn default() -> Self {
         Self {
-            ops: Mutex::new(LuaOps::default()),
             commands: Mutex::new(HashMap::new()),
             keymaps: Mutex::new(HashMap::new()),
             autocmds: Mutex::new(HashMap::new()),
@@ -561,7 +483,6 @@ impl Default for LuaShared {
             next_id: AtomicU64::new(1),
             next_buf_id: AtomicU64::new(ui::LUA_BUF_ID_BASE),
             next_external_id: AtomicU64::new(1),
-            history: Mutex::new(Arc::new(Vec::new())),
             tasks: Mutex::new(LuaTaskRuntime::new()),
             processes: Mutex::new(None),
             agent_snapshots: Mutex::new(None),
@@ -681,68 +602,6 @@ impl LuaRuntime {
         self.lua.load(&src).set_name("init.lua").exec()
     }
 
-    /// Populate the snapshot fields before dispatching a Lua callback.
-    pub fn set_context(
-        &self,
-        transcript_text: Option<String>,
-        prompt_text: Option<String>,
-        focused_window: Option<String>,
-        vim_mode: Option<String>,
-    ) {
-        if let Ok(mut o) = self.shared.ops.lock() {
-            o.set_context(transcript_text, prompt_text, focused_window, vim_mode);
-        }
-    }
-
-    /// Push just the prompt text into the read-side snapshot. Used when
-    /// firing `WinEvent::TextChanged` so handlers reading
-    /// `smelt.prompt.text()` see the fresh buffer without going through
-    /// a full `set_context` pass.
-    pub fn set_prompt_text_snapshot(&self, text: String) {
-        if let Ok(mut o) = self.shared.ops.lock() {
-            o.prompt_text = Some(text);
-        }
-    }
-
-    /// Populate the engine snapshot fields. Called once at startup and
-    /// whenever the engine state changes (mode, model, cost, tokens).
-    pub fn set_engine_context(&self, snap: EngineSnapshot) {
-        if let Ok(mut o) = self.shared.ops.lock() {
-            o.engine = snap;
-        }
-    }
-
-    /// Snapshot the set of models the user can switch to. Called once
-    /// at startup — this list is session-immutable.
-    pub fn set_available_models(&self, models: Vec<(String, String, String)>) {
-        if let Ok(mut o) = self.shared.ops.lock() {
-            o.available_models = models;
-        }
-    }
-
-    /// Snapshot current user-facing settings. Called at startup and
-    /// whenever a setting toggles — not every tick.
-    pub fn set_settings_snapshot(&self, settings: Vec<(String, bool)>) {
-        if let Ok(mut o) = self.shared.ops.lock() {
-            o.settings = settings;
-        }
-    }
-
-    /// Snapshot the input history (past submitted prompts). Called at
-    /// startup and whenever a new entry is pushed.
-    pub fn set_input_history(&self, entries: Vec<String>) {
-        if let Ok(mut o) = self.shared.ops.lock() {
-            o.input_history = entries;
-        }
-    }
-
-    /// Update the history snapshot. Called from `snapshot_engine_context`.
-    pub fn set_history(&self, history: Vec<protocol::Message>) {
-        if let Ok(mut h) = self.shared.history.lock() {
-            *h = Arc::new(history);
-        }
-    }
-
     /// Install the background process registry so `smelt.process.*`
     /// primitives can enumerate and kill procs. Called once at App start.
     pub fn set_process_registry(&self, registry: engine::tools::ProcessRegistry) {
@@ -757,13 +616,6 @@ impl LuaRuntime {
     pub fn set_agent_snapshots(&self, snaps: crate::app::SharedSnapshots) {
         if let Ok(mut s) = self.shared.agent_snapshots.lock() {
             *s = Some(snaps);
-        }
-    }
-
-    /// Clear the snapshot fields after dispatching.
-    pub fn clear_context(&self) {
-        if let Ok(mut o) = self.shared.ops.lock() {
-            o.clear_context();
         }
     }
 
@@ -2030,115 +1882,6 @@ mod tests {
     }
 
     #[test]
-    fn transcript_text_reads_context() {
-        let rt = LuaRuntime::new();
-        rt.set_context(Some("hello world".into()), None, None, None);
-        let text: String = rt
-            .lua
-            .load("return smelt.transcript.text()")
-            .eval()
-            .expect("eval");
-        assert_eq!(text, "hello world");
-        rt.clear_context();
-        let text: String = rt
-            .lua
-            .load("return smelt.transcript.text()")
-            .eval()
-            .expect("eval");
-        assert_eq!(text, "");
-    }
-
-    #[test]
-    fn buf_text_reads_context() {
-        let rt = LuaRuntime::new();
-        rt.set_context(None, Some("prompt content".into()), None, None);
-        let text: String = rt.lua.load("return smelt.buf.text()").eval().expect("eval");
-        assert_eq!(text, "prompt content");
-    }
-
-    #[test]
-    fn engine_model_reads_snapshot() {
-        let rt = LuaRuntime::new();
-        rt.set_engine_context(EngineSnapshot {
-            model: "claude-opus-4".into(),
-            ..Default::default()
-        });
-        let model: String = rt
-            .lua
-            .load("return smelt.engine.model()")
-            .eval()
-            .expect("eval");
-        assert_eq!(model, "claude-opus-4");
-    }
-
-    #[test]
-    fn engine_mode_reads_snapshot() {
-        let rt = LuaRuntime::new();
-        rt.set_engine_context(EngineSnapshot {
-            mode: "plan".into(),
-            ..Default::default()
-        });
-        let mode: String = rt
-            .lua
-            .load("return smelt.engine.mode()")
-            .eval()
-            .expect("eval");
-        assert_eq!(mode, "plan");
-    }
-
-    #[test]
-    fn engine_is_busy_reads_snapshot() {
-        let rt = LuaRuntime::new();
-        rt.set_engine_context(EngineSnapshot {
-            is_busy: true,
-            ..Default::default()
-        });
-        let busy: bool = rt
-            .lua
-            .load("return smelt.engine.is_busy()")
-            .eval()
-            .expect("eval");
-        assert!(busy);
-    }
-
-    #[test]
-    fn engine_cost_reads_snapshot() {
-        let rt = LuaRuntime::new();
-        rt.set_engine_context(EngineSnapshot {
-            session_cost: 1.23,
-            ..Default::default()
-        });
-        let cost: f64 = rt
-            .lua
-            .load("return smelt.engine.cost()")
-            .eval()
-            .expect("eval");
-        assert!((cost - 1.23).abs() < 0.001);
-    }
-
-    #[test]
-    fn engine_context_tokens_reads_snapshot() {
-        let rt = LuaRuntime::new();
-        rt.set_engine_context(EngineSnapshot {
-            context_tokens: Some(5000),
-            context_window: Some(128000),
-            ..Default::default()
-        });
-        let tokens: u32 = rt
-            .lua
-            .load("return smelt.engine.context_tokens()")
-            .eval()
-            .expect("eval");
-        assert_eq!(tokens, 5000);
-        let window: u32 = rt
-            .lua
-            .load("return smelt.engine.context_window()")
-            .eval()
-            .expect("eval");
-        assert_eq!(window, 128000);
-    }
-
-    #[test]
     fn emit_data_passes_table_to_handler() {
         let rt = LuaRuntime::new();
         install_test_notify(&rt);
@@ -2183,20 +1926,5 @@ mod tests {
             drain_notifications(&rt),
             vec!["got: turn_start".to_string()]
         );
-    }
-
-    #[test]
-    fn reasoning_effort_reads_snapshot() {
-        let rt = LuaRuntime::new();
-        rt.set_engine_context(EngineSnapshot {
-            reasoning_effort: "high".into(),
-            ..Default::default()
-        });
-        let effort: String = rt
-            .lua
-            .load("return smelt.engine.reasoning_effort()")
-            .eval()
-            .expect("eval");
-        assert_eq!(effort, "high");
     }
 }
