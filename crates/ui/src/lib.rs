@@ -241,7 +241,15 @@ impl Ui {
         self.wins.insert(id, win);
 
         let layer_id = float_layer_id(id);
-        self.compositor.add(&layer_id, Box::new(p), rect, zindex);
+        // Pickers are non-focusable in the keymap sense; mouse clicks
+        // should not promote them to focused or raise their zindex
+        // (they sit beneath dialogs/cmdline by design).
+        let opts = compositor::LayerOpts {
+            focus_on_click: focusable,
+            raise_on_click: focusable,
+        };
+        self.compositor
+            .add_with_opts(&layer_id, Box::new(p), rect, zindex, opts);
         if focusable {
             self.compositor.focus(&layer_id);
         }
@@ -287,7 +295,15 @@ impl Ui {
         self.wins.insert(id, win);
 
         let layer_id = float_layer_id(id);
-        self.compositor.add(&layer_id, Box::new(n), rect, zindex);
+        // Toast: non-focusable, sits below dialogs by design. Click
+        // dispatches `Dismiss` (handled by App), so suppress focus +
+        // raise so the click doesn't bump the toast above a real modal.
+        let opts = compositor::LayerOpts {
+            focus_on_click: false,
+            raise_on_click: false,
+        };
+        self.compositor
+            .add_with_opts(&layer_id, Box::new(n), rect, zindex, opts);
         if focusable {
             self.compositor.focus(&layer_id);
         }
