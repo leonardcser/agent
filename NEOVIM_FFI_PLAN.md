@@ -217,6 +217,27 @@ Canonicalization (Ctrl-R and friends):
   to declarations; `history_search` still uses the lower-level
   `smelt.prompt.open_picker` directly because its tab-vs-enter
   restore logic doesn't match the generic shape.
+- **Step 5b — Picker polish + cmd.picker split.** Done. Three
+  follow-ups: (1) `prompt_picker.lua` direction inverted for
+  `prompt_docked` (logical idx 0 sits at the bottom row, so Up/c-k/
+  c-p move toward higher indices); the keys list and teardown loop
+  cover all six chord variants. `to_picker_items` and the inner
+  `all_items` now thread the explicit `prefix` field through, and
+  filtering delegates to `smelt.fuzzy.rank` (matches the field-
+  independent scoring of the deleted Rust ArgPicker). (2)
+  `crates/tui/src/lua/api.rs` callback registration extracts a pair
+  of helpers in `crates/tui/src/lua/mod.rs` —
+  `register_callback_handle` (registry-value + atomic-id + insert)
+  and `drop_displaced_lua_handle` (drop the Lua handle id stashed in
+  a displaced `Callback::Lua`). The four `smelt.win.*` bindings
+  shrink ~30 LOC. (3) `smelt.cmd.register` reverts to a pure
+  passthrough; declarative picker behaviour moves to a separate
+  `smelt.cmd.picker(name, opts)` with explicit `apply` (direct
+  dispatch) / `prepare` (pre-open snapshot) hooks instead of the
+  dual-mode `handler(arg|nil)`. `theme`, `color`, `model`, and
+  `settings` migrate to the new entry point. Plugins also gain a
+  visual `prefix = "● "` pill on theme/color items and lavender /
+  lilac descriptions deduplicate to "cool purple" / "warm purple".
 - **Step 6 — Migrate Confirm to Lua.** Deferred. The mechanical
   migration is clear (add `smelt.confirm.build_{title,summary,preview}
   _buf`, `smelt.confirm.resolve`, `smelt.confirm.back_tab` sync
