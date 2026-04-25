@@ -12,7 +12,7 @@ use ui::buffer::BufCreateOpts;
 use ui::text_input::TextInput;
 use ui::{
     BufId, Constraint, FitMax, FloatConfig, OptionItem, OptionList, PanelHeight, PanelSpec,
-    Placement, WinId,
+    Placement, SeparatorStyle, WinId,
 };
 
 // ── Dialog ───────────────────────────────────────────────────────────
@@ -60,6 +60,12 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                     spec = spec.with_pad_left(pad_left);
                 }
                 spec = spec.focusable(focusable).with_initial_focus(initial_focus);
+                if let Some(sep) = parse_separator(&panel)? {
+                    spec = spec.with_separator(sep);
+                }
+                if panel.get::<bool>("collapse_when_empty").unwrap_or(false) {
+                    spec.collapse_when_empty = true;
+                }
                 panel_specs.push(spec);
             }
             "markdown" => {
@@ -106,9 +112,12 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                     ti = ti.with_placeholder(p);
                 }
                 let widget = Box::new(ti);
-                panel_specs.push(
-                    PanelSpec::widget(widget, PanelHeight::Fit).with_initial_focus(initial_focus),
-                );
+                let mut spec =
+                    PanelSpec::widget(widget, PanelHeight::Fit).with_initial_focus(initial_focus);
+                if panel.get::<bool>("collapse_when_empty").unwrap_or(false) {
+                    spec.collapse_when_empty = true;
+                }
+                panel_specs.push(spec);
             }
             "list" => {
                 let buf_id: u64 = panel.get("buf").map_err(|e| format!("list.buf: {e}"))?;
@@ -153,13 +162,14 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
     // `ask_user_question`, `exit_plan_mode`) should opt in — passive viewers
     // like `/help`, `/btw`, `/ps` must let engine responses flow through.
     let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
+    let placement = parse_dialog_placement(&opts);
 
     app.ui
         .dialog_open(
             FloatConfig {
                 title,
                 border: ui::Border::None,
-                placement: Placement::fit_content(FitMax::HalfScreen),
+                placement,
                 blocks_agent,
                 ..Default::default()
             },
@@ -167,6 +177,31 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
             panel_specs,
         )
         .ok_or_else(|| "failed to open dialog window".to_string())
+}
+
+fn parse_separator(panel: &mlua::Table) -> Result<Option<SeparatorStyle>, String> {
+    match panel.get::<String>("separator").ok().as_deref() {
+        Some("dashed") => Ok(Some(SeparatorStyle::Dashed)),
+        Some("solid") => Ok(Some(SeparatorStyle::Solid)),
+        Some(other) => Err(format!(
+            "panel.separator: unknown style {other:?} (expected \"dashed\" or \"solid\")"
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Top-level `placement` option on `smelt.ui.dialog._open`. Defaults
+/// to `fit_content(HalfScreen)` (compact center-floating dialog).
+/// `"dock_bottom"` docks full-width at the bottom; an optional
+/// `placement_height = <pct>` caps it (e.g. `60` → `Pct(60)`).
+fn parse_dialog_placement(opts: &mlua::Table) -> Placement {
+    match opts.get::<String>("placement").ok().as_deref() {
+        Some("dock_bottom") => {
+            let pct: u16 = opts.get("placement_height").unwrap_or(60);
+            Placement::dock_bottom_full_width(Constraint::Pct(pct))
+        }
+        _ => Placement::fit_content(FitMax::HalfScreen),
+    }
 }
 
 // ── Picker ───────────────────────────────────────────────────────────

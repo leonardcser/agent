@@ -1,259 +1,52 @@
-//! Confirm dialog — built-in tool approvals. Plugin tools drive their
-//! own dialogs through `smelt.ui.dialog.open`.
+//! Confirm dialog — built-in tool approvals.
 //!
-//! Panels (top to bottom):
-//! - 0 `Title` (Content, Fit) — ` tool: desc` (bash-syntax-highlighted
-//!   for `bash`; first line only when the command is multi-line).
-//! - 1 `Summary` (Content, Fit, hidden when absent).
-//! - 2 `Preview` (Content, Fill, hidden when the tool has no preview)
-//!   — inline diff, notebook diff, syntax-highlit file content, or
-//!   the bash command body. Scrolls on PageUp/PageDown.
-//! - 3 `Options` (`OptionList` widget, Fit, default focus) — yes / no
-//!   + dynamic "always allow …" entries per approval scope.
-//! - 4 `Reason` (`TextInput` widget, Fit, hidden until the user types
-//!   `e` or starts typing) — message attached to the decision.
+//! The dialog itself lives in `runtime/lua/smelt/confirm.lua`. This
+//! file is just the Rust-side primitives the Lua orchestrator calls
+//! through `smelt.confirm._*`:
 //!
-//! Keys (when focus is on Options):
-//! - `1`..`9`, Enter → resolve with `options[N]`
-//! - PageUp / PageDown → scroll Preview panel
-//! - `e` → focus Reason panel (edit reason message)
-//! - Esc / Ctrl+C → resolve as `ConfirmChoice::No`
+//! - [`build_title_buf`] — bash-syntax-highlit ` tool: desc` line.
+//! - [`build_summary_buf`] — optional one-line muted summary.
+//! - [`build_preview_buf`] — diff / notebook / file / bash-body
+//!   preview, depending on the tool.
+//! - [`build_options`] — yes / no + dynamic "always allow …" entries
+//!   per approval scope. Returns the labels (for the OptionList
+//!   widget) and the parallel `ConfirmChoice` array (looked up on
+//!   resolve by index).
 //!
-//! When focus is on Reason:
-//! - Enter → resolve with the currently-selected option + the reason text
-//! - Esc → clear reason and re-focus Options
+//! Plugin tools drive their own dialogs through `smelt.ui.dialog.open`.
 
 use super::super::App;
 use crate::app::dialogs::confirm_preview::ConfirmPreview;
 use crate::app::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
-use crate::keymap::hints;
 use crate::render::display::{ColorRole, ColorValue};
 use crate::render::layout_out::{LayoutSink, SpanCollector};
 use crate::theme;
-use crossterm::event::KeyCode;
-use std::cell::RefCell;
-use std::rc::Rc;
 use ui::buffer::BufCreateOpts;
-use ui::text_input::TextInput;
-use ui::{
-    BufId, Callback, CallbackResult, KeyBind, OptionItem, OptionList, PanelHeight, PanelSpec,
-    Payload, SeparatorStyle, WinEvent, WinId,
-};
+use ui::BufId;
 
-const PANEL_PREVIEW: usize = 2;
-const PANEL_OPTIONS: usize = 3;
-const PANEL_REASON: usize = 4;
-
-struct ConfirmState {
-    request_id: u64,
-    call_id: String,
-    tool_name: String,
-    args: std::collections::HashMap<String, serde_json::Value>,
-    choices: Vec<ConfirmChoice>,
+/// Live Confirm request held in `App::confirm_requests` while the
+/// Lua dialog is open. The choices array is populated by
+/// `build_options` so resolve can look up the user's pick by index.
+pub(crate) struct ConfirmEntry {
+    pub req: ConfirmRequest,
+    pub choices: Vec<ConfirmChoice>,
 }
 
-pub fn open(app: &mut App, req: &ConfirmRequest) {
-    let (title_buf, summary_buf, preview_buf) = build_text_buffers(app, req);
-    let (option_list, choices) = build_options(req);
-    let reason = TextInput::new().with_placeholder("reason (optional)…");
-
-    let hint_text = hints::join(&[
-        hints::CONFIRM,
-        hints::ADD_MSG,
-        hints::scroll(app.input.vim_enabled()),
-        hints::CANCEL,
-    ]);
-    let dialog_config = app.builtin_dialog_config(Some(hint_text), vec![]);
-
-    let panels = vec![
-        PanelSpec::content(title_buf, PanelHeight::Fit).focusable(false),
-        {
-            let mut p = PanelSpec::content(summary_buf, PanelHeight::Fit).focusable(false);
-            p.collapse_when_empty = true;
-            p
-        },
-        {
-            let mut p = PanelSpec::content(preview_buf, PanelHeight::Fill)
-                .focusable(false)
-                .with_separator(SeparatorStyle::Dashed);
-            p.collapse_when_empty = true;
-            p
-        },
-        PanelSpec::widget(Box::new(option_list), PanelHeight::Fit),
-        {
-            let mut p = PanelSpec::widget(Box::new(reason), PanelHeight::Fit);
-            p.collapse_when_empty = true;
-            p
-        },
-    ];
-
-    // Confirm blocks the engine-event drain — it gates a pending
-    // tool call's approval. No further engine events are applied
-    // until the user answers.
-    let Some(win_id) = app.ui.dialog_open(
-        ui::FloatConfig {
-            title: None,
-            border: ui::Border::None,
-            placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(60)),
-            blocks_agent: true,
-            ..Default::default()
-        },
-        dialog_config,
-        panels,
-    ) else {
-        return;
-    };
-
-    let state = Rc::new(RefCell::new(ConfirmState {
-        request_id: req.request_id,
-        call_id: req.call_id.clone(),
-        tool_name: req.tool_name.clone(),
-        args: req.args.clone(),
-        choices,
-    }));
-
-    let ops = app.lua.ops_handle();
-
-    // PageUp / PageDown: scroll the Preview panel regardless of focus.
-    for key in [
-        KeyBind::plain(KeyCode::PageUp),
-        KeyBind::plain(KeyCode::PageDown),
-    ] {
-        let up = matches!(key.code, KeyCode::PageUp);
-        let _ = app.ui.win_set_keymap(
-            win_id,
-            key,
-            Callback::Rust(Box::new(move |ctx| {
-                if let Some(dialog) = ctx.ui.dialog_mut(ctx.win) {
-                    let page = (dialog.panel_rect_height(PANEL_PREVIEW).max(1) as isize) / 2;
-                    let dir = if up { -1 } else { 1 };
-                    dialog.panel_scroll_by(PANEL_PREVIEW, dir * page);
-                }
-                CallbackResult::Consumed
-            })),
-        );
-    }
-
-    // 'e' when focus is on Options: jump to the Reason input.
-    let _ = app.ui.win_set_keymap(
-        win_id,
-        KeyBind::char('e'),
-        Callback::Rust(Box::new(move |ctx| {
-            if let Some(dialog) = ctx.ui.dialog_mut(ctx.win) {
-                if dialog.focused_panel() == PANEL_OPTIONS {
-                    dialog.focus_panel(PANEL_REASON);
-                    return CallbackResult::Consumed;
-                }
-            }
-            CallbackResult::Pass
-        })),
-    );
-
-    // BackTab (shift-tab): toggle app mode and, if the new mode
-    // auto-allows this tool call, approve + close.
-    let state_backtab = state.clone();
-    let ops_backtab = ops.clone();
-    let _ = app.ui.win_set_keymap(
-        win_id,
-        KeyBind::plain(KeyCode::BackTab),
-        Callback::Rust(Box::new(move |ctx| {
-            let s = state_backtab.borrow();
-            let win = ctx.win;
-            let request_id = s.request_id;
-            let call_id = s.call_id.clone();
-            let tool_name = s.tool_name.clone();
-            let args = s.args.clone();
-            ops_backtab.push(move |app: &mut App| {
-                app.handle_confirm_back_tab(win, request_id, &call_id, &tool_name, &args);
-            });
-            CallbackResult::Consumed
-        })),
-    );
-
-    // Submit: two code paths —
-    //   Payload::Selection{index} from the OptionList → options[index]
-    //   Payload::None from TextInput Enter → selected option + reason text
-    let state_submit = state.clone();
-    let ops_submit = ops.clone();
-    app.ui.win_on_event(
-        win_id,
-        WinEvent::Submit,
-        Callback::Rust(Box::new(move |ctx| {
-            let idx = match ctx.payload {
-                Payload::Selection { index } => index,
-                _ => selected_option(ctx.ui, ctx.win).unwrap_or(0),
-            };
-            let s = state_submit.borrow();
-            let choice = s.choices.get(idx).cloned().unwrap_or(ConfirmChoice::No);
-            let message = reason_text(ctx.ui, ctx.win);
-            let win = ctx.win;
-            let request_id = s.request_id;
-            let call_id = s.call_id.clone();
-            let tool_name = s.tool_name.clone();
-            ops_submit.push(move |app: &mut App| {
-                app.handle_confirm_resolve(choice, message, request_id, &call_id, &tool_name);
-                app.close_float(win);
-            });
-            CallbackResult::Consumed
-        })),
-    );
-
-    // Dismiss: resolve as denied (No).
-    let state_dismiss = state;
-    app.ui.win_on_event(
-        win_id,
-        WinEvent::Dismiss,
-        Callback::Rust(Box::new(move |ctx| {
-            let s = state_dismiss.borrow();
-            let win = ctx.win;
-            let request_id = s.request_id;
-            let call_id = s.call_id.clone();
-            let tool_name = s.tool_name.clone();
-            ops.push(move |app: &mut App| {
-                app.handle_confirm_resolve(
-                    ConfirmChoice::No,
-                    None,
-                    request_id,
-                    &call_id,
-                    &tool_name,
-                );
-                app.close_float(win);
-            });
-            CallbackResult::Consumed
-        })),
-    );
-}
-
-fn selected_option(ui: &mut ui::Ui, win: WinId) -> Option<usize> {
-    let dialog = ui.dialog_mut(win)?;
-    let widget = dialog.panel_widget_mut::<OptionList>(PANEL_OPTIONS)?;
-    Some(widget.cursor())
-}
-
-fn reason_text(ui: &mut ui::Ui, win: WinId) -> Option<String> {
-    let dialog = ui.dialog_mut(win)?;
-    let widget = dialog.panel_widget_mut::<TextInput>(PANEL_REASON)?;
-    let text = widget.text().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
-// ── Buffer construction ────────────────────────────────────────────────
-
-fn build_text_buffers(app: &mut App, req: &ConfirmRequest) -> (BufId, BufId, BufId) {
+/// Title buffer: ` tool: desc Allow?` with the tool name in the accent
+/// color and the desc bash-highlit when the tool is `bash` (or the
+/// preview is a bash body — multi-line commands show only the first
+/// line in the title; the rest goes in the preview panel).
+pub(crate) fn build_title_buf(app: &mut App, req: &ConfirmRequest) -> BufId {
     let theme_snap = theme::snapshot();
     let width = crate::render::term_width() as u16;
     let preview = ConfirmPreview::from_tool(&req.tool_name, &req.desc, &req.args);
     let is_bash = matches!(preview, ConfirmPreview::BashBody { .. }) || req.tool_name == "bash";
 
-    let title_buf = app.ui.buf_create(BufCreateOpts {
+    let buf_id = app.ui.buf_create(BufCreateOpts {
         buftype: ui::buffer::BufType::Scratch,
         modifiable: false,
     });
-    if let Some(buf) = app.ui.buf_mut(title_buf) {
+    if let Some(buf) = app.ui.buf_mut(buf_id) {
         crate::render::to_buffer::render_into_buffer(buf, width, &theme_snap, |sink| {
             render_title(
                 sink,
@@ -266,13 +59,20 @@ fn build_text_buffers(app: &mut App, req: &ConfirmRequest) -> (BufId, BufId, Buf
             sink.newline();
         });
     }
+    buf_id
+}
 
-    let summary_buf = app.ui.buf_create(BufCreateOpts {
+/// Summary buffer: ` <muted summary>` or empty when the request has no
+/// summary. The Lua dialog hides the panel via `collapse_when_empty`.
+pub(crate) fn build_summary_buf(app: &mut App, req: &ConfirmRequest) -> BufId {
+    let theme_snap = theme::snapshot();
+    let width = crate::render::term_width() as u16;
+    let buf_id = app.ui.buf_create(BufCreateOpts {
         buftype: ui::buffer::BufType::Scratch,
         modifiable: false,
     });
     if let Some(ref summary) = req.summary {
-        if let Some(buf) = app.ui.buf_mut(summary_buf) {
+        if let Some(buf) = app.ui.buf_mut(buf_id) {
             crate::render::to_buffer::render_into_buffer(buf, width, &theme_snap, |sink| {
                 sink.print(" ");
                 sink.push_fg(ColorValue::Role(ColorRole::Muted));
@@ -282,18 +82,26 @@ fn build_text_buffers(app: &mut App, req: &ConfirmRequest) -> (BufId, BufId, Buf
             });
         }
     }
+    buf_id
+}
 
-    let preview_buf = app.ui.buf_create(BufCreateOpts {
+/// Preview buffer: tool-specific syntax-highlit content (diff,
+/// notebook diff, file content, bash body). Empty when the tool has
+/// no preview; the Lua dialog hides the panel via `collapse_when_empty`.
+pub(crate) fn build_preview_buf(app: &mut App, req: &ConfirmRequest) -> BufId {
+    let theme_snap = theme::snapshot();
+    let width = crate::render::term_width() as u16;
+    let preview = ConfirmPreview::from_tool(&req.tool_name, &req.desc, &req.args);
+    let buf_id = app.ui.buf_create(BufCreateOpts {
         buftype: ui::buffer::BufType::Scratch,
         modifiable: false,
     });
     if preview.is_some() {
-        if let Some(buf) = app.ui.buf_mut(preview_buf) {
+        if let Some(buf) = app.ui.buf_mut(buf_id) {
             preview.render_into_buffer(buf, width, &theme_snap);
         }
     }
-
-    (title_buf, summary_buf, preview_buf)
+    buf_id
 }
 
 fn render_title(
@@ -323,9 +131,12 @@ fn render_title(
     sink.newline();
 }
 
-// ── Options ────────────────────────────────────────────────────────────
-
-fn build_options(req: &ConfirmRequest) -> (OptionList, Vec<ConfirmChoice>) {
+/// `(labels, choices)` for the OptionList widget. The two arrays are
+/// parallel — index into `labels` matches the same `ConfirmChoice`
+/// entry. Yes / No are always first; "always allow …" variants vary
+/// by whether the request has an outside-cwd directory or
+/// approval-pattern globs.
+pub(crate) fn build_options(req: &ConfirmRequest) -> (Vec<String>, Vec<ConfirmChoice>) {
     let mut labels: Vec<String> = Vec::new();
     let mut choices: Vec<ConfirmChoice> = Vec::new();
 
@@ -386,11 +197,5 @@ fn build_options(req: &ConfirmRequest) -> (OptionList, Vec<ConfirmChoice>) {
         choices.push(ConfirmChoice::Always(ApprovalScope::Workspace));
     }
 
-    let items: Vec<OptionItem> = labels.into_iter().map(OptionItem::new).collect();
-    let accent = ui::grid::Style {
-        fg: Some(theme::accent()),
-        ..Default::default()
-    };
-    let list = OptionList::new(items).with_cursor_style(accent);
-    (list, choices)
+    (labels, choices)
 }

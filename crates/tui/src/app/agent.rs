@@ -1376,7 +1376,22 @@ impl App {
                 // Close any non-blocking float (e.g. Ps) to make room.
                 self.close_focused_non_blocking_float();
                 self.set_active_status(&req.call_id, ToolStatus::Confirm);
-                crate::app::dialogs::confirm::open(self, &req);
+
+                // Register the request and fire the Lua dialog. The
+                // dialog (runtime/lua/smelt/confirm.lua) reads the
+                // request back through `smelt.confirm._*` primitives
+                // and resolves it on submit / dismiss.
+                let handle_id = self.next_confirm_handle;
+                self.next_confirm_handle = self.next_confirm_handle.wrapping_add(1);
+                let (_labels, choices) = crate::app::dialogs::confirm::build_options(&req);
+                self.confirm_requests.insert(
+                    handle_id,
+                    crate::app::dialogs::confirm::ConfirmEntry {
+                        req: *req,
+                        choices,
+                    },
+                );
+                self.lua.fire_confirm_open(handle_id);
                 LoopAction::Continue
             }
         }

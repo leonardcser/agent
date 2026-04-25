@@ -1378,6 +1378,9 @@ impl LuaRuntime {
 
         smelt.set("ui", smelt_ui)?;
 
+        // smelt.confirm.* primitives consumed by confirm.lua.
+        crate::lua::confirm_ops::register(lua, &smelt)?;
+
         smelt.set(
             "clipboard",
             lua.create_function(|_, text: String| {

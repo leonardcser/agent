@@ -50,6 +50,7 @@ impl ActiveTool {
 /// All data needed to show a confirm dialog. Flows unchanged from
 /// `EngineEvent::RequestPermission` through `SessionControl`, `DeferredDialog`,
 /// `ConfirmContext`, and `ConfirmDialog::new`.
+#[derive(Clone)]
 pub struct ConfirmRequest {
     pub call_id: String,
     pub tool_name: String,

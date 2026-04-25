@@ -22,6 +22,7 @@
 
 mod api;
 pub mod app_ref;
+mod confirm_ops;
 mod task;
 mod tasks;
 pub mod ui_ops;
@@ -1002,6 +1003,22 @@ impl LuaRuntime {
         items
     }
 
+    /// Fire `smelt.confirm.open(handle_id)`. Called by the agent loop
+    /// when an LLM tool call needs user approval — `agent.rs` registers
+    /// the request in `App::confirm_requests` first, then this method
+    /// hands the handle to the Lua dialog runner.
+    pub fn fire_confirm_open(&self, handle_id: u64) {
+        let result: mlua::Result<()> = (|| {
+            let smelt: mlua::Table = self.lua.globals().get("smelt")?;
+            let confirm: mlua::Table = smelt.get("confirm")?;
+            let open: mlua::Function = confirm.get("open")?;
+            open.call::<()>(handle_id)
+        })();
+        if let Err(e) = result {
+            self.record_error(format!("smelt.confirm.open: {e}"));
+        }
+    }
+
     fn record_error(&self, msg: String) {
         // Route through `smelt.notify_error` so tests that override
         // it (`install_test_notify`) capture errors emitted by the
@@ -1157,6 +1174,10 @@ const BOOTSTRAP_CHUNKS: &[(&str, &str)] = &[
     (
         "smelt/cmd.lua",
         include_str!("../../../../runtime/lua/smelt/cmd.lua"),
+    ),
+    (
+        "smelt/confirm.lua",
+        include_str!("../../../../runtime/lua/smelt/confirm.lua"),
     ),
 ];
 

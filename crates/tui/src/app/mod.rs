@@ -205,12 +205,19 @@ pub struct App {
     pub agent_snapshots: crate::app::SharedSnapshots,
     pub available_models: Vec<crate::config::ResolvedModel>,
     pub engine: EngineHandle,
-    permissions: Arc<Permissions>,
+    pub(crate) permissions: Arc<Permissions>,
     /// The active turn's state, or `None` when the app is idle.
     /// Owned by `App` so reducer handlers (`apply_ops`) can mutate
     /// it directly rather than threading `&mut Option<TurnState>`
     /// through every call chain.
     pub(crate) agent: Option<TurnState>,
+    /// Pending Confirm dialog requests, keyed by Lua-side handle id.
+    /// `agent.rs` inserts a request before firing `smelt.confirm.open
+    /// (handle_id)`; the Lua dialog reads it back through Rust
+    /// primitives and removes it on resolve / dismiss.
+    pub(crate) confirm_requests:
+        HashMap<u64, crate::app::dialogs::confirm::ConfirmEntry>,
+    pub(crate) next_confirm_handle: u64,
     /// Ghost text prediction for the input field.
     pub input_prediction: Option<String>,
     /// Monotonic counter to discard stale predictions.
@@ -667,6 +674,8 @@ impl App {
             engine,
             permissions,
             agent: None,
+            confirm_requests: HashMap::new(),
+            next_confirm_handle: 1,
             input_prediction: None,
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
