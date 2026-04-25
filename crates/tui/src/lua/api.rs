@@ -267,13 +267,23 @@ impl LuaRuntime {
         )?;
         session_tbl.set(
             "delete",
-            push_op!(lua, shared, |id: String| DomainOp::DeleteSession(id)),
+            lua.create_function(|_, id: String| {
+                crate::lua::with_app(|app| {
+                    if id != app.session.id {
+                        crate::session::delete(&id);
+                    }
+                });
+                Ok(())
+            })?,
         )?;
         smelt.set("session", session_tbl)?;
 
         engine_tbl.set(
             "set_model",
-            push_op!(lua, shared, |v: String| DomainOp::SetModel(v)),
+            lua.create_function(|_, v: String| {
+                crate::lua::with_app(|app| app.apply_model(&v));
+                Ok(())
+            })?,
         )?;
         // smelt.engine.models() → array of `{key, name, provider}`
         // for the prompt-docked `/model` picker.
@@ -300,17 +310,38 @@ impl LuaRuntime {
         }
         engine_tbl.set(
             "set_mode",
-            push_op!(lua, shared, |v: String| DomainOp::SetMode(v)),
+            lua.create_function(|_, v: String| {
+                crate::lua::with_app(|app| match protocol::Mode::parse(&v) {
+                    Some(mode) => app.set_mode(mode),
+                    None => app.notify_error(format!("unknown mode: {v}")),
+                });
+                Ok(())
+            })?,
         )?;
         engine_tbl.set(
             "set_reasoning_effort",
-            push_op!(lua, shared, |v: String| DomainOp::SetReasoningEffort(v)),
+            lua.create_function(|_, v: String| {
+                crate::lua::with_app(|app| match protocol::ReasoningEffort::parse(&v) {
+                    Some(effort) => app.set_reasoning_effort(effort),
+                    None => app.notify_error(format!("unknown reasoning effort: {v}")),
+                });
+                Ok(())
+            })?,
         )?;
         engine_tbl.set(
             "submit",
-            push_op!(lua, shared, |v: String| DomainOp::Submit(v)),
+            lua.create_function(|_, v: String| {
+                crate::lua::with_app(|app| app.queued_messages.push(v));
+                Ok(())
+            })?,
         )?;
-        engine_tbl.set("cancel", push_op!(lua, shared, || DomainOp::Cancel))?;
+        engine_tbl.set(
+            "cancel",
+            lua.create_function(|_, ()| {
+                crate::lua::with_app(|app| app.engine.send(protocol::UiCommand::Cancel));
+                Ok(())
+            })?,
+        )?;
         {
             let s = shared.clone();
             engine_tbl.set(
@@ -435,18 +466,18 @@ impl LuaRuntime {
                 })?,
             )?;
         }
-        {
-            let s = shared.clone();
-            process_tbl.set(
-                "kill",
-                lua.create_function(move |_, id: String| {
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(DomainOp::KillProcess(id));
-                    }
-                    Ok(())
-                })?,
-            )?;
-        }
+        process_tbl.set(
+            "kill",
+            lua.create_function(|_, id: String| {
+                crate::lua::with_app(|app| {
+                    let registry = app.engine.processes.clone();
+                    tokio::spawn(async move {
+                        let _ = registry.stop(&id).await;
+                    });
+                });
+                Ok(())
+            })?,
+        )?;
         {
             let s = shared.clone();
             process_tbl.set(
@@ -508,7 +539,10 @@ impl LuaRuntime {
         )?;
         agent_tbl.set(
             "kill",
-            push_op!(lua, shared, |pid: u32| DomainOp::KillAgent(pid)),
+            lua.create_function(|_, pid: u32| {
+                engine::registry::kill_agent(pid);
+                Ok(())
+            })?,
         )?;
         {
             let s = shared.clone();
@@ -1159,30 +1193,20 @@ impl LuaRuntime {
                 Ok(())
             })?,
         )?;
-        {
-            let s = shared.clone();
-            prompt_tbl.set(
-                "set_section",
-                lua.create_function(move |_, (name, content): (String, String)| {
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(DomainOp::SetPromptSection(name, content));
-                    }
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let s = shared.clone();
-            prompt_tbl.set(
-                "remove_section",
-                lua.create_function(move |_, name: String| {
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(DomainOp::RemovePromptSection(name));
-                    }
-                    Ok(())
-                })?,
-            )?;
-        }
+        prompt_tbl.set(
+            "set_section",
+            lua.create_function(|_, (name, content): (String, String)| {
+                crate::lua::with_app(|app| app.prompt_sections.set(&name, content));
+                Ok(())
+            })?,
+        )?;
+        prompt_tbl.set(
+            "remove_section",
+            lua.create_function(|_, name: String| {
+                crate::lua::with_app(|app| app.prompt_sections.remove(&name));
+                Ok(())
+            })?,
+        )?;
         smelt.set("prompt", prompt_tbl)?;
 
         // smelt.tools.register(def) / unregister(name) / resolve(...)

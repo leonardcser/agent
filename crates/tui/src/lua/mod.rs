@@ -2164,51 +2164,6 @@ mod tests {
     }
 
     #[test]
-    fn engine_set_mode_queues_op() {
-        let rt = LuaRuntime::new();
-        rt.lua
-            .load(r#"smelt.engine.set_mode("plan")"#)
-            .exec()
-            .expect("exec");
-        let ops = rt.drain_ops();
-        assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], AppOp::Domain(DomainOp::SetMode(m)) if m == "plan"));
-    }
-
-    #[test]
-    fn engine_set_model_queues_op() {
-        let rt = LuaRuntime::new();
-        rt.lua
-            .load(r#"smelt.engine.set_model("gpt-4o")"#)
-            .exec()
-            .expect("exec");
-        let ops = rt.drain_ops();
-        assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], AppOp::Domain(DomainOp::SetModel(m)) if m == "gpt-4o"));
-    }
-
-    #[test]
-    fn engine_cancel_queues_op() {
-        let rt = LuaRuntime::new();
-        rt.lua.load("smelt.engine.cancel()").exec().expect("exec");
-        let ops = rt.drain_ops();
-        assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], AppOp::Domain(DomainOp::Cancel)));
-    }
-
-    #[test]
-    fn engine_submit_queues_op() {
-        let rt = LuaRuntime::new();
-        rt.lua
-            .load(r#"smelt.engine.submit("hello")"#)
-            .exec()
-            .expect("exec");
-        let ops = rt.drain_ops();
-        assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], AppOp::Domain(DomainOp::Submit(t)) if t == "hello"));
-    }
-
-    #[test]
     fn engine_compact_queues_op() {
         let rt = LuaRuntime::new();
         rt.lua
