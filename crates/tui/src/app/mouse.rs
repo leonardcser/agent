@@ -158,29 +158,19 @@ impl App {
                 return EventOutcome::Redraw;
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let dragged = self.mouse_drag_active && self.drag_on_scrollbar.is_none();
-                match self.app_focus {
-                    crate::app::AppFocus::Content => {
-                        // A double/triple-click already copied the
-                        // initial word/line; on release we re-copy the
-                        // (possibly extended) selection if the user
-                        // dragged OR if there's a word/line anchor.
-                        let had_anchor_span = self.transcript_window.drag_anchor_word.is_some()
-                            || self.transcript_window.drag_anchor_line.is_some();
-                        if dragged || had_anchor_span {
-                            self.handle_content_mouse(me, 0);
-                        } else {
-                            self.transcript_window.drag_anchor_word = None;
-                            self.transcript_window.drag_anchor_line = None;
+                // `Window::mouse_up` self-guards bare clicks (no yank,
+                // no clear-on-empty) and handles its own anchor cleanup,
+                // so both branches just dispatch unconditionally.
+                // Scrollbar drag is an App-owned gesture and takes the
+                // Up itself — the adapter call is skipped there.
+                if self.drag_on_scrollbar.is_none() {
+                    self.dispatch_focused_mouse(me, 0);
+                }
+                if self.app_focus == crate::app::AppFocus::Prompt {
+                    if let Some(prev) = self.prompt_drag_return_vim_mode.take() {
+                        if let Some(vim) = self.input.win.vim.as_mut() {
+                            vim.set_mode(prev);
                         }
-                        if let Some(vim) = self.transcript_window.vim.as_mut() {
-                            vim.set_mode(crate::vim::ViMode::Normal);
-                        } else {
-                            self.transcript_window.win_cursor.clear_anchor();
-                        }
-                    }
-                    crate::app::AppFocus::Prompt => {
-                        self.copy_prompt_selection_on_release();
                     }
                 }
                 self.mouse_drag_active = false;
@@ -230,10 +220,13 @@ impl App {
                 self.last_click = Some((now, me.row, me.column, count));
                 let double = count == 2;
 
-                // First, check if the click lands inside the input text
-                // region — that's the only prompt-area hit we position
-                // for. Clicks on queued messages, bars, status line etc.
-                // only change focus.
+                // Prompt input area: route Down through the unified
+                // `Window::handle_mouse` path (via the prompt mouse
+                // adapter, which handles source ↔ wrapped translation).
+                // Same primitive transcript and dialog buffer panels
+                // use, so click cadence / drag anchors / yank-on-
+                // release / theme selection bg are shared.
+                let _ = double;
                 if let Some(vp) = self.prompt_viewport {
                     if vp.contains(me.row, me.column) {
                         self.app_focus = crate::app::AppFocus::Prompt;
@@ -245,39 +238,12 @@ impl App {
                             return EventOutcome::Redraw;
                         }
                         self.drag_on_scrollbar = None;
-                        if let Some(content::ViewportHit::Content { row, col }) =
-                            vp.hit(me.row, me.column)
-                        {
-                            self.position_prompt_cursor_from_click(
-                                row,
-                                col,
-                                vp.scroll_top as usize,
-                                vp.content_width,
-                            );
-                        }
                         if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
-                            // Save the pre-drag vim mode so mouse-up
-                            // can restore it (a drag from Insert should
-                            // not land the user in Normal). Applies to
-                            // both single-click drag and double-click
-                            // word-select, since both enter Visual.
                             if let Some(vim) = self.input.win.vim.as_ref() {
                                 self.prompt_drag_return_vim_mode = Some(vim.mode());
                             }
                         }
-                        if double {
-                            self.select_and_copy_word_in_prompt();
-                        } else if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
-                            // Anchor a vim Visual selection at the click so
-                            // a drag grows inclusive of the anchor char,
-                            // matching keyboard `v` behaviour.
-                            let anchor = self.input.win.cpos;
-                            if let Some(vim) = self.input.win.vim.as_mut() {
-                                vim.begin_visual(crate::vim::ViMode::Visual, anchor);
-                            } else {
-                                self.input.win.win_cursor.set_anchor(Some(anchor));
-                            }
-                        }
+                        self.handle_prompt_mouse(me, count);
                         return EventOutcome::Redraw;
                     }
                 }
@@ -316,138 +282,61 @@ impl App {
     }
 
     /// Scroll the pane under the mouse cursor by `delta` lines (positive
-    /// = down). Scrolling over the prompt drives vim j/k on the input
-    /// buffer; scrolling anywhere else drives the content pane. This
-    /// keeps wheel behaviour consistent with the "buffer scroll is
-    /// cursor motion" model used by keyboard navigation.
+    /// = down). Unified policy across transcript / prompt / dialog
+    /// buffer panels: wheel moves `cpos` AND `scroll_top` together by
+    /// `delta` visual rows. The cursor's viewport-relative row stays
+    /// constant — visually pinned in the viewport while the buffer
+    /// scrolls under it. Same UX as the transcript today, applied to
+    /// every buffer surface.
     pub(super) fn scroll_under_mouse(&mut self, row: u16, delta: isize) {
         if matches!(self.layout.hit_test(row, 0), content::HitRegion::Prompt) {
             self.app_focus = crate::app::AppFocus::Prompt;
-            self.scroll_prompt_by_lines(delta);
+            // Prompt's `edit_buf.buf` is the source buffer (≠ wrapped
+            // display rows). `win_cursor.move_vertical` operates on
+            // source rows; the renderer's `ensure_cursor_visible`
+            // (Step 6) syncs `scroll_top` to keep the cursor visible.
+            // Once 7b lands the row-space adapter, this collapses into
+            // a shared `Window::scroll_by_lines` call with the rest.
+            let buf = self.input.win.edit_buf.buf.clone();
+            let new_pos = self
+                .input
+                .win
+                .win_cursor
+                .move_vertical(&buf, self.input.win.cpos, delta);
+            if new_pos != self.input.win.cpos {
+                self.input.win.cpos = new_pos;
+            }
             return;
         }
         if !self.has_transcript_content(self.settings.show_thinking) {
             return;
         }
         self.app_focus = crate::app::AppFocus::Content;
-        // tmux copy-mode model: wheel pans the viewport; cpos / cursor
-        // stay anchored at their absolute position and scroll out of
-        // view. Keyboard motions (j/k, arrows) or a click re-anchor.
         let rows = self.full_transcript_display_text(self.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
-            .scroll_view_by(delta, rows.len(), viewport);
+            .scroll_by_lines(delta, &rows, viewport);
     }
 
-    fn scroll_prompt_by_lines(&mut self, delta: isize) {
-        let buf = &self.input.win.edit_buf.buf;
-        let new_pos = self
-            .input
-            .win
-            .win_cursor
-            .move_vertical(buf, self.input.win.cpos, delta);
-        if new_pos != self.input.win.cpos {
-            self.input.win.cpos = new_pos;
+    /// Route a mouse event to the focused buffer surface's adapter.
+    /// Both adapters wrap `Window::handle_mouse` with the per-surface
+    /// row/break/viewport plumbing, so all the App layer needs is the
+    /// focus dispatch.
+    fn dispatch_focused_mouse(&mut self, me: MouseEvent, click_count: u8) {
+        match self.app_focus {
+            crate::app::AppFocus::Content => self.handle_content_mouse(me, click_count),
+            crate::app::AppFocus::Prompt => self.handle_prompt_mouse(me, click_count),
         }
     }
 
-    /// Translate a click inside the prompt input region into a char
-    /// offset in `state.buf` and move `state.cpos` there. `rel_row` is
-    /// rows below the top of the input region; `col` is the screen
-    /// column. Takes current wrap metrics from the last-drawn frame.
-    fn position_prompt_cursor_from_click(
-        &mut self,
-        rel_row: u16,
-        col: u16,
-        scroll: usize,
-        usable: u16,
-    ) {
-        let target_visual_row = rel_row as usize + scroll;
-        let target_col = col as usize;
-        let usable = usable as usize;
-        let buf = &self.input.buf;
-
-        // Simple char-wrap walk that mirrors `wrap_and_locate_cursor`'s
-        // behaviour for the common case of plain text input.
-        let mut visual_row = 0usize;
-        let mut col_in_line = 0usize;
-        let mut target_byte: Option<usize> = None;
-        let mut last_byte_on_target_row: Option<usize> = None;
-        for (byte_off, ch) in buf.char_indices() {
-            if visual_row == target_visual_row {
-                last_byte_on_target_row = Some(byte_off);
-                if col_in_line == target_col {
-                    target_byte = Some(byte_off);
-                    break;
-                }
-            }
-            if ch == '\n' {
-                if visual_row == target_visual_row && target_byte.is_none() {
-                    target_byte = Some(byte_off);
-                    break;
-                }
-                visual_row += 1;
-                col_in_line = 0;
-                continue;
-            }
-            col_in_line += 1;
-            if col_in_line >= usable {
-                if visual_row == target_visual_row && target_byte.is_none() {
-                    // Past the end of target row without hitting target
-                    // col — clamp to end of line.
-                    target_byte = Some(byte_off + ch.len_utf8());
-                    break;
-                }
-                visual_row += 1;
-                col_in_line = 0;
-            }
-        }
-        let cpos = target_byte
-            .or_else(|| {
-                last_byte_on_target_row
-                    .map(|b| b + buf[b..].chars().next().map_or(0, |c| c.len_utf8()))
-            })
-            .unwrap_or(buf.len());
-        self.input.win.cpos = cpos.min(buf.len());
-        let want = col as usize;
-        self.input.win.win_cursor.set_curswant(Some(want));
-    }
-
-    /// Extend the active drag selection. Scrollbar drags re-snap the
-    /// thumb; content drags delegate to `transcript_window.handle_mouse`
-    /// (which knows how to grow word/line anchored drags); prompt
-    /// drags still ride the local prompt-side path until Step 4 hands
-    /// the prompt to `Window::handle_mouse` too.
+    /// Drag handler: scrollbar drags re-snap the thumb; otherwise the
+    /// event flows to the focused buffer adapter.
     fn extend_selection_to(&mut self, me: MouseEvent) {
         if self.drag_on_scrollbar.is_some() {
             self.apply_scrollbar_drag(me.row);
             return;
         }
-        match self.app_focus {
-            crate::app::AppFocus::Content => {
-                self.handle_content_mouse(me, 0);
-            }
-            crate::app::AppFocus::Prompt => {
-                if let Some(vp) = self.prompt_viewport {
-                    if let Some(content::ViewportHit::Content { row: r, col: c }) =
-                        vp.hit(me.row, me.column)
-                    {
-                        self.position_prompt_cursor_from_click(
-                            r,
-                            c,
-                            vp.scroll_top as usize,
-                            vp.content_width,
-                        );
-                    }
-                }
-                // Vim Visual mode reads cpos directly for `visual_range`
-                // — no separate anchor to extend. Only the non-vim path
-                // needs the explicit win_cursor extend.
-                if self.input.win.vim.is_none() {
-                    self.input.win.win_cursor.extend(self.input.win.cpos);
-                }
-            }
-        }
+        self.dispatch_focused_mouse(me, 0);
     }
 
     /// Frame-tick hook: if the user is mid-drag with the content cursor
@@ -486,36 +375,109 @@ impl App {
         self.move_content_cursor_by_lines(delta);
     }
 
-    /// Finalise a prompt drag-select: copy any non-empty selection to
-    /// the clipboard and clear the anchor. A bare click (no drag) has
-    /// anchor == cpos, so this is a no-op in that case. When vim drove
-    /// the selection via `Visual` mode, restore whatever mode the user
-    /// was in before the drag started (Normal / Insert) so a drag from
-    /// Insert doesn't leave them stranded in Normal.
-    fn copy_prompt_selection_on_release(&mut self) {
-        if let Some((s, e)) = self.input.selection_range() {
-            let text: String = self.input.win.edit_buf.buf[s..e].to_string();
-            if crate::app::commands::copy_to_clipboard(&text).is_ok() {
-                self.input.win.kill_ring.record_clipboard_write(text);
-            }
+    /// Drive a prompt mouse event through `Window::handle_mouse` —
+    /// same primitive the transcript and dialog buffer panels use.
+    /// The prompt's source buffer ≠ wrapped display rows, so we
+    /// translate window state into wrapped-row byte space before the
+    /// call, run the dispatch, then translate cpos / anchors back to
+    /// source bytes. Yank text is re-sliced from source so soft-wrap
+    /// `\n`s don't leak into the clipboard.
+    fn handle_prompt_mouse(&mut self, me: MouseEvent, click_count: u8) {
+        let Some(vp) = self.prompt_viewport else {
+            return;
+        };
+        let usable = vp.content_width as usize;
+        let wrap = crate::content::prompt_wrap::PromptWrap::build(&self.input, usable);
+        if wrap.rows.is_empty() {
+            return;
         }
-        if let Some(prev) = self.prompt_drag_return_vim_mode.take() {
-            if let Some(vim) = self.input.win.vim.as_mut() {
-                vim.set_mode(prev);
-            }
-        }
-        self.input.win.win_cursor.clear_anchor();
-    }
 
-    /// Double-click on the prompt: select the word under the cursor
-    /// (if any) via the shared `Buffer::select_word_at` helper, and
-    /// copy it to the clipboard.
-    fn select_and_copy_word_in_prompt(&mut self) {
-        let cpos = self.input.win.cpos;
-        if let Some((s, e)) = self.input.select_word_at(cpos) {
-            let text = self.input.win.edit_buf.buf[s..e].to_string();
-            if crate::app::commands::copy_to_clipboard(&text).is_ok() {
-                self.input.win.kill_ring.record_clipboard_write(text);
+        // Pre-call: translate source-byte state on `state.win` into
+        // wrapped-row-byte space. cpos, vim Visual anchor, win_cursor
+        // anchor, and the two drag anchors all need translation.
+        let saved_src_cpos = self.input.win.cpos;
+        let saved_src_anchor = self.input.win.win_cursor.anchor();
+        let saved_src_dword = self.input.win.drag_anchor_word;
+        let saved_src_dline = self.input.win.drag_anchor_line;
+        let saved_vim_visual_anchor = self.input.win.vim.as_ref().and_then(|v| v.visual_anchor());
+
+        self.input.win.cpos = wrap.src_to_wrapped(saved_src_cpos);
+        self.input
+            .win
+            .win_cursor
+            .set_anchor(saved_src_anchor.map(|a| wrap.src_to_wrapped(a)));
+        self.input.win.drag_anchor_word =
+            saved_src_dword.map(|(s, e)| (wrap.src_to_wrapped(s), wrap.src_to_wrapped(e)));
+        self.input.win.drag_anchor_line =
+            saved_src_dline.map(|(s, e)| (wrap.src_to_wrapped(s), wrap.src_to_wrapped(e)));
+        if let Some(vim) = self.input.win.vim.as_mut() {
+            if let Some(a) = saved_vim_visual_anchor {
+                vim.begin_visual(crate::vim::ViMode::Visual, wrap.src_to_wrapped(a));
+            }
+        }
+
+        // Build the same `MouseCtx` shape the transcript uses.
+        let ctx = ui::MouseCtx {
+            rows: &wrap.rows,
+            soft_breaks: &wrap.soft_breaks,
+            hard_breaks: &wrap.hard_breaks,
+            viewport: vp,
+            click_count,
+        };
+        let action = self.input.win.handle_mouse(me, ctx);
+
+        // Post-call: translate state on `state.win` back to source
+        // bytes. `Window::mouse_up` already cleared its anchors, so
+        // reading them after Up just yields `None`.
+        let new_w_cpos = self.input.win.cpos;
+        let new_w_anchor = self.input.win.win_cursor.anchor();
+        let new_w_dword = self.input.win.drag_anchor_word;
+        let new_w_dline = self.input.win.drag_anchor_line;
+        let new_w_vim_anchor = self.input.win.vim.as_ref().and_then(|v| v.visual_anchor());
+
+        self.input.win.cpos = wrap.wrapped_to_src(new_w_cpos);
+        self.input
+            .win
+            .win_cursor
+            .set_anchor(new_w_anchor.map(|a| wrap.wrapped_to_src(a)));
+        self.input.win.drag_anchor_word =
+            new_w_dword.map(|(s, e)| (wrap.wrapped_to_src(s), wrap.wrapped_to_src(e)));
+        self.input.win.drag_anchor_line =
+            new_w_dline.map(|(s, e)| (wrap.wrapped_to_src(s), wrap.wrapped_to_src(e)));
+        if let Some(vim) = self.input.win.vim.as_mut() {
+            if let Some(a) = new_w_vim_anchor {
+                vim.begin_visual(crate::vim::ViMode::Visual, wrap.wrapped_to_src(a));
+            }
+        }
+
+        // If Window yielded a yank, re-slice from source so soft-wrap
+        // `\n`s don't leak into the clipboard. The selection range in
+        // source coordinates is whatever anchor/cpos translated to.
+        if matches!(action, ui::MouseAction::Yank(_)) {
+            if let Some((s, e)) = self.input.selection_range() {
+                if e > s {
+                    let text = self.input.win.edit_buf.buf[s..e].to_string();
+                    if crate::app::commands::copy_to_clipboard(&text).is_ok() {
+                        self.input.win.kill_ring.record_clipboard_write(text);
+                    }
+                }
+            } else {
+                // Word/line selection from double/triple click anchors
+                // the win_cursor at the start and parks cpos at end-1.
+                // Use the drag anchors if win_cursor was already cleared.
+                let range = self
+                    .input
+                    .win
+                    .drag_anchor_word
+                    .or(self.input.win.drag_anchor_line);
+                if let Some((s, e)) = range {
+                    if e > s {
+                        let text = self.input.win.edit_buf.buf[s..e].to_string();
+                        if crate::app::commands::copy_to_clipboard(&text).is_ok() {
+                            self.input.win.kill_ring.record_clipboard_write(text);
+                        }
+                    }
+                }
             }
         }
     }
@@ -698,7 +660,7 @@ impl App {
                             .reanchor_to_visible_row(&rows, viewport);
                     }
                     crate::app::AppFocus::Prompt => {
-                        self.prompt_input_scroll = from_top as usize;
+                        self.input.win.scroll_top = from_top;
                     }
                 }
             }

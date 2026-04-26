@@ -282,6 +282,17 @@ impl Vim {
     /// mode (`Visual` or `VisualLine`). Used by mouse drag-select so the
     /// selection originates at the click rather than the previous
     /// cursor position.
+    /// Read the Visual-mode anchor byte. Returns `Some(byte)` only
+    /// while in `Visual`/`VisualLine`; `None` in Normal/Insert. Used by
+    /// the prompt mouse adapter to translate between source-byte and
+    /// wrapped-byte spaces across `Window::handle_mouse` calls.
+    pub fn visual_anchor(&self) -> Option<usize> {
+        match self.mode {
+            ViMode::Visual | ViMode::VisualLine => Some(self.visual_anchor),
+            _ => None,
+        }
+    }
+
     pub fn begin_visual(&mut self, mode: ViMode, cpos: usize) {
         self.mode = mode;
         self.sub = SubState::Ready;

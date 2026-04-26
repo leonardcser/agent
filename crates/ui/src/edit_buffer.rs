@@ -55,7 +55,7 @@ impl EditBuffer {
     /// Returns `(start, end)` byte offsets, or `None` if the position
     /// is in whitespace / out of bounds.
     pub fn word_range_at(&self, pos: usize) -> Option<(usize, usize)> {
-        self.word_range_at_transparent(pos, &[])
+        word_range_at(&self.buf, pos)
     }
 
     /// Like `word_range_at` but treats byte positions listed in
@@ -69,7 +69,7 @@ impl EditBuffer {
         pos: usize,
         transparent: &[usize],
     ) -> Option<(usize, usize)> {
-        self.token_range_at_transparent(pos, transparent, |c| c.is_alphanumeric() || c == '_')
+        word_range_at_transparent(&self.buf, pos, transparent)
     }
 
     /// Vim "WORD" (capital W) variant of [`Self::word_range_at_transparent`]:
@@ -81,73 +81,7 @@ impl EditBuffer {
         pos: usize,
         transparent: &[usize],
     ) -> Option<(usize, usize)> {
-        self.token_range_at_transparent(pos, transparent, |c| !c.is_whitespace())
-    }
-
-    fn token_range_at_transparent<F>(
-        &self,
-        pos: usize,
-        transparent: &[usize],
-        is_word: F,
-    ) -> Option<(usize, usize)>
-    where
-        F: Fn(char) -> bool,
-    {
-        let is_trans = |p: usize| transparent.binary_search(&p).is_ok();
-        if pos >= self.buf.len() {
-            return None;
-        }
-        let first = self.buf[pos..].chars().next()?;
-        if !is_word(first) && !is_trans(pos) {
-            return None;
-        }
-        let mut start = pos;
-        while start > 0 {
-            let prev = self.buf[..start]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let c = self.buf[prev..].chars().next()?;
-            if !is_word(c) && !is_trans(prev) {
-                break;
-            }
-            start = prev;
-        }
-        let mut end = pos;
-        while end < self.buf.len() {
-            let c = self.buf[end..].chars().next()?;
-            if !is_word(c) && !is_trans(end) {
-                break;
-            }
-            end += c.len_utf8();
-        }
-        // Trim leading/trailing transparent chars so the selection
-        // spans exactly the merged word.
-        while start < end {
-            let c = self.buf[start..].chars().next()?;
-            if is_trans(start) && !is_word(c) {
-                start += c.len_utf8();
-            } else {
-                break;
-            }
-        }
-        while end > start {
-            let prev = self.buf[..end].char_indices().next_back().map(|(i, _)| i)?;
-            let c = self.buf[prev..].chars().next()?;
-            if is_trans(prev) && !is_word(c) {
-                end = prev;
-            } else {
-                break;
-            }
-        }
-        if start == end {
-            return None;
-        }
-        if !self.buf[start..end].chars().any(is_word) {
-            return None;
-        }
-        Some((start, end))
+        big_word_range_at_transparent(&self.buf, pos, transparent)
     }
 
     /// Source-line range at `pos`. `hard_breaks` lists byte positions of
@@ -157,35 +91,132 @@ impl EditBuffer {
     /// buffer start/end. The returned range does not include the
     /// trailing `\n`.
     pub fn line_range_at(&self, pos: usize, hard_breaks: &[usize]) -> Option<(usize, usize)> {
-        if self.buf.is_empty() {
-            return None;
-        }
-        let pos = pos.min(self.buf.len());
-        let start = match hard_breaks.binary_search(&pos) {
-            Ok(_) => pos + 1,
-            Err(idx) => {
-                if idx == 0 {
-                    0
-                } else {
-                    hard_breaks[idx - 1] + 1
-                }
-            }
-        };
-        let end = match hard_breaks.binary_search(&pos) {
-            Ok(_) => pos,
-            Err(idx) => {
-                if idx < hard_breaks.len() {
-                    hard_breaks[idx]
-                } else {
-                    self.buf.len()
-                }
-            }
-        };
-        if end <= start {
-            return None;
-        }
-        Some((start, end))
+        line_range_at(&self.buf, pos, hard_breaks)
     }
+}
+
+/// Standalone version of [`EditBuffer::word_range_at`] that operates on
+/// any `&str`. Window's mouse helpers use this against
+/// `rows.join("\n")` so they don't need `self.edit_buf.buf` to match —
+/// the prompt's `edit_buf.buf` is the source buffer (≠ wrapped display
+/// rows), so a `self`-bound method couldn't be reused there.
+pub fn word_range_at(buf: &str, pos: usize) -> Option<(usize, usize)> {
+    word_range_at_transparent(buf, pos, &[])
+}
+
+/// Like [`word_range_at`] but treats byte positions listed in
+/// `transparent` as if they were word characters during the walk.
+pub fn word_range_at_transparent(
+    buf: &str,
+    pos: usize,
+    transparent: &[usize],
+) -> Option<(usize, usize)> {
+    token_range_at_transparent(buf, pos, transparent, |c| c.is_alphanumeric() || c == '_')
+}
+
+/// Vim "WORD" range: any contiguous run of non-whitespace.
+pub fn big_word_range_at_transparent(
+    buf: &str,
+    pos: usize,
+    transparent: &[usize],
+) -> Option<(usize, usize)> {
+    token_range_at_transparent(buf, pos, transparent, |c| !c.is_whitespace())
+}
+
+fn token_range_at_transparent<F>(
+    buf: &str,
+    pos: usize,
+    transparent: &[usize],
+    is_word: F,
+) -> Option<(usize, usize)>
+where
+    F: Fn(char) -> bool,
+{
+    let is_trans = |p: usize| transparent.binary_search(&p).is_ok();
+    if pos >= buf.len() {
+        return None;
+    }
+    let first = buf[pos..].chars().next()?;
+    if !is_word(first) && !is_trans(pos) {
+        return None;
+    }
+    let mut start = pos;
+    while start > 0 {
+        let prev = buf[..start]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let c = buf[prev..].chars().next()?;
+        if !is_word(c) && !is_trans(prev) {
+            break;
+        }
+        start = prev;
+    }
+    let mut end = pos;
+    while end < buf.len() {
+        let c = buf[end..].chars().next()?;
+        if !is_word(c) && !is_trans(end) {
+            break;
+        }
+        end += c.len_utf8();
+    }
+    while start < end {
+        let c = buf[start..].chars().next()?;
+        if is_trans(start) && !is_word(c) {
+            start += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    while end > start {
+        let prev = buf[..end].char_indices().next_back().map(|(i, _)| i)?;
+        let c = buf[prev..].chars().next()?;
+        if is_trans(prev) && !is_word(c) {
+            end = prev;
+        } else {
+            break;
+        }
+    }
+    if start == end {
+        return None;
+    }
+    if !buf[start..end].chars().any(is_word) {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// Standalone version of [`EditBuffer::line_range_at`].
+pub fn line_range_at(buf: &str, pos: usize, hard_breaks: &[usize]) -> Option<(usize, usize)> {
+    if buf.is_empty() {
+        return None;
+    }
+    let pos = pos.min(buf.len());
+    let start = match hard_breaks.binary_search(&pos) {
+        Ok(_) => pos + 1,
+        Err(idx) => {
+            if idx == 0 {
+                0
+            } else {
+                hard_breaks[idx - 1] + 1
+            }
+        }
+    };
+    let end = match hard_breaks.binary_search(&pos) {
+        Ok(_) => pos,
+        Err(idx) => {
+            if idx < hard_breaks.len() {
+                hard_breaks[idx]
+            } else {
+                buf.len()
+            }
+        }
+    };
+    if end <= start {
+        return None;
+    }
+    Some((start, end))
 }
 
 impl Default for EditBuffer {

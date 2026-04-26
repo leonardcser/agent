@@ -246,7 +246,7 @@ pub(super) fn compute_visual_line_offsets(
     offsets
 }
 
-pub(super) enum Span {
+pub(crate) enum Span {
     Plain(String),
     Attachment(String),
     AtRef(String),
@@ -330,7 +330,7 @@ pub(crate) fn try_at_ref(chars: &[char], i: usize) -> Option<(String, usize)> {
     }
 }
 
-pub(super) fn build_display_spans(
+pub(crate) fn build_display_spans(
     buf: &str,
     att_ids: &[AttachmentId],
     store: &AttachmentStore,
@@ -377,7 +377,7 @@ pub(super) fn build_display_spans(
     spans
 }
 
-pub(super) fn spans_to_string(spans: &[Span]) -> String {
+pub(crate) fn spans_to_string(spans: &[Span]) -> String {
     let mut s = String::new();
     for span in spans {
         match span {

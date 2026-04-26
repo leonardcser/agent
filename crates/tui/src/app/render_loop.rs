@@ -183,8 +183,6 @@ impl App {
         prediction: Option<&str>,
         has_prompt_cursor: bool,
     ) -> ui::Rect {
-        // Pull all immutable data out before the mutable buf borrow.
-        let prev_input_scroll = self.prompt_input_scroll;
         let bar_info = content::prompt_data::BarInfo {
             model_label: Some(self.model.clone()),
             reasoning_effort: self.reasoning_effort,
@@ -204,7 +202,6 @@ impl App {
                 width: term_w,
                 height: prompt_height,
                 has_prompt_cursor,
-                prev_input_scroll,
                 bar_info,
             };
             let input_buf = self
@@ -217,7 +214,15 @@ impl App {
         let chrome_rows = prompt_output.chrome_rows;
         let cursor = prompt_output.cursor;
         let cursor_style = prompt_output.cursor_style;
-        self.prompt_input_scroll = prompt_output.input_scroll;
+        // Write the renderer's clamped scroll_top back into the Window
+        // (handles the case where the prompt buffer shrank and the old
+        // scroll_top is now beyond max_off, or vim `zz` requested a
+        // recenter via `pending_recenter`).
+        if let Some(ref ivp) = prompt_output.input_viewport {
+            self.input.win.scroll_top = ivp.scroll_top;
+        }
+        self.input.win.pending_recenter = false;
+        self.input.win.last_render_cpos = Some(self.input.win.cpos);
 
         let (prompt_input_rect, prompt_viewport) =
             if let Some(ref ivp) = prompt_output.input_viewport {

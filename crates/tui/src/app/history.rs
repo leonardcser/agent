@@ -89,7 +89,7 @@ impl App {
         self.context_tokens = None;
         self.task_label = None;
         self.working.clear();
-        self.prompt_input_scroll = 0;
+        self.input.win.scroll_top = 0;
         self.prompt_viewport = None;
         self.transcript_viewport = None;
         self.clear_transcript();

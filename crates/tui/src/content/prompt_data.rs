@@ -19,7 +19,6 @@ pub(crate) struct PromptInput<'a> {
     pub width: u16,
     pub height: u16,
     pub has_prompt_cursor: bool,
-    pub prev_input_scroll: usize,
     pub bar_info: BarInfo,
 }
 
@@ -37,7 +36,6 @@ pub(crate) struct PromptOutput {
     pub chrome_rows: Vec<WindowRow>,
     pub cursor: Option<(u16, u16)>,
     pub cursor_style: Option<(Style, char)>,
-    pub input_scroll: usize,
     pub input_viewport: Option<InputViewport>,
 }
 
@@ -109,7 +107,6 @@ pub(crate) fn compute_prompt(input: &mut PromptInput<'_>, input_buf: &mut Buffer
         chrome_rows,
         cursor: input_area.cursor_info.cursor_pos,
         cursor_style: input_area.cursor_info.cursor_style,
-        input_scroll: input_area.scroll_info.scroll_offset,
         input_viewport: if input_row_count > 0 {
             Some(InputViewport {
                 top_row: input_area_start,
@@ -496,18 +493,26 @@ fn compute_input_area(
     let content_rows = total_content_rows.min(max_content_rows);
 
     let scroll_offset = if total_content_rows > content_rows {
-        let mut off = input.prev_input_scroll;
-        if off == usize::MAX {
-            off = cursor_line.saturating_sub(content_rows / 2);
-        }
-        if cursor_line >= off + content_rows {
-            off = cursor_line + 1 - content_rows;
-        }
-        if cursor_line < off {
-            off = cursor_line;
-        }
         let max_off = total_content_rows.saturating_sub(content_rows);
-        off.min(max_off)
+        let cursor_moved = state.win.last_render_cpos != Some(state.win.cpos);
+        let raw = if state.win.pending_recenter {
+            cursor_line.saturating_sub(content_rows / 2)
+        } else if cursor_moved {
+            // Cursor moved since last render → ensure it's visible.
+            // tmux copy-mode: wheel/scrollbar panning leaves cpos
+            // unchanged, so this branch doesn't fire and scroll_top
+            // stays where the user pinned it.
+            let mut s = state.win.scroll_top as usize;
+            if cursor_line < s {
+                s = cursor_line;
+            } else if cursor_line >= s + content_rows {
+                s = cursor_line + 1 - content_rows;
+            }
+            s
+        } else {
+            state.win.scroll_top as usize
+        };
+        raw.min(max_off)
     } else {
         0
     };
@@ -940,7 +945,6 @@ mod tests {
             width: 80,
             height: 10,
             has_prompt_cursor: true,
-            prev_input_scroll: 0,
             bar_info: BarInfo {
                 model_label: None,
                 reasoning_effort: protocol::ReasoningEffort::Off,

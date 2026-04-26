@@ -245,6 +245,15 @@ pub struct Window {
     /// the user scrolls away from the bottom; back to `true` when
     /// they scroll back to it.
     pub follow_tail: bool,
+    /// One-shot "center cursor on next render" request, set by vim `zz`.
+    /// Honored and cleared by the next paint that knows the viewport
+    /// dimensions. Independent of `follow_tail` (which is sticky).
+    pub pending_recenter: bool,
+    /// Last `cpos` observed by the renderer. Compared against current
+    /// `cpos` each frame to distinguish "cursor moved → ensure visible"
+    /// from "wheel/scrollbar panned → leave scroll alone." `None` on
+    /// first render forces an initial ensure-visible.
+    pub last_render_cpos: Option<usize>,
     pub cursor_positioned: bool,
     /// Active drag-anchor span set by a double-click word-select
     /// (`[start, end)` byte range in the joined buffer). When set,
@@ -272,6 +281,8 @@ impl Window {
             cursor_line: 0,
             cursor_col: 0,
             follow_tail: true,
+            pending_recenter: false,
+            last_render_cpos: None,
             cursor_positioned: false,
             drag_anchor_word: None,
             drag_anchor_line: None,
@@ -341,9 +352,10 @@ impl Window {
         cpos: usize,
         transparent: &[usize],
         rows: &[String],
+        buf: &str,
         viewport_rows: u16,
     ) -> Option<(usize, usize)> {
-        let (start, end) = self.edit_buf.word_range_at_transparent(cpos, transparent)?;
+        let (start, end) = crate::edit_buffer::word_range_at_transparent(buf, cpos, transparent)?;
         self.finish_range_select(start, end, rows, viewport_rows);
         Some((start, end))
     }
@@ -355,11 +367,11 @@ impl Window {
         cpos: usize,
         transparent: &[usize],
         rows: &[String],
+        buf: &str,
         viewport_rows: u16,
     ) -> Option<(usize, usize)> {
-        let (start, end) = self
-            .edit_buf
-            .big_word_range_at_transparent(cpos, transparent)?;
+        let (start, end) =
+            crate::edit_buffer::big_word_range_at_transparent(buf, cpos, transparent)?;
         self.finish_range_select(start, end, rows, viewport_rows);
         Some((start, end))
     }
@@ -377,9 +389,10 @@ impl Window {
         cpos: usize,
         hard_breaks: &[usize],
         rows: &[String],
+        buf: &str,
         viewport_rows: u16,
     ) -> Option<(usize, usize)> {
-        let (start, end) = self.edit_buf.line_range_at(cpos, hard_breaks)?;
+        let (start, end) = crate::edit_buffer::line_range_at(buf, cpos, hard_breaks)?;
         self.finish_range_select(start, end, rows, viewport_rows);
         Some((start, end))
     }
@@ -553,15 +566,24 @@ impl Window {
     /// kill ring. The window's `drag_anchor_*` fields are managed
     /// internally so successive `Drag` events extend by the right unit.
     pub fn handle_mouse(&mut self, event: MouseEvent, ctx: MouseCtx) -> MouseAction {
+        // Build the joined buffer once and pass it down. Mouse helpers
+        // operate on this `&str` instead of `self.edit_buf.buf`, which
+        // lets surfaces whose `edit_buf.buf` is *not* `rows.join("\n")`
+        // (the prompt — source buffer ≠ wrapped display rows) reuse
+        // `Window::handle_mouse` directly. The transcript and dialog
+        // buffer panels still keep `edit_buf.buf == rows.join("\n")`
+        // via their existing sync paths; the buffer arg just doesn't
+        // need it to be true.
+        let buf = ctx.rows.join("\n");
         match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => self.mouse_down(event, ctx),
-            MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(event, ctx),
-            MouseEventKind::Up(MouseButton::Left) => self.mouse_up(ctx),
+            MouseEventKind::Down(MouseButton::Left) => self.mouse_down(event, ctx, &buf),
+            MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(event, ctx, &buf),
+            MouseEventKind::Up(MouseButton::Left) => self.mouse_up(ctx, &buf),
             _ => MouseAction::Ignored,
         }
     }
 
-    fn mouse_down(&mut self, event: MouseEvent, ctx: MouseCtx) -> MouseAction {
+    fn mouse_down(&mut self, event: MouseEvent, ctx: MouseCtx, buf: &str) -> MouseAction {
         // Hit-test against the painted viewport: anything that lands
         // on the scrollbar or outside the rect is the host's problem
         // (scrollbar drag latching, focus shift, …).
@@ -593,6 +615,7 @@ impl Window {
                     cpos,
                     ctx.soft_breaks,
                     ctx.rows,
+                    buf,
                     viewport_rows,
                 ) {
                     self.drag_anchor_word = Some((s, e));
@@ -603,7 +626,7 @@ impl Window {
             }
             3 => {
                 if let Some((s, e)) =
-                    self.select_line_at(cpos, ctx.hard_breaks, ctx.rows, viewport_rows)
+                    self.select_line_at(cpos, ctx.hard_breaks, ctx.rows, buf, viewport_rows)
                 {
                     self.drag_anchor_line = Some((s, e));
                     self.drag_anchor_word = None;
@@ -628,7 +651,7 @@ impl Window {
         }
     }
 
-    fn mouse_drag(&mut self, event: MouseEvent, ctx: MouseCtx) -> MouseAction {
+    fn mouse_drag(&mut self, event: MouseEvent, ctx: MouseCtx, buf: &str) -> MouseAction {
         // Drag past the rect edges still extends — clamp the cell to
         // the viewport's content area so the cursor lands on the
         // nearest visible position. Host handles edge-autoscroll on
@@ -649,31 +672,45 @@ impl Window {
         self.jump_to_line_col(ctx.rows, line_idx, rel_col as usize, viewport_rows);
 
         if self.drag_anchor_word.is_some() {
-            self.extend_word_anchored_drag(ctx);
+            self.extend_word_anchored_drag(ctx, buf);
         } else if self.drag_anchor_line.is_some() {
-            self.extend_line_anchored_drag(ctx);
+            self.extend_line_anchored_drag(ctx, buf);
         } else if self.vim.is_none() {
             self.win_cursor.extend(self.cpos);
         }
         MouseAction::Consumed
     }
 
-    fn mouse_up(&mut self, ctx: MouseCtx) -> MouseAction {
+    fn mouse_up(&mut self, ctx: MouseCtx, buf: &str) -> MouseAction {
         // Compute the final selection from rows; yank if non-empty.
-        // Vim Visual stays in mode; the transcript also exits Visual
-        // back to Normal after release — the host can do that itself
-        // via an explicit `vim.set_mode(Normal)` if it prefers.
-        let buf = ctx.rows.join("\n");
+        // A bare click (no drag, no double/triple-click span) leaves
+        // `anchor == cpos`. Vim Visual reports an inclusive single-char
+        // range in that case, so we skip the yank when no actual
+        // selection was made — matches the transcript's pre-7a
+        // App-level guard, but applied here so every consumer gets it.
         let cpos = self.compute_cpos(ctx.rows);
-        let range = if let Some(vim) = self.vim.as_ref() {
-            vim.visual_range(&buf, cpos)
+        let has_drag_span = self.drag_anchor_word.is_some() || self.drag_anchor_line.is_some();
+        let has_selection = if let Some(vim) = self.vim.as_ref() {
+            match vim.mode() {
+                ViMode::Visual | ViMode::VisualLine => vim.visual_anchor() != Some(cpos),
+                _ => false,
+            }
         } else {
-            self.win_cursor.range(cpos)
+            self.win_cursor.anchor().is_some_and(|a| a != cpos)
+        };
+        let range = if has_drag_span || has_selection {
+            if let Some(vim) = self.vim.as_ref() {
+                vim.visual_range(buf, cpos)
+            } else {
+                self.win_cursor.range(cpos)
+            }
+        } else {
+            None
         };
         let action = match range {
             Some((s, e)) if e > s => {
-                let s = crate::text::snap(&buf, s);
-                let e = crate::text::snap(&buf, e);
+                let s = crate::text::snap(buf, s);
+                let e = crate::text::snap(buf, e);
                 if e > s {
                     MouseAction::Yank(buf[s..e].to_string())
                 } else {
@@ -682,8 +719,17 @@ impl Window {
             }
             _ => MouseAction::Consumed,
         };
-        // Drag anchors only outlive the drag; clear so a fresh click
-        // starts a single-cell selection.
+        // The user's gesture is over: clear all selection state so a
+        // fresh click starts a fresh selection. Owning this here means
+        // every consumer (transcript, prompt, dialog buffer) gets the
+        // same lifecycle for free — no bespoke clear-anchor code in
+        // the host adapters.
+        if let Some(vim) = self.vim.as_mut() {
+            if matches!(vim.mode(), ViMode::Visual | ViMode::VisualLine) {
+                vim.set_mode(ViMode::Normal);
+            }
+        }
+        self.win_cursor.clear_anchor();
         self.drag_anchor_word = None;
         self.drag_anchor_line = None;
         action
@@ -693,22 +739,18 @@ impl Window {
     /// word inside the selection while the drag grows by full WORD
     /// units, flipping the visual anchor as the drag crosses back over
     /// the original word.
-    fn extend_word_anchored_drag(&mut self, ctx: MouseCtx) {
+    fn extend_word_anchored_drag(&mut self, ctx: MouseCtx, buf: &str) {
         let Some((ws, we)) = self.drag_anchor_word else {
             return;
         };
         let p = self.compute_cpos(ctx.rows);
         let (new_cpos, new_anchor) = if p >= we {
-            let far = self
-                .edit_buf
-                .word_range_at_transparent(p, ctx.soft_breaks)
+            let far = crate::edit_buffer::word_range_at_transparent(buf, p, ctx.soft_breaks)
                 .map(|(_, e)| e.saturating_sub(1).max(ws))
                 .unwrap_or(p.max(we.saturating_sub(1)));
             (far, ws)
         } else if p < ws {
-            let near = self
-                .edit_buf
-                .word_range_at_transparent(p, ctx.soft_breaks)
+            let near = crate::edit_buffer::word_range_at_transparent(buf, p, ctx.soft_breaks)
                 .map(|(s, _)| s)
                 .unwrap_or(p);
             (near, we.saturating_sub(1).max(ws))
@@ -723,22 +765,18 @@ impl Window {
         }
     }
 
-    fn extend_line_anchored_drag(&mut self, ctx: MouseCtx) {
+    fn extend_line_anchored_drag(&mut self, ctx: MouseCtx, buf: &str) {
         let Some((ls, le)) = self.drag_anchor_line else {
             return;
         };
         let p = self.compute_cpos(ctx.rows);
         let (new_cpos, new_anchor) = if p >= le {
-            let far = self
-                .edit_buf
-                .line_range_at(p, ctx.hard_breaks)
+            let far = crate::edit_buffer::line_range_at(buf, p, ctx.hard_breaks)
                 .map(|(_, e)| e.saturating_sub(1).max(ls))
                 .unwrap_or(p.max(le.saturating_sub(1)));
             (far, ls)
         } else if p < ls {
-            let near = self
-                .edit_buf
-                .line_range_at(p, ctx.hard_breaks)
+            let near = crate::edit_buffer::line_range_at(buf, p, ctx.hard_breaks)
                 .map(|(s, _)| s)
                 .unwrap_or(p);
             (near, le.saturating_sub(1).max(ls))
@@ -754,6 +792,31 @@ impl Window {
     }
 
     // ── Key dispatch ───────────────────────────────────────────────────
+
+    /// Esc handler shared by every buffer surface. Clears selection
+    /// state without dismissing higher-level UI; returns `true` if the
+    /// key was consumed (i.e. there was something to clear). Callers
+    /// (Dialog, App) chain this *before* their own Esc semantics:
+    /// dialog dismiss only fires when the focused window had nothing
+    /// to clear.
+    pub fn handle_escape(&mut self) -> bool {
+        if let Some(vim) = self.vim.as_mut() {
+            if matches!(vim.mode(), ViMode::Visual | ViMode::VisualLine) {
+                vim.set_mode(ViMode::Normal);
+                self.win_cursor.clear_anchor();
+                self.drag_anchor_word = None;
+                self.drag_anchor_line = None;
+                return true;
+            }
+        }
+        if self.win_cursor.anchor().is_some() {
+            self.win_cursor.clear_anchor();
+            self.drag_anchor_word = None;
+            self.drag_anchor_line = None;
+            return true;
+        }
+        false
+    }
 
     pub fn handle_key(
         &mut self,
@@ -846,6 +909,38 @@ impl Window {
         self.follow_tail = new >= max_scroll;
     }
 
+    /// Adjust `scroll_top` so the cursor's visual row (`cursor_line`)
+    /// sits inside the viewport. Top edge → scroll up to align cursor;
+    /// bottom edge → scroll down by one row past the cursor. No-op if
+    /// already visible. Called by every cpos-mutating site (key insert,
+    /// vim motion, paste, click-to-position) — the universal "keep the
+    /// cursor visible" policy shared by transcript, prompt, and dialog
+    /// buffer panels.
+    pub fn ensure_cursor_visible(&mut self, cursor_line: usize, viewport_rows: u16) {
+        let viewport = viewport_rows as usize;
+        if viewport == 0 {
+            return;
+        }
+        let scroll_top = self.scroll_top as usize;
+        if cursor_line < scroll_top {
+            self.scroll_top = cursor_line as u16;
+        } else if cursor_line >= scroll_top + viewport {
+            self.scroll_top = (cursor_line + 1 - viewport) as u16;
+        }
+    }
+
+    /// If `follow_tail` is set, snap `scroll_top` to the last viewport
+    /// of `total_rows`. Generalizes the transcript's tail-follow auto-
+    /// snap so any append-only buffer surface can opt in via
+    /// `follow_tail = true`.
+    pub fn snap_to_bottom_if_following(&mut self, total_rows: usize, viewport_rows: u16) {
+        if !self.follow_tail {
+            return;
+        }
+        let viewport = viewport_rows as usize;
+        self.scroll_top = total_rows.saturating_sub(viewport) as u16;
+    }
+
     pub fn scroll_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
         if rows.is_empty() || delta == 0 {
             return;
@@ -877,7 +972,11 @@ impl Window {
         }
         let line_idx = line_idx.min(rows.len() - 1);
         let offsets = Self::line_start_offsets(rows);
-        self.edit_buf.buf = rows.join("\n");
+        // Intentionally do NOT write `self.edit_buf.buf` here. Mouse
+        // helpers are pure over `(rows, &str buf)` so the prompt — whose
+        // `edit_buf.buf` is the source buffer, not the wrapped display
+        // rows — can run through `Window::handle_mouse` without losing
+        // its source content.
         let line = &rows[line_idx];
         let col_bytes = cell_to_byte(line, col);
         self.cpos = offsets[line_idx] + col_bytes;

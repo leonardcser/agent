@@ -5,6 +5,7 @@ pub(crate) mod layout;
 pub(crate) mod layout_out;
 mod paint;
 pub(crate) mod prompt_data;
+pub(crate) mod prompt_wrap;
 mod scrollbar;
 pub(crate) mod selection;
 pub(crate) mod status;
@@ -18,7 +19,6 @@ pub(crate) mod window_view;
 pub(crate) use layout::HitRegion;
 pub use status::StatusItem;
 pub use transcript::{SnapshotCell, TranscriptSnapshot};
-pub(crate) use ui::ViewportHit;
 pub use viewport::ViewportGeom;
 
 pub(crate) use selection::{scan_at_token, truncate_str, try_at_ref, wrap_line};

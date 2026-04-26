@@ -572,7 +572,7 @@ impl App {
                 self.edit_in_editor();
             }
             Action::CenterScroll => {
-                self.prompt_input_scroll = usize::MAX;
+                self.input.win.pending_recenter = true;
             }
             Action::NotifyError(msg) => {
                 self.notify_error(msg);
@@ -602,7 +602,7 @@ impl App {
                 EventOutcome::Noop
             }
             Action::CenterScroll => {
-                self.prompt_input_scroll = usize::MAX;
+                self.input.win.pending_recenter = true;
                 EventOutcome::Noop
             }
             Action::Resize {

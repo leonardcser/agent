@@ -867,20 +867,34 @@ impl Dialog {
         let Some(panel) = self.panels.get_mut(panel_idx) else {
             return 0;
         };
+        let interactive = panel.interactive;
         match &mut panel.content {
             DialogPanelContent::Widget(w) => w.scroll_by(delta),
-            DialogPanelContent::Buffer { win, view, .. } => {
-                let total = panel.line_count as isize;
-                let rows = panel.rect.height as isize;
-                let max_scroll = (total - rows).max(0);
+            DialogPanelContent::Buffer {
+                win, view, rows, ..
+            } => {
                 let cur = win.scroll_top as isize;
-                let new = (cur + delta).clamp(0, max_scroll);
-                if new == cur {
-                    return 0;
+                if interactive {
+                    // Interactive buffer panel: wheel moves cpos AND
+                    // scroll_top together so the cursor stays at the
+                    // same viewport row. Matches transcript / prompt
+                    // wheel UX.
+                    let row_strs: Vec<String> = rows.iter().cloned().collect();
+                    win.scroll_by_lines(delta, &row_strs, panel.rect.height);
+                    view.set_scroll(win.scroll_top as usize);
+                    win.scroll_top as isize - cur
+                } else {
+                    let total = panel.line_count as isize;
+                    let rows_h = panel.rect.height as isize;
+                    let max_scroll = (total - rows_h).max(0);
+                    let new = (cur + delta).clamp(0, max_scroll);
+                    if new == cur {
+                        return 0;
+                    }
+                    win.scroll_top = new as u16;
+                    view.set_scroll(new as usize);
+                    new - cur
                 }
-                win.scroll_top = new as u16;
-                view.set_scroll(new as usize);
-                new - cur
             }
         }
     }
@@ -1093,6 +1107,20 @@ impl Component for Dialog {
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult {
         if matches!(code, KeyCode::Esc) && mods == KeyModifiers::NONE {
+            // Esc chain: focused window first. If the focused panel is
+            // an interactive buffer with an active selection / vim
+            // Visual mode, let the window clear it before bubbling
+            // dismiss. Matches the transcript and prompt: Esc clears,
+            // then escapes.
+            if let Some(panel) = self.panels.get_mut(self.focused) {
+                if panel.interactive {
+                    if let DialogPanelContent::Buffer { win, .. } = &mut panel.content {
+                        if win.handle_escape() {
+                            return KeyResult::Consumed;
+                        }
+                    }
+                }
+            }
             return KeyResult::Action(WidgetEvent::Dismiss);
         }
         // Ctrl+C always dismisses a dialog (matches legacy behavior).
