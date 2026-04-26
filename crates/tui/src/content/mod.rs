@@ -3,7 +3,6 @@ pub(crate) mod display;
 pub(crate) mod highlight;
 pub(crate) mod layout;
 pub(crate) mod layout_out;
-mod paint;
 pub(crate) mod prompt_data;
 pub(crate) mod prompt_wrap;
 mod scrollbar;
@@ -24,7 +23,7 @@ pub use viewport::ViewportGeom;
 pub(crate) use selection::{scan_at_token, truncate_str, try_at_ref, wrap_line};
 
 pub(crate) use status::BarSpan;
-pub use status::StatusPosition;
+pub use status::{StatusPosition, StyleState};
 
 use crate::theme;
 use crate::utils::format_duration;
@@ -34,18 +33,6 @@ use std::collections::HashMap;
 pub use context::{LayoutContext, PaintContext};
 pub use display::DisplayBlock;
 pub use highlight::warm_up_syntect;
-
-/// Tracked terminal style state for diff-based SGR emission.
-#[derive(Clone, Default, PartialEq)]
-pub struct StyleState {
-    pub fg: Option<Color>,
-    pub bg: Option<Color>,
-    pub bold: bool,
-    pub dim: bool,
-    pub italic: bool,
-    pub crossedout: bool,
-    pub underline: bool,
-}
 
 pub(crate) const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
 /// Frame duration for every animated spinner in the app. Callers in

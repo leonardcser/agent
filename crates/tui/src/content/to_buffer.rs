@@ -4,11 +4,33 @@
 //! normal buffer → view → grid path and inherits scrollbar, selection,
 //! and vim motions.
 
-use super::display::{DisplayLine, SpanStyle as DisplaySpanStyle};
+use super::display::{ColorRole, ColorValue, DisplayLine, SpanStyle as DisplaySpanStyle};
 use super::layout_out::SpanCollector;
-use super::paint::resolve;
 use crate::theme::Theme;
+use crossterm::style::Color;
 use ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
+
+/// Resolve a `ColorValue` against a theme snapshot. The `Theme` is
+/// captured once per render so cached layouts survive theme changes
+/// without invalidation.
+#[inline]
+fn resolve(c: ColorValue, theme: &Theme) -> Color {
+    match c {
+        ColorValue::Rgb(r, g, b) => Color::Rgb { r, g, b },
+        ColorValue::Ansi(v) => Color::AnsiValue(v),
+        ColorValue::Named(n) => Color::from(n),
+        ColorValue::Role(role) => match role {
+            ColorRole::Accent => theme.accent,
+            ColorRole::Slug => theme.slug,
+            ColorRole::UserBg => theme.user_bg,
+            ColorRole::CodeBlockBg => theme.code_block_bg,
+            ColorRole::Bar => theme.bar,
+            ColorRole::ToolPending => theme.tool_pending,
+            ColorRole::ReasonOff => theme.reason_off,
+            ColorRole::Muted => theme.muted,
+        },
+    }
+}
 
 /// Run any span-emitting renderer (inline diff, syntax highlighter,
 /// markdown, etc.) against a fresh `SpanCollector` and project the
@@ -69,8 +91,8 @@ pub(crate) fn project_display_line(dline: &DisplayLine, theme: &Theme) -> Projec
     }
 
     let decoration = LineDecoration {
-        gutter_bg: dline.gutter_bg.map(|c| resolve(c, theme, true)),
-        fill_bg: dline.fill_bg.map(|c| resolve(c, theme, true)),
+        gutter_bg: dline.gutter_bg.map(|c| resolve(c, theme)),
+        fill_bg: dline.fill_bg.map(|c| resolve(c, theme)),
         fill_right_margin: dline.fill_right_margin,
         soft_wrapped: dline.soft_wrapped,
         source_text: dline.source_text.clone(),
@@ -85,8 +107,8 @@ pub(crate) fn project_display_line(dline: &DisplayLine, theme: &Theme) -> Projec
 
 fn resolve_span_style(span: &DisplaySpanStyle, theme: &Theme) -> SpanStyle {
     SpanStyle {
-        fg: span.fg.map(|c| resolve(c, theme, false)),
-        bg: span.bg.map(|c| resolve(c, theme, true)),
+        fg: span.fg.map(|c| resolve(c, theme)),
+        bg: span.bg.map(|c| resolve(c, theme)),
         bold: span.bold,
         dim: span.dim,
         italic: span.italic,

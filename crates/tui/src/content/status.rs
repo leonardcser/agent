@@ -6,8 +6,22 @@
 //! `draw_bar`. Both collapse on narrow terminals by dropping the
 //! highest-priority (least-important) spans first.
 
-use super::{layout_out::display_width, selection::truncate_str, StyleState};
+use super::{layout_out::display_width, selection::truncate_str};
 use crossterm::style::Color;
+
+/// Foreground / background / attribute snapshot for a status-line
+/// span. The status bar is the only consumer; it converts to
+/// `ui::grid::Style` at paint time via `style_to_grid` below.
+#[derive(Clone, Default, PartialEq)]
+pub struct StyleState {
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
+    pub bold: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub crossedout: bool,
+    pub underline: bool,
+}
 
 /// A structured status item that Lua (or internal code) provides.
 /// Rust owns width fitting, priority dropping, and truncation.
