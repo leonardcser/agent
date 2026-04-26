@@ -1,8 +1,8 @@
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn render_agent_block<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn render_agent_block(
+    out: &mut SpanCollector,
     agent_id: &str,
     slug: Option<&str>,
     blocking: bool,

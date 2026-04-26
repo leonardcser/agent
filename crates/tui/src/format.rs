@@ -19,7 +19,7 @@ use std::sync::Arc;
 use ui::buffer::{Buffer, BufferFormatter};
 
 use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
-use crate::content::layout_out::{LayoutSink, SpanCollector};
+use crate::content::layout_out::SpanCollector;
 use crate::content::to_buffer::render_into_buffer;
 
 /// Content kind a formatter-backed buffer renders. Constructed from a

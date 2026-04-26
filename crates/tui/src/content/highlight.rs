@@ -9,7 +9,7 @@ use syntect::parsing::SyntaxSet;
 use unicode_width::UnicodeWidthStr;
 
 use super::display::{ColorRole, ColorValue, NamedColor};
-use super::layout_out::LayoutSink;
+use super::layout_out::SpanCollector;
 use super::term_width;
 
 pub(super) static SYNTAX_SET: LazyLock<SyntaxSet> =
@@ -40,8 +40,8 @@ fn syntax_theme() -> &'static syntect::highlighting::Theme {
 /// lets partial selections (vim visual / click-drag) over fenced blocks
 /// round-trip back to raw markdown — the visible code body is what the
 /// user sees, the fences re-attach if the first/last row is covered.
-pub(crate) fn render_code_block<S: LayoutSink>(
-    out: &mut S,
+pub(crate) fn render_code_block(
+    out: &mut SpanCollector,
     lines: &[&str],
     lang: &str,
     width: usize,
@@ -137,8 +137,8 @@ pub(crate) fn render_code_block<S: LayoutSink>(
     rows
 }
 
-pub(super) fn render_highlighted<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn render_highlighted(
+    out: &mut SpanCollector,
     lines: &[&str],
     syntax: &syntect::parsing::SyntaxReference,
     skip: u16,
@@ -187,8 +187,8 @@ pub(super) fn render_highlighted<S: LayoutSink>(
     emitted
 }
 
-pub(crate) fn print_syntax_file<S: LayoutSink>(
-    out: &mut S,
+pub(crate) fn print_syntax_file(
+    out: &mut SpanCollector,
     content: &str,
     path: &str,
     skip: u16,
@@ -197,8 +197,8 @@ pub(crate) fn print_syntax_file<S: LayoutSink>(
     print_syntax_file_ext(out, content, path, None, skip, max_rows)
 }
 
-pub(crate) fn print_syntax_file_ext<S: LayoutSink>(
-    out: &mut S,
+pub(crate) fn print_syntax_file_ext(
+    out: &mut SpanCollector,
     content: &str,
     path: &str,
     syntax_ext: Option<&str>,
@@ -538,8 +538,8 @@ fn compute_change_visibility(changes: &[DiffChange], ctx: usize) -> Vec<bool> {
 /// Render a syntax-highlighted inline diff.
 /// `skip` rows are computed but not emitted; up to `max_rows` visible rows
 /// are written to `out`.
-pub(crate) fn print_inline_diff<S: LayoutSink>(
-    out: &mut S,
+pub(crate) fn print_inline_diff(
+    out: &mut SpanCollector,
     old: &str,
     new: &str,
     path: &str,
@@ -552,8 +552,8 @@ pub(crate) fn print_inline_diff<S: LayoutSink>(
     print_cached_inline_diff(out, &cache, skip, max_rows)
 }
 
-fn print_cached_spans<S: LayoutSink>(
-    out: &mut S,
+fn print_cached_spans(
+    out: &mut SpanCollector,
     spans: &[CachedSpan],
     bg: Option<ColorValue>,
 ) -> usize {
@@ -573,8 +573,8 @@ fn print_cached_spans<S: LayoutSink>(
     col
 }
 
-fn split_cached_spans_into_rows<S: LayoutSink>(
-    out: &mut S,
+fn split_cached_spans_into_rows(
+    out: &mut SpanCollector,
     spans: &[CachedSpan],
     max_width: usize,
 ) -> Vec<Vec<CachedSpan>> {
@@ -613,8 +613,8 @@ fn split_cached_spans_into_rows<S: LayoutSink>(
     rows
 }
 
-pub(crate) fn print_cached_inline_diff<S: LayoutSink>(
-    out: &mut S,
+pub(crate) fn print_cached_inline_diff(
+    out: &mut SpanCollector,
     cache: &CachedInlineDiff,
     skip: u16,
     max_rows: u16,
@@ -704,8 +704,8 @@ pub(crate) fn print_cached_inline_diff<S: LayoutSink>(
 }
 
 /// Split syntax regions into visual rows that each fit within `max_width` columns.
-fn split_regions_into_rows<S: LayoutSink>(
-    out: &mut S,
+fn split_regions_into_rows(
+    out: &mut SpanCollector,
     regions: &[(Style, &str)],
     max_width: usize,
 ) -> Vec<Vec<(Style, String)>> {
@@ -768,7 +768,7 @@ impl<'a> BashHighlighter<'a> {
 
     /// Print a single line with syntax highlighting.
     /// Does not emit a newline — the caller controls line breaks.
-    pub fn print_line<S: LayoutSink>(&mut self, out: &mut S, line: &str) {
+    pub fn print_line(&mut self, out: &mut SpanCollector, line: &str) {
         let line_with_nl = format!("{}\n", line);
         let regions = self
             .h
@@ -788,8 +788,8 @@ impl<'a> BashHighlighter<'a> {
 }
 
 /// Print pre-split owned regions. Returns columns printed.
-fn print_split_regions<S: LayoutSink>(
-    out: &mut S,
+fn print_split_regions(
+    out: &mut SpanCollector,
     regions: &[(Style, String)],
     bg: Option<ColorValue>,
 ) -> usize {
@@ -911,8 +911,8 @@ fn skip_inline_span_range(chars: &[char], i: usize, end: usize) -> Option<(usize
     None
 }
 
-pub(crate) fn render_markdown_table<S: LayoutSink>(
-    out: &mut S,
+pub(crate) fn render_markdown_table(
+    out: &mut SpanCollector,
     rows: &[Vec<String>],
     dim: bool,
     bctx: Option<&super::BoxContext>,
@@ -999,67 +999,68 @@ pub(crate) fn render_markdown_table<S: LayoutSink>(
 
     let mut total_rows = 0u16;
 
-    let bar = |out: &mut S, dim: bool| {
+    let bar = |out: &mut SpanCollector, dim: bool| {
         out.set_fg(ColorValue::Role(ColorRole::Bar));
         if dim {
             out.set_dim();
         }
     };
-    let reset = |out: &mut S, _dim: bool| {
+    let reset = |out: &mut SpanCollector, _dim: bool| {
         out.reset_style();
     };
 
-    let render_table_row = |out: &mut S, row: &[String], widths: &[usize], dim: bool| -> u16 {
-        let wrapped: Vec<Vec<String>> = row
-            .iter()
-            .enumerate()
-            .map(|(c, cell)| {
-                let w = widths.get(c).copied().unwrap_or(0);
-                wrap_cell_words(out, cell, w)
-            })
-            .collect();
-        let height = wrapped.iter().map(|w| w.len()).max().unwrap_or(1);
+    let render_table_row =
+        |out: &mut SpanCollector, row: &[String], widths: &[usize], dim: bool| -> u16 {
+            let wrapped: Vec<Vec<String>> = row
+                .iter()
+                .enumerate()
+                .map(|(c, cell)| {
+                    let w = widths.get(c).copied().unwrap_or(0);
+                    wrap_cell_words(out, cell, w)
+                })
+                .collect();
+            let height = wrapped.iter().map(|w| w.len()).max().unwrap_or(1);
 
-        for vline in 0..height {
-            if let Some(b) = bctx {
-                b.print_left(out);
-            } else if !indent.is_empty() {
-                out.print_gutter(indent);
-            }
-            bar(out, dim);
-            out.print_gutter("┃");
-            reset(out, dim);
-            let mut line_cols = 1; // "┃"
-            for (c, width) in widths.iter().enumerate() {
-                let text = wrapped
-                    .get(c)
-                    .and_then(|w| w.get(vline))
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                let visual_len = strip_markdown_markers(text).width();
-                out.print_gutter(" ");
-                print_inline_styled(out, text, dim);
-                let pad = width.saturating_sub(visual_len);
-                if pad > 0 {
-                    out.print_gutter(&" ".repeat(pad));
+            for vline in 0..height {
+                if let Some(b) = bctx {
+                    b.print_left(out);
+                } else if !indent.is_empty() {
+                    out.print_gutter(indent);
                 }
-                out.print_gutter(" ");
                 bar(out, dim);
                 out.print_gutter("┃");
                 reset(out, dim);
-                line_cols += width + 3; // " content pad ┃"
+                let mut line_cols = 1; // "┃"
+                for (c, width) in widths.iter().enumerate() {
+                    let text = wrapped
+                        .get(c)
+                        .and_then(|w| w.get(vline))
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let visual_len = strip_markdown_markers(text).width();
+                    out.print_gutter(" ");
+                    print_inline_styled(out, text, dim);
+                    let pad = width.saturating_sub(visual_len);
+                    if pad > 0 {
+                        out.print_gutter(&" ".repeat(pad));
+                    }
+                    out.print_gutter(" ");
+                    bar(out, dim);
+                    out.print_gutter("┃");
+                    reset(out, dim);
+                    line_cols += width + 3; // " content pad ┃"
+                }
+                if let Some(b) = bctx {
+                    b.print_right(out, line_cols);
+                }
+                out.newline();
             }
-            if let Some(b) = bctx {
-                b.print_right(out, line_cols);
-            }
-            out.newline();
-        }
-        height as u16
-    };
+            height as u16
+        };
 
     // left, horizontal, junction, right
     let render_border =
-        |out: &mut S, widths: &[usize], dim: bool, l: &str, j: &str, r: &str| -> u16 {
+        |out: &mut SpanCollector, widths: &[usize], dim: bool, l: &str, j: &str, r: &str| -> u16 {
             if let Some(b) = bctx {
                 b.print_left(out);
             } else if !indent.is_empty() {
@@ -1109,7 +1110,7 @@ pub(crate) fn render_markdown_table<S: LayoutSink>(
 
 /// Stacked layout for tables too wide for the terminal.
 /// Each data row becomes a block of "Header: value" lines, separated by blank lines.
-fn render_table_stacked<S: LayoutSink>(out: &mut S, rows: &[Vec<String>], dim: bool) -> u16 {
+fn render_table_stacked(out: &mut SpanCollector, rows: &[Vec<String>], dim: bool) -> u16 {
     let header = match rows.first() {
         Some(h) => h,
         None => return 0,
@@ -1164,7 +1165,7 @@ fn render_table_stacked<S: LayoutSink>(out: &mut S, rows: &[Vec<String>], dim: b
 
 /// Word-wrap cell text so each line's visual width (after stripping markers) fits within `max_width`.
 /// Only breaks at spaces that are outside inline markdown spans.
-fn wrap_cell_words<S: LayoutSink>(out: &mut S, text: &str, max_width: usize) -> Vec<String> {
+fn wrap_cell_words(out: &mut SpanCollector, text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
     }
@@ -1233,7 +1234,7 @@ fn min_visual_width(text: &str) -> usize {
 /// Render inline markdown spans: `**bold**`, `__bold__`, `*italic*`, `_italic_`,
 /// `***bold+italic***`, `` `code` ``, `~~strikethrough~~`.
 /// Everything else passes through literally.
-pub(crate) fn print_inline_styled<S: LayoutSink>(out: &mut S, text: &str, dim: bool) {
+pub(crate) fn print_inline_styled(out: &mut SpanCollector, text: &str, dim: bool) {
     if dim {
         out.push_dim();
     }
@@ -1432,7 +1433,7 @@ fn parse_inline(chars: &[char], start: usize, end: usize) -> Vec<InlineNode> {
 /// Walk an `InlineNode` tree and emit its spans to the sink. Uses
 /// `push_style`/`pop_style` so inner nodes inherit the outer style —
 /// e.g. italic inside bold becomes a single span with both attributes.
-fn emit_inline_nodes<S: LayoutSink>(out: &mut S, nodes: &[InlineNode]) {
+fn emit_inline_nodes(out: &mut SpanCollector, nodes: &[InlineNode]) {
     for node in nodes {
         match node {
             InlineNode::Text(s) => out.print(s),
@@ -1643,7 +1644,7 @@ fn append_char_to_row(row: &mut Vec<InlineSpan>, ch: char, style: &InlineStyle) 
     });
 }
 
-pub(crate) fn emit_inline_spans<S: LayoutSink>(out: &mut S, spans: &[InlineSpan]) {
+pub(crate) fn emit_inline_spans(out: &mut SpanCollector, spans: &[InlineSpan]) {
     use super::display::{ColorRole, ColorValue, SpanStyle};
 
     for span in spans {

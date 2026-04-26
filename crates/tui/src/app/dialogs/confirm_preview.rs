@@ -4,7 +4,7 @@
 //! consumes `from_tool` + `render_into_buffer`.
 
 use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
-use crate::content::layout_out::LayoutSink;
+use crate::content::layout_out::SpanCollector;
 use crate::content::wrap_line;
 use crate::theme;
 use engine::tools::NotebookRenderData;
@@ -247,8 +247,8 @@ fn join_string_or_array(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn render_notebook_preview<S: LayoutSink>(
-    out: &mut S,
+fn render_notebook_preview(
+    out: &mut SpanCollector,
     data: &NotebookRenderData,
     skip: u16,
     viewport: u16,

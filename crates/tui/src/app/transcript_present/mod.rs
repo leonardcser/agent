@@ -17,7 +17,7 @@ use crate::content::highlight::{
     print_cached_inline_diff, print_inline_diff, print_syntax_file, print_syntax_file_ext,
     render_code_block, render_markdown_table, BashHighlighter,
 };
-use crate::content::layout_out::{display_width, LayoutSink, SpanCollector};
+use crate::content::layout_out::{display_width, SpanCollector};
 use crate::content::{truncate_str, wrap_line, LayoutContext};
 use crate::theme;
 use crate::utils::format_duration;
@@ -202,8 +202,8 @@ pub(crate) fn thinking_summary(content: &str) -> (String, usize) {
 }
 
 /// Render a single hidden-thinking summary row with optional animated dots.
-pub(crate) fn render_thinking_summary<S: LayoutSink>(
-    out: &mut S,
+pub(crate) fn render_thinking_summary(
+    out: &mut SpanCollector,
     width: usize,
     label: &str,
     line_count: usize,
@@ -287,8 +287,8 @@ pub(crate) fn gap_between(above: &Element, below: &Element) -> u16 {
     }
 }
 
-pub(super) fn render_block<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn render_block(
+    out: &mut SpanCollector,
     block: &Block,
     state: Option<&ToolState>,
     width: usize,
@@ -487,8 +487,8 @@ pub(super) fn render_block<S: LayoutSink>(
 }
 /// Print user message text with accent highlighting for valid `@path` refs,
 /// `/command` lines, and `[image]` attachment labels.
-pub(super) fn print_user_highlights<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn print_user_highlights(
+    out: &mut SpanCollector,
     text: &str,
     image_labels: &[String],
     is_command: bool,
@@ -508,14 +508,14 @@ pub(super) fn print_user_highlights<S: LayoutSink>(
     let mut i = 0;
     let mut plain = String::new();
 
-    let flush = |out: &mut S, plain: &mut String| {
+    let flush = |out: &mut SpanCollector, plain: &mut String| {
         if !plain.is_empty() {
             let s = std::mem::take(plain);
             out.print(&s);
         }
     };
 
-    let accent = |out: &mut S, token: String| {
+    let accent = |out: &mut SpanCollector, token: String| {
         out.push_fg(accent_role);
         out.print(&token);
         out.pop_style();

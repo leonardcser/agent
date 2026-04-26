@@ -1,8 +1,8 @@
-//! Projection: turn `DisplayBlock` output (produced by `SpanCollector`,
-//! the in-memory `LayoutSink`) into a `ui::Buffer` so content rendered
-//! by `print_inline_diff`, `print_syntax_file`, `render_markdown_inner`,
-//! etc. flows through the normal buffer → view → grid path and
-//! inherits scrollbar, selection, and vim motions.
+//! Projection: turn `DisplayBlock` output (produced by `SpanCollector`)
+//! into a `ui::Buffer` so content rendered by `print_inline_diff`,
+//! `print_syntax_file`, `render_markdown_inner`, etc. flows through the
+//! normal buffer → view → grid path and inherits scrollbar, selection,
+//! and vim motions.
 
 use super::display::{DisplayLine, SpanStyle as DisplaySpanStyle};
 use super::layout_out::SpanCollector;
@@ -10,12 +10,12 @@ use super::paint::resolve;
 use crate::theme::Theme;
 use ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
 
-/// Run any `LayoutSink`-using renderer (inline diff, syntax
-/// highlighter, markdown, etc.) against a fresh `SpanCollector`,
-/// project the captured `DisplayBlock` into `buf`. Renderers write
-/// into `&mut SpanCollector`; their styled output lands as
-/// `SpanStyle` highlights on `buf`, gaining scrollbar / selection /
-/// vim motions for free.
+/// Run any span-emitting renderer (inline diff, syntax highlighter,
+/// markdown, etc.) against a fresh `SpanCollector` and project the
+/// captured `DisplayBlock` into `buf`. Renderers write into
+/// `&mut SpanCollector`; their styled output lands as `SpanStyle`
+/// highlights on `buf`, gaining scrollbar / selection / vim motions
+/// for free.
 pub(crate) fn render_into_buffer(
     buf: &mut Buffer,
     width: u16,

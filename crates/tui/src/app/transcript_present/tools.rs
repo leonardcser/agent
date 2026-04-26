@@ -4,8 +4,8 @@ use super::tool_previews::{
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn render_tool<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn render_tool(
+    out: &mut SpanCollector,
     _call_id: &str,
     name: &str,
     summary: &str,
@@ -70,8 +70,8 @@ pub(super) fn render_tool<S: LayoutSink>(
     rows
 }
 
-pub(super) fn render_confirm_result<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn render_confirm_result(
+    out: &mut SpanCollector,
     tool: &str,
     desc: &str,
     choice: Option<ConfirmChoice>,
@@ -159,8 +159,8 @@ fn tool_line_layout(name: &str, suffix_len: usize, width: usize) -> ToolLineLayo
     }
 }
 
-fn print_tool_line<S: LayoutSink>(
-    out: &mut S,
+fn print_tool_line(
+    out: &mut SpanCollector,
     name: &str,
     summary: &str,
     pill_color: ColorValue,
@@ -249,7 +249,7 @@ fn print_tool_line<S: LayoutSink>(
 /// rest as plain text. Agent names are single words (no spaces) optionally
 /// separated by ", ". The first token that contains a space or follows a
 /// non-comma separator marks the start of the plain-text portion.
-fn print_agent_summary<S: LayoutSink>(out: &mut S, summary: &str) {
+fn print_agent_summary(out: &mut SpanCollector, summary: &str) {
     // Find where agent names end: consume "word(, word)*" prefix.
     let mut end = 0;
     let mut rest = summary;
@@ -287,8 +287,8 @@ fn print_agent_summary<S: LayoutSink>(out: &mut S, summary: &str) {
     }
 }
 
-pub(super) fn print_tool_output<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn print_tool_output(
+    out: &mut SpanCollector,
     name: &str,
     output: &ToolOutput,
     args: &HashMap<String, serde_json::Value>,
@@ -347,13 +347,13 @@ pub(super) fn print_tool_output<S: LayoutSink>(
     }
 }
 
-pub(super) fn print_dim<S: LayoutSink>(out: &mut S, text: &str) {
+pub(super) fn print_dim(out: &mut SpanCollector, text: &str) {
     out.push_dim();
     out.print(text);
     out.pop_style();
 }
 
-fn print_dim_non_selectable<S: LayoutSink>(out: &mut S, time_str: &str, timeout_str: &str) {
+fn print_dim_non_selectable(out: &mut SpanCollector, time_str: &str, timeout_str: &str) {
     let meta = SpanMeta {
         selectable: false,
         copy_as: None,
@@ -370,8 +370,8 @@ fn print_dim_non_selectable<S: LayoutSink>(out: &mut S, time_str: &str, timeout_
     }
 }
 
-pub(super) fn print_dim_count<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn print_dim_count(
+    out: &mut SpanCollector,
     count: usize,
     singular: &str,
     plural: &str,
@@ -380,8 +380,8 @@ pub(super) fn print_dim_count<S: LayoutSink>(
     out.newline();
     1
 }
-pub(super) fn render_wrapped_output<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn render_wrapped_output(
+    out: &mut SpanCollector,
     content: &str,
     is_error: bool,
     width: usize,
@@ -428,8 +428,8 @@ pub(super) fn render_wrapped_output<S: LayoutSink>(
     rows
 }
 
-pub(super) fn render_default_output<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn render_default_output(
+    out: &mut SpanCollector,
     content: &str,
     is_error: bool,
     width: usize,

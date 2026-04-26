@@ -5,14 +5,14 @@
 //!
 //! Each primitive resolves a `BufId` (minted via `smelt.buf.create`),
 //! grabs the term width + current theme snapshot, and runs the
-//! `LayoutSink` projection through `crate::content::to_buffer::render_into_buffer`.
+//! span-collector projection through `crate::content::to_buffer::render_into_buffer`.
 
 use mlua::prelude::*;
 use std::collections::HashMap;
 
 use crate::app::dialogs::confirm_preview::ConfirmPreview;
 use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
-use crate::content::layout_out::LayoutSink;
+
 use crate::content::to_buffer::render_into_buffer;
 use crate::theme;
 use ui::BufId;

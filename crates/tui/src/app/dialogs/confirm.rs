@@ -19,7 +19,7 @@ use super::super::App;
 use crate::app::dialogs::confirm_preview::ConfirmPreview;
 use crate::app::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 use crate::content::display::{ColorRole, ColorValue};
-use crate::content::layout_out::{LayoutSink, SpanCollector};
+use crate::content::layout_out::SpanCollector;
 use crate::theme;
 use ui::BufId;
 

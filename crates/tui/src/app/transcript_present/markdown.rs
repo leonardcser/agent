@@ -1,7 +1,7 @@
 use super::*;
 
-pub(crate) fn render_markdown_inner<S: LayoutSink>(
-    out: &mut S,
+pub(crate) fn render_markdown_inner(
+    out: &mut SpanCollector,
     content: &str,
     width: usize,
     indent: &str,
@@ -251,8 +251,8 @@ pub(super) fn is_horizontal_rule(line: &str) -> bool {
 /// Render a horizontal rule line with dim styling (matching list markers).
 /// Replaces the HR characters (---, ***, ___) with box-drawing chars (─) but
 /// only renders 3 of them to match the visual weight of list markers.
-fn render_horizontal_rule<S: LayoutSink>(
-    out: &mut S,
+fn render_horizontal_rule(
+    out: &mut SpanCollector,
     bctx: Option<&crate::content::BoxContext>,
     indent: &str,
 ) -> u16 {
@@ -284,8 +284,8 @@ fn render_horizontal_rule<S: LayoutSink>(
 }
 
 /// Parse pipe-delimited table lines into rows, then render.
-fn render_markdown_table_from_lines<S: LayoutSink>(
-    out: &mut S,
+fn render_markdown_table_from_lines(
+    out: &mut SpanCollector,
     lines: &[&str],
     dim: bool,
     bctx: Option<&crate::content::BoxContext>,
@@ -306,73 +306,10 @@ fn render_markdown_table_from_lines<S: LayoutSink>(
     // 1..N are marked as soft-wrap continuations so they're skipped
     // once the source has been emitted. Sub-table selections that
     // exclude row 0 fall back to the rendered box-drawing chars.
-    let raw_source = lines.join("\n");
-    let mut tagged = SourceTextOnFirstRow::new(out, raw_source);
-    render_markdown_table(&mut tagged, &table_rows, dim, bctx, indent)
-}
-
-/// `LayoutSink` adapter that injects `set_source_text` before the
-/// first `newline()` and marks every subsequent `newline()` as a
-/// soft-wrap continuation. Used to attach a raw markdown source string
-/// to the first visual row of a multi-row rendered construct (tables)
-/// where per-row source mapping is impractical because the renderer
-/// builds its own visual layout.
-struct SourceTextOnFirstRow<'a, S: LayoutSink> {
-    inner: &'a mut S,
-    pending_source: Option<String>,
-}
-
-impl<'a, S: LayoutSink> SourceTextOnFirstRow<'a, S> {
-    fn new(inner: &'a mut S, source: String) -> Self {
-        Self {
-            inner,
-            pending_source: Some(source),
-        }
-    }
-}
-
-impl<S: LayoutSink> LayoutSink for SourceTextOnFirstRow<'_, S> {
-    fn print(&mut self, text: &str) {
-        self.inner.print(text);
-    }
-    fn newline(&mut self) {
-        if let Some(src) = self.pending_source.take() {
-            self.inner.set_source_text(&src);
-        } else {
-            self.inner.mark_soft_wrap_continuation();
-        }
-        self.inner.newline();
-    }
-    fn mark_wrapped(&mut self) {
-        self.inner.mark_wrapped();
-    }
-    fn fill_line_bg(&mut self, bg: crate::content::display::ColorValue, right_margin: u16) {
-        self.inner.fill_line_bg(bg, right_margin);
-    }
-    fn snapshot_style(&self) -> crate::content::display::SpanStyle {
-        self.inner.snapshot_style()
-    }
-    fn apply_style(&mut self, style: crate::content::display::SpanStyle) {
-        self.inner.apply_style(style);
-    }
-    fn push_style(&mut self, style: crate::content::display::SpanStyle) {
-        self.inner.push_style(style);
-    }
-    fn pop_style(&mut self) {
-        self.inner.pop_style();
-    }
-    fn set_gutter_bg(&mut self, bg: crate::content::display::ColorValue) {
-        self.inner.set_gutter_bg(bg);
-    }
-    fn mark_soft_wrap_continuation(&mut self) {
-        self.inner.mark_soft_wrap_continuation();
-    }
-    fn set_source_text(&mut self, text: &str) {
-        self.inner.set_source_text(text);
-    }
-    fn print_with_meta(&mut self, text: &str, meta: crate::content::display::SpanMeta) {
-        self.inner.print_with_meta(text, meta);
-    }
+    out.arm_source_text(lines.join("\n"));
+    let n = render_markdown_table(out, &table_rows, dim, bctx, indent);
+    out.disarm_source_text();
+    n
 }
 
 #[cfg(test)]

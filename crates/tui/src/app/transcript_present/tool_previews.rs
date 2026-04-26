@@ -2,8 +2,8 @@ use super::markdown::render_markdown_inner;
 use super::tools::{print_dim, print_dim_count, render_default_output};
 use super::*;
 
-pub(super) fn render_edit_output<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn render_edit_output(
+    out: &mut SpanCollector,
     output: &ToolOutput,
     args: &HashMap<String, serde_json::Value>,
 ) -> u16 {
@@ -27,8 +27,8 @@ pub(super) fn render_edit_output<S: LayoutSink>(
     }
 }
 
-pub(super) fn render_write_output<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn render_write_output(
+    out: &mut SpanCollector,
     args: &HashMap<String, serde_json::Value>,
 ) -> u16 {
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -36,8 +36,8 @@ pub(super) fn render_write_output<S: LayoutSink>(
     print_syntax_file(out, content, path, 0, 0)
 }
 
-pub(super) fn render_notebook_output<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn render_notebook_output(
+    out: &mut SpanCollector,
     output: &ToolOutput,
     width: usize,
 ) -> u16 {
@@ -91,8 +91,8 @@ pub(super) fn render_notebook_output<S: LayoutSink>(
     }
     rows
 }
-pub(super) fn render_plan_output<S: LayoutSink>(
-    out: &mut S,
+pub(super) fn render_plan_output(
+    out: &mut SpanCollector,
     args: &HashMap<String, serde_json::Value>,
     width: usize,
 ) -> u16 {

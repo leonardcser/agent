@@ -11,7 +11,7 @@ use crate::app::transcript_present as blocks;
 use crate::app::transcript_present::{
     gap_between, render_thinking_summary, thinking_summary, Element,
 };
-use crate::content::layout_out::{LayoutSink, SpanCollector};
+use crate::content::layout_out::SpanCollector;
 use crate::content::selection::wrap_and_locate_cursor;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -816,7 +816,7 @@ impl App {
         self.parser.has_active_thinking() && !show_thinking
     }
 
-    fn render_ephemeral_into<S: LayoutSink>(&self, out: &mut S, width: usize, show_thinking: bool) {
+    fn render_ephemeral_into(&self, out: &mut SpanCollector, width: usize, show_thinking: bool) {
         let Some(at) = self.parser.active_thinking() else {
             return;
         };
