@@ -1,0 +1,318 @@
+@startuml tui-ui-architecture
+!pragma layout elk
+
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam roundCorner 6
+skinparam defaultFontName "Inter"
+skinparam packageStyle rectangle
+hide empty members
+hide empty methods
+
+title smelt — tui / ui abstraction levels (class view)
+
+' =====================================================================
+' tui crate — application layer
+' =====================================================================
+package "crate: tui  (application)" as TUI #FFF6E0 {
+
+  class App <<owns event loop>> {
+    runs the event loop
+    owns Ui + Session + Config
+    bridges Lua ↔ Ui
+  }
+
+  class Config {
+    model, theme, keymaps,
+    skills, providers
+  }
+  class State {
+    persisted toggles
+    (mode, model, vim_mode…)
+  }
+  class Theme
+  class Session {
+    messages, metadata
+    Claude API client
+  }
+  class Attachment
+
+  class KeyAction <<enum>>
+  class KeyContext {
+    bindings
+    + condition
+  }
+  class When <<predicate>>
+
+  enum BufFormat {
+    Plain
+    Markdown
+    Diff
+    Bash
+    Json
+    Code(lang)
+  }
+
+  class LuaRuntime <<mlua>> {
+    plugin scripts
+    callbacks on win events
+  }
+}
+
+' =====================================================================
+' ui crate — framework layer
+' =====================================================================
+package "crate: ui  (framework)" as UI #E6F1FF {
+
+  ' --- Primitives -----------------------------------------------------
+  package "primitives" as P #F4F8FF {
+    class Style {
+      fg, bg, attrs
+    }
+    class Cell {
+      symbol
+      style: Style
+    }
+    class Grid <<terminal frame>> {
+      Vec<Cell>
+      differential flush
+    }
+    class Rect {
+      top, left
+      width, height
+    }
+    class Constraint <<enum>>
+    class Placement <<enum>>
+    class Border
+    class LayoutTree
+  }
+
+  ' --- Content layer --------------------------------------------------
+  package "content" as C #F4F8FF {
+    interface BufferFormatter {
+      render(src, width) → lines,
+      highlights, decorations
+    }
+    class Buffer <<Arc-shared>> {
+      BufId
+      lines, spans
+      LineDecoration
+      marks, virtual text
+    }
+    class BufferView {
+      buffer: Arc<Buffer>
+      scroll offset
+      borders
+      transient highlights
+    }
+    class EditBuffer {
+      undo / redo
+      kill ring
+    }
+  }
+
+  ' --- Interaction contracts -----------------------------------------
+  package "interaction contracts" as IX #F4F8FF {
+    interface Component {
+      prepare(area)
+      draw(GridSlice)
+      handle_key() : KeyResult
+      handle_mouse() : KeyResult
+      cursor() : Option<(x,y)>
+    }
+    interface PanelWidget {
+      content_rows()
+      tick()
+      selected_index()
+      text_value()
+    }
+    interface ListWidget {
+      row_count
+      selected / set_selected
+      scroll_top / scroll_by
+    }
+    enum WidgetEvent {
+      Submit
+      SubmitText
+      Cancel
+      Dismiss
+      Select
+      TextChanged
+      Yank
+    }
+    enum KeyResult {
+      Consumed
+      Ignored
+      Action(WidgetEvent)
+    }
+  }
+
+  ' --- Widgets (live inside dialogs) ---------------------------------
+  package "panel widgets" as W #F4F8FF {
+    class TextInput {
+      single line editor
+      cursor, anchor
+      placeholder
+    }
+    class OptionList
+    class BufferList
+  }
+
+  ' --- Components (top-level layers in the Compositor) ---------------
+  package "components / layers" as L #F4F8FF {
+    class Window <<viewport over Buffer>> {
+      WinId
+      BufId
+      cursor, scroll
+      WinConfig (Split | Float)
+      vim mode state
+    }
+    class Dialog <<modal, multi-panel>> {
+      panels: PanelWidget | Buffer
+      focus & key fall-through
+      owns inner Windows
+    }
+    class Picker <<dropdown>> {
+      non-focusable
+      driven externally
+    }
+    class Cmdline <<: / / prompt>>
+    class Notification <<toast>>
+    class StatusBar
+  }
+
+  ' --- Event dispatch -------------------------------------------------
+  package "events / callbacks" as E #F4F8FF {
+    class Callbacks <<registry>> {
+      keymap: (WinId, KeyBind) → Callback
+      events: (WinId, WinEvent) → Callback
+    }
+    enum Callback {
+      Rust(FnMut)
+      Lua(LuaHandle)
+    }
+    enum WinEvent {
+      Open / Close
+      FocusGained / Lost
+      SelectionChanged
+      Submit / TextChanged
+      Dismiss / Tick
+    }
+    class Payload <<event data>>
+  }
+
+  ' --- Orchestration --------------------------------------------------
+  class Compositor <<layer stack>> {
+    layers: Vec<Box<dyn Component>>
+    zindex, focus
+    hit-testing
+    render → Grid
+  }
+
+  class Ui <<facade / registry>> {
+    buffers: Map<BufId, Buffer>
+    windows: Map<WinId, Window>
+    compositor: Compositor
+    callbacks: Callbacks
+    selection style, layout tree
+    --
+    buf_create / buf_mut
+    win_open_split / picker_open / dialog_open
+    win_set_keymap / win_on_event
+    handle_key_with_lua
+    handle_mouse_with_lua
+    dispatch_event / dispatch_tick
+    render
+  }
+}
+
+' =====================================================================
+' Relationships — primitives
+' =====================================================================
+Cell --> Style
+Grid "1" o--> "*" Cell
+
+Rect <.. Component : draws inside
+Constraint <.. LayoutTree
+Placement <.. LayoutTree
+
+' =====================================================================
+' Relationships — content
+' =====================================================================
+Buffer ..> BufferFormatter : <<uses (pluggable)>>
+BufferView "1" o--> "1" Buffer
+EditBuffer --> Buffer
+
+' =====================================================================
+' Relationships — interaction
+' =====================================================================
+PanelWidget --|> Component
+ListWidget  --|> PanelWidget
+
+TextInput  ..|> PanelWidget
+OptionList ..|> PanelWidget
+BufferList ..|> PanelWidget
+OptionList ..|> ListWidget
+BufferList ..|> ListWidget
+
+Window       ..|> Component
+Dialog       ..|> Component
+Picker       ..|> Component
+Cmdline      ..|> Component
+Notification ..|> Component
+StatusBar    ..|> Component
+
+Component ..> KeyResult     : returns
+KeyResult ..> WidgetEvent   : carries
+
+' =====================================================================
+' Composition between high-level pieces
+' =====================================================================
+Window  "1" o--> "1" Buffer       : views
+Window  "1" o--> "0..1" EditBuffer
+Dialog  "1" o--> "*" PanelWidget  : panels
+Dialog  "1" o--> "*" Window       : buffer panels
+Picker  "1" o--> "1" BufferView
+Cmdline "1" o--> "1" TextInput
+Cmdline "1" o--> "0..1" Picker    : completion
+
+Compositor "1" o--> "*" Component : layers (z-ordered)
+Compositor --> Grid               : paints into
+
+Ui *--> Compositor
+Ui *--> Callbacks
+Ui  o--> "*" Buffer : registry
+Ui  o--> "*" Window : registry
+
+' =====================================================================
+' Event wiring
+' =====================================================================
+Callbacks "1" o--> "*" Callback
+Callback ..> WinEvent
+Callback ..> Payload
+Ui ..> WidgetEvent : classify_widget_action()\n→ WinEvent + Payload
+
+' =====================================================================
+' tui ↔ ui — application layer plugs into the framework
+' =====================================================================
+App   *--> Config
+App   *--> State
+App   *--> Session
+App   *--> LuaRuntime
+App   --> Ui            : drives
+State ..> Config        : resolve()
+Session "1" o--> "*" Attachment
+
+KeyContext o--> When
+KeyContext --> KeyAction
+KeyAction ..> Callback  : registered as
+
+BufFormat ..|> BufferFormatter
+Buffer <.. BufFormat    : plugged into
+
+LuaRuntime ..> Callback : registers Callback::Lua
+LuaRuntime ..> WinEvent : reacts to
+
+Theme ..> Style         : produces
+
+@enduml

@@ -1,0 +1,756 @@
+@startuml tui-ui-architecture-target
+!pragma layout elk
+
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam roundCorner 6
+skinparam defaultFontName "Inter"
+skinparam packageStyle rectangle
+hide empty members
+hide empty methods
+
+title smelt — target architecture (structure)\n\
+Decisions and rationale live in **ARCHITECTURE.md**; sequencing in **REFACTOR.md**.
+
+' =====================================================================
+' LUA — entire UX
+' =====================================================================
+package "runtime/lua/smelt/  (UX layer — the whole user-facing surface)" as LUA #FFEFE0 {
+
+  class "widgets/*.lua" as LWID <<Lua>> {
+    input, options, list, picker,
+    cmdline, statusline, notification
+    — keymap recipes for Windows
+  }
+  class "dialog.lua" as LDLGHELP <<Lua>> {
+    splits-edit OR Overlay helper
+    one question per dialog
+    (no tab strip in framework)
+  }
+  class "dialogs/*.lua" as LDLG <<Lua>> {
+    confirm, permissions, agents,
+    rewind, resume
+    multi-question flow = Lua
+    loop opening N dialogs
+  }
+  class "status.lua"  as LSTAT <<Lua>> {
+    statusline spec (segments)
+    segments bind to Cells:
+      { bind = "now", fmt = … }
+      { bind = "agent_mode" }
+      …
+    escape hatch:
+      { call = fn, deps = {…} }
+      ' fn re-runs only when one of
+      ' deps' cells changes
+  }
+  class "modes.lua"   as LMOD  <<Lua>>
+  class "transcript.lua" as LTX <<Lua>> {
+    buf.attach { parser="markdown",
+                 on_block=… }
+  }
+  class "diff.lua" as LDIFF <<Lua>> {
+    buf.attach { parser="diff",
+                 on_block=… }
+  }
+  class "commands.lua" as LCMD <<Lua>>
+  class "tools/*.lua" as LTOOLS <<Lua>> {
+    bash, read_file, write_file,
+    edit_file, glob, grep, web_fetch,
+    web_search, notebook, agent, …
+  }
+  class "plugins/*.lua" as LPLG <<Lua>>
+  class "colorschemes/*.lua" as LCS <<Lua>>
+}
+
+' =====================================================================
+' crate: tui — smelt's TUI binary (App + perf + Lua + state machines)
+' =====================================================================
+package "crate: tui  (smelt's TUI binary)" as TUI #FFF6E0 {
+
+  class Core <<headless-safe coordinator>> {
+    config:        AppConfig
+    session:       Session
+    confirms:      Confirms
+    clipboard:     Clipboard
+    timers:        Timers
+    cells:         Cells
+    lua:           LuaRuntime
+    tools:         ToolRuntime
+    engine_bridge: EngineBridge
+    --
+    runs the event loop
+    impl Host (no Ui knowledge)
+    ' Shared by TuiApp + HeadlessApp.
+    ' Anything that doesn't need
+    ' Ui lives here.
+  }
+  class TuiApp <<terminal frontend>> {
+    core:       Core
+    well_known: WellKnown
+    ui:         ui::Ui
+    --
+    impl Host + UiHost
+  }
+  class HeadlessApp <<no-Ui frontend>> {
+    core: Core
+    sink: HeadlessSink     ' JSON / text out
+    --
+    impl Host (not UiHost)
+    ' Lua-driven UX bindings that
+    ' touch ui/win/buf are absent
+    ' here; tools, engine, cells,
+    ' timers, autocmds all work.
+  }
+
+  package "subsystems  (owned by Core unless noted)" as SUB #FFF1C8 {
+    class AppConfig
+    class WellKnown <<well-known WinIds — TuiApp only>> {
+      transcript: WinId
+      prompt:     WinId
+      statusline: WinId
+      cmdline:    Option<WinId>
+    }
+    class Session {
+      history:    Vec<Message>
+      costs:      CostTracker
+      turn_metas: Vec<TurnMeta>
+      ' Sub-agent state lives in Lua
+      ' (cells driven by tui::subprocess
+      ' on_event callbacks), not here.
+    }
+    class Confirms {
+      requests:    Map<HandleId,
+        oneshot::Sender<Decision>>
+      next_handle: HandleId
+      ' Gates engine generation:
+      ' EngineBridge checks
+      ' is_clear() before pulling
+      ' next request from queue.
+    }
+    class Clipboard
+    class Timers {
+      set(ms, fn) -> TimerId
+      set_interval(ms, fn) -> TimerId
+      cancel(id)
+      ' Built-in `now` cell ticked at 1s
+      ' lives here. Plugin timers can
+      ' drive their own cells.
+    }
+    class Cells <<reactive registry — also the event bus>> {
+      Map<CellName, Box<dyn Any>>
+      built-ins: now, spinner_frame,
+        agent_mode, vim_mode, model,
+        reasoning, confirms_pending,
+        tokens_used, errors, cwd,
+        session_title,
+        history (Cell<HistoryDelta>),
+        turn_complete (Cell<TurnMeta>),
+        turn_error (Cell<TurnError>),
+        confirm_requested (Cell<HandleId>),
+        confirm_resolved (Cell<…>),
+        session_started/ended,
+        branch
+      --
+      new<T>(name, initial) -> CellId
+      get<T>(name) -> &T
+      set<T>(name, T)        ' wakes loop;
+                              ' notifies subs;
+                              ' next render
+                              ' resolves spec
+                              ' bindings
+      subscribe(name, CbId)   ' sole observer
+                              ' mechanism — autocmd
+                              ' is sugar over this.
+                              ' Pure events =
+                              ' Cell<()>.set(()).
+      glob_subscribe(pattern, CbId)
+    }
+    class ToolRuntime {
+      registry: Map<name, LuaTool>
+      impls engine::ToolDispatcher
+    }
+    class LuaRuntime <<mlua>> {
+      plugin scripts
+      callback queue
+      coroutine tasks
+      TLS pointer to &mut Host
+      cancel: cooperative —
+        coroutine resumes with
+        Err(Canceled)
+      ' Autocmd subscriptions are
+      ' just `Cells::subscribe`
+      ' under the hood; smelt.au.*
+      ' is sugar over smelt.cell.*.
+    }
+  }
+
+  package "engine bridge" as EB #FFE9B5 {
+    class EngineBridge {
+      drains event_rx → host calls
+      TextDelta → Buffer.append
+        (Rust-only; no Lua per chunk)
+      ToolStarted/Finished, block end
+        → Buffer attach `on_block` cb
+    }
+  }
+
+  package "Rust capabilities  (generic, Lua-callable — FFI for intricate logic)" as BIND #FFE9B5 {
+    class "tui::parse"        as TPARSE     <<markdown / diff / syntax>>
+    class "tui::process"      as TPROC      <<short-lived spawn /\ngroup / streaming / kill>>
+    class "tui::subprocess"   as TSUB       <<long-lived child:\nspawn · send · on_event ·\nwait · kill — used by\nsub-agent / mcp / bg cmd>>
+    class "tui::fs"           as TFS        <<read / write / edit (mtime-checked) / glob / lock>>
+    class "tui::http"         as THTTP      <<fetch / cache / redirects>>
+    class "tui::html"         as THTML      <<html → markdown>>
+    class "tui::notebook"     as TNB        <<Jupyter JSON ops>>
+    class "tui::grep"         as TGREP      <<ripgrep wrapper>>
+    class "tui::path"         as TPATH      <<normalize / canonical / relative>>
+    class "tui::fuzzy"        as TFUZZY     <<fuzzy matching / scoring>>
+    class "tui::permissions"  as TPERM      <<all permission policy:\nbash AST · pattern match ·\nworkspace path extract ·\nruntime approvals ·\nworkspace store (JSON)>>
+  }
+
+  enum VimMode {
+    Normal / Insert / Visual
+    / VisualLine
+    ' Lives on App as a single
+    ' global field. Lua:
+    ' smelt.vim.mode.
+  }
+
+  package "smelt registries  (UI-side)" as REG #FFE9B5 {
+    class CommandRegistry
+  }
+}
+
+' =====================================================================
+' crate: ui — generic terminal UI primitives, no smelt knowledge
+' =====================================================================
+package "crate: ui  (generic terminal UI primitives)" as UI #E6F1FF {
+
+  package "primitives" as P #F4F8FF {
+    class Style
+    class Cell
+    class Grid <<terminal frame>>
+    class Rect
+    class CellUpdate
+    class Flush <<diff → SGR writer>>
+  }
+
+  package "theme" as TH #F4F8FF {
+    class Theme <<highlight registry>> {
+      groups, links
+      get / set / link
+    }
+  }
+
+  package "content" as C #F4F8FF {
+    class Buffer <<lines + extmarks>> {
+      lines, undo
+      modifiable: bool        ' data-layer guard
+      namespaces, extmarks
+      ' Theme refs are highlight ids,
+      ' not raw colors.
+      ' Parsed/computed metadata
+      ' (LCS diff results, syntect
+      ' tokens) lives in dedicated
+      ' namespaces — no separate
+      ' IR cache file. Persisted
+      ' with the Buffer.
+      --
+      attach(spec)            ' parser + decorations
+                              ' + on_block callback
+                              ' fired at semantic
+                              ' boundaries, NOT
+                              ' per chunk
+      yank_text_for_range(r)  ' pure helper:
+                              ' walks extmarks in
+                              ' range, applies
+                              ' each extmark's
+                              ' YankSubst (Empty
+                              ' skips, Static
+                              ' substitutes); no
+                              ' buffer-level hook
+    }
+    class Namespace
+    class Extmark {
+      pos, hl_id              ' → Theme
+      virt_text, sign, conceal
+      right_gravity           ' stable under append
+      on_click: Option<WinEvent>
+      yank: Option<YankSubst>  ' yank-time policy
+                                ' for bytes covered
+                                ' by this extmark
+    }
+    enum YankSubst {
+      Empty                   ' elide (e.g. hidden
+                              '   thinking blocks)
+      Static(String)          ' replace with text
+                              '   (e.g. prompt
+                              '   attachment sigils
+                              '   → expanded path)
+    }
+  }
+
+  package "interaction contracts" as IX #F4F8FF {
+    interface Host <<ui-agnostic trait — Core impl>> {
+      clipboard() : &mut dyn ClipboardWrite
+      cells() : &mut Cells
+      timers() : &mut Timers
+      lua()   : &mut LuaRuntime
+      tools() : &mut ToolRuntime
+      engine(): &mut EngineBridge
+      session(): &mut Session
+      confirms(): &mut Confirms
+      ' Everything Lua bindings need
+      ' that does NOT touch Ui:
+      ' cell/timer/clipboard/cmd/
+      ' engine/permissions/confirm/
+      ' agent/session/tools/os/fs/
+      ' http/html/notebook/path/
+      ' parse/grep/fuzzy/au/theme.
+      ' Headless impls only this.
+    }
+    interface UiHost <<extends Host — TuiApp impl>> {
+      ui()    : &mut Ui
+      focus(win: WinId)
+      fire_win_event(win: WinId, ev: WinEvent)
+      buf_create / buf_mut
+      win_open / win_close / win_mut
+      overlay_open / overlay_close
+      ' Ui-shaped surface only.
+      ' Lua bindings under
+      ' smelt.ui / smelt.win /
+      ' smelt.buf / smelt.statusline
+      ' require UiHost; calling them
+      ' from a HeadlessApp errors.
+      ' No request_redraw — rendering
+      ' is event-driven + diff-based.
+    }
+    enum Event {
+      Key(KeyEvent)
+      Mouse(MouseEvent)
+      Resize
+      Focus / Blur
+    }
+    enum Status {
+      Consumed / Capture / Ignored
+      ' No Yank payload — handlers call
+      ' Host clipboard directly.
+    }
+    enum WinEvent {
+      Open / Close
+      FocusGained / Lost
+      Submit / Dismiss
+      Select(idx)
+      TextChanged
+    }
+    enum FocusTarget <<keyboard-focus>> {
+      Window(WinId)
+    }
+    enum HitTarget <<mouse/capture>> {
+      Window(WinId)
+      Scrollbar(owner: WinId)
+      Chrome(owner: OverlayId)
+    }
+  }
+
+  package "concrete interactive unit" as L #F4F8FF {
+    class Window <<buffer viewport>> {
+      WinId, BufId
+      cursor: (line, col)
+      scroll_top: usize
+      selection: Option<Range>
+      keymap: KeymapId        ' recipe id
+      focusable: bool
+      --
+      render(buf, grid)
+      handle(event, ctx, host) -> Status
+      cursor() : Option<(x,y)>
+    }
+  }
+
+  package "layout + composition" as LO #F4F8FF {
+    class LayoutTree {
+      Vbox { gap, separator,
+             border, title, items }
+      Hbox { gap, separator,
+             border, title, items }
+      Leaf(WinId)
+      Item = (Constraint, LayoutTree)
+      ' Any container can carry chrome
+      ' (border + title). Convention
+      ' is to use it on overlays only;
+      ' the type system allows it
+      ' anywhere.
+    }
+    enum Constraint {
+      Length(u16)
+      Percentage(u16)
+      Ratio(u32, u32)
+      Min(u16) / Max(u16)
+      Fill(u16)
+      Fit
+    }
+    enum SeparatorStyle {
+      None / Solid / Dashed / Double
+    }
+    enum BorderStyle {
+      Sharp / Rounded
+    }
+    class Borders <<bitflags>> {
+      TOP | RIGHT | BOTTOM | LEFT
+      ALL  | NONE
+    }
+    class Border {
+      style: BorderStyle
+      sides: Borders
+    }
+    enum Anchor {
+      Screen(Center)
+      Screen { row, col }
+      Cursor(Edge)
+      Win { target: WinId,
+            attach: Edge }
+    }
+    class Overlay <<placement + modality>> {
+      layout: LayoutTree     ' chrome (if any)
+                              ' lives in here
+      anchor: Anchor
+      z:      u16
+      modal:  bool
+    }
+  }
+
+  class Ui <<facade + compositor>> {
+    bufs:     Map<BufId, Buffer>
+    wins:     Map<WinId, Window>
+    splits:   LayoutTree         ' base layer
+    overlays: Vec<Overlay>       ' z-ordered
+    focus:    Option<WinId>      ' semantic keyboard focus
+    focus_history: Vec<WinId>
+    capture:  Option<HitTarget>  ' mouse drag capture
+    cursor_shape:  CursorShape   ' single global
+    theme, callbacks
+    ' pub(crate) mouse dispatch state:
+    ' hit index, capture, last_click,
+    ' autoscroll_since
+    --
+    buf_create / buf_mut
+    win_open / win_close / win_mut
+    overlay_open / overlay_close
+    dispatch_event / render
+    --
+    focus() -> Option<WinId>
+    set_focus(win) -> bool
+    focused_window() / focused_window_mut()
+    focused_overlay() -> Option<OverlayId>
+    active_modal() -> Option<OverlayId>
+    hit_test(row,col) -> Option<HitTarget>
+    focus_next / focus_prev   ' modal-aware
+  }
+
+}
+
+' =====================================================================
+' crate: engine — LLM core, frontend-agnostic
+' =====================================================================
+package "crate: engine  (LLM core — frontend-agnostic, zero UI imports)" as ENG #DCF4DC {
+
+  class EngineHandle <<channel boundary>> {
+    cmd_tx:  Sender<UiCommand>
+    event_rx: Receiver<EngineEvent>
+    --
+    The ONLY way frontends talk
+    to engine. No trait impls,
+    no callbacks, no UI types.
+    No engine-side state leaks
+    (no `processes`, no
+    `runtime_approvals`, no
+    `permissions`) — all that
+    lives in tui::* now.
+  }
+  class EngineConfig
+  class EventInjector
+
+  package "tools  (slim — schema + dispatcher)" as TO #C8E8C8 {
+    class ToolSchema <<metadata>> {
+      name, description
+      parameters: JSON Schema
+      ' No `modes` field — mode
+      ' gating is a UX concern,
+      ' lives in the Lua tool def's
+      ' `hooks` (returns "deny"/
+      ' "needs_confirm" based on
+      ' AgentMode). Engine has no
+      ' opinion on Plan/Apply/Yolo.
+    }
+    interface ToolDispatcher <<trait>> {
+      dispatch(call_id, name,
+               args, ctx)
+        -> ToolResult
+      evaluate_hooks(name, args)
+        -> Hooks (needs_confirm,
+                  approval_patterns,
+                  preflight)
+      ' Implemented by tui's
+      ' ToolRuntime — engine never
+      ' executes tools itself.
+    }
+    class ToolResult
+  }
+
+  package "providers" as PR #C8E8C8 {
+    interface Provider {
+      chat / stream
+    }
+    class "Anthropic"   as PA
+    class "OpenAI"      as PO
+    class "Codex"       as PCD
+    class "Copilot"     as PCP
+  }
+
+  package "support" as SP #C8E8C8 {
+    class McpManager
+    class AuthProvider
+    class SkillLoader
+    class CancellationToken
+    class CompactOptions
+    ' No multi-agent registry, no
+    ' inter-agent socket here — sub-agents
+    ' are child processes spawned by Lua
+    ' tools through tui::subprocess.
+  }
+}
+
+' =====================================================================
+' crate: protocol — wire types, pure data
+' =====================================================================
+package "crate: protocol  (wire types — pure data, serde)" as PROTO #F0FFF0 {
+
+  package "messages" as PMSG #E0F8E0 {
+    class Message {
+      role, content, reasoning,
+      tool_calls, tool_call_id
+    }
+    enum Role {
+      System / User / Assistant
+      / Tool
+      ' No `Agent` role — sub-agent
+      ' replies are tool results.
+    }
+    class ToolCall
+    class ToolOutcome
+    class Content
+    class ContentPart
+  }
+
+  package "events ↑ (engine → frontend)" as PEV #E0F8E0 {
+    enum EngineEvent {
+      Ready / Thinking / ThinkingDelta
+      Text / TextDelta
+      ToolStarted / ToolOutput / ToolFinished
+      RequestPermission
+      Steered / TurnComplete / TurnError
+      TokenUsage / Retrying
+      CompactionComplete / TitleGenerated
+      Shutdown
+      ToolDispatch / ToolHooksRequest
+      ' No AgentMessage / AgentExited /
+      ' Spawned — sub-agents are tool calls.
+      …
+    }
+  }
+
+  package "commands ↓ (frontend → engine)" as PCMD #E0F8E0 {
+    enum UiCommand {
+      StartTurn / Steer / Unsteer
+      PermissionDecision
+      SetAgentMode / SetReasoningEffort / SetModel
+      Compact / GenerateTitle / Btw
+      ToolResult / ToolHooksResponse
+      Cancel
+      ' No AgentMessage — parent talks to
+      ' sub-agents through subprocess IPC,
+      ' not through engine UiCommands.
+      …
+    }
+  }
+
+  package "config / metadata" as PCFG #E0F8E0 {
+    enum AgentMode {
+      Normal / Plan / Apply / Yolo
+      ' Permission-gating policy.
+      ' Lua: smelt.agent.mode.
+    }
+    enum ReasoningEffort {
+      Off / Low / Med / High / Max
+    }
+    class TokenUsage
+    class TurnMeta
+    class ToolDef
+    class ToolHooks
+    enum AuxiliaryTask
+    ' No AgentBlockData — sub-agent replies
+    ' are tool outcomes.
+  }
+}
+
+' =====================================================================
+' Cross-crate dependency direction (one-way, no cycles)
+' =====================================================================
+ENG   -[#888,dashed]-> PROTO : uses wire types
+TUI   -[#888,dashed]-> PROTO : uses wire types
+TUI   -[#888,dashed]-> ENG   : EngineHandle\n(channels only)
+TUI   -[#888,dashed]-> UI    : ui primitives
+LUA   -[#888,dashed]-> TUI   : smelt.* Lua API
+
+' =====================================================================
+' Engine internals
+' =====================================================================
+EngineHandle ..> EngineEvent : event_rx
+EngineHandle ..> UiCommand   : cmd_tx
+ToolDispatcher ..> ToolResult : returns
+ToolDispatcher ..> ToolSchema : looks up by name
+Provider <|.. PA
+Provider <|.. PO
+Provider <|.. PCD
+Provider <|.. PCP
+
+' =====================================================================
+' tui internals
+' =====================================================================
+Core *--> AppConfig
+Core *--> Session
+Core *--> Confirms
+Core *--> Clipboard
+Core *--> Timers
+Core *--> Cells
+Core *--> LuaRuntime
+Core *--> ToolRuntime
+Core *--> EngineBridge
+
+TuiApp      *--> Core
+TuiApp      *--> WellKnown
+TuiApp      --> Ui            : drives compositor
+HeadlessApp *--> Core
+
+Core        ..|> Host         : impls (Ui-agnostic)
+TuiApp      ..|> UiHost       : impls (extends Host\nwith Ui surface)
+HeadlessApp ..|> Host         : impls only Host\n(no UiHost)
+UiHost      --|> Host         : extends
+ToolRuntime ..|> ToolDispatcher : impls (engine's\ndispatch trait)
+
+WellKnown ..> Window  : refs by WinId
+Session   ..> Buffer  : transcript + prompt\nvia BufId on WellKnown
+
+EngineBridge --> EngineHandle : owns
+EngineBridge ..> Confirms        : registers requests
+EngineBridge ..> Session         : update history,\ncosts, snapshots
+EngineBridge ..> Cells           : set(history),\nset(turn_complete),\nset(token_usage), …
+Confirms ..> EngineHandle        : PermissionDecision
+
+LuaRuntime *--> CommandRegistry
+
+Window ..> UiHost           : direct mutation\nvia &mut dyn UiHost
+
+' Lua → tui Rust API
+LCMD     -[#aa6,dashed]-> CommandRegistry : registers
+LDLG     -[#aa6,dashed]-> LDLGHELP        : composes via dialog.lua
+LDLGHELP -[#aa6,dashed]-> Ui              : splices into splits\nor opens an Overlay
+LDLGHELP -[#aa6,dashed]-> LWID            : composes widgets
+LSTAT    -[#aa6,dashed]-> Window          : statusline as a Window
+LSTAT    -[#aa6,dashed]-> Cells           : binds segments to cells
+Timers   ..> Cells                        : drives `now`, `spinner_frame`
+LMOD     -[#aa6,dashed]-> Cells           : reads/writes\nagent_mode cell
+LTX      -[#aa6,dashed]-> TPARSE          : parse markdown +\nhighlight code
+LTX      -[#aa6,dashed]-> Buffer          : write extmarks
+LDIFF    -[#aa6,dashed]-> TPARSE          : compute diff +\nhighlight sides
+LDIFF    -[#aa6,dashed]-> Buffer          : write extmarks
+LWID     -[#aa6,dashed]-> Window          : opens Windows\nwith keymap recipes
+LWID     -[#aa6,dashed]-> TFUZZY          : picker / completer\nfiltering
+LCS      -[#aa6,dashed]-> Theme           : set / link
+LTOOLS   -[#aa6,dashed]-> TPROC           : exec / spawn-bg
+LTOOLS   -[#aa6,dashed]-> TFS             : read / write / edit / glob
+LTOOLS   -[#aa6,dashed]-> THTTP           : fetch / cache
+LTOOLS   -[#aa6,dashed]-> THTML           : html → markdown
+LTOOLS   -[#aa6,dashed]-> TNB             : Jupyter ops
+LTOOLS   -[#aa6,dashed]-> TGREP           : ripgrep
+LTOOLS   -[#aa6,dashed]-> TPERM           : bash AST parse\n(intricate logic\nbehind FFI)
+LTOOLS   -[#aa6,dashed]-> TSUB            : spawn_agent /\nmessage_agent /\nany child process
+LPLG     -[#aa6,dashed]-> BIND            : any plugin can\ncompose Rust capabilities
+
+' =====================================================================
+' ui internals
+' =====================================================================
+Window   ..> Buffer            : reads via BufId
+
+LayoutTree --> Constraint
+LayoutTree --> SeparatorStyle  : optional, between siblings
+Border     --> BorderStyle
+Border     --> Borders
+LayoutTree --> Border          : optional chrome
+Overlay    --> Anchor          : positioning
+Overlay    --> LayoutTree      : tiles members
+Overlay  ..> Window            : refs members by WinId\nin layout leaves
+Buffer   o--> "*" Namespace
+Buffer   o--> "*" Extmark
+Extmark  --> Theme : hl_id
+Extmark  --> YankSubst : optional
+
+Ui o--> "*" Buffer    : owns
+Ui o--> "*" Window    : owns
+Ui *--> LayoutTree    : splits
+Ui o--> "*" Overlay   : overlays (z-ordered)
+Ui --> Grid
+Ui --> Flush
+Ui *--> Theme
+
+' =====================================================================
+' The single note kept inline — Buffer vs Window split is a visual
+' reference users want to scan; everything else lives in ARCHITECTURE.md.
+' =====================================================================
+note as N3b #EEFFEE
+  **Buffer vs Window — what goes where.**
+  Rule of thumb: anything that would *differ* if the
+  same content were shown in two viewports goes on
+  Window; anything shared goes on Buffer.
+
+  | concern         | Buffer | Window |
+  |-----------------|--------|--------|
+  | lines / text    |   X    |        |
+  | extmarks        |   X    |        |
+  |  (highlights,   |        |        |
+  |   signs, virt   |        |        |
+  |   text)         |        |        |
+  | modifiable flag |   X    |        |
+  | undo history    |   X    |        |
+  | on_change cb    |   X    |        |
+  | cursor pos      |        |   X    |
+  | scroll offset   |        |   X    |
+  | selection range |        |   X    |
+  | keymap overlay  |        |   X    |
+  | scrollbar state |        |   X    |
+  | border / title  |  —     |   —    |  ' on LayoutTree (any container)
+  | panel dividers  |  —     |   —    |  ' on LayoutTree (parent)
+
+  Same Buffer can have 0..N Windows looking at it
+  with independent cursors/scrolls. No BufferView
+  middle layer.
+
+  **Composing widgets**: a "dialog with a list +
+  text input" is **N Windows in one Overlay**. The
+  Overlay's `layout` is a Vbox/Hbox of `Leaf(WinId)`s,
+  with chrome on the Vbox/Hbox itself.
+  No compound-widget type, no group type — every
+  composite shape is N×Window inside an Overlay.
+
+  **Rendering model**: event-driven + diff-based,
+  no dirty flag. The loop renders after every
+  event; the compositor diffs current vs previous
+  Grid and flushes only changed cells. Idle CPU
+  is zero (loop parks). Things that change over
+  time (clock, spinner) drive a `Cell` from a
+  timer; the Cell setter wakes the loop.
+end note
+
+@enduml
