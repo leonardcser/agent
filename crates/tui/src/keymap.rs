@@ -22,8 +22,7 @@ pub enum KeyAction {
     CycleReasoning,
     ToggleStash,
     OpenHelp,
-    OpenHistorySearch,
-    PurgeRedraw,
+    Redraw,
     AcceptGhostText,
 
     // Submit
@@ -69,6 +68,8 @@ pub enum KeyAction {
     // Selection (shift+movement extends selection)
     SelectLeft,
     SelectRight,
+    SelectUp,
+    SelectDown,
     SelectWordForward,
     SelectWordBackward,
     SelectStartOfLine,
@@ -147,11 +148,6 @@ impl When {
 
     const fn not_vim_non_insert(mut self) -> Self {
         self.vim_non_insert = Cond::No;
-        self
-    }
-
-    const fn not_vim(mut self) -> Self {
-        self.vim_enabled = Cond::No;
         self
     }
 
@@ -274,13 +270,7 @@ static BINDINGS: &[Binding] = &[
     bind(KeyCode::Char('s'), CTRL, when(), KeyAction::ToggleStash),
     bind(KeyCode::BackTab, NONE, when(), KeyAction::ToggleMode),
     bind(KeyCode::Char('t'), CTRL, when(), KeyAction::CycleReasoning),
-    bind(
-        KeyCode::Char('r'),
-        CTRL,
-        when().not_vim_non_insert(),
-        KeyAction::OpenHistorySearch,
-    ),
-    bind(KeyCode::Char('l'), CTRL, when(), KeyAction::PurgeRedraw),
+    bind(KeyCode::Char('l'), CTRL, when(), KeyAction::Redraw),
     bind(
         KeyCode::Char('?'),
         NONE,
@@ -414,51 +404,33 @@ static BINDINGS: &[Binding] = &[
     bind(
         KeyCode::Left,
         SHIFT.union(ALT),
-        when().not_vim(),
+        when(),
         KeyAction::SelectWordBackward,
     ),
     bind(
         KeyCode::Right,
         SHIFT.union(ALT),
-        when().not_vim(),
+        when(),
         KeyAction::SelectWordForward,
     ),
     bind(
         KeyCode::Left,
         SHIFT.union(CTRL),
-        when().not_vim(),
+        when(),
         KeyAction::SelectWordBackward,
     ),
     bind(
         KeyCode::Right,
         SHIFT.union(CTRL),
-        when().not_vim(),
+        when(),
         KeyAction::SelectWordForward,
     ),
-    bind(
-        KeyCode::Left,
-        SHIFT,
-        when().not_vim(),
-        KeyAction::SelectLeft,
-    ),
-    bind(
-        KeyCode::Right,
-        SHIFT,
-        when().not_vim(),
-        KeyAction::SelectRight,
-    ),
-    bind(
-        KeyCode::Home,
-        SHIFT,
-        when().not_vim(),
-        KeyAction::SelectStartOfLine,
-    ),
-    bind(
-        KeyCode::End,
-        SHIFT,
-        when().not_vim(),
-        KeyAction::SelectEndOfLine,
-    ),
+    bind(KeyCode::Left, SHIFT, when(), KeyAction::SelectLeft),
+    bind(KeyCode::Right, SHIFT, when(), KeyAction::SelectRight),
+    bind(KeyCode::Up, SHIFT, when(), KeyAction::SelectUp),
+    bind(KeyCode::Down, SHIFT, when(), KeyAction::SelectDown),
+    bind(KeyCode::Home, SHIFT, when(), KeyAction::SelectStartOfLine),
+    bind(KeyCode::End, SHIFT, when(), KeyAction::SelectEndOfLine),
     // ── Arrow / Home / End navigation ───────────────────────────────────
     bind(KeyCode::Left, ALT, when(), KeyAction::MoveWordBackward),
     bind(KeyCode::Left, SUPER, when(), KeyAction::MoveStartOfLine),
@@ -660,7 +632,7 @@ pub mod hints {
     const HELP_PREFIXES: &[(&str, &str)] = &[
         (
             "/command",
-            "slash commands  (try /resume, /compact, /fork, /ps, /vim\u{2026})",
+            "commands  (try /resume, /compact, /fork, /ps, /vim\u{2026})",
         ),
         ("@<path>", "attach a file or URL"),
         ("!<cmd>", "run a shell command"),

@@ -82,7 +82,8 @@ smelt --model claude-opus-4-5 --api-base https://api.anthropic.com/v1 --api-key-
 - **Multi-agent** — parallel subagents with inter-agent messaging (opt-in)
 - **Skills** — on-demand specialized knowledge via `SKILL.md` files
 - **MCP** — connect external tool servers via the Model Context Protocol
-- **Custom commands** — user-defined slash commands via markdown files
+- **Custom commands** — user-defined commands via markdown files
+- **Lua scripting** — extend with `~/.config/smelt/init.lua` (keymaps, commands, autocmds, engine control, lifecycle events)
 - **Custom instructions** — project-level `AGENTS.md` files
 - **Input prediction** — ghost text suggesting your next message
 - **Image support** — paste from clipboard or reference image files

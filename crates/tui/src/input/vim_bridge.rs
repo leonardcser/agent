@@ -1,12 +1,12 @@
-//! Bridge between `InputState` and the vim state machine.
+//! Bridge between `PromptState` and the vim state machine.
 //!
 //! Vim owns its own mode/count state but operates on the input's live
 //! `buf`/`cpos`/`attachment_ids`. After Part B of the refactor, vim no longer
 //! keeps a private register or undo history either — it borrows the kill ring
-//! and the single `UndoHistory` owned by `InputState` through `VimContext`,
+//! and the single `UndoHistory` owned by `PromptState` through `VimContext`,
 //! so no post-key sync is needed.
 
-use super::{Action, History, InputState};
+use super::{Action, History, PromptState};
 use crate::vim::{self, VimContext};
 use crossterm::event::{Event, KeyEvent};
 
@@ -20,13 +20,13 @@ pub(super) enum VimBridgeResult {
     NotAKey,
 }
 
-impl InputState {
+impl PromptState {
     pub(super) fn dispatch_vim(
         &mut self,
         ev: &Event,
         history: &mut Option<&mut History>,
     ) -> VimBridgeResult {
-        if self.vim.is_none() {
+        if self.win.vim.is_none() {
             return VimBridgeResult::NotAKey;
         }
         let Event::Key(key_ev) = ev else {
@@ -34,17 +34,27 @@ impl InputState {
         };
         let key_ev: KeyEvent = *key_ev;
 
-        let vim = self.vim.as_mut().unwrap();
+        // Seed vim's curswant from the window cursor so a prior
+        // shift+arrow-driven vertical motion's preferred column is
+        // preserved when the user next hits j/k, and write it back out
+        // after — one source of truth, one `curswant`.
+        let seed = self.win.win_cursor.curswant();
+        let vim = self.win.vim.as_mut().unwrap();
+        vim.set_curswant(seed);
         let result = {
+            let mut clipboard = crate::app::commands::SystemClipboard;
             let mut ctx = VimContext {
-                buf: &mut self.buf,
-                cpos: &mut self.cpos,
-                attachments: &mut self.attachment_ids,
-                kill_ring: &mut self.kill_ring,
-                history: &mut self.history,
+                buf: &mut self.win.edit_buf.buf,
+                cpos: &mut self.win.cpos,
+                attachments: &mut self.win.edit_buf.attachment_ids,
+                kill_ring: &mut self.win.kill_ring,
+                history: &mut self.win.edit_buf.history,
+                clipboard: &mut clipboard,
             };
             vim.handle_key(key_ev, &mut ctx)
         };
+        let post = self.win.vim.as_ref().unwrap().curswant();
+        self.win.win_cursor.set_curswant(post);
 
         match result {
             vim::Action::Consumed => {
@@ -55,7 +65,7 @@ impl InputState {
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::Submit => {
-                if self.buf.is_empty() && self.attachment_ids.is_empty() {
+                if self.win.edit_buf.buf.is_empty() && self.win.edit_buf.attachment_ids.is_empty() {
                     VimBridgeResult::Handled(Action::SubmitEmpty)
                 } else {
                     let display = self.message_display_text();
@@ -65,17 +75,20 @@ impl InputState {
                 }
             }
             vim::Action::HistoryPrev => {
-                if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(&self.buf)) {
-                    self.buf = entry.to_string();
-                    self.cpos = 0;
+                if let Some(entry) = history
+                    .as_deref_mut()
+                    .and_then(|h| h.up(&self.win.edit_buf.buf))
+                {
+                    self.win.edit_buf.buf = entry.to_string();
+                    self.win.cpos = 0;
                     self.sync_completer();
                 }
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::HistoryNext => {
                 if let Some(entry) = history.as_deref_mut().and_then(|h| h.down()) {
-                    self.buf = entry.to_string();
-                    self.cpos = self.buf.len();
+                    self.win.edit_buf.buf = entry.to_string();
+                    self.win.cpos = self.win.edit_buf.buf.len();
                     self.sync_completer();
                 }
                 VimBridgeResult::Handled(Action::Redraw)

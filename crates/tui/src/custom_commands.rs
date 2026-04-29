@@ -82,7 +82,7 @@ pub fn list() -> Vec<(String, String)> {
     items
 }
 
-/// Resolve a slash-command input (e.g. "/commit" or "/commit fix typos") to a
+/// Resolve a command input (e.g. "/commit" or "/commit fix typos") to a
 /// parsed CustomCommand.  Any text after the command name is appended to the
 /// body as extra user instructions.  Custom commands take priority; builtin
 /// commands are used as a fallback. `multi_agent` is forwarded to builtin

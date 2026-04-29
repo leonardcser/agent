@@ -58,7 +58,7 @@ impl Tool for ReadFileTool {
     fn execute<'a>(
         &'a self,
         args: HashMap<String, Value>,
-        _ctx: &'a ToolContext<'a>,
+        _ctx: &'a ToolContext,
     ) -> ToolFuture<'a> {
         Box::pin(async move { tokio::task::block_in_place(|| self.run(&args)) })
     }

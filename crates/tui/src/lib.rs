@@ -1,26 +1,29 @@
 pub mod alloc;
+pub mod api;
 pub mod app;
 pub mod attachment;
 pub mod builtin_commands;
 pub mod completer;
 pub mod config;
+pub mod content;
 pub mod custom_commands;
+pub mod format;
 pub mod fuzzy;
 pub mod input;
 pub mod instructions;
 pub mod keymap;
+pub mod lua;
 pub mod metrics;
 pub mod perf;
 pub mod persist;
-pub mod render;
+pub mod prompt_sections;
 pub mod session;
 pub mod sleep_inhibit;
 pub mod state;
-pub mod text_utils;
 pub mod theme;
-pub mod undo;
 pub mod utils;
 pub mod vim;
+pub mod window;
 pub mod workspace_permissions;
 
 /// Expand `@path` and `"@path with spaces"` references in user input:
@@ -30,7 +33,7 @@ pub fn expand_at_refs(input: &str) -> String {
     let mut refs: Vec<String> = Vec::new();
     let mut i = 0;
     while i < chars.len() {
-        if let Some((_, path, end)) = render::scan_at_token(&chars, i) {
+        if let Some((_, path, end)) = content::scan_at_token(&chars, i) {
             let resolved = path.trim_end_matches([',', '.']);
             if !resolved.is_empty() && std::path::Path::new(resolved).exists() {
                 refs.push(resolved.to_string());

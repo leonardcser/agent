@@ -243,7 +243,7 @@ fn atomic_write(path: &std::path::Path, contents: &[u8], ts: u64) {
 }
 
 /// Save the render cache alongside the session.
-pub fn save_render_cache(session: &Session, cache: &crate::render::RenderCache) {
+pub fn save_render_cache(session: &Session, cache: &crate::app::transcript_cache::RenderCache) {
     let session_dir = dir_for(session);
     let _ = fs::create_dir_all(&session_dir);
     let path = render_cache_path(&session_dir);
@@ -252,12 +252,12 @@ pub fn save_render_cache(session: &Session, cache: &crate::render::RenderCache) 
 
 /// Load the render cache for a session. Returns `None` if the file is
 /// missing, corrupt, or built by an incompatible version.
-pub fn load_render_cache(session: &Session) -> Option<crate::render::RenderCache> {
+pub fn load_render_cache(session: &Session) -> Option<crate::app::transcript_cache::RenderCache> {
     let session_dir = dir_for(session);
     let path = render_cache_path(&session_dir);
     let data = fs::read(path).ok()?;
-    let cache = crate::render::RenderCache::deserialize(&data)?;
-    if cache.version != crate::render::RENDER_CACHE_VERSION {
+    let cache = crate::app::transcript_cache::RenderCache::deserialize(&data)?;
+    if cache.version != crate::app::transcript_cache::RENDER_CACHE_VERSION {
         return None;
     }
     Some(cache)
@@ -265,7 +265,10 @@ pub fn load_render_cache(session: &Session) -> Option<crate::render::RenderCache
 
 /// Save the persisted layout cache (per-block laid-out output) alongside
 /// the session.
-pub fn save_layout_cache(session: &Session, cache: &crate::render::PersistedLayoutCache) {
+pub fn save_layout_cache(
+    session: &Session,
+    cache: &crate::app::transcript_cache::PersistedLayoutCache,
+) {
     let _perf = crate::perf::begin("session:write_layout");
     let session_dir = dir_for(session);
     let _ = fs::create_dir_all(&session_dir);
@@ -277,13 +280,15 @@ pub fn save_layout_cache(session: &Session, cache: &crate::render::PersistedLayo
 
 /// Load the persisted layout cache for a session. Returns `None` if the
 /// file is missing, corrupt, or built by an incompatible version.
-pub fn load_layout_cache(session: &Session) -> Option<crate::render::PersistedLayoutCache> {
+pub fn load_layout_cache(
+    session: &Session,
+) -> Option<crate::app::transcript_cache::PersistedLayoutCache> {
     let _perf = crate::perf::begin("session:read_layout");
     let session_dir = dir_for(session);
     let path = layout_cache_path(&session_dir);
     let data = fs::read(path).ok()?;
-    let cache = crate::render::PersistedLayoutCache::deserialize(&data)?;
-    if cache.version != crate::render::LAYOUT_CACHE_VERSION {
+    let cache = crate::app::transcript_cache::PersistedLayoutCache::deserialize(&data)?;
+    if cache.version != crate::app::transcript_cache::LAYOUT_CACHE_VERSION {
         return None;
     }
     Some(cache)

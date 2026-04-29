@@ -1,6 +1,4 @@
-use super::{
-    bool_arg, kill_process_group, str_arg, timeout_arg, Tool, ToolContext, ToolFuture, ToolResult,
-};
+use super::{kill_process_group, str_arg, timeout_arg, Tool, ToolContext, ToolFuture, ToolResult};
 use protocol::EngineEvent;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -18,7 +16,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). For long-running processes set run_in_background=true. Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves."
+        "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves."
     }
 
     fn parameters(&self) -> Value {
@@ -27,8 +25,7 @@ impl Tool for BashTool {
             "properties": {
                 "command": {"type": "string", "description": "Shell command to execute"},
                 "description": {"type": "string", "description": "Short (max 10 words) description of what this command does"},
-                "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (default: 120000, max: 600000)"},
-                "run_in_background": {"type": "boolean", "description": "Run the command in the background and return a process ID. Use read_process_output to check output and stop_process to kill it."}
+                "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (default: 120000, max: 600000)"}
             },
             "required": ["command"]
         })
@@ -58,11 +55,7 @@ impl Tool for BashTool {
         patterns
     }
 
-    fn execute<'a>(
-        &'a self,
-        args: HashMap<String, Value>,
-        ctx: &'a ToolContext<'a>,
-    ) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let command = str_arg(&args, "command");
 
@@ -72,10 +65,6 @@ impl Tool for BashTool {
 
             if let Some(msg) = check_shell_background_operator(&command) {
                 return ToolResult::err(msg);
-            }
-
-            if bool_arg(&args, "run_in_background") {
-                return execute_background(&command, ctx).await;
             }
 
             execute_streaming(&command, &args, ctx).await
@@ -92,7 +81,7 @@ const INTERACTIVE_BINS: &[&str] = &[
 /// Git subcommands whose `-i`/`--interactive` flag requires a TTY.
 const GIT_INTERACTIVE_SUBCMDS: &[&str] = &["rebase", "add", "checkout", "clean", "stash"];
 
-fn check_interactive(command: &str) -> Option<&'static str> {
+pub fn check_interactive(command: &str) -> Option<&'static str> {
     let cmds = crate::permissions::split_shell_commands(command);
     for subcmd in &cmds {
         let parts: Vec<&str> = subcmd.split_whitespace().collect();
@@ -120,7 +109,7 @@ fn check_interactive(command: &str) -> Option<&'static str> {
     None
 }
 
-fn check_shell_background_operator(command: &str) -> Option<String> {
+pub fn check_shell_background_operator(command: &str) -> Option<String> {
     let has_background_operator = crate::permissions::split_shell_commands_with_ops(command)
         .iter()
         .any(|(_, op)| op.as_deref() == Some("&"));
@@ -135,30 +124,10 @@ fn check_shell_background_operator(command: &str) -> Option<String> {
     }
 }
 
-async fn execute_background(command: &str, ctx: &ToolContext<'_>) -> ToolResult {
-    match tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .process_group(0)
-        .spawn()
-    {
-        Ok(child) => {
-            let id = ctx.processes.next_id();
-            ctx.processes
-                .spawn(id.clone(), command, child, ctx.proc_done_tx.clone());
-            ToolResult::ok(format!("background process started with id: {id}"))
-        }
-        Err(e) => ToolResult::err(e.to_string()),
-    }
-}
-
 async fn execute_streaming(
     command: &str,
     args: &HashMap<String, Value>,
-    ctx: &ToolContext<'_>,
+    ctx: &ToolContext,
 ) -> ToolResult {
     let timeout = timeout_arg(args, 120);
 

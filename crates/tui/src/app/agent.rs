@@ -4,7 +4,7 @@ impl App {
     /// Send a permission decision — either to a child agent (via socket reply)
     /// or to the local engine. This is the single routing point for all
     /// permission verdicts.
-    pub(super) fn send_permission_decision(
+    pub(crate) fn send_permission_decision(
         &mut self,
         request_id: u64,
         approved: bool,
@@ -26,7 +26,7 @@ impl App {
     pub(super) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
         self.sleep_inhibit.acquire();
         self.input_prediction = None;
-        self.screen.begin_turn();
+        self.begin_turn();
         self.show_user_message(display, content.image_labels());
         let text = content.text_content();
         if self.session.first_user_message.is_none() {
@@ -46,7 +46,7 @@ impl App {
     /// rendered as AgentMessage blocks.
     pub(super) fn begin_agent_message_turn(&mut self) -> TurnState {
         self.input_prediction = None;
-        self.screen.begin_turn();
+        self.begin_turn();
         self.sync_session_snapshot();
         self.dispatch_turn(Content::text(""))
     }
@@ -55,7 +55,9 @@ impl App {
     /// current app state. Callers own any history/session prep before this.
     fn dispatch_turn(&mut self, content: Content) -> TurnState {
         let Some(api_key) = self.resolve_api_key() else {
-            self.screen.set_throbber(render::Throbber::Done);
+            {
+                self.working.finish(TurnOutcome::Done);
+            };
             return TurnState {
                 turn_id: 0,
                 pending: Vec::new(),
@@ -63,8 +65,16 @@ impl App {
             };
         };
 
-        self.screen.set_throbber(render::Throbber::Working);
+        {
+            self.working.begin(TurnPhase::Working);
+        };
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
+
+        self.lua.emit(crate::lua::AutocmdEvent::TurnStart);
+        self.flush_lua_callbacks();
+
+        let system_prompt = self.rebuild_system_prompt();
+        let plugin_tools = self.lua.plugin_tool_defs(self.mode);
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
@@ -82,6 +92,8 @@ impl App {
             session_dir: crate::session::dir_for(&self.session),
             model_config_overrides: None,
             permission_overrides: None,
+            system_prompt: Some(system_prompt),
+            plugin_tools,
         });
 
         TurnState {
@@ -126,7 +138,7 @@ impl App {
                     ) {
                         Ok(model) => Some(model),
                         Err(err) => {
-                            self.screen.notify_error(err.to_string());
+                            self.notify_error(err.to_string());
                             None
                         }
                     }
@@ -135,7 +147,7 @@ impl App {
                     match crate::config::resolve_provider_ref(&self.available_models, provider) {
                         Ok(model) => Some(model),
                         Err(err) => {
-                            self.screen.notify_error(err.to_string());
+                            self.notify_error(err.to_string());
                             None
                         }
                     }
@@ -222,13 +234,15 @@ impl App {
         };
 
         self.sleep_inhibit.acquire();
-        self.screen.begin_turn();
+        self.begin_turn();
         self.show_user_message(&display, vec![]);
         if self.session.first_user_message.is_none() {
             self.session.first_user_message = Some(display.clone());
         }
         self.maybe_generate_title(Some(&evaluated));
-        self.screen.set_throbber(render::Throbber::Working);
+        {
+            self.working.begin(TurnPhase::Working);
+        };
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
@@ -246,6 +260,8 @@ impl App {
             session_dir: crate::session::dir_for(&self.session),
             model_config_overrides,
             permission_overrides,
+            system_prompt: None,
+            plugin_tools: vec![],
         });
 
         TurnState {
@@ -258,28 +274,52 @@ impl App {
     /// Lightweight cancel: stop the engine turn without saving session,
     /// generating titles, or triggering auto-compact. Used before rewind/clear
     /// where the history will be mutated immediately after.
-    pub(super) fn cancel_agent(&mut self) {
+    pub(crate) fn cancel_agent(&mut self) {
         self.sleep_inhibit.release();
         self.engine.send(UiCommand::Cancel);
-        self.screen.set_throbber(render::Throbber::Interrupted);
+        {
+            self.working.finish(TurnOutcome::Interrupted);
+        };
         self.queued_messages.clear();
     }
 
-    pub(super) fn finish_turn(&mut self, cancelled: bool) {
+    /// Finish and drop the active turn (no-op when idle). Combines
+    /// the `finish_turn` + `self.agent = None` pair every cancel
+    /// site needs.
+    pub(super) fn discard_turn(&mut self, cancelled: bool) {
+        if self.agent.is_some() {
+            self.finish_turn(cancelled);
+            self.agent = None;
+        }
+    }
+
+    pub(crate) fn finish_turn(&mut self, cancelled: bool) {
         self.sleep_inhibit.release();
         if cancelled {
             self.engine.send(UiCommand::Cancel);
             self.kill_blocking_agents();
         }
+        let was_cancelled = cancelled;
+        let history = self.history.clone();
+        self.lua
+            .emit_data(crate::lua::AutocmdEvent::TurnEnd, |lua| {
+                let t = lua.create_table()?;
+                t.set("cancelled", was_cancelled)?;
+                t.set("messages", crate::lua::messages_to_lua(lua, &history)?)?;
+                Ok(t)
+            });
+        self.flush_lua_callbacks();
         // Flush any in-flight streaming content before committing tools.
-        self.screen.flush_streaming_thinking();
-        self.screen.flush_streaming_text();
+        self.flush_streaming_thinking();
+        self.flush_streaming_text();
         // Commit active tools to block history but don't render yet —
         // the next draw_frame renders blocks + prompt atomically in one
         // synchronized update, avoiding a flash where the prompt disappears.
-        self.screen.commit_active_tools();
+        self.finalize_active_tools();
         if cancelled {
-            self.screen.set_throbber(render::Throbber::Interrupted);
+            {
+                self.working.finish(TurnOutcome::Interrupted);
+            };
             // If a title/slug generation was in-flight, discard it so stale
             // TitleGenerated events don't update the session. But if a slug
             // was already set before this turn, keep it.
@@ -296,48 +336,18 @@ impl App {
                     combined.push('\n');
                     combined.push_str(&self.input.buf);
                 }
-                self.input.buf = combined;
-                self.input.cpos = self.input.buf.len();
+                crate::api::buf::replace(&mut self.input, combined, None);
             }
         } else {
-            self.screen.set_throbber(render::Throbber::Done);
-            // Fire async prediction for the user's next input.
-            // Skip predictions on subagent tabs — they're independent.
+            {
+                self.working.finish(TurnOutcome::Done);
+            };
             self.input_prediction = None;
-            if self.settings.show_prediction {
-                // Collect last 3 user messages + last assistant message for
-                // richer prediction context.
-                let mut context: Vec<protocol::Message> = self
-                    .history
-                    .iter()
-                    .rev()
-                    .filter(|m| m.role == protocol::Role::User)
-                    .take(3)
-                    .cloned()
-                    .collect();
-                context.reverse();
-                if let Some(msg) = self
-                    .history
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == protocol::Role::Assistant)
-                    .cloned()
-                {
-                    context.push(msg);
-                }
-                if !context.is_empty() {
-                    self.predict_generation += 1;
-                    self.engine.send(UiCommand::PredictInput {
-                        history: context,
-                        generation: self.predict_generation,
-                    });
-                }
-            }
         }
         let meta = self
             .pending_turn_meta
             .take()
-            .or_else(|| self.screen.turn_meta());
+            .or_else(|| self.working.turn_meta());
         if let Some(mut meta) = meta {
             for (agent_id, data) in self.pending_agent_blocks.drain(..) {
                 meta.agent_blocks.insert(agent_id, data);
@@ -369,18 +379,19 @@ impl App {
                 if !background {
                     if let Some(tokens) = usage.prompt_tokens {
                         if tokens > 0 {
-                            self.screen.set_context_tokens(tokens);
+                            self.context_tokens = Some(tokens);
                             self.session.context_tokens = Some(tokens);
                         }
                     }
                     if let Some(tps) = tokens_per_sec {
-                        self.screen.record_tokens_per_sec(tps);
+                        self.working.record_tokens_per_sec(tps);
                     }
-                    self.screen.set_throbber(render::Throbber::Working);
+                    {
+                        self.working.begin(TurnPhase::Working);
+                    };
                 }
                 let cost = cost_usd.unwrap_or(0.0);
                 self.session_cost_usd += cost;
-                self.screen.set_session_cost(self.session_cost_usd);
                 crate::metrics::append(&crate::metrics::MetricsEntry {
                     timestamp_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -397,16 +408,16 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::ToolOutput { call_id, chunk } => {
-                self.screen.append_active_output(&call_id, &chunk);
+                self.append_active_output(&call_id, &chunk);
                 SessionControl::Continue
             }
             EngineEvent::Steered { text, count } => {
-                self.screen.flush_streaming_thinking();
-                self.screen.flush_streaming_text();
+                self.flush_streaming_thinking();
+                self.flush_streaming_text();
                 let drain_n = count.min(self.queued_messages.len());
                 self.queued_messages.drain(..drain_n);
                 if drain_n > 0 {
-                    self.screen.push(Block::User {
+                    self.push_block(Block::User {
                         text,
                         image_labels: vec![],
                     });
@@ -414,20 +425,20 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::ThinkingDelta { delta } => {
-                self.screen.append_streaming_thinking(&delta);
+                self.append_streaming_thinking(&delta);
                 SessionControl::Continue
             }
             EngineEvent::Thinking { content } => {
-                self.screen.push(Block::Thinking { content });
+                self.push_block(Block::Thinking { content });
                 SessionControl::Continue
             }
             EngineEvent::TextDelta { delta } => {
-                self.screen.append_streaming_text(&delta);
+                self.append_streaming_text(&delta);
                 SessionControl::Continue
             }
             EngineEvent::Text { content } => {
-                self.screen.flush_streaming_text();
-                self.screen.push(Block::Text { content });
+                self.flush_streaming_text();
+                self.push_block(Block::Text { content });
                 SessionControl::Continue
             }
             EngineEvent::ToolStarted {
@@ -436,17 +447,30 @@ impl App {
                 args,
                 summary,
             } => {
-                // Flush any remaining streaming content before tools render.
-                self.screen.flush_streaming_thinking();
-                self.screen.flush_streaming_text();
+                self.flush_streaming_thinking();
+                self.flush_streaming_text();
                 if tool_name != "spawn_agent" {
-                    self.screen.start_tool(
+                    self.start_tool(
                         call_id.clone(),
                         tool_name.clone(),
-                        summary,
+                        summary.clone(),
                         args.clone(),
                     );
                 }
+                let tool_name_for_lua = tool_name.clone();
+                let args_for_lua = args.clone();
+                self.lua
+                    .emit_data(crate::lua::AutocmdEvent::ToolStart, |lua| {
+                        let t = lua.create_table()?;
+                        t.set("tool", tool_name_for_lua)?;
+                        let args_tbl = lua.create_table()?;
+                        for (k, v) in &args_for_lua {
+                            args_tbl.set(k.as_str(), crate::lua::json_to_lua(lua, v)?)?;
+                        }
+                        t.set("args", args_tbl)?;
+                        Ok(t)
+                    });
+                self.flush_lua_callbacks();
                 pending.push(PendingTool {
                     call_id,
                     name: tool_name,
@@ -459,17 +483,18 @@ impl App {
                 result,
                 elapsed_ms,
             } => {
+                let mut finished_tool_name: Option<String> = None;
+                let mut finished_is_error = false;
                 if let Some(idx) = pending.iter().position(|p| p.call_id == call_id) {
                     let removed = pending.remove(idx);
                     if removed.name == "spawn_agent" {
-                        // Extract agent_id from result and kill if blocking.
                         let agent_id = result
                             .content
                             .strip_prefix("agent ")
                             .and_then(|s| s.split_whitespace().next())
                             .unwrap_or("")
                             .to_string();
-                        self.screen.finish_active_agent(&agent_id);
+                        self.finish_active_agent(&agent_id);
                         if let Some(idx) = self
                             .agents
                             .iter()
@@ -499,18 +524,21 @@ impl App {
                             self.sync_agent_snapshots();
                         }
                     } else {
+                        finished_tool_name = Some(removed.name.clone());
+                        finished_is_error = result.is_error;
                         let status = if result.is_error {
                             ToolStatus::Err
                         } else {
                             ToolStatus::Ok
                         };
-                        let render_cache = render::build_tool_output_render_cache(
-                            &removed.name,
-                            &removed.args,
-                            &result.content,
-                            result.is_error,
-                            result.metadata.as_ref(),
-                        );
+                        let render_cache =
+                            crate::app::transcript_cache::build_tool_output_render_cache(
+                                &removed.name,
+                                &removed.args,
+                                &result.content,
+                                result.is_error,
+                                result.metadata.as_ref(),
+                            );
                         let output = Some(Box::new(ToolOutput {
                             content: result.content,
                             is_error: result.is_error,
@@ -518,11 +546,22 @@ impl App {
                             render_cache,
                         }));
                         let elapsed = elapsed_ms.map(Duration::from_millis);
-                        self.screen.finish_tool(&call_id, status, output, elapsed);
+                        self.finish_tool(&call_id, status, output, elapsed);
                     }
                 }
-                self.screen
-                    .set_running_procs(self.engine.processes.running_count());
+                if let Some(tool_name) = finished_tool_name {
+                    let is_err = finished_is_error;
+                    let elapsed = elapsed_ms;
+                    self.lua
+                        .emit_data(crate::lua::AutocmdEvent::ToolEnd, |lua| {
+                            let t = lua.create_table()?;
+                            t.set("tool", tool_name)?;
+                            t.set("is_error", is_err)?;
+                            t.set("elapsed_ms", elapsed)?;
+                            Ok(t)
+                        });
+                    self.flush_lua_callbacks();
+                }
                 self.refresh_agent_counts();
                 SessionControl::Continue
             }
@@ -534,7 +573,7 @@ impl App {
                 confirm_message,
                 approval_patterns,
                 summary,
-            } => SessionControl::NeedsConfirm(ConfirmRequest {
+            } => SessionControl::NeedsConfirm(Box::new(ConfirmRequest {
                 call_id,
                 tool_name,
                 desc: confirm_message,
@@ -543,12 +582,9 @@ impl App {
                 outside_dir: None,
                 summary,
                 request_id,
-            }),
-            EngineEvent::RequestAnswer { request_id, args } => {
-                SessionControl::NeedsAskQuestion { args, request_id }
-            }
+            })),
             EngineEvent::Retrying { delay_ms, attempt } => {
-                self.screen.set_throbber(render::Throbber::Retrying {
+                self.working.begin(TurnPhase::Retrying {
                     delay: Duration::from_millis(delay_ms),
                     attempt,
                 });
@@ -560,7 +596,9 @@ impl App {
             }
             EngineEvent::CompactionComplete { messages } => {
                 if self.pending_compact_epoch != self.compact_epoch {
-                    self.screen.set_throbber(render::Throbber::Done);
+                    {
+                        self.working.finish(TurnOutcome::Done);
+                    };
                     return SessionControl::Continue;
                 }
                 self.apply_compaction(messages);
@@ -571,13 +609,17 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::BtwResponse { content } => {
-                self.screen.set_btw_response(content);
+                let _ = content;
                 SessionControl::Continue
             }
             EngineEvent::InputPrediction { text, generation } => {
                 if generation == self.predict_generation {
                     self.handle_input_prediction(text);
                 }
+                SessionControl::Continue
+            }
+            EngineEvent::EngineAskResponse { id, content } => {
+                self.lua.fire_callback(id, &content);
                 SessionControl::Continue
             }
             EngineEvent::Messages {
@@ -602,8 +644,10 @@ impl App {
                 SessionControl::Done
             }
             EngineEvent::TurnError { message } => {
-                self.screen.set_throbber(render::Throbber::Done);
-                self.screen.notify_error(message);
+                {
+                    self.working.finish(TurnOutcome::Done);
+                };
+                self.notify_error(message);
                 SessionControl::Done
             }
             EngineEvent::Shutdown { .. } => SessionControl::Done,
@@ -626,7 +670,7 @@ impl App {
                     .iter()
                     .any(|a| a.agent_id == from_id && a.blocking);
                 if !is_blocking {
-                    self.screen.push(Block::AgentMessage {
+                    self.push_block(Block::AgentMessage {
                         from_id: from_id.clone(),
                         from_slug: from_slug.clone(),
                         content: message.clone(),
@@ -640,6 +684,83 @@ impl App {
                     message,
                 });
                 SessionControl::Continue
+            }
+            EngineEvent::ExecutePluginTool {
+                request_id,
+                call_id,
+                tool_name,
+                args,
+            } => {
+                // Plugins open their own confirm dialogs via
+                // `smelt.ui.dialog.open` from inside `execute`. The
+                // core no longer special-cases plugin tools here.
+                self.handle_plugin_tool(request_id, call_id, tool_name, args);
+                SessionControl::Continue
+            }
+            EngineEvent::EvaluatePluginToolHooks {
+                request_id,
+                tool_name,
+                args,
+                ..
+            } => {
+                let _guard = crate::lua::install_app_ptr(self);
+                let hooks = self.lua.evaluate_plugin_hooks(&tool_name, &args);
+                drop(_guard);
+                self.engine
+                    .send(protocol::UiCommand::PluginToolHooksResult { request_id, hooks });
+                SessionControl::Continue
+            }
+            EngineEvent::CoreToolResult {
+                request_id,
+                content,
+                is_error,
+                metadata,
+            } => {
+                self.lua
+                    .resolve_core_tool_call(request_id, content, is_error, metadata);
+                SessionControl::Continue
+            }
+        }
+    }
+
+    /// Execute a plugin-defined tool by calling the Lua handler registered for
+    /// it. If no handler is found, returns an error result to the engine.
+    ///
+    /// Handlers run as `LuaTask`s. A handler that doesn't yield
+    /// completes synchronously and the result is forwarded right away.
+    /// A handler that yields (e.g. via `smelt.ui.dialog.open`) parks;
+    /// its result arrives later through `drive_tasks()`.
+    fn handle_plugin_tool(
+        &mut self,
+        request_id: u64,
+        call_id: String,
+        tool_name: String,
+        args: std::collections::HashMap<String, serde_json::Value>,
+    ) {
+        let mode = self.mode;
+        let session_id = self.session.id.clone();
+        let session_dir = crate::session::dir_for(&self.session);
+        match self.lua.execute_plugin_tool(
+            &tool_name,
+            &args,
+            request_id,
+            &call_id,
+            crate::lua::PluginToolEnv {
+                mode,
+                session_id: &session_id,
+                session_dir: &session_dir,
+            },
+        ) {
+            crate::lua::ToolExecResult::Immediate { content, is_error } => {
+                self.engine.send(protocol::UiCommand::PluginToolResult {
+                    request_id,
+                    call_id,
+                    content,
+                    is_error,
+                });
+            }
+            crate::lua::ToolExecResult::Pending => {
+                // Result will be delivered via drive_tasks.
             }
         }
     }
@@ -662,7 +783,7 @@ impl App {
             }
             EngineEvent::CompactionComplete { messages } => {
                 if self.pending_compact_epoch != self.compact_epoch {
-                    self.screen.set_throbber(render::Throbber::Done);
+                    self.working.finish(TurnOutcome::Done);
                     return;
                 }
                 self.apply_compaction(messages);
@@ -671,19 +792,22 @@ impl App {
                 self.handle_title_generated(title, slug);
             }
             EngineEvent::BtwResponse { content } => {
-                self.screen.set_btw_response(content);
+                let _ = content;
             }
             EngineEvent::InputPrediction { text, generation }
                 if generation == self.predict_generation =>
             {
                 self.handle_input_prediction(text);
             }
+            EngineEvent::EngineAskResponse { id, content } => {
+                self.lua.fire_callback(id, &content);
+            }
             EngineEvent::ProcessCompleted { id, exit_code } => {
                 self.handle_process_completed(id, exit_code);
             }
             EngineEvent::TurnError { message } => {
-                self.screen.set_throbber(render::Throbber::Done);
-                self.screen.notify_error(message);
+                self.working.finish(TurnOutcome::Done);
+                self.notify_error(message);
             }
             EngineEvent::AgentExited {
                 agent_id,
@@ -701,7 +825,7 @@ impl App {
                     .iter()
                     .any(|a| a.agent_id == from_id && a.blocking);
                 if !is_blocking {
-                    self.screen.push(Block::AgentMessage {
+                    self.push_block(Block::AgentMessage {
                         from_id: from_id.clone(),
                         from_slug: from_slug.clone(),
                         content: message.clone(),
@@ -722,7 +846,7 @@ impl App {
         }
         self.session.title = Some(title);
         self.session.slug = Some(slug.clone());
-        self.screen.set_task_label(slug.clone());
+        self.set_task_label(slug.clone());
         self.pending_title = false;
         self.save_session();
 
@@ -733,7 +857,6 @@ impl App {
     fn handle_input_prediction(&mut self, text: String) {
         if self.input.buf.is_empty() {
             self.input_prediction = Some(text);
-            self.screen.mark_dirty();
         }
     }
 
@@ -748,14 +871,14 @@ impl App {
         match std::env::var(&self.api_key_env) {
             Ok(key) => Some(key),
             Err(std::env::VarError::NotPresent) => {
-                self.screen.notify_error(format!(
+                self.notify_error(format!(
                     "environment variable '{}' is not set but is required for API authentication",
                     self.api_key_env
                 ));
                 None
             }
             Err(std::env::VarError::NotUnicode(_)) => {
-                self.screen.notify_error(format!(
+                self.notify_error(format!(
                     "environment variable '{}' contains non-Unicode data and cannot be used as an API key",
                     self.api_key_env
                 ));
@@ -771,14 +894,14 @@ impl App {
         match std::env::var(key_env) {
             Ok(key) => Some(key),
             Err(std::env::VarError::NotPresent) => {
-                self.screen.notify_error(format!(
+                self.notify_error(format!(
                     "environment variable '{}' is not set but is required for API authentication",
                     key_env
                 ));
                 None
             }
             Err(std::env::VarError::NotUnicode(_)) => {
-                self.screen.notify_error(format!(
+                self.notify_error(format!(
                     "environment variable '{}' contains non-Unicode data and cannot be used as an API key",
                     key_env
                 ));
@@ -790,7 +913,7 @@ impl App {
     fn handle_agent_exited(&mut self, agent_id: &str, exit_code: Option<i32>) {
         if let Some(c) = exit_code {
             if c != 0 {
-                self.screen.push(Block::Hint {
+                self.push_block(Block::Hint {
                     content: format!("{agent_id} exited with code {c}."),
                 });
             }
@@ -816,12 +939,10 @@ impl App {
                 agent.status = super::AgentTrackStatus::Error;
             }
         }
-        self.screen.cancel_active_agents();
+        self.cancel_active_agents();
     }
 
-    pub(super) fn refresh_agent_counts(&mut self) {
-        self.screen.set_agent_count(self.agents.len());
-    }
+    pub(super) fn refresh_agent_counts(&mut self) {}
 
     // ── Agent tracking ────────────────────────────────────────────────
 
@@ -850,15 +971,15 @@ impl App {
 
             if child.blocking {
                 // Blocking agents render as a live overlay (like active tools).
-                self.screen.start_active_agent(child.agent_id.clone());
+                self.start_active_agent(child.agent_id.clone());
             } else {
                 // Non-blocking agents get a one-line static block.
-                self.screen.push(Block::Agent {
+                self.push_block(Block::Agent {
                     agent_id: child.agent_id.clone(),
                     slug: None,
                     blocking: false,
                     tool_calls: Vec::new(),
-                    status: render::AgentBlockStatus::Running,
+                    status: AgentBlockStatus::Running,
                     elapsed: None,
                 });
             }
@@ -953,7 +1074,6 @@ impl App {
 
         if session_cost_delta > 0.0 {
             self.session_cost_usd += session_cost_delta;
-            self.screen.set_session_cost(self.session_cost_usd);
         }
 
         if !changed {
@@ -961,20 +1081,26 @@ impl App {
         }
 
         // Update active blocking agent overlays on screen.
-        for agent in &self.agents {
-            if agent.blocking {
-                let status = match agent.status {
-                    super::AgentTrackStatus::Working => render::AgentBlockStatus::Running,
-                    super::AgentTrackStatus::Idle => render::AgentBlockStatus::Done,
-                    super::AgentTrackStatus::Error => render::AgentBlockStatus::Error,
+        let agent_updates: Vec<_> = self
+            .agents
+            .iter()
+            .filter(|a| a.blocking)
+            .map(|a| {
+                let status = match a.status {
+                    super::AgentTrackStatus::Working => AgentBlockStatus::Running,
+                    super::AgentTrackStatus::Idle => AgentBlockStatus::Done,
+                    super::AgentTrackStatus::Error => AgentBlockStatus::Error,
                 };
-                self.screen.update_active_agent(
-                    &agent.agent_id,
-                    agent.slug.as_deref(),
-                    &agent.tool_calls,
+                (
+                    a.agent_id.clone(),
+                    a.slug.clone(),
+                    a.tool_calls.clone(),
                     status,
-                );
-            }
+                )
+            })
+            .collect();
+        for (agent_id, slug, tool_calls, status) in agent_updates {
+            self.update_active_agent(&agent_id, slug.as_deref(), &tool_calls, status);
         }
 
         self.refresh_agent_counts();
@@ -983,10 +1109,10 @@ impl App {
 
     /// Update the shared snapshots so the /agents dialog sees live data.
     fn sync_agent_snapshots(&self) {
-        let snaps: Vec<render::AgentSnapshot> = self
+        let snaps: Vec<crate::app::AgentSnapshot> = self
             .agents
             .iter()
-            .map(|a| render::AgentSnapshot {
+            .map(|a| crate::app::AgentSnapshot {
                 agent_id: a.agent_id.clone(),
                 prompt: a.prompt.clone(),
                 tool_calls: a.tool_calls.clone(),
@@ -1003,116 +1129,21 @@ impl App {
             Some(c) => format!("Background process {id} exited with code {c}."),
             None => format!("Background process {id} exited."),
         };
-        self.screen.push(Block::Text { content: msg });
-        self.screen
-            .set_running_procs(self.engine.processes.running_count());
+        self.push_block(Block::Text { content: msg });
     }
 
-    // ── Dialog resolution ────────────────────────────────────────────────
-
-    pub(super) fn handle_dialog_result(
-        &mut self,
-        result: render::DialogResult,
-        agent: &mut Option<TurnState>,
-    ) {
-        // Dialog-area cleanup + spinner resume happen once here.  Arms that
-        // do a full-screen repaint (rewind, resume) still work — clearing
-        // an already-repainted region is a no-op.
-        self.finalize_dialog_close();
-        match result {
-            render::DialogResult::Confirm {
-                choice,
-                message,
-                tool_name,
-                request_id,
-            } => {
-                let call_id = self
-                    .confirm_context
-                    .as_ref()
-                    .map(|c| c.call_id.clone())
-                    .unwrap_or_default();
-                self.confirm_context = None;
-                let should_cancel = self.resolve_confirm(
-                    (choice, message),
-                    &call_id,
-                    request_id,
-                    &tool_name,
-                    agent,
-                );
-                if should_cancel && agent.is_some() {
-                    self.finish_turn(true);
-                    *agent = None;
-                }
-            }
-            render::DialogResult::Question { answer, request_id } => {
-                let should_cancel = self.resolve_question(answer, request_id, agent);
-                if should_cancel && agent.is_some() {
-                    self.finish_turn(true);
-                    *agent = None;
-                }
-            }
-            render::DialogResult::Rewind {
-                block_idx,
-                restore_vim_insert,
-            } => {
-                if let Some(idx) = block_idx {
-                    if agent.is_some() {
-                        self.cancel_agent();
-                        *agent = None;
-                    }
-                    if let Some((text, images)) = self.rewind_to(idx) {
-                        self.input.restore_from_rewind(text, images);
-                    }
-                    // rewind_to → redraw(true) already purged the screen;
-                    // drain stale engine events and save the truncated state.
-                    while self.engine.try_recv().is_ok() {}
-                    self.save_session();
-                } else if restore_vim_insert {
-                    self.input.set_vim_mode(vim::ViMode::Insert);
-                }
-            }
-            render::DialogResult::Resume { session_id } => {
-                if let Some(id) = session_id {
-                    if let Some(loaded) = session::load(&id) {
-                        self.load_session(loaded);
-                        self.restore_screen();
-                        if let Some(tokens) = self.session.context_tokens {
-                            self.screen.set_context_tokens(tokens);
-                        }
-                        self.screen.flush_blocks();
-                    }
-                }
-            }
-            render::DialogResult::Export { target } => match target {
-                Some(render::ExportTarget::Clipboard) => self.export_to_clipboard(),
-                Some(render::ExportTarget::File) => self.export_to_file(),
-                None => {}
-            },
-            render::DialogResult::PermissionsClosed {
-                session_remaining,
-                workspace_remaining,
-            } => {
-                self.sync_permissions(session_remaining, workspace_remaining);
-            }
-            render::DialogResult::AgentsClosed => {
-                self.refresh_agent_counts();
-            }
-            render::DialogResult::PsClosed | render::DialogResult::Dismissed => {}
-        }
-    }
-
-    pub(super) fn session_permission_entries(&self) -> Vec<render::PermissionEntry> {
+    pub(crate) fn session_permission_entries(&self) -> Vec<PermissionEntry> {
         let rt = self.runtime_approvals.read().unwrap();
         let mut entries = Vec::new();
         for (tool, patterns) in rt.session_tool_entries() {
             if patterns.is_empty() {
-                entries.push(render::PermissionEntry {
+                entries.push(PermissionEntry {
                     tool,
                     pattern: "*".into(),
                 });
             } else {
                 for p in patterns {
-                    entries.push(render::PermissionEntry {
+                    entries.push(PermissionEntry {
                         tool: tool.clone(),
                         pattern: p,
                     });
@@ -1120,7 +1151,7 @@ impl App {
             }
         }
         for dir in rt.session_dirs() {
-            entries.push(render::PermissionEntry {
+            entries.push(PermissionEntry {
                 tool: "directory".into(),
                 pattern: dir.display().to_string(),
             });
@@ -1128,9 +1159,9 @@ impl App {
         entries
     }
 
-    fn sync_permissions(
+    pub(crate) fn sync_permissions(
         &mut self,
-        session_entries: Vec<render::PermissionEntry>,
+        session_entries: Vec<PermissionEntry>,
         workspace_rules: Vec<crate::workspace_permissions::Rule>,
     ) {
         // Rebuild session approvals from flattened entries.
@@ -1169,16 +1200,15 @@ impl App {
 
     /// Resolve a completed confirm dialog choice.
     /// Returns `true` if the agent should be cancelled.
-    pub(super) fn resolve_confirm(
+    pub(crate) fn resolve_confirm(
         &mut self,
         (choice, message): (ConfirmChoice, Option<String>),
         call_id: &str,
         request_id: u64,
         tool_name: &str,
-        agent: &mut Option<TurnState>,
     ) -> bool {
         let label = match &choice {
-            ConfirmChoice::Yes | ConfirmChoice::YesAutoApply => "approved",
+            ConfirmChoice::Yes => "approved",
             ConfirmChoice::Always(_) => "always",
             ConfirmChoice::AlwaysPatterns(ref pats, _) => {
                 pats.first().map(|s| s.as_str()).unwrap_or("pattern")
@@ -1187,16 +1217,12 @@ impl App {
             ConfirmChoice::No => "denied",
         };
         if let Some(ref msg) = message {
-            self.screen
-                .set_active_user_message(call_id, format!("{label}: {msg}"));
+            self.set_active_user_message(call_id, format!("{label}: {msg}"));
         }
         match choice {
-            ConfirmChoice::Yes | ConfirmChoice::YesAutoApply => {
-                self.screen.set_active_status(call_id, ToolStatus::Pending);
+            ConfirmChoice::Yes => {
+                self.set_active_status(call_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
-                if matches!(choice, ConfirmChoice::YesAutoApply) {
-                    self.set_mode(Mode::Apply);
-                }
                 false
             }
             ConfirmChoice::Always(scope) => {
@@ -1212,7 +1238,7 @@ impl App {
                         self.reload_workspace_permissions();
                     }
                 }
-                self.screen.set_active_status(call_id, ToolStatus::Pending);
+                self.set_active_status(call_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
                 false
             }
@@ -1237,7 +1263,7 @@ impl App {
                         self.reload_workspace_permissions();
                     }
                 }
-                self.screen.set_active_status(call_id, ToolStatus::Pending);
+                self.set_active_status(call_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
                 false
             }
@@ -1254,25 +1280,20 @@ impl App {
                         self.reload_workspace_permissions();
                     }
                 }
-                self.screen.set_active_status(call_id, ToolStatus::Pending);
+                self.set_active_status(call_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
                 false
             }
             ConfirmChoice::No => {
                 let has_message = message.is_some();
                 self.send_permission_decision(request_id, false, message);
-                self.screen
-                    .finish_tool(call_id, ToolStatus::Denied, None, None);
+                self.finish_tool(call_id, ToolStatus::Denied, None, None);
                 if has_message {
-                    // Deny with feedback — let the agent continue with the message.
-                    // Clear pending so the engine's ToolFinished event doesn't
-                    // overwrite the Denied status.
-                    if let Some(ref mut ag) = agent {
+                    if let Some(ref mut ag) = self.agent {
                         ag.pending.retain(|p| p.call_id != call_id);
                     }
                     false
                 } else {
-                    // Deny without message — stop the agent.
                     engine::log::entry(
                         engine::log::Level::Info,
                         "agent_stop",
@@ -1281,49 +1302,11 @@ impl App {
                             "tool": tool_name,
                         }),
                     );
-                    if let Some(ref mut ag) = agent {
+                    if let Some(ref mut ag) = self.agent {
                         ag.pending.clear();
                     }
                     true
                 }
-            }
-        }
-    }
-
-    /// Resolve a completed question dialog.
-    /// `answer` is `Some(json)` on confirm, `None` on cancel.
-    /// Returns `true` if the agent should be cancelled.
-    pub(super) fn resolve_question(
-        &mut self,
-        answer: Option<String>,
-        request_id: u64,
-        agent: &mut Option<TurnState>,
-    ) -> bool {
-        match answer {
-            Some(json) => {
-                self.engine.send(UiCommand::QuestionAnswer {
-                    request_id,
-                    answer: Some(json),
-                });
-                false
-            }
-            None => {
-                engine::log::entry(
-                    engine::log::Level::Info,
-                    "agent_stop",
-                    &serde_json::json!({
-                        "reason": "question_cancelled",
-                    }),
-                );
-                self.engine.send(UiCommand::QuestionAnswer {
-                    request_id,
-                    answer: None,
-                });
-                self.screen.finish_tool("", ToolStatus::Denied, None, None);
-                if let Some(ref mut ag) = agent {
-                    ag.pending.clear();
-                }
-                true
             }
         }
     }
@@ -1335,13 +1318,12 @@ impl App {
         ctrl: SessionControl,
         pending: &[PendingTool],
         pending_dialogs: &mut VecDeque<DeferredDialog>,
-        active_dialog: &mut Option<Box<dyn render::Dialog>>,
         last_keypress: Option<Instant>,
     ) -> LoopAction {
-        // Queue dialogs when a blocking dialog is active or the user is typing.
+        // Queue dialogs when a blocking float is open or the user is typing.
         // The queue is drained in the main loop via re-dispatch, so auto-approval
         // checks re-run (handles "always allow" → recheck).
-        let should_queue = active_dialog.as_ref().is_some_and(|d| d.blocks_agent())
+        let should_queue = self.focused_float_blocks_agent()
             || (last_keypress
                 .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS))
                 && !self.input.buf.is_empty());
@@ -1389,9 +1371,8 @@ impl App {
 
                 // Auto-approval didn't match — queue if we can't show a dialog now.
                 if should_queue {
-                    self.screen
-                        .set_active_status(&req.call_id, ToolStatus::Confirm);
-                    self.screen.set_pending_dialog(true);
+                    self.set_active_status(&req.call_id, ToolStatus::Confirm);
+                    self.pending_dialog = true;
                     pending_dialogs.push_back(DeferredDialog::Confirm(req));
                     return LoopAction::Continue;
                 }
@@ -1423,39 +1404,22 @@ impl App {
                         .retain(|p| !rt.has_pattern(&req.tool_name, p));
                 }
 
-                // Close any non-blocking dialog (e.g. Ps) to make room.
-                if active_dialog.take().is_some() {
-                    self.finalize_dialog_close();
-                }
-                self.confirm_context = Some(ConfirmContext {
-                    call_id: req.call_id.clone(),
-                    tool_name: req.tool_name.clone(),
-                    args: req.args.clone(),
-                    request_id: req.request_id,
-                });
-                self.screen
-                    .set_active_status(&req.call_id, ToolStatus::Confirm);
-                let dialog = Box::new(ConfirmDialog::new(&req, self.input.vim_enabled()));
-                self.open_dialog(dialog, active_dialog);
-                LoopAction::Continue
-            }
-            SessionControl::NeedsAskQuestion { args, request_id } => {
-                if should_queue {
-                    self.screen.set_pending_dialog(true);
-                    pending_dialogs.push_back(DeferredDialog::AskQuestion { args, request_id });
-                    return LoopAction::Continue;
-                }
+                // Close any non-blocking float (e.g. Ps) to make room.
+                self.close_focused_non_blocking_float();
+                self.set_active_status(&req.call_id, ToolStatus::Confirm);
 
-                // Close any non-blocking dialog (e.g. Ps) to make room.
-                if active_dialog.take().is_some() {
-                    self.finalize_dialog_close();
-                }
-                // ask_user_question doesn't have a call_id in the permission flow,
-                // use empty string (it targets the last active tool via fallback).
-                self.screen.set_active_status("", ToolStatus::Confirm);
-                let questions = render::parse_questions(&args);
-                let dialog = Box::new(QuestionDialog::new(questions, request_id));
-                self.open_dialog(dialog, active_dialog);
+                // Register the request and fire the Lua dialog. The
+                // dialog (runtime/lua/smelt/confirm.lua) reads the
+                // request back through `smelt.confirm._*` primitives
+                // and resolves it on submit / dismiss.
+                let handle_id = self.next_confirm_handle;
+                self.next_confirm_handle = self.next_confirm_handle.wrapping_add(1);
+                let (_labels, choices) = crate::app::dialogs::confirm::build_options(&req);
+                self.confirm_requests.insert(
+                    handle_id,
+                    crate::app::dialogs::confirm::ConfirmEntry { req: *req, choices },
+                );
+                self.lua.fire_confirm_open(handle_id);
                 LoopAction::Continue
             }
         }

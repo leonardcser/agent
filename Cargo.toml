@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/engine", "crates/tui"]
+members = ["crates/protocol", "crates/engine", "crates/tui", "crates/ui"]
 
 [package]
 name = "smelt-agent"
@@ -28,3 +28,27 @@ dialoguer = "0.12.0"
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# Release-optimized build with symbols preserved, for CPU sampling profilers
+# like `samply`. Build with `cargo build --profile bench-cpu`, then run
+# `samply record ./target/bench-cpu/smelt`.
+[profile.bench-cpu]
+inherits = "release"
+strip = false
+debug = true
+
+# Faster dev/test builds: dependencies don't need debug info (we never
+# step into them), and line-tables-only on our own code keeps backtraces
+# usable while drastically cutting link time and dSYM generation on macOS.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 0
+
+[dev-dependencies]
+insta = { version = "1.47.2", features = ["json"] }
+serde_json = "1.0.149"
+tempfile = "3.27.0"
+wiremock = "0.6.5"

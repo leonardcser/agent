@@ -31,7 +31,7 @@ impl Tool for StopAgentTool {
     fn execute<'a>(
         &'a self,
         args: HashMap<String, Value>,
-        _ctx: &'a ToolContext<'a>,
+        _ctx: &'a ToolContext,
     ) -> ToolFuture<'a> {
         Box::pin(async move {
             let target_id = str_arg(&args, "target");

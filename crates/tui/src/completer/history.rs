@@ -1,44 +1,11 @@
-use std::collections::HashSet;
+//! History reverse-search scoring. The UI is a Lua plugin
+//! (`runtime/lua/smelt/plugins/history_search.lua`) that calls into
+//! `smelt.history.search(query)`, which wraps this function. Tests
+//! exercise the scorer directly.
 
 use super::score::{recency_bonus, split_words};
-use super::{Completer, CompleterKind, CompletionItem};
 
-impl Completer {
-    pub fn history(entries: &[String]) -> Self {
-        let mut seen = HashSet::new();
-        let all_items: Vec<CompletionItem> = entries
-            .iter()
-            .rev()
-            .filter(|text| seen.insert(text.as_str()))
-            .map(|text| {
-                let label = text
-                    .trim_start()
-                    .lines()
-                    .map(str::trim)
-                    .find(|l| !l.is_empty())
-                    .unwrap_or("")
-                    .to_string();
-                CompletionItem {
-                    label,
-                    ..Default::default()
-                }
-            })
-            .collect();
-        let results = all_items.clone();
-        Self {
-            anchor: 0,
-            kind: CompleterKind::History,
-            query: String::new(),
-            results,
-            selected: 0,
-            all_items,
-            selected_key: None,
-            original_value: None,
-        }
-    }
-}
-
-pub(super) fn history_score(text: &str, query: &str, recency_rank: usize) -> Option<u32> {
+pub fn history_score(text: &str, query: &str, recency_rank: usize) -> Option<u32> {
     let base = crate::fuzzy::fuzzy_score(text, query)? as i64;
     let text_norm = text.trim().to_lowercase();
     let query_norm = query.trim().to_lowercase();
@@ -106,4 +73,86 @@ pub(super) fn history_score(text: &str, query: &str, recency_rank: usize) -> Opt
     score -= recency_bonus(recency_rank);
 
     Some(score.max(0) as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::history_score;
+
+    /// Rank `entries` (oldest first, like the live history vec) against `query`.
+    /// Returns the original labels in best-first order, matching what Ctrl+R
+    /// displays at the bottom of the picker.
+    fn ranked(entries: &[&str], query: &str) -> Vec<String> {
+        // Oldest-first → iterate reversed so the rank index marks recency.
+        let mut scored: Vec<(u32, usize, String)> = entries
+            .iter()
+            .rev()
+            .enumerate()
+            .filter_map(|(rank, text)| {
+                history_score(text, query, rank).map(|s| (s, rank, (*text).to_string()))
+            })
+            .collect();
+        scored.sort_by_key(|(s, rank, _)| (*s, *rank));
+        scored.into_iter().map(|(_, _, t)| t).collect()
+    }
+
+    #[test]
+    fn prefers_exact_single_word_prompt() {
+        let labels = ranked(&["hot dog bun", "bundle assets", "bun"], "bun");
+        assert_eq!(labels.first().map(String::as_str), Some("bun"));
+    }
+
+    #[test]
+    fn prefers_whole_word_over_embedded_match() {
+        let labels = ranked(&["bundle assets", "hot dog bun"], "bun");
+        let bun_pos = labels
+            .iter()
+            .position(|label| label == "hot dog bun")
+            .unwrap();
+        let bundle_pos = labels
+            .iter()
+            .position(|label| label == "bundle assets")
+            .unwrap();
+        assert!(bun_pos < bundle_pos, "whole-word bun should beat bundle");
+    }
+
+    #[test]
+    fn prefers_more_recent_history_for_similar_matches() {
+        let labels = ranked(&["older bun prompt", "newer bun prompt"], "bun");
+        assert_eq!(labels.first().map(String::as_str), Some("newer bun prompt"));
+    }
+
+    #[test]
+    fn prefers_real_word_match_over_fuzzy_letters() {
+        let labels = ranked(
+            &[
+                "use the gh cli search for issue in the llama.cpp repo",
+                "don't cat into a file, just tell me here",
+                "create a full stack application fully with bun and typscript for recepies. work with subagents",
+                "add them with default allow",
+                "full",
+            ],
+            "full",
+        );
+        let exact_pos = labels.iter().position(|label| label == "full").unwrap();
+        let word_pos = labels
+            .iter()
+            .position(|label| {
+                label == "create a full stack application fully with bun and typscript for recepies. work with subagents"
+            })
+            .unwrap();
+        let fuzzy_pos = labels
+            .iter()
+            .position(|label| label == "add them with default allow")
+            .unwrap();
+
+        assert!(
+            exact_pos < word_pos,
+            "exact match should beat longer word hit"
+        );
+        assert!(
+            word_pos < fuzzy_pos,
+            "word hit should beat fuzzy-only subsequence"
+        );
+    }
 }

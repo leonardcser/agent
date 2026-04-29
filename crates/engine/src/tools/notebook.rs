@@ -372,11 +372,7 @@ impl Tool for NotebookEditTool {
         staleness_error(&self.files, &path, "notebook")
     }
 
-    fn execute<'a>(
-        &'a self,
-        args: HashMap<String, Value>,
-        ctx: &'a ToolContext<'a>,
-    ) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let path = str_arg(&args, "notebook_path");
             let _guard = ctx.file_locks.lock(&path).await;

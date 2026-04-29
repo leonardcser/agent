@@ -55,7 +55,7 @@ impl App {
 
     /// Record current token count and cost so they can be restored on rewind.
     pub(super) fn snapshot_tokens(&mut self) {
-        if let Some(tokens) = self.screen.context_tokens() {
+        if let Some(tokens) = self.context_tokens {
             self.token_snapshots.push((self.history.len(), tokens));
         }
         self.cost_snapshots
@@ -64,7 +64,7 @@ impl App {
 
     pub(super) fn fork_session(&mut self) {
         if self.history.is_empty() {
-            self.screen.notify_error("nothing to fork".into());
+            self.notify_error("nothing to fork".into());
             return;
         }
         self.save_session();
@@ -74,7 +74,7 @@ impl App {
         self.session = forked;
         self.save_session();
         self.flush_persist();
-        self.screen.notify(format!("forked from {original_id}"));
+        self.notify(format!("forked from {original_id}"));
     }
 
     pub fn reset_session(&mut self) {
@@ -86,13 +86,19 @@ impl App {
         self.pending_agent_blocks.clear();
         self.reset_session_permissions();
         self.queued_messages.clear();
-        self.screen.clear();
+        self.context_tokens = None;
+        self.task_label = None;
+        self.working.clear();
+        self.input.win.scroll_top = 0;
+        self.prompt_viewport = None;
+        self.transcript_viewport = None;
+        self.clear_transcript();
+        self.app_focus = crate::app::AppFocus::Prompt;
         self.input.clear();
         self.input.store.clear();
         self.engine.processes.clear();
         self.reset_subagents_for_new_session();
         self.session = session::Session::new();
-        self.screen.set_session_cost(0.0);
         self.pending_title = false;
         self.compact_epoch += 1;
         if let Ok(mut guard) = self.shared_session.lock() {
@@ -135,11 +141,10 @@ impl App {
 
         self.session = loaded;
         if let Some(ref slug) = self.session.slug {
-            self.screen.set_task_label(slug.clone());
+            self.set_task_label(slug.clone());
         }
         self.history = self.session.messages.clone();
         self.restore_snapshots_from_session();
-        self.screen.set_session_cost(self.session_cost_usd);
         self.reset_session_permissions();
         self.queued_messages.clear();
         self.input.clear();
@@ -153,27 +158,6 @@ impl App {
         while self.engine.try_recv().is_ok() {}
     }
 
-    pub(super) fn resume_entries(&self) -> Vec<ResumeEntry> {
-        let sessions = session::list_sessions();
-        let current_id = &self.session.id;
-        let flat: Vec<ResumeEntry> = sessions
-            .into_iter()
-            .filter(|s| s.id != *current_id)
-            .map(|s| ResumeEntry {
-                id: s.id,
-                title: s.title.unwrap_or_default(),
-                subtitle: s.first_user_message,
-                updated_at_ms: s.updated_at_ms,
-                created_at_ms: s.created_at_ms,
-                cwd: s.cwd,
-                parent_id: s.parent_id,
-                depth: 0,
-                size_bytes: s.text_bytes,
-            })
-            .collect();
-        super::build_session_tree(flat)
-    }
-
     // ── History / session ────────────────────────────────────────────────
 
     /// Rebuild the screen from session history and import persisted render cache.
@@ -182,9 +166,9 @@ impl App {
     }
 
     fn rebuild_screen_from_history(&mut self) {
-        self.screen.clear();
+        self.clear_transcript();
         if let Some(ref slug) = self.session.slug {
-            self.screen.set_task_label(slug.clone());
+            self.set_task_label(slug.clone());
         }
         if self.history.is_empty() {
             return;
@@ -232,7 +216,8 @@ impl App {
         let mut blocking_agent_ids: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
-        for msg in &self.history {
+        let messages = self.history.clone();
+        for msg in &messages {
             match msg.role {
                 Role::User => {
                     if let Some(ref content) = msg.content {
@@ -240,7 +225,7 @@ impl App {
                         let prefix_marker = engine::compact::SUMMARY_PREFIX.trim_end();
                         if let Some(rest) = text.strip_prefix(prefix_marker) {
                             let summary = rest.trim_start_matches('\n');
-                            self.screen.push(Block::Compacted {
+                            self.push_block(Block::Compacted {
                                 summary: summary.to_string(),
                             });
                         } else {
@@ -255,7 +240,7 @@ impl App {
                                     format!("{text} {suffix}")
                                 }
                             };
-                            self.screen.push(Block::User {
+                            self.push_block(Block::User {
                                 text: display_text,
                                 image_labels,
                             });
@@ -265,13 +250,13 @@ impl App {
                 Role::Assistant => {
                     if let Some(ref reasoning) = msg.reasoning_content {
                         if !reasoning.is_empty() {
-                            self.screen.push(Block::Thinking {
+                            self.push_block(Block::Thinking {
                                 content: reasoning.clone(),
                             });
                         }
                     }
                     if let Some(ref content) = msg.content {
-                        self.screen.push(Block::Text {
+                        self.push_block(Block::Text {
                             content: content.text_content(),
                         });
                     }
@@ -304,9 +289,9 @@ impl App {
                                     .unwrap_or_else(|| result_text.contains("finished:"));
                                 let is_error = output.as_ref().is_some_and(|o| o.is_error);
                                 let block_status = if is_error {
-                                    render::AgentBlockStatus::Error
+                                    AgentBlockStatus::Error
                                 } else {
-                                    render::AgentBlockStatus::Done
+                                    AgentBlockStatus::Done
                                 };
                                 let elapsed = tool_elapsed
                                     .get(&tc.id)
@@ -335,7 +320,7 @@ impl App {
                                 if is_blocking {
                                     blocking_agent_ids.insert(agent_id.clone());
                                 }
-                                self.screen.push(Block::Agent {
+                                self.push_block(Block::Agent {
                                     agent_id,
                                     slug,
                                     blocking: is_blocking,
@@ -363,14 +348,14 @@ impl App {
                             let elapsed = tool_elapsed
                                 .get(&tc.id)
                                 .map(|ms| Duration::from_millis(*ms));
-                            self.screen.push_tool_call(
+                            self.push_tool_call(
                                 Block::ToolCall {
                                     call_id: tc.id.clone(),
                                     name: tc.function.name.clone(),
                                     summary,
                                     args,
                                 },
-                                crate::render::ToolState {
+                                ToolState {
                                     status,
                                     elapsed,
                                     output: output.map(Box::new),
@@ -388,7 +373,7 @@ impl App {
                     // is already shown in the spawn_agent block.
                     if !blocking_agent_ids.contains(&from_id) {
                         if let Some(ref content) = msg.content {
-                            self.screen.push(Block::AgentMessage {
+                            self.push_block(Block::AgentMessage {
                                 from_id,
                                 from_slug: msg.agent_from_slug.clone().unwrap_or_default(),
                                 content: content.text_content(),
@@ -400,14 +385,14 @@ impl App {
         }
 
         if let Some((_, meta)) = self.turn_metas.last() {
-            self.screen.restore_from_turn_meta(meta);
+            self.working.restore_from_turn_meta(meta);
         }
 
         // Reattach the persisted layout cache, if any. Must happen *after*
         // every block has been pushed so the cache vector lengths match.
         // Per-block width validity is enforced inside `import_layout_cache`.
         if let Some(layout_cache) = session::load_layout_cache(&self.session) {
-            self.screen.import_layout_cache(layout_cache);
+            self.import_layout_cache(layout_cache);
         }
     }
 
@@ -424,10 +409,9 @@ impl App {
             (None, None)
         } else {
             (
-                self.screen.export_render_cache(),
-                self.screen
-                    .layout_cache_dirty()
-                    .then(|| self.screen.export_layout_cache())
+                self.export_render_cache(),
+                self.layout_cache_dirty()
+                    .then(|| self.export_layout_cache())
                     .flatten(),
             )
         };
@@ -514,12 +498,14 @@ impl App {
     }
 
     pub fn is_compacting(&self) -> bool {
-        self.screen.working_throbber() == Some(render::Throbber::Compacting)
+        self.working.is_compacting()
     }
 
     pub fn compact_history(&mut self, instructions: Option<String>) {
         self.pending_compact_epoch = self.compact_epoch;
-        self.screen.set_throbber(render::Throbber::Compacting);
+        {
+            self.working.begin(TurnPhase::Compacting);
+        };
         self.engine.send(UiCommand::Compact {
             history: self.history.clone(),
             instructions,
@@ -528,7 +514,9 @@ impl App {
 
     pub(super) fn apply_compaction(&mut self, messages: Vec<protocol::Message>) {
         if messages.is_empty() {
-            self.screen.set_throbber(render::Throbber::Done);
+            {
+                self.working.finish(TurnOutcome::Done);
+            };
             return;
         }
 
@@ -541,9 +529,12 @@ impl App {
         self.session_cost_usd = carried_cost;
 
         self.restore_screen();
-        self.screen.clear_context_tokens();
+        self.context_tokens = None;
         self.save_session();
-        self.screen.set_throbber(render::Throbber::Done);
+        {
+            self.working.finish(TurnOutcome::Done);
+        };
+        self.transcript_window.scroll_to_bottom();
     }
 
     pub(super) fn maybe_auto_compact(&mut self) {
@@ -553,7 +544,7 @@ impl App {
         let Some(ctx) = self.context_window else {
             return;
         };
-        let Some(tokens) = self.screen.context_tokens() else {
+        let Some(tokens) = self.context_tokens else {
             return;
         };
         if tokens as u64 * 100 >= ctx as u64 * engine::compact_threshold_percent() {
@@ -562,7 +553,7 @@ impl App {
     }
 
     pub fn rewind_to(&mut self, block_idx: usize) -> Option<(String, Vec<(String, String)>)> {
-        let turns = self.screen.user_turns();
+        let turns = self.user_turns();
         let turn_text = turns
             .iter()
             .find(|(i, _)| *i == block_idx)
@@ -603,13 +594,8 @@ impl App {
 
         self.history.truncate(hist_idx);
         self.truncate_snapshots_to(hist_idx);
-        self.screen.set_session_cost(self.session_cost_usd);
-        if let Some(&(_, tokens)) = self.token_snapshots.last() {
-            self.screen.set_context_tokens(tokens);
-        } else {
-            self.screen.clear_context_tokens();
-        }
-        self.screen.truncate_to(block_idx);
+        self.context_tokens = self.token_snapshots.last().map(|&(_, t)| t);
+        self.truncate_to(block_idx);
         self.reset_session_permissions();
         self.compact_epoch += 1;
 
@@ -619,7 +605,7 @@ impl App {
     // ── Agent internals ──────────────────────────────────────────────────
 
     pub fn show_user_message(&mut self, input: &str, image_labels: Vec<String>) {
-        self.screen.push(Block::User {
+        self.push_block(Block::User {
             text: input.to_string(),
             image_labels,
         });

@@ -166,7 +166,6 @@ pub(super) fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
             "web_search",
             "read_process_output",
             "stop_process",
-            "exit_plan_mode",
         ] {
             tools.entry(name.to_string()).or_insert(Decision::Allow);
         }
@@ -199,10 +198,6 @@ pub(super) fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
         tools
             .entry("ask_user_question".to_string())
             .or_insert(Decision::Allow);
-
-        tools
-            .entry("exit_plan_mode".to_string())
-            .or_insert(Decision::Ask);
     }
 
     // Multi-agent tools: always allowed in all modes (they're coordination

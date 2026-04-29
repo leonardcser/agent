@@ -230,13 +230,7 @@ pub struct ResolvedModel {
     pub config: ModelConfig,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuxiliaryTask {
-    Title,
-    Prediction,
-    Compaction,
-    Btw,
-}
+pub use protocol::AuxiliaryTask;
 
 #[derive(Debug, Clone)]
 pub struct AuxiliaryRouting {
@@ -554,6 +548,34 @@ impl Config {
         self.providers
             .iter()
             .any(|p| p.provider_type.as_deref() == Some("copilot"))
+    }
+
+    /// Auto-inject OAuth providers (Codex, Copilot) when the user has stored
+    /// credentials but no explicit config entry. This eliminates the need for
+    /// `smelt auth` to mutate the user's config file.
+    pub fn inject_oauth_providers(&mut self) {
+        if !self.has_codex_provider()
+            && engine::auth::is_logged_in(engine::auth::AuthProvider::Codex)
+        {
+            self.providers.push(ProviderConfig {
+                name: Some("codex".to_string()),
+                provider_type: Some("codex".to_string()),
+                api_base: Some(engine::provider::codex::CODEX_API_ENDPOINT.to_string()),
+                api_key_env: None,
+                models: vec![],
+            });
+        }
+        if !self.has_copilot_provider()
+            && engine::auth::is_logged_in(engine::auth::AuthProvider::Copilot)
+        {
+            self.providers.push(ProviderConfig {
+                name: Some("copilot".to_string()),
+                provider_type: Some("copilot".to_string()),
+                api_base: Some(engine::provider::copilot::DEFAULT_COPILOT_API_BASE.to_string()),
+                api_key_env: None,
+                models: vec![],
+            });
+        }
     }
 
     /// Get the default model key from defaults.model

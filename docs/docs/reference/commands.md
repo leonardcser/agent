@@ -1,4 +1,4 @@
-# Slash Commands
+# Commands
 
 Type `/` to open the command picker with fuzzy search.
 

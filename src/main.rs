@@ -145,6 +145,8 @@ enum Commands {
 #[tokio::main]
 async fn main() {
     std::panic::set_hook(Box::new(|info| {
+        let _ = std::io::stdout().execute(crossterm::event::DisableMouseCapture);
+        let _ = std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen);
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
         let _ = std::io::stdout().execute(crossterm::event::DisableFocusChange);
@@ -197,7 +199,7 @@ async fn main() {
     // Eager-load syntect's syntax and theme sets in the background so the
     // first tool render doesn't pay the ~30ms lazy-init cost mid-frame.
     // Runs in parallel with session loading and is done well before first paint.
-    std::thread::spawn(tui::render::warm_up_syntect);
+    std::thread::spawn(tui::content::warm_up_syntect);
 
     if args.headless && args.message.is_none() {
         eprintln!("error: --headless requires a message argument");
@@ -283,6 +285,8 @@ async fn main() {
             } else {
                 None
             };
+            let _ = std::io::stdout().execute(crossterm::event::DisableMouseCapture);
+            let _ = std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen);
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
             let _ = std::io::stdout().execute(crossterm::event::DisableFocusChange);
@@ -350,6 +354,18 @@ async fn main() {
         Arc::new(std::sync::RwLock::new(rt))
     };
 
+    let skill_loader = {
+        let extra_paths: Vec<std::path::PathBuf> = cfg
+            .skills
+            .paths
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        Arc::new(engine::SkillLoader::load(&extra_paths))
+    };
+    let tui_skill_section = skill_loader.prompt_section().map(String::from);
+    let tui_instructions = instructions.clone();
+
     let engine_handle = engine::start(engine::EngineConfig {
         api: engine::ApiConfig {
             base: api_base,
@@ -378,16 +394,7 @@ async fn main() {
         },
         interactive: !args.headless && !args.subagent,
         mcp_servers: cfg.mcp.clone(),
-        skills: {
-            let extra_paths: Vec<std::path::PathBuf> = cfg
-                .skills
-                .paths
-                .iter()
-                .map(std::path::PathBuf::from)
-                .collect();
-            let loader = engine::SkillLoader::load(&extra_paths);
-            Some(Arc::new(loader))
-        },
+        skills: Some(skill_loader),
         auto_compact: settings.auto_compact,
         context_window: cfg.settings.context_window,
         redact_secrets: settings.redact_secrets,
@@ -446,6 +453,8 @@ async fn main() {
         startup_auth_error.take(),
     );
     app.model_config = (&model_config).into();
+    app.extra_instructions = tui_instructions;
+    app.skill_section = tui_skill_section;
     if let Some(mode) = mode_override {
         app.mode = mode;
     }

@@ -54,11 +54,7 @@ impl Tool for SpawnAgentTool {
         })
     }
 
-    fn execute<'a>(
-        &'a self,
-        args: HashMap<String, Value>,
-        ctx: &'a ToolContext<'a>,
-    ) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let prompt = str_arg(&args, "prompt");
             let blocking = bool_arg(&args, "wait");
@@ -189,7 +185,7 @@ impl Tool for SpawnAgentTool {
 
 impl SpawnAgentTool {
     /// Block until the named agent sends a message back via the socket.
-    async fn wait_for_agent(&self, agent_id: &str, ctx: &ToolContext<'_>) -> ToolResult {
+    async fn wait_for_agent(&self, agent_id: &str, ctx: &ToolContext) -> ToolResult {
         let Some(ref tx) = self.agent_msg_tx else {
             return ToolResult::err("blocking spawn not available (no message channel)");
         };

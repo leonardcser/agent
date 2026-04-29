@@ -388,6 +388,113 @@ pub fn stats_line_visual_width(line: &StatsLine, label_col: usize) -> usize {
     }
 }
 
+/// Flatten one `StatsLine` to a plain string. Used by the `/stats` and
+/// `/cost` Lua plugins which render through `smelt.ui.dialog.open` and
+/// need a textual representation rather than the structured variants.
+pub fn stats_line_to_text(line: &StatsLine, label_col: usize) -> String {
+    match line {
+        StatsLine::Kv { label, value } => {
+            let pad = label_col.saturating_sub(label.len());
+            format!("{label}{}{value}", " ".repeat(pad))
+        }
+        StatsLine::Heading(text) => text.clone(),
+        StatsLine::SparklineBars(bars) => bars.clone(),
+        StatsLine::SparklineLegend(text) => text.clone(),
+        StatsLine::HeatRow { label, cells } => {
+            let mut out = String::new();
+            out.push_str(label);
+            out.push(' ');
+            for cell in cells {
+                out.push_str(match cell {
+                    HeatCell::Empty => "·",
+                    HeatCell::Level(0) => "░",
+                    HeatCell::Level(1) => "▒",
+                    HeatCell::Level(2) => "▓",
+                    HeatCell::Level(_) => "█",
+                });
+                out.push(' ');
+            }
+            out
+        }
+        StatsLine::Blank => String::new(),
+    }
+}
+
+/// Render full `/stats` output as a single string. Two-column layout
+/// joined row-by-row when both columns are present; falls back to
+/// sequential left → blank → right.
+pub fn render_stats_text(out: &StatsOutput) -> String {
+    let left_col = label_col_width(&out.left);
+    let right_col = label_col_width(&out.right);
+    if out.right.is_empty() {
+        return out
+            .left
+            .iter()
+            .map(|l| stats_line_to_text(l, left_col))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    let left_visual = out
+        .left
+        .iter()
+        .map(|l| stats_line_visual_width(l, left_col))
+        .max()
+        .unwrap_or(0);
+    let term_width = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80);
+    let right_visual = out
+        .right
+        .iter()
+        .map(|l| stats_line_visual_width(l, right_col))
+        .max()
+        .unwrap_or(0);
+    let gap = 5;
+
+    if left_visual + gap + right_visual + 2 <= term_width {
+        // Side-by-side.
+        let rows = out.left.len().max(out.right.len());
+        (0..rows)
+            .map(|i| {
+                let l_text = out
+                    .left
+                    .get(i)
+                    .map(|l| stats_line_to_text(l, left_col))
+                    .unwrap_or_default();
+                let r_text = out
+                    .right
+                    .get(i)
+                    .map(|l| stats_line_to_text(l, right_col))
+                    .unwrap_or_default();
+                let pad = (left_visual + gap).saturating_sub(l_text.chars().count());
+                format!("{l_text}{}{r_text}", " ".repeat(pad))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        // Sequential.
+        let mut rows: Vec<String> = out
+            .left
+            .iter()
+            .map(|l| stats_line_to_text(l, left_col))
+            .collect();
+        rows.push(String::new());
+        rows.extend(out.right.iter().map(|l| stats_line_to_text(l, right_col)));
+        rows.join("\n")
+    }
+}
+
+/// Render `/cost` output (single column) as a plain string.
+pub fn render_cost_text(lines: &[StatsLine]) -> String {
+    let col = label_col_width(lines);
+    lines
+        .iter()
+        .map(|l| stats_line_to_text(l, col))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn render_session_cost(
     cost_usd: f64,
     model: &str,

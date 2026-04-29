@@ -7,11 +7,111 @@ use crate::usage::{ModelConfigOverrides, PermissionOverrides, TokenUsage, TurnMe
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Auxiliary LLM task — routed to a dedicated auxiliary model when the
+/// engine config has one, otherwise falls back to the primary model.
+/// `Btw` is the generic escape hatch (plain `/btw` prompts, plugin
+/// `engine.ask` calls without a specific task tag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuxiliaryTask {
+    Title,
+    Prediction,
+    Compaction,
+    #[default]
+    Btw,
+}
+
+/// How a plugin tool interacts with concurrent tool execution.
+///
+/// `Concurrent` (default): runs alongside other tools via the engine's
+/// `pending_plugins` channel — good for pure data fetches with no UI.
+///
+/// `Sequential`: deferred until after every concurrent tool has
+/// finished, then dispatched one at a time. Used by tools that open a
+/// dialog and await a user reply — the user should see all other tool
+/// output before the prompt. `ask_user_question` is the canonical
+/// example.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionMode {
+    #[default]
+    Concurrent,
+    Sequential,
+}
+
+/// A tool defined by a Lua plugin. Sent from TUI to engine so the engine
+/// can include it in LLM tool definitions and proxy execution back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginToolDef {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    /// When set, the tool is only available in these modes.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub modes: Option<Vec<Mode>>,
+    #[serde(default)]
+    pub execution_mode: ToolExecutionMode,
+    /// When `true`, this plugin tool replaces the core Rust tool of the
+    /// same name. The engine drops the core definition from the LLM
+    /// schema and dispatches calls to the plugin instead. When `false`
+    /// (default), registering a name that collides with a core tool
+    /// is an error reported back to the user.
+    #[serde(default)]
+    pub override_core: bool,
+    /// Hook signals declared by the plugin. Each `true` flag tells the
+    /// engine to round-trip through `EvaluatePluginToolHooks` before
+    /// dispatching the tool — to ask the user for permission, run a
+    /// preflight check, etc. When all flags are false the engine
+    /// dispatches the tool directly (today's behavior, no permission
+    /// gate). Plugin tools that touch security-sensitive surfaces
+    /// (bash, file mutation) MUST opt in.
+    #[serde(default)]
+    pub hooks: PluginToolHookFlags,
+}
+
+/// Which permission hooks a plugin tool has registered. Sent with
+/// `PluginToolDef` so the engine knows whether to ask the TUI to
+/// evaluate them per-call.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginToolHookFlags {
+    #[serde(default)]
+    pub needs_confirm: bool,
+    #[serde(default)]
+    pub approval_patterns: bool,
+    #[serde(default)]
+    pub preflight: bool,
+}
+
+impl PluginToolHookFlags {
+    /// True when at least one hook is registered — i.e. the engine must
+    /// round-trip through `EvaluatePluginToolHooks` before dispatch.
+    pub fn any(&self) -> bool {
+        self.needs_confirm || self.approval_patterns || self.preflight
+    }
+}
+
+/// Result of evaluating a plugin tool's permission hooks for a specific
+/// invocation. Returned by the TUI in response to
+/// `EngineEvent::EvaluatePluginToolHooks`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginToolHooks {
+    /// Confirm dialog message; `None` falls back to the tool name.
+    #[serde(default)]
+    pub needs_confirm: Option<String>,
+    /// Approval patterns to offer "always allow" for.
+    #[serde(default)]
+    pub approval_patterns: Vec<String>,
+    /// Pre-flight error; `Some` fails the call immediately without
+    /// asking the user.
+    #[serde(default)]
+    pub preflight_error: Option<String>,
+}
+
 /// Events emitted by the engine. The UI consumes these to update its display.
 ///
-/// Most variants are fire-and-forget. The exceptions are `RequestPermission`
-/// and `RequestAnswer`, which carry a `request_id` that the UI must eventually
-/// reply to via `UiCommand`.
+/// Most variants are fire-and-forget. The exception is `RequestPermission`,
+/// which carries a `request_id` that the UI must eventually reply to via
+/// `UiCommand::PermissionDecision`.
 ///
 /// Event ordering within a turn:
 ///   Ready → (Thinking* → Text* → ToolStarted → ToolOutput* → ToolFinished)*
@@ -67,12 +167,6 @@ pub enum EngineEvent {
         summary: Option<String>,
     },
 
-    /// Engine needs the user to answer a question (ask_user_question tool).
-    RequestAnswer {
-        request_id: u64,
-        args: HashMap<String, serde_json::Value>,
-    },
-
     /// Token usage update after an LLM call.
     TokenUsage {
         usage: TokenUsage,
@@ -101,6 +195,9 @@ pub enum EngineEvent {
 
     /// Predicted next user input (ghost text autocomplete).
     InputPrediction { text: String, generation: u64 },
+
+    /// Response to a `UiCommand::EngineAsk` request.
+    EngineAskResponse { id: u64, content: String },
 
     /// Snapshot of the engine's message list, sent after each significant step.
     Messages {
@@ -133,6 +230,38 @@ pub enum EngineEvent {
         from_slug: String,
         message: String,
     },
+
+    /// Engine needs the TUI to execute a plugin-defined tool.
+    ExecutePluginTool {
+        request_id: u64,
+        call_id: String,
+        tool_name: String,
+        args: HashMap<String, serde_json::Value>,
+    },
+
+    /// Engine asks the TUI to evaluate a plugin tool's permission
+    /// hooks (`needs_confirm`, `approval_patterns`, `preflight`) for a
+    /// specific invocation. The TUI replies with
+    /// `UiCommand::PluginToolHooksResult`, after which the engine
+    /// resumes the standard Allow / Deny / Ask flow.
+    EvaluatePluginToolHooks {
+        request_id: u64,
+        call_id: String,
+        tool_name: String,
+        args: HashMap<String, serde_json::Value>,
+        mode: Mode,
+    },
+
+    /// Result of a core-tool side call requested by a Lua plugin via
+    /// `smelt.tools.call`. Streamed back so the suspended Lua coroutine
+    /// can resume with the tool's output.
+    CoreToolResult {
+        request_id: u64,
+        content: String,
+        is_error: bool,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        metadata: Option<serde_json::Value>,
+    },
 }
 
 /// Commands sent from the UI to the engine.
@@ -158,9 +287,19 @@ pub enum UiCommand {
         /// Per-turn model parameter overrides (from custom commands).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         model_config_overrides: Option<ModelConfigOverrides>,
-        /// Per-turn permission overrides (from custom commands).
+        /// Per-turn permission overrides (from custom commands or Lua plugins).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         permission_overrides: Option<PermissionOverrides>,
+        /// Full system prompt assembled by the TUI (from prompt sections).
+        /// When present the engine uses this verbatim instead of rendering
+        /// its built-in template.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        system_prompt: Option<String>,
+        /// Plugin-defined tools registered by Lua plugins. The engine
+        /// includes these in the LLM tool definitions and proxies execution
+        /// back to the TUI via `ExecutePluginTool`.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        plugin_tools: Vec<PluginToolDef>,
     },
 
     /// Inject a message mid-turn (steering / type-ahead).
@@ -176,14 +315,16 @@ pub enum UiCommand {
         message: Option<String>,
     },
 
-    /// Reply to a `RequestAnswer` event.
-    QuestionAnswer {
-        request_id: u64,
-        answer: Option<String>,
-    },
-
     /// Change the active mode while the engine is running.
-    SetMode { mode: Mode },
+    SetMode {
+        mode: Mode,
+        /// Updated system prompt for the new mode (if managed by TUI).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        system_prompt: Option<String>,
+        /// Updated plugin tools for the new mode.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        plugin_tools: Option<Vec<PluginToolDef>>,
+    },
 
     /// Change reasoning effort while the engine is running.
     SetReasoningEffort { effort: ReasoningEffort },
@@ -220,6 +361,45 @@ pub enum UiCommand {
     PredictInput {
         history: Vec<Message>,
         generation: u64,
+    },
+
+    /// One-shot LLM call initiated by a Lua plugin. The engine spawns
+    /// a fire-and-forget request routed through `task`'s auxiliary
+    /// model (or the primary model when the routing slot is empty) and
+    /// returns the response as `EngineAskResponse`.
+    EngineAsk {
+        id: u64,
+        system: String,
+        messages: Vec<Message>,
+        #[serde(default)]
+        task: AuxiliaryTask,
+    },
+
+    /// Result of a plugin tool execution (response to `ExecutePluginTool`).
+    PluginToolResult {
+        request_id: u64,
+        call_id: String,
+        content: String,
+        is_error: bool,
+    },
+
+    /// Result of evaluating a plugin tool's permission hooks (response
+    /// to `EngineEvent::EvaluatePluginToolHooks`).
+    PluginToolHooksResult {
+        request_id: u64,
+        hooks: PluginToolHooks,
+    },
+
+    /// Side-call from a Lua plugin to a core (or another plugin) tool.
+    /// The engine runs the named tool and replies with
+    /// `EngineEvent::CoreToolResult`. The plugin's parent `call_id` is
+    /// reused so streamed output (e.g. `ToolOutput`) is grouped under
+    /// the visible plugin invocation.
+    CallCoreTool {
+        request_id: u64,
+        parent_call_id: String,
+        tool_name: String,
+        args: HashMap<String, serde_json::Value>,
     },
 
     /// Cancel the current turn.

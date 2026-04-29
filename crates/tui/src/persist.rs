@@ -11,7 +11,7 @@
 //! Callers that need the on-disk state to be up-to-date (session load,
 //! fork, shutdown) call [`Persister::flush`] to drain the queue first.
 
-use crate::render::{PersistedLayoutCache, RenderCache};
+use crate::app::transcript_cache::{PersistedLayoutCache, RenderCache};
 use crate::session::{self, Session};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};

@@ -114,6 +114,8 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
         }
     }
 
+    cfg.inject_oauth_providers();
+
     let app_state = tui::state::State::load();
     let mut available_models = cfg.resolve_models();
 
@@ -188,7 +190,21 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
                 std::process::exit(1);
             }
             cfg = tui::config::Config::load_from(&cfg.path);
+            cfg.inject_oauth_providers();
             available_models = cfg.resolve_models();
+            // Inject cached models for OAuth providers discovered after the wizard.
+            if cfg.has_codex_provider() {
+                let ids = engine::auth::cached_models(engine::auth::AuthProvider::Codex);
+                if !ids.is_empty() {
+                    cfg.inject_codex_models(&mut available_models, &ids);
+                }
+            }
+            if cfg.has_copilot_provider() {
+                let ids = engine::auth::cached_models(engine::auth::AuthProvider::Copilot);
+                if !ids.is_empty() {
+                    cfg.inject_copilot_models(&mut available_models, &ids);
+                }
+            }
             if let Some(r) = available_models.first() {
                 let key = match resolve_api_key(&r.api_key_env) {
                     Ok(key) => key,

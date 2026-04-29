@@ -1,19 +1,14 @@
 mod buffer;
 mod completer_bridge;
 mod history;
-mod kill_ring;
-mod menu_bridge;
-mod settings;
 mod vim_bridge;
 
 pub use history::History;
-pub use kill_ring::KillRing;
-pub use settings::{Menu, MenuAction, MenuKind, MenuResult, MenuState, SettingsState};
 
 use crate::attachment::{Attachment, AttachmentId, AttachmentStore};
-use crate::completer::{Completer, CompleterKind};
+use crate::completer::CompleterSession;
+use crate::content;
 use crate::keymap::{self, KeyAction, KeyContext};
-use crate::render;
 use crate::vim::{ViMode, Vim};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use protocol::Content;
@@ -39,41 +34,41 @@ pub struct InputSnapshot {
 
 // ── Shared input state ───────────────────────────────────────────────────────
 
-/// Unified input buffer with attachment markers and file completer.
-/// Used by both the prompt loop and the agent-mode type-ahead.
-pub struct InputState {
-    pub buf: String,
-    pub cpos: usize,
-    pub attachment_ids: Vec<AttachmentId>,
+/// Prompt window state — a `ui::Window` (cursor, vim, kill ring,
+/// editable buffer) plus prompt-specific side-cars (completer, stash,
+/// history, attachments). `Deref<Target = EditBuffer>` gives direct
+/// access to `input.buf`, `input.attachment_ids`, etc.
+pub struct PromptState {
+    pub win: ui::Window,
     pub store: AttachmentStore,
-    pub completer: Option<Completer>,
-    pub menu: Option<MenuState>,
-    pub(super) vim: Option<Vim>,
-    /// Saved buffer before history search, restored on cancel.
-    pub(super) history_saved_buf: Option<(String, usize)>,
+    pub completer: Option<CompleterSession>,
+    /// Picker float IDs from closed completer sessions, waiting for the
+    /// next frame to drain and `win_close`. `PromptState` doesn't hold a
+    /// `&mut ui::Ui`, so closing has to happen out-of-band.
+    pub pending_picker_close: Vec<ui::WinId>,
     pub stash: Option<InputSnapshot>,
     /// Tracks whether the current buffer content originated from a paste.
     /// Cleared on any manual character input.
     pub(super) from_paste: bool,
-    pub(super) kill_ring: KillRing,
-    pub(super) history: crate::undo::UndoHistory,
     /// Chord state: true after Ctrl+X, waiting for second key.
     pending_ctrl_x: bool,
     /// Completable arguments for commands like `/model`, `/theme`, `/color`.
     /// Each entry is `("/cmd", vec!["arg1", "arg2", ...])`.
     pub command_arg_sources: Vec<(String, Vec<String>)>,
-    /// Byte position of the selection anchor for shift+key selection (non-vim).
-    /// When `Some`, selection spans from anchor to `cpos`.
-    selection_anchor: Option<usize>,
+}
+
+impl std::ops::Deref for PromptState {
+    type Target = ui::EditBuffer;
+    fn deref(&self) -> &ui::EditBuffer {
+        &self.win.edit_buf
+    }
 }
 
 /// What the caller should do after `handle_event`.
 pub enum Action {
     Redraw,
-    PurgeRedraw,
     Submit { content: Content, display: String },
     SubmitEmpty,
-    MenuResult(MenuResult),
     ToggleMode,
     CycleReasoning,
     EditInEditor,
@@ -83,30 +78,32 @@ pub enum Action {
     Noop,
 }
 
-impl Default for InputState {
+impl Default for PromptState {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl InputState {
+impl PromptState {
     pub fn new() -> Self {
+        let mut win = ui::Window::new(
+            ui::PROMPT_WIN,
+            ui::BufId(0),
+            ui::WinConfig::Split(ui::SplitConfig {
+                region: "prompt".into(),
+                gutters: ui::Gutters::default(),
+            }),
+        );
+        win.edit_buf = ui::EditBuffer::new();
         Self {
-            buf: String::new(),
-            cpos: 0,
-            attachment_ids: Vec::new(),
+            win,
             store: AttachmentStore::new(),
             completer: None,
-            menu: None,
-            vim: None,
-            history_saved_buf: None,
+            pending_picker_close: Vec::new(),
             stash: None,
             from_paste: false,
-            kill_ring: KillRing::new(),
-            history: crate::undo::UndoHistory::new(Some(100)),
             pending_ctrl_x: false,
             command_arg_sources: Vec::new(),
-            selection_anchor: None,
         }
     }
 
@@ -114,23 +111,27 @@ impl InputState {
     /// Works for both vim visual modes and shift+key selection.
     pub fn selection_range(&self) -> Option<(usize, usize)> {
         // Vim visual mode takes priority.
-        if let Some(ref vim) = self.vim {
-            if let Some(range) = vim.visual_range(&self.buf, self.cpos) {
+        if let Some(ref vim) = self.win.vim {
+            if let Some(range) = vim.visual_range(&self.win.edit_buf.buf, self.win.cpos) {
                 return Some(range);
             }
         }
-        // Non-vim shift+key selection.
-        let anchor = self.selection_anchor?;
-        let (a, b) = if anchor <= self.cpos {
-            (anchor, self.cpos)
-        } else {
-            (self.cpos, anchor)
-        };
-        if a == b {
-            None
-        } else {
-            Some((a, b))
+        self.win.win_cursor.range(self.win.cpos)
+    }
+
+    /// Selection range to *render* with the selection-bg style. Falls
+    /// back to the yank-flash range from the kill ring when there's no
+    /// real selection so vim copy ops (`yy`, `yw`, visual `y`, …) get
+    /// the brief post-yank highlight, matching nvim's
+    /// `vim.highlight.on_yank`. Editing logic must keep using
+    /// `selection_range` so the flash never affects mutations.
+    pub fn display_selection_range(&self) -> Option<(usize, usize)> {
+        if let Some(range) = self.selection_range() {
+            return Some(range);
         }
+        self.win
+            .kill_ring
+            .yank_flash_range(std::time::Instant::now())
     }
 
     fn has_selection(&self) -> bool {
@@ -138,39 +139,70 @@ impl InputState {
     }
 
     /// Clear any active selection (non-vim). Called on non-shift movement or editing.
-    pub(super) fn clear_selection(&mut self) {
-        self.selection_anchor = None;
+    pub fn clear_selection(&mut self) {
+        self.win.win_cursor.clear_anchor();
+    }
+
+    /// End the active completer session, queueing its Picker float for
+    /// close on the next frame. Replaces bare `self.completer = None`
+    /// so the associated `ui::WinId` doesn't leak.
+    pub fn close_completer(&mut self) {
+        if let Some(session) = self.completer.take() {
+            if let Some(win) = session.picker_win {
+                self.pending_picker_close.push(win);
+            }
+        }
+    }
+
+    /// Install a fresh completer, retiring any previous session's picker
+    /// float. Every site that creates a new `CompleterSession` must go
+    /// through this — bare `self.completer = Some(...)` orphans the old
+    /// `ui::WinId` and leaves a stale picker painted above the prompt.
+    pub fn set_completer(&mut self, comp: crate::completer::Completer) {
+        self.close_completer();
+        self.completer = Some(CompleterSession::new(comp));
+    }
+
+    /// Select the word at `cpos`. Used by mouse double-click.
+    pub fn select_word_at(&mut self, cpos: usize) -> Option<(usize, usize)> {
+        let (start, end) = self.win.edit_buf.word_range_at(cpos)?;
+        self.win.cpos = end.saturating_sub(1).max(start);
+        if let Some(vim) = self.win.vim.as_mut() {
+            vim.begin_visual(crate::vim::ViMode::Visual, start);
+        } else {
+            self.win.win_cursor.set_anchor(Some(start));
+        }
+        Some((start, end))
     }
 
     /// Start or extend selection at current cursor position (non-vim shift+key).
     fn extend_selection(&mut self) {
-        if self.selection_anchor.is_none() {
-            self.selection_anchor = Some(self.cpos);
-        }
+        self.win.win_cursor.extend(self.win.cpos);
     }
 
     /// Delete the currently selected text, returning it. Handles attachment cleanup.
     fn delete_selection(&mut self) -> Option<String> {
         let (start, end) = self.selection_range()?;
-        let deleted = self.buf[start..end].to_string();
+        let deleted = self.win.edit_buf.buf[start..end].to_string();
         self.remove_attachments_in_range(start, end);
-        self.buf.drain(start..end);
-        self.cpos = start;
-        self.selection_anchor = None;
+        self.win.edit_buf.buf.drain(start..end);
+        self.win.cpos = start;
+        self.win.win_cursor.clear_anchor();
         Some(deleted)
     }
 
     pub fn vim_enabled(&self) -> bool {
-        self.vim.is_some()
+        self.win.vim.is_some()
     }
 
     pub fn vim_mode(&self) -> Option<ViMode> {
-        self.vim.as_ref().map(|v| v.mode())
+        self.win.vim.as_ref().map(|v| v.mode())
     }
 
     /// Returns true if vim is enabled and currently in insert mode.
     pub fn vim_in_insert_mode(&self) -> bool {
-        self.vim
+        self.win
+            .vim
             .as_ref()
             .is_some_and(|v| v.mode() == ViMode::Insert)
     }
@@ -183,89 +215,121 @@ impl InputState {
 
     pub fn set_vim_enabled(&mut self, enabled: bool) {
         if enabled {
-            if self.vim.is_none() {
-                self.vim = Some(Vim::new());
+            if self.win.vim.is_none() {
+                self.win.vim = Some(Vim::new());
             }
         } else {
-            self.vim = None;
+            self.win.vim = None;
         }
     }
 
     /// Restore vim to a specific mode (used after double-Esc cancel).
     pub fn set_vim_mode(&mut self, mode: ViMode) {
-        if let Some(ref mut vim) = self.vim {
+        if let Some(ref mut vim) = self.win.vim {
             vim.set_mode(mode);
         }
     }
 
     pub fn take_buffer(&mut self) -> (String, usize) {
-        let buf = std::mem::take(&mut self.buf);
-        let cpos = std::mem::replace(&mut self.cpos, 0);
+        let buf = std::mem::take(&mut self.win.edit_buf.buf);
+        let cpos = std::mem::replace(&mut self.win.cpos, 0);
         (buf, cpos)
     }
 
     pub fn set_buffer(&mut self, buf: String, cpos: usize) {
-        self.buf = buf;
-        self.cpos = cpos.min(self.buf.len());
+        self.win.edit_buf.buf = buf;
+        self.win.cpos = cpos.min(self.win.edit_buf.buf.len());
     }
 
     /// Take the kill ring contents (moves ownership, leaves empty).
     pub fn take_kill_ring(&mut self) -> String {
-        self.kill_ring.take()
+        self.win.kill_ring.take()
     }
 
     /// Set the kill ring contents (used to sync back from dialogs).
     pub fn set_kill_ring(&mut self, contents: String) {
-        self.kill_ring.set(contents);
+        self.win.kill_ring.set(contents);
+    }
+
+    /// Reconcile the kill ring with the system clipboard before an
+    /// emacs-style paste (`C-y`). If the clipboard text differs from
+    /// what we last pushed, treat it as externally updated and
+    /// overwrite the kill ring (charwise — external sources don't
+    /// know about vim's linewise concept). When they match, the kill
+    /// ring is already authoritative.
+    fn sync_kill_ring_from_clipboard(&mut self) {
+        let Some(text) = crate::app::commands::paste_from_clipboard() else {
+            return;
+        };
+        if self.win.kill_ring.last_clipboard_write() == Some(text.as_str()) {
+            return;
+        }
+        self.win.kill_ring.set(text.clone());
+        self.win.kill_ring.record_clipboard_write(text);
     }
 
     pub fn clear(&mut self) {
-        self.buf.clear();
-        self.cpos = 0;
-        self.attachment_ids.clear();
-        self.completer = None;
-        self.menu = None;
-        self.history_saved_buf = None;
+        self.win.edit_buf.buf.clear();
+        self.win.cpos = 0;
+        self.win.edit_buf.attachment_ids.clear();
+        self.close_completer();
         self.from_paste = false;
-        self.selection_anchor = None;
+        self.win.win_cursor.clear_anchor();
         // Note: stash and store are intentionally NOT cleared here.
+    }
+
+    /// Replace the prompt buffer wholesale and re-establish invariants:
+    /// snapshot undo, clear attachments + shift-selection anchor, reset
+    /// paste state, drop the completer so it re-derives. Prefer the
+    /// `crate::api::buf::replace` wrapper at call sites — it reads as
+    /// intent rather than a method on the receiver.
+    pub fn replace_text(&mut self, text: String, cursor: Option<usize>) {
+        self.save_undo();
+        let cpos = cursor.unwrap_or(text.len()).min(text.len());
+        self.win.edit_buf.buf = text;
+        self.win.cpos = cpos;
+        self.win.edit_buf.attachment_ids.clear();
+        self.win.win_cursor.clear_anchor();
+        self.from_paste = false;
+        self.close_completer();
+        self.recompute_completer();
     }
 
     /// Toggle stash: if no stash, save current buf and clear; if stashed, restore.
     /// Attachments are cloned out of the store so the stash survives store clears.
     pub fn toggle_stash(&mut self) {
         if let Some(snap) = self.stash.take() {
-            self.buf = snap.buf;
-            self.cpos = snap.cpos;
-            self.attachment_ids = snap
+            self.win.edit_buf.buf = snap.buf;
+            self.win.cpos = snap.cpos;
+            self.win.edit_buf.attachment_ids = snap
                 .attachments
                 .into_iter()
                 .map(|a| self.store.insert(a))
                 .collect();
             self.from_paste = snap.from_paste;
-            self.completer = None;
-        } else if !self.buf.is_empty() || !self.attachment_ids.is_empty() {
-            let attachments = std::mem::take(&mut self.attachment_ids)
+            self.close_completer();
+        } else if !self.win.edit_buf.buf.is_empty() || !self.win.edit_buf.attachment_ids.is_empty()
+        {
+            let attachments = std::mem::take(&mut self.win.edit_buf.attachment_ids)
                 .into_iter()
                 .filter_map(|id| self.store.get(id).cloned())
                 .collect();
             self.stash = Some(InputSnapshot {
-                buf: std::mem::take(&mut self.buf),
-                cpos: std::mem::replace(&mut self.cpos, 0),
+                buf: std::mem::take(&mut self.win.edit_buf.buf),
+                cpos: std::mem::replace(&mut self.win.cpos, 0),
                 attachments,
                 from_paste: self.from_paste,
             });
-            self.completer = None;
-            self.history_saved_buf = None;
+            self.close_completer();
         }
     }
 
     /// Restore stash into the buffer (called after submit/command completes).
     pub fn restore_stash(&mut self) {
         if let Some(snap) = self.stash.take() {
-            self.buf = snap.buf;
-            self.cpos = snap.cpos;
-            self.attachment_ids = snap
+            self.win.edit_buf.buf = snap.buf;
+            self.win.cpos = snap.cpos;
+            self.win.edit_buf.attachment_ids = snap
                 .attachments
                 .into_iter()
                 .map(|a| self.store.insert(a))
@@ -287,38 +351,13 @@ impl InputState {
                 ids.push(id);
             }
         }
-        self.buf = text;
-        self.cpos = self.buf.len();
-        self.attachment_ids = ids;
-    }
-
-    pub fn has_modal(&self) -> bool {
-        self.menu.is_some()
-            || self.completer.as_ref().is_some_and(|c| {
-                matches!(
-                    c.kind,
-                    CompleterKind::Model
-                        | CompleterKind::Theme
-                        | CompleterKind::Color
-                        | CompleterKind::Settings
-                        | CompleterKind::History
-                )
-            })
-    }
-
-    /// Returns the history search query if a history completer is active.
-    pub fn history_search_query(&self) -> Option<&str> {
-        self.completer.as_ref().and_then(|c| {
-            if c.kind == CompleterKind::History {
-                Some(c.query.as_str())
-            } else {
-                None
-            }
-        })
+        self.win.edit_buf.buf = text;
+        self.win.cpos = self.win.edit_buf.buf.len();
+        self.win.edit_buf.attachment_ids = ids;
     }
 
     pub fn cursor_char(&self) -> usize {
-        char_pos(&self.buf, self.cpos)
+        char_pos(&self.win.edit_buf.buf, self.win.cpos)
     }
 
     /// Expand attachment markers and return the final text for submission.
@@ -334,9 +373,9 @@ impl InputState {
         let mut result = String::new();
         let mut att_idx = 0;
         let mut seen: std::collections::HashSet<AttachmentId> = std::collections::HashSet::new();
-        for c in self.buf.chars() {
+        for c in self.win.edit_buf.buf.chars() {
             if c == ATTACHMENT_MARKER {
-                if let Some(&id) = self.attachment_ids.get(att_idx) {
+                if let Some(&id) = self.win.edit_buf.attachment_ids.get(att_idx) {
                     if seen.insert(id) {
                         result.push_str(self.store.expanded_text(id));
                     } else if matches!(self.store.get(id), Some(Attachment::Paste { .. })) {
@@ -355,9 +394,9 @@ impl InputState {
     pub fn message_display_text(&self) -> String {
         let mut result = String::new();
         let mut att_idx = 0;
-        for c in self.buf.chars() {
+        for c in self.win.edit_buf.buf.chars() {
             if c == ATTACHMENT_MARKER {
-                if let Some(&id) = self.attachment_ids.get(att_idx) {
+                if let Some(&id) = self.win.edit_buf.attachment_ids.get(att_idx) {
                     if let Some(att) = self.store.get(id) {
                         match att {
                             Attachment::Paste { content } => result.push_str(content),
@@ -376,7 +415,9 @@ impl InputState {
     }
 
     pub fn image_count(&self) -> usize {
-        self.attachment_ids
+        self.win
+            .edit_buf
+            .attachment_ids
             .iter()
             .filter(|&&id| matches!(self.store.get(id), Some(Attachment::Image { .. })))
             .count()
@@ -413,14 +454,15 @@ impl InputState {
     /// Build a `KeyContext` snapshot for keymap lookups.
     pub fn key_context(&self, agent_running: bool, ghost_text_visible: bool) -> KeyContext {
         KeyContext {
-            buf_empty: self.buf.is_empty() && self.attachment_ids.is_empty(),
-            vim_non_insert: self.vim.as_ref().is_some_and(|v| {
+            buf_empty: self.win.edit_buf.buf.is_empty()
+                && self.win.edit_buf.attachment_ids.is_empty(),
+            vim_non_insert: self.win.vim.as_ref().is_some_and(|v| {
                 matches!(
                     v.mode(),
                     ViMode::Normal | ViMode::Visual | ViMode::VisualLine
                 )
             }),
-            vim_enabled: self.vim.is_some(),
+            vim_enabled: self.win.vim.is_some(),
             agent_running,
             ghost_text_visible,
         }
@@ -435,13 +477,23 @@ impl InputState {
         history: Option<&mut History>,
     ) -> Action {
         if !matches!(action, KeyAction::Yank | KeyAction::YankPop) {
-            self.kill_ring.clear_yank();
+            self.win.kill_ring.clear_yank();
+        }
+        // Any non-vertical action abandons the preferred column so the
+        // next vertical motion picks up wherever the user is now.
+        if !matches!(
+            action,
+            KeyAction::MoveUp | KeyAction::MoveDown | KeyAction::SelectUp | KeyAction::SelectDown
+        ) {
+            self.win.win_cursor.clear_curswant();
         }
         // Selection actions extend; editing actions consume; everything else clears.
         let is_select = matches!(
             action,
             KeyAction::SelectLeft
                 | KeyAction::SelectRight
+                | KeyAction::SelectUp
+                | KeyAction::SelectDown
                 | KeyAction::SelectWordForward
                 | KeyAction::SelectWordBackward
                 | KeyAction::SelectStartOfLine
@@ -469,7 +521,6 @@ impl InputState {
             KeyAction::Quit => Action::Noop,        // caller checks
             KeyAction::CancelAgent => Action::Noop, // caller checks
             KeyAction::OpenHelp => Action::Noop,    // caller checks
-            KeyAction::OpenHistorySearch => Action::Noop, // caller checks
             KeyAction::AcceptGhostText => Action::Noop, // caller checks
 
             // ── App control ─────────────────────────────────────────────
@@ -483,11 +534,11 @@ impl InputState {
                 self.toggle_stash();
                 Action::Redraw
             }
-            KeyAction::PurgeRedraw => Action::PurgeRedraw,
+            KeyAction::Redraw => Action::Redraw,
 
             // ── Submit / newline ─────────────────────────────────────────
             KeyAction::Submit => {
-                if self.buf.is_empty() && self.attachment_ids.is_empty() {
+                if self.win.edit_buf.buf.is_empty() && self.win.edit_buf.attachment_ids.is_empty() {
                     Action::SubmitEmpty
                 } else {
                     let display = self.message_display_text();
@@ -501,17 +552,17 @@ impl InputState {
                     self.save_undo();
                     self.delete_selection();
                 }
-                self.buf.insert(self.cpos, '\n');
-                self.cpos += 1;
-                self.completer = None;
+                self.win.edit_buf.buf.insert(self.win.cpos, '\n');
+                self.win.cpos += 1;
+                self.close_completer();
                 Action::Redraw
             }
 
             // ── Navigation ──────────────────────────────────────────────
             KeyAction::MoveLeft => {
-                if self.cpos > 0 {
-                    let cp = char_pos(&self.buf, self.cpos);
-                    self.cpos = byte_of_char(&self.buf, cp - 1);
+                if self.win.cpos > 0 {
+                    let cp = char_pos(&self.win.edit_buf.buf, self.win.cpos);
+                    self.win.cpos = byte_of_char(&self.win.edit_buf.buf, cp - 1);
                     self.recompute_completer();
                     Action::Redraw
                 } else {
@@ -519,9 +570,9 @@ impl InputState {
                 }
             }
             KeyAction::MoveRight => {
-                if self.cpos < self.buf.len() {
-                    let cp = char_pos(&self.buf, self.cpos);
-                    self.cpos = byte_of_char(&self.buf, cp + 1);
+                if self.win.cpos < self.win.edit_buf.buf.len() {
+                    let cp = char_pos(&self.win.edit_buf.buf, self.win.cpos);
+                    self.win.cpos = byte_of_char(&self.win.edit_buf.buf, cp + 1);
                     self.recompute_completer();
                     Action::Redraw
                 } else {
@@ -543,14 +594,18 @@ impl InputState {
                 }
             }
             KeyAction::MoveUp => {
-                let new_pos = crate::vim::move_up(&self.buf, self.cpos);
-                if new_pos != self.cpos {
-                    self.cpos = new_pos;
+                let new_pos =
+                    self.win
+                        .win_cursor
+                        .move_vertical(&self.win.edit_buf.buf, self.win.cpos, -1);
+                if new_pos != self.win.cpos {
+                    self.win.cpos = new_pos;
                     self.recompute_completer();
                     Action::Redraw
-                } else if let Some(entry) = history.and_then(|h| h.up(&self.buf)) {
-                    self.buf = entry.to_string();
-                    self.cpos = 0;
+                } else if let Some(entry) = history.and_then(|h| h.up(&self.win.edit_buf.buf)) {
+                    self.win.edit_buf.buf = entry.to_string();
+                    self.win.cpos = 0;
+                    self.win.win_cursor.clear_curswant();
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -558,14 +613,18 @@ impl InputState {
                 }
             }
             KeyAction::MoveDown => {
-                let new_pos = crate::vim::move_down(&self.buf, self.cpos);
-                if new_pos != self.cpos {
-                    self.cpos = new_pos;
+                let new_pos =
+                    self.win
+                        .win_cursor
+                        .move_vertical(&self.win.edit_buf.buf, self.win.cpos, 1);
+                if new_pos != self.win.cpos {
+                    self.win.cpos = new_pos;
                     self.recompute_completer();
                     Action::Redraw
                 } else if let Some(entry) = history.and_then(|h| h.down()) {
-                    self.buf = entry.to_string();
-                    self.cpos = self.buf.len();
+                    self.win.edit_buf.buf = entry.to_string();
+                    self.win.cpos = self.win.edit_buf.buf.len();
+                    self.win.win_cursor.clear_curswant();
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -573,29 +632,29 @@ impl InputState {
                 }
             }
             KeyAction::MoveStartOfLine => {
-                self.cpos = crate::text_utils::line_start(&self.buf, self.cpos);
+                self.win.cpos = ui::text::line_start(&self.win.edit_buf.buf, self.win.cpos);
                 self.recompute_completer();
                 Action::Redraw
             }
             KeyAction::MoveEndOfLine => {
-                self.cpos = crate::text_utils::line_end(&self.buf, self.cpos);
+                self.win.cpos = ui::text::line_end(&self.win.edit_buf.buf, self.win.cpos);
                 self.recompute_completer();
                 Action::Redraw
             }
             KeyAction::MoveStartOfBuffer => {
-                self.cpos = 0;
+                self.win.cpos = 0;
                 self.recompute_completer();
                 Action::Redraw
             }
             KeyAction::MoveEndOfBuffer => {
-                self.cpos = self.buf.len();
+                self.win.cpos = self.win.edit_buf.buf.len();
                 self.recompute_completer();
                 Action::Redraw
             }
             KeyAction::HistoryPrev => {
-                if let Some(entry) = history.and_then(|h| h.up(&self.buf)) {
-                    self.buf = entry.to_string();
-                    self.cpos = 0;
+                if let Some(entry) = history.and_then(|h| h.up(&self.win.edit_buf.buf)) {
+                    self.win.edit_buf.buf = entry.to_string();
+                    self.win.cpos = 0;
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -604,8 +663,8 @@ impl InputState {
             }
             KeyAction::HistoryNext => {
                 if let Some(entry) = history.and_then(|h| h.down()) {
-                    self.buf = entry.to_string();
-                    self.cpos = self.buf.len();
+                    self.win.edit_buf.buf = entry.to_string();
+                    self.win.cpos = self.win.edit_buf.buf.len();
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -683,15 +742,20 @@ impl InputState {
                 if self.has_selection() {
                     self.delete_selection();
                 }
-                if let Some(new_cpos) = self.kill_ring.yank(&mut self.buf, self.cpos) {
-                    self.cpos = new_cpos;
+                self.sync_kill_ring_from_clipboard();
+                if let Some(new_cpos) = self
+                    .win
+                    .kill_ring
+                    .yank(&mut self.win.edit_buf.buf, self.win.cpos)
+                {
+                    self.win.cpos = new_cpos;
                     self.recompute_completer();
                 }
                 Action::Redraw
             }
             KeyAction::YankPop => {
-                if let Some(new_cpos) = self.kill_ring.yank_pop(&mut self.buf) {
-                    self.cpos = new_cpos;
+                if let Some(new_cpos) = self.win.kill_ring.yank_pop(&mut self.win.edit_buf.buf) {
+                    self.win.cpos = new_cpos;
                     self.recompute_completer();
                 }
                 Action::Redraw
@@ -718,16 +782,16 @@ impl InputState {
 
             // ── Vim half-page scroll ────────────────────────────────────
             KeyAction::VimHalfPageUp => {
-                let half = render::term_height() / 2;
-                let line = current_line(&self.buf, self.cpos);
+                let half = content::term_height() / 2;
+                let line = current_line(&self.win.edit_buf.buf, self.win.cpos);
                 let target = line.saturating_sub(half);
                 self.move_to_line(target);
                 Action::Redraw
             }
             KeyAction::VimHalfPageDown => {
-                let half = render::term_height() / 2;
-                let line = current_line(&self.buf, self.cpos);
-                let total = self.buf.chars().filter(|&c| c == '\n').count() + 1;
+                let half = content::term_height() / 2;
+                let line = current_line(&self.win.edit_buf.buf, self.win.cpos);
+                let total = self.win.edit_buf.buf.chars().filter(|&c| c == '\n').count() + 1;
                 let target = (line + half).min(total - 1);
                 self.move_to_line(target);
                 Action::Redraw
@@ -736,9 +800,11 @@ impl InputState {
             // ── Clipboard ───────────────────────────────────────────────
             KeyAction::CopySelection => {
                 if let Some((start, end)) = self.selection_range() {
-                    let text = self.buf[start..end].to_string();
-                    let _ = crate::app::copy_to_clipboard(&text);
-                    self.kill_ring.set(text);
+                    let text = self.win.edit_buf.buf[start..end].to_string();
+                    if crate::app::copy_to_clipboard(&text).is_ok() {
+                        self.win.kill_ring.record_clipboard_write(text.clone());
+                    }
+                    self.win.kill_ring.set(text);
                 }
                 Action::Noop
             }
@@ -746,8 +812,10 @@ impl InputState {
                 if self.selection_range().is_some() {
                     self.save_undo();
                     if let Some(text) = self.delete_selection() {
-                        let _ = crate::app::copy_to_clipboard(&text);
-                        self.kill_ring.set(text);
+                        if crate::app::copy_to_clipboard(&text).is_ok() {
+                            self.win.kill_ring.record_clipboard_write(text.clone());
+                        }
+                        self.win.kill_ring.set(text);
                     }
                     self.recompute_completer();
                     Action::Redraw
@@ -756,58 +824,89 @@ impl InputState {
                 }
             }
             KeyAction::ClipboardImage => {
+                // Cmd/Meta+V. When bracketed paste is active the
+                // terminal forwards the clipboard as an `Event::Paste`
+                // we never reach here. But some terminals (or configs
+                // with bracketed paste off) send raw Cmd+V as a key —
+                // handle both image and text paste so the shortcut is
+                // reliable regardless of the terminal's paste mode.
                 if let Some(url) = clipboard_image_to_data_url() {
                     self.save_undo();
                     self.insert_image("clipboard.png".into(), url);
-                    Action::Redraw
-                } else {
-                    Action::Noop
+                    return Action::Redraw;
                 }
+                if let Some(text) = crate::app::commands::paste_from_clipboard() {
+                    if !text.is_empty() {
+                        self.save_undo();
+                        if self.has_selection() {
+                            self.delete_selection();
+                        }
+                        self.insert_paste(text);
+                        return Action::Redraw;
+                    }
+                }
+                Action::Noop
             }
 
             // ── Selection (shift+movement) ─────────────────────────────
             KeyAction::SelectLeft => {
                 self.extend_selection();
-                if self.cpos > 0 {
-                    let cp = char_pos(&self.buf, self.cpos);
-                    self.cpos = byte_of_char(&self.buf, cp - 1);
+                if self.win.cpos > 0 {
+                    let cp = char_pos(&self.win.edit_buf.buf, self.win.cpos);
+                    self.win.cpos = byte_of_char(&self.win.edit_buf.buf, cp - 1);
                 }
                 Action::Redraw
             }
             KeyAction::SelectRight => {
                 self.extend_selection();
-                if self.cpos < self.buf.len() {
-                    let cp = char_pos(&self.buf, self.cpos);
-                    self.cpos = byte_of_char(&self.buf, cp + 1);
+                if self.win.cpos < self.win.edit_buf.buf.len() {
+                    let cp = char_pos(&self.win.edit_buf.buf, self.win.cpos);
+                    self.win.cpos = byte_of_char(&self.win.edit_buf.buf, cp + 1);
                 }
+                Action::Redraw
+            }
+            KeyAction::SelectUp => {
+                self.extend_selection();
+                self.win.cpos =
+                    self.win
+                        .win_cursor
+                        .move_vertical(&self.win.edit_buf.buf, self.win.cpos, -1);
+                Action::Redraw
+            }
+            KeyAction::SelectDown => {
+                self.extend_selection();
+                self.win.cpos =
+                    self.win
+                        .win_cursor
+                        .move_vertical(&self.win.edit_buf.buf, self.win.cpos, 1);
                 Action::Redraw
             }
             KeyAction::SelectWordForward => {
                 self.extend_selection();
-                self.cpos = crate::text_utils::word_forward_pos(
-                    &self.buf,
-                    self.cpos,
-                    crate::text_utils::CharClass::Word,
+                self.win.cpos = ui::text::word_forward_pos(
+                    &self.win.edit_buf.buf,
+                    self.win.cpos,
+                    ui::text::CharClass::Word,
                 );
                 Action::Redraw
             }
             KeyAction::SelectWordBackward => {
                 self.extend_selection();
-                self.cpos = crate::text_utils::word_backward_pos(
-                    &self.buf,
-                    self.cpos,
-                    crate::text_utils::CharClass::Word,
+                self.win.cpos = ui::text::word_backward_pos(
+                    &self.win.edit_buf.buf,
+                    self.win.cpos,
+                    ui::text::CharClass::Word,
                 );
                 Action::Redraw
             }
             KeyAction::SelectStartOfLine => {
                 self.extend_selection();
-                self.cpos = crate::text_utils::line_start(&self.buf, self.cpos);
+                self.win.cpos = ui::text::line_start(&self.win.edit_buf.buf, self.win.cpos);
                 Action::Redraw
             }
             KeyAction::SelectEndOfLine => {
                 self.extend_selection();
-                self.cpos = crate::text_utils::line_end(&self.buf, self.cpos);
+                self.win.cpos = ui::text::line_end(&self.win.edit_buf.buf, self.win.cpos);
                 Action::Redraw
             }
         }
@@ -815,21 +914,16 @@ impl InputState {
 
     /// Process a terminal event. Returns what the caller should do next.
     ///
-    /// Priority ladder: menu → completer → vim → paste → resize → keymap → insert.
+    /// Priority ladder: completer → vim → paste → resize → keymap → insert.
     pub fn handle_event(&mut self, ev: Event, mut history: Option<&mut History>) -> Action {
-        // 1. Menu intercepts all keys when open.
-        if self.menu.is_some() {
-            return self.handle_menu_event(&ev);
-        }
-
-        // 2. Completer intercepts navigation keys when active.
+        // 1. Completer intercepts navigation keys when active.
         if self.completer.is_some() {
             if let Some(action) = self.handle_completer_event(&ev) {
                 return action;
             }
         }
 
-        // 3. Vim mode intercepts key events.
+        // 2. Vim mode intercepts key events.
         match self.dispatch_vim(&ev, &mut history) {
             VimBridgeResult::Handled(action) => return action,
             VimBridgeResult::Passthrough => {
@@ -840,7 +934,7 @@ impl InputState {
             }
         }
 
-        // 4. Paste events.
+        // 3. Paste events.
         if let Event::Paste(data) = ev {
             self.save_undo();
             if self.selection_range().is_some() {
@@ -870,7 +964,7 @@ impl InputState {
             return Action::Redraw;
         }
 
-        // 5. Resize events.
+        // 4. Resize events.
         if let Event::Resize(w, h) = ev {
             return Action::Resize {
                 width: w as usize,
@@ -878,7 +972,7 @@ impl InputState {
             };
         }
 
-        // 6. Key events — look up in the keymap.
+        // 5. Key events — look up in the keymap.
         if let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = ev
@@ -901,14 +995,15 @@ impl InputState {
             // (agent_running, ghost_text) are set to defaults here — the app
             // event loop overrides them by calling lookup directly when needed.
             let ctx = KeyContext {
-                buf_empty: self.buf.is_empty() && self.attachment_ids.is_empty(),
-                vim_non_insert: self.vim.as_ref().is_some_and(|v| {
+                buf_empty: self.win.edit_buf.buf.is_empty()
+                    && self.win.edit_buf.attachment_ids.is_empty(),
+                vim_non_insert: self.win.vim.as_ref().is_some_and(|v| {
                     matches!(
                         v.mode(),
                         ViMode::Normal | ViMode::Visual | ViMode::VisualLine
                     )
                 }),
-                vim_enabled: self.vim.is_some(),
+                vim_enabled: self.win.vim.is_some(),
                 agent_running: false,
                 ghost_text_visible: false,
             };
@@ -1205,7 +1300,7 @@ mod tests {
 
     #[test]
     fn paste_into_empty_buffer_sets_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!echo hello".to_string());
         assert!(
             input.skip_shell_escape(),
@@ -1216,7 +1311,7 @@ mod tests {
 
     #[test]
     fn type_then_type_sets_from_paste_false() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_char('!');
         input.insert_char('e');
         assert!(
@@ -1227,7 +1322,7 @@ mod tests {
 
     #[test]
     fn type_bang_then_paste_sets_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         // Simulate user typing '!'
         input.insert_char('!');
@@ -1235,8 +1330,8 @@ mod tests {
 
         // Reset cursor to simulate the scenario: user types '!', then pastes at line start
         // This is the key scenario that was broken before the fix
-        input.buf.clear();
-        input.cpos = 0;
+        input.win.edit_buf.buf.clear();
+        input.win.cpos = 0;
         input.insert_paste("echo hello".to_string());
         assert!(
             input.skip_shell_escape(),
@@ -1247,10 +1342,10 @@ mod tests {
 
     #[test]
     fn paste_in_middle_of_line_does_not_set_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
-        input.buf = "hello ".to_string();
-        input.cpos = 6; // After "hello "
+        input.win.edit_buf.buf = "hello ".to_string();
+        input.win.cpos = 6; // After "hello "
         input.insert_paste("!world".to_string());
         assert!(
             !input.skip_shell_escape(),
@@ -1261,10 +1356,10 @@ mod tests {
 
     #[test]
     fn paste_at_end_of_line_does_not_set_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
-        input.buf = "hello".to_string();
-        input.cpos = 5; // At end
+        input.win.edit_buf.buf = "hello".to_string();
+        input.win.cpos = 5; // At end
         input.insert_paste(" world".to_string());
         assert!(
             !input.skip_shell_escape(),
@@ -1275,10 +1370,10 @@ mod tests {
 
     #[test]
     fn paste_at_start_of_multiline_buffer() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
-        input.buf = "line1\nline2".to_string();
-        input.cpos = 0; // At very start
+        input.win.edit_buf.buf = "line1\nline2".to_string();
+        input.win.cpos = 0; // At very start
         input.insert_paste("!command".to_string());
         assert!(
             input.skip_shell_escape(),
@@ -1289,10 +1384,10 @@ mod tests {
 
     #[test]
     fn paste_at_start_of_second_line_sets_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
-        input.buf = "line1\n".to_string();
-        input.cpos = 6; // Start of second line
+        input.win.edit_buf.buf = "line1\n".to_string();
+        input.win.cpos = 6; // Start of second line
         input.insert_paste("!command".to_string());
         assert!(
             input.skip_shell_escape(),
@@ -1303,10 +1398,10 @@ mod tests {
 
     #[test]
     fn paste_middle_of_second_line_does_not_set_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
-        input.buf = "line1\nhello".to_string();
-        input.cpos = 8; // Insert at byte position 8 (before first 'l' of "hello")
+        input.win.edit_buf.buf = "line1\nhello".to_string();
+        input.win.cpos = 8; // Insert at byte position 8 (before first 'l' of "hello")
         input.insert_paste(" world".to_string());
         assert!(
             !input.skip_shell_escape(),
@@ -1317,7 +1412,7 @@ mod tests {
 
     #[test]
     fn manual_char_after_paste_clears_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
@@ -1330,7 +1425,7 @@ mod tests {
 
     #[test]
     fn backspace_at_start_clears_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
@@ -1340,19 +1435,19 @@ mod tests {
             "Backspace not at start should not clear from_paste"
         );
 
-        input.cpos = 0;
+        input.win.cpos = 0;
         input.backspace(); // Now at position 0
                            // Can't backspace further, but the logic would clear it if we could
     }
 
     #[test]
     fn delete_word_backward_at_start_clears_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
         // Move cursor to end
-        input.cpos = input.buf.len();
+        input.win.cpos = input.buf.len();
         input.delete_word_backward(); // Deletes "hello"
         assert!(
             input.skip_shell_escape(),
@@ -1360,11 +1455,11 @@ mod tests {
         );
 
         // Move to after "echo " and delete word
-        input.cpos = 5; // After "echo"
+        input.win.cpos = 5; // After "echo"
         input.delete_word_backward(); // Deletes "echo"
         assert!(input.skip_shell_escape(), "Still not at absolute start");
 
-        input.cpos = 1; // After "!"
+        input.win.cpos = 1; // After "!"
         input.delete_word_backward(); // Would delete to start, which should clear from_paste
         assert!(
             !input.skip_shell_escape(),
@@ -1374,7 +1469,7 @@ mod tests {
 
     #[test]
     fn clear_resets_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!test".to_string());
         assert!(input.skip_shell_escape());
 
@@ -1384,7 +1479,7 @@ mod tests {
 
     #[test]
     fn large_paste_creates_attachment() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         // Use multi-line paste which definitely creates an attachment
         let multi_line = (0..PASTE_LINE_THRESHOLD)
@@ -1405,7 +1500,7 @@ mod tests {
 
     #[test]
     fn multi_line_paste_above_threshold_creates_attachment() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         let multi_line = (0..PASTE_LINE_THRESHOLD)
             .map(|i| format!("!line{}", i))
@@ -1424,7 +1519,7 @@ mod tests {
 
     #[test]
     fn small_multi_line_paste_inlined() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
         let multi_line = "!line1\nline2\nline3".to_string();
         input.insert_paste(multi_line);
@@ -1441,7 +1536,7 @@ mod tests {
 
     #[test]
     fn stash_preserves_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!test".to_string());
         assert!(input.skip_shell_escape());
 
@@ -1464,7 +1559,7 @@ mod tests {
 
     #[test]
     fn multiple_pastes_set_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!first".to_string());
         assert!(input.skip_shell_escape());
 
@@ -1473,7 +1568,7 @@ mod tests {
         assert!(!input.skip_shell_escape());
 
         // Paste again at start of line
-        input.cpos = 0;
+        input.win.cpos = 0;
         input.insert_paste("!second".to_string());
         assert!(
             input.skip_shell_escape(),
@@ -1483,7 +1578,7 @@ mod tests {
 
     #[test]
     fn paste_with_carriage_returns_normalized() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("!line1\r\nline2\rline3".to_string());
         assert!(input.skip_shell_escape());
         assert!(
@@ -1495,7 +1590,7 @@ mod tests {
 
     #[test]
     fn empty_paste_does_not_set_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("".to_string());
         assert!(
             !input.skip_shell_escape(),
@@ -1505,7 +1600,7 @@ mod tests {
 
     #[test]
     fn whitespace_only_paste_at_start_sets_from_paste() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.insert_paste("   ".to_string());
         assert!(
             input.skip_shell_escape(),
@@ -1516,10 +1611,10 @@ mod tests {
     #[test]
     fn paste_starting_with_bang_at_line_start() {
         // This is the main bug scenario: type '!', then paste command
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
 
-        input.buf = String::new();
-        input.cpos = 0;
+        input.win.edit_buf.buf = String::new();
+        input.win.cpos = 0;
         input.insert_paste("!ls -la".to_string());
 
         assert!(
@@ -1537,33 +1632,33 @@ mod tests {
 
     #[test]
     fn shift_select_right_creates_selection() {
-        let mut input = InputState::new();
-        input.buf = "hello".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello".to_string();
+        input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
-        assert_eq!(input.selection_anchor, Some(0));
-        assert_eq!(input.cpos, 1);
+        assert_eq!(input.win.win_cursor.anchor(), Some(0));
+        assert_eq!(input.win.cpos, 1);
         assert_eq!(input.selection_range(), Some((0, 1)));
     }
 
     #[test]
     fn shift_select_extends_selection() {
-        let mut input = InputState::new();
-        input.buf = "hello".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello".to_string();
+        input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
         input.execute_key_action(KeyAction::SelectRight, None);
         input.execute_key_action(KeyAction::SelectRight, None);
-        assert_eq!(input.selection_anchor, Some(0));
-        assert_eq!(input.cpos, 3);
+        assert_eq!(input.win.win_cursor.anchor(), Some(0));
+        assert_eq!(input.win.cpos, 3);
         assert_eq!(input.selection_range(), Some((0, 3)));
     }
 
     #[test]
     fn movement_clears_selection() {
-        let mut input = InputState::new();
-        input.buf = "hello".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello".to_string();
+        input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
         input.execute_key_action(KeyAction::SelectRight, None);
         assert!(input.selection_range().is_some());
@@ -1573,9 +1668,9 @@ mod tests {
 
     #[test]
     fn backspace_deletes_selection() {
-        let mut input = InputState::new();
-        input.buf = "hello world".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello world".to_string();
+        input.win.cpos = 0;
         // Select "hello"
         for _ in 0..5 {
             input.execute_key_action(KeyAction::SelectRight, None);
@@ -1583,14 +1678,14 @@ mod tests {
         assert_eq!(input.selection_range(), Some((0, 5)));
         input.execute_key_action(KeyAction::Backspace, None);
         assert_eq!(input.buf, " world");
-        assert_eq!(input.cpos, 0);
+        assert_eq!(input.win.cpos, 0);
     }
 
     #[test]
     fn delete_forward_deletes_selection() {
-        let mut input = InputState::new();
-        input.buf = "hello world".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello world".to_string();
+        input.win.cpos = 0;
         for _ in 0..5 {
             input.execute_key_action(KeyAction::SelectRight, None);
         }
@@ -1600,47 +1695,47 @@ mod tests {
 
     #[test]
     fn typing_replaces_selection() {
-        let mut input = InputState::new();
-        input.buf = "hello world".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello world".to_string();
+        input.win.cpos = 0;
         for _ in 0..5 {
             input.execute_key_action(KeyAction::SelectRight, None);
         }
         input.insert_char('X');
         assert_eq!(input.buf, "X world");
-        assert_eq!(input.cpos, 1);
+        assert_eq!(input.win.cpos, 1);
     }
 
     #[test]
     fn select_left_from_end() {
-        let mut input = InputState::new();
-        input.buf = "hello".to_string();
-        input.cpos = 5;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello".to_string();
+        input.win.cpos = 5;
         input.execute_key_action(KeyAction::SelectLeft, None);
         input.execute_key_action(KeyAction::SelectLeft, None);
-        assert_eq!(input.selection_anchor, Some(5));
-        assert_eq!(input.cpos, 3);
+        assert_eq!(input.win.win_cursor.anchor(), Some(5));
+        assert_eq!(input.win.cpos, 3);
         assert_eq!(input.selection_range(), Some((3, 5)));
     }
 
     #[test]
     fn select_word_forward() {
-        let mut input = InputState::new();
-        input.buf = "hello world foo".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello world foo".to_string();
+        input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectWordForward, None);
-        assert_eq!(input.selection_anchor, Some(0));
+        assert_eq!(input.win.win_cursor.anchor(), Some(0));
         // word_forward_pos from 0 should be 6 (start of "world").
-        assert_eq!(input.cpos, 6);
+        assert_eq!(input.win.cpos, 6);
         input.execute_key_action(KeyAction::Backspace, None);
         assert_eq!(input.buf, "world foo");
     }
 
     #[test]
     fn select_word_backward() {
-        let mut input = InputState::new();
-        input.buf = "hello world".to_string();
-        input.cpos = 11;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello world".to_string();
+        input.win.cpos = 11;
         input.execute_key_action(KeyAction::SelectWordBackward, None);
         assert_eq!(input.selection_range(), Some((6, 11)));
         input.execute_key_action(KeyAction::Backspace, None);
@@ -1649,77 +1744,77 @@ mod tests {
 
     #[test]
     fn select_to_line_start() {
-        let mut input = InputState::new();
-        input.buf = "hello world".to_string();
-        input.cpos = 5;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello world".to_string();
+        input.win.cpos = 5;
         input.execute_key_action(KeyAction::SelectStartOfLine, None);
         assert_eq!(input.selection_range(), Some((0, 5)));
     }
 
     #[test]
     fn select_to_line_end() {
-        let mut input = InputState::new();
-        input.buf = "hello world".to_string();
-        input.cpos = 5;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello world".to_string();
+        input.win.cpos = 5;
         input.execute_key_action(KeyAction::SelectEndOfLine, None);
         assert_eq!(input.selection_range(), Some((5, 11)));
     }
 
     #[test]
     fn newline_replaces_selection() {
-        let mut input = InputState::new();
-        input.buf = "hello world".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello world".to_string();
+        input.win.cpos = 0;
         for _ in 0..5 {
             input.execute_key_action(KeyAction::SelectRight, None);
         }
         input.execute_key_action(KeyAction::InsertNewline, None);
         assert_eq!(input.buf, "\n world");
-        assert_eq!(input.cpos, 1);
+        assert_eq!(input.win.cpos, 1);
     }
 
     #[test]
     fn kill_to_eol_with_selection() {
-        let mut input = InputState::new();
-        input.buf = "hello world".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello world".to_string();
+        input.win.cpos = 0;
         for _ in 0..5 {
             input.execute_key_action(KeyAction::SelectRight, None);
         }
         input.execute_key_action(KeyAction::KillToEndOfLine, None);
         assert_eq!(input.buf, " world");
         // Killed text should be in kill ring.
-        assert_eq!(input.kill_ring.current(), "hello");
+        assert_eq!(input.win.kill_ring.current(), "hello");
     }
 
     #[test]
     fn selection_at_buffer_boundary() {
-        let mut input = InputState::new();
-        input.buf = "ab".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "ab".to_string();
+        input.win.cpos = 0;
         // Select all.
         input.execute_key_action(KeyAction::SelectRight, None);
         input.execute_key_action(KeyAction::SelectRight, None);
         assert_eq!(input.selection_range(), Some((0, 2)));
         input.execute_key_action(KeyAction::Backspace, None);
         assert_eq!(input.buf, "");
-        assert_eq!(input.cpos, 0);
+        assert_eq!(input.win.cpos, 0);
     }
 
     #[test]
     fn selection_range_empty_when_anchor_equals_cursor() {
-        let mut input = InputState::new();
-        input.buf = "hello".to_string();
-        input.cpos = 3;
-        input.selection_anchor = Some(3);
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello".to_string();
+        input.win.cpos = 3;
+        input.win.win_cursor.set_anchor(Some(3));
         assert_eq!(input.selection_range(), None);
     }
 
     #[test]
     fn clear_resets_selection() {
-        let mut input = InputState::new();
-        input.buf = "hello".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello".to_string();
+        input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
         assert!(input.selection_range().is_some());
         input.clear();
@@ -1728,9 +1823,9 @@ mod tests {
 
     #[test]
     fn delete_word_backward_with_selection() {
-        let mut input = InputState::new();
-        input.buf = "hello world".to_string();
-        input.cpos = 6;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello world".to_string();
+        input.win.cpos = 6;
         // Select "wor"
         for _ in 0..3 {
             input.execute_key_action(KeyAction::SelectRight, None);
@@ -1741,9 +1836,9 @@ mod tests {
 
     #[test]
     fn delete_word_forward_with_selection() {
-        let mut input = InputState::new();
-        input.buf = "hello world".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello world".to_string();
+        input.win.cpos = 0;
         for _ in 0..3 {
             input.execute_key_action(KeyAction::SelectRight, None);
         }
@@ -1753,9 +1848,9 @@ mod tests {
 
     #[test]
     fn delete_to_start_of_line_with_selection() {
-        let mut input = InputState::new();
-        input.buf = "hello world".to_string();
-        input.cpos = 3;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello world".to_string();
+        input.win.cpos = 3;
         for _ in 0..4 {
             input.execute_key_action(KeyAction::SelectRight, None);
         }
@@ -1765,42 +1860,42 @@ mod tests {
 
     #[test]
     fn select_left_at_start_stays() {
-        let mut input = InputState::new();
-        input.buf = "hello".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello".to_string();
+        input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectLeft, None);
-        assert_eq!(input.cpos, 0);
-        assert_eq!(input.selection_anchor, Some(0));
+        assert_eq!(input.win.cpos, 0);
+        assert_eq!(input.win.win_cursor.anchor(), Some(0));
     }
 
     #[test]
     fn select_right_at_end_stays() {
-        let mut input = InputState::new();
-        input.buf = "hello".to_string();
-        input.cpos = 5;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "hello".to_string();
+        input.win.cpos = 5;
         input.execute_key_action(KeyAction::SelectRight, None);
-        assert_eq!(input.cpos, 5);
+        assert_eq!(input.win.cpos, 5);
     }
 
     #[test]
     fn select_empty_buffer() {
-        let mut input = InputState::new();
-        input.buf = String::new();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = String::new();
+        input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
-        assert_eq!(input.cpos, 0);
+        assert_eq!(input.win.cpos, 0);
         assert!(input.selection_range().is_none());
     }
 
     #[test]
     fn utf8_selection() {
-        let mut input = InputState::new();
-        input.buf = "héllo".to_string();
-        input.cpos = 0;
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "héllo".to_string();
+        input.win.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
         input.execute_key_action(KeyAction::SelectRight, None);
         // Should select "hé" — 2 chars but 3 bytes.
-        assert_eq!(input.cpos, 3); // byte offset of 'l'
+        assert_eq!(input.win.cpos, 3); // byte offset of 'l'
         assert_eq!(input.selection_range(), Some((0, 3)));
         input.execute_key_action(KeyAction::Backspace, None);
         assert_eq!(input.buf, "llo");
@@ -1808,10 +1903,10 @@ mod tests {
 
     #[test]
     fn selection_preserved_across_multiple_select_directions() {
-        let mut input = InputState::new();
-        input.buf = "abcdef".to_string();
-        input.cpos = 3; // on 'd'
-                        // Select right 2 chars.
+        let mut input = PromptState::new();
+        input.win.edit_buf.buf = "abcdef".to_string();
+        input.win.cpos = 3; // on 'd'
+                            // Select right 2 chars.
         input.execute_key_action(KeyAction::SelectRight, None);
         input.execute_key_action(KeyAction::SelectRight, None);
         assert_eq!(input.selection_range(), Some((3, 5)));
@@ -1820,7 +1915,7 @@ mod tests {
         input.execute_key_action(KeyAction::SelectLeft, None);
         input.execute_key_action(KeyAction::SelectLeft, None);
         input.execute_key_action(KeyAction::SelectLeft, None);
-        assert_eq!(input.cpos, 1);
+        assert_eq!(input.win.cpos, 1);
         assert_eq!(input.selection_range(), Some((1, 3)));
     }
 
@@ -1830,10 +1925,10 @@ mod tests {
             Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
         };
 
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         input.set_vim_enabled(true);
-        input.buf = "hello world".to_string();
-        input.cpos = 0;
+        input.win.edit_buf.buf = "hello world".to_string();
+        input.win.cpos = 0;
         // Create a shift selection.
         input.execute_key_action(KeyAction::SelectRight, None);
         input.execute_key_action(KeyAction::SelectRight, None);
@@ -1859,15 +1954,15 @@ mod tests {
 
     #[test]
     fn delete_selection_removes_attachments() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         // Insert text with an attachment marker in the middle: "ab[paste]cd"
-        input.buf = format!("ab{}cd", ATTACHMENT_MARKER);
-        input.cpos = 0;
+        input.win.edit_buf.buf = format!("ab{}cd", ATTACHMENT_MARKER);
+        input.win.cpos = 0;
         let id = input.store.insert_paste("pasted".to_string());
-        input.attachment_ids.push(id);
+        input.win.edit_buf.attachment_ids.push(id);
         // Select "b[paste]c" (bytes 1..5 — marker is 3 bytes)
-        input.selection_anchor = Some(1);
-        input.cpos = 1 + 1 + ATTACHMENT_MARKER.len_utf8() + 1; // b + marker + c
+        input.win.win_cursor.set_anchor(Some(1));
+        input.win.cpos = 1 + 1 + ATTACHMENT_MARKER.len_utf8() + 1; // b + marker + c
         assert!(input.selection_range().is_some());
         let deleted = input.delete_selection();
         assert!(deleted.is_some());
@@ -1881,15 +1976,15 @@ mod tests {
     // ── Attachment dedup within a single message ───────────────────────
 
     /// Place two markers in the buffer that both point at `id`.
-    fn buf_with_two_markers(input: &mut InputState, id: AttachmentId) {
-        input.buf = format!("pre{m}mid{m}post", m = ATTACHMENT_MARKER);
-        input.cpos = input.buf.len();
-        input.attachment_ids = vec![id, id];
+    fn buf_with_two_markers(input: &mut PromptState, id: AttachmentId) {
+        input.win.edit_buf.buf = format!("pre{m}mid{m}post", m = ATTACHMENT_MARKER);
+        input.win.cpos = input.buf.len();
+        input.win.edit_buf.attachment_ids = vec![id, id];
     }
 
     #[test]
     fn expanded_text_inlines_paste_once_for_duplicate_ids() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         let body = "secret pasted block".to_string();
         let id = input.store.insert_paste(body.clone());
         buf_with_two_markers(&mut input, id);
@@ -1905,12 +2000,12 @@ mod tests {
 
     #[test]
     fn expanded_text_distinct_pastes_both_expand() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         let id1 = input.store.insert_paste("alpha body long enough".into());
         let id2 = input.store.insert_paste("beta body different".into());
-        input.buf = format!("{m}and{m}", m = ATTACHMENT_MARKER);
-        input.cpos = input.buf.len();
-        input.attachment_ids = vec![id1, id2];
+        input.win.edit_buf.buf = format!("{m}and{m}", m = ATTACHMENT_MARKER);
+        input.win.cpos = input.buf.len();
+        input.win.edit_buf.attachment_ids = vec![id1, id2];
         let text = input.expanded_text();
         assert!(text.contains("alpha body long enough"));
         assert!(text.contains("beta body different"));
@@ -1919,12 +2014,12 @@ mod tests {
 
     #[test]
     fn expanded_text_three_identical_ids_emits_one_body_two_stubs() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         let body = "repeated content".to_string();
         let id = input.store.insert_paste(body.clone());
-        input.buf = format!("{m}a{m}b{m}", m = ATTACHMENT_MARKER);
-        input.cpos = input.buf.len();
-        input.attachment_ids = vec![id, id, id];
+        input.win.edit_buf.buf = format!("{m}a{m}b{m}", m = ATTACHMENT_MARKER);
+        input.win.cpos = input.buf.len();
+        input.win.edit_buf.attachment_ids = vec![id, id, id];
         let text = input.expanded_text();
         assert_eq!(text.matches(&body).count(), 1);
         assert_eq!(text.matches(PASTE_STUB).count(), 2);
@@ -1932,7 +2027,7 @@ mod tests {
 
     #[test]
     fn build_content_dedups_repeated_image_in_parts() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         let id = input
             .store
             .insert_image("img.png".into(), "data:image/png;base64,AAA".into());
@@ -1947,16 +2042,16 @@ mod tests {
 
     #[test]
     fn build_content_preserves_distinct_images() {
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         let id1 = input
             .store
             .insert_image("a.png".into(), "data:image/png;base64,AAA".into());
         let id2 = input
             .store
             .insert_image("b.png".into(), "data:image/png;base64,BBB".into());
-        input.buf = format!("{m}{m}", m = ATTACHMENT_MARKER);
-        input.cpos = input.buf.len();
-        input.attachment_ids = vec![id1, id2];
+        input.win.edit_buf.buf = format!("{m}{m}", m = ATTACHMENT_MARKER);
+        input.win.cpos = input.buf.len();
+        input.win.edit_buf.attachment_ids = vec![id1, id2];
         let content = input.build_content();
         assert_eq!(content.image_count(), 2);
     }
@@ -1964,16 +2059,16 @@ mod tests {
     #[test]
     fn build_content_dedups_interleaved_image_references() {
         // Pattern: img A, img B, img A again. Parts should be [A, B].
-        let mut input = InputState::new();
+        let mut input = PromptState::new();
         let id_a = input
             .store
             .insert_image("a.png".into(), "data:image/png;base64,AAA".into());
         let id_b = input
             .store
             .insert_image("b.png".into(), "data:image/png;base64,BBB".into());
-        input.buf = format!("{m}x{m}y{m}", m = ATTACHMENT_MARKER);
-        input.cpos = input.buf.len();
-        input.attachment_ids = vec![id_a, id_b, id_a];
+        input.win.edit_buf.buf = format!("{m}x{m}y{m}", m = ATTACHMENT_MARKER);
+        input.win.cpos = input.buf.len();
+        input.win.edit_buf.attachment_ids = vec![id_a, id_b, id_a];
         let content = input.build_content();
         assert_eq!(content.image_count(), 2);
     }

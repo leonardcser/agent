@@ -4,8 +4,8 @@
 # build
 cargo build
 
-# test
-cargo test --workspace
+# test (requires `cargo install cargo-nextest` — much faster than `cargo test`)
+cargo nextest run --workspace
 
 # format and lint
 cargo fmt && cargo clippy --workspace --all-targets -- -D warnings

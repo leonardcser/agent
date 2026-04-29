@@ -1,109 +1,102 @@
 use super::*;
 
 use crate::keymap::{self, KeyAction};
-use crossterm::{event::Event, terminal};
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture, Event},
+    terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
+    ExecutableCommand,
+};
 use std::time::{Duration, Instant};
 
-/// Coalesce-window for repeated `Action::PurgeRedraw` (Ctrl+L) presses.
-/// A second press inside this window is dropped — the first press has
-/// already done a full purge+repaint and the screen state hasn't had
-/// time to drift.
-const PURGE_REDRAW_DEBOUNCE: Duration = Duration::from_millis(10);
-
 impl App {
-    /// Run a Ctrl+L purge+redraw, suppressing repeats inside the
-    /// debounce window so a held key or rapid double-press only fires
-    /// the expensive full-screen repaint once.
-    pub(super) fn purge_redraw_debounced(&mut self) {
-        let now = Instant::now();
-        if let Some(last) = self.last_purge_redraw {
-            if now.duration_since(last) < PURGE_REDRAW_DEBOUNCE {
-                return;
-            }
-        }
-        self.last_purge_redraw = Some(now);
-        self.screen.redraw();
-    }
-
-    fn apply_settings_result(&mut self, s: &crate::input::SettingsState) {
-        self.set_settings(s.clone());
-    }
-
     // ── Terminal event dispatch ───────────────────────────────────────────
 
     /// Handle a single terminal event, potentially starting/stopping agents.
     /// Returns `true` if the app should quit.
-    pub(super) fn dispatch_terminal_event(
-        &mut self,
-        ev: Event,
-        agent: &mut Option<TurnState>,
-        t: &mut Timers,
-        active_dialog: &mut Option<Box<dyn render::Dialog>>,
-    ) -> bool {
+    pub(super) fn dispatch_terminal_event(&mut self, ev: Event, t: &mut Timers) -> bool {
         if matches!(ev, Event::FocusGained | Event::FocusLost) {
-            self.screen.set_focused(matches!(ev, Event::FocusGained));
+            let focused = matches!(ev, Event::FocusGained);
+            if self.term_focused != focused {
+                self.term_focused = focused;
+            }
             return false;
         }
 
-        // Route events to the active dialog if one is showing.
-        if active_dialog.is_some() {
-            // Terminal resize: full clear + redraw screen + redraw dialog.
+        // Global chord layer: these keys fire in every focus context
+        // (prompt, content, cmdline, or any float). Intercepted before
+        // focus-specific routing so no handler below can swallow them.
+        if let Event::Key(KeyEvent {
+            code, modifiers, ..
+        }) = &ev
+        {
+            // Global shortcuts only fire when no float is focused —
+            // otherwise the float's keymap (e.g. Confirm's BackTab
+            // handler) gets first dibs.
+            if self.ui.focused_float().is_none() {
+                let ctx = self.input.key_context(self.agent.is_some(), false);
+                match keymap::lookup(*code, *modifiers, &ctx) {
+                    Some(KeyAction::ToggleMode) => {
+                        self.toggle_mode();
+                        return false;
+                    }
+                    Some(KeyAction::CycleReasoning) => {
+                        self.cycle_reasoning();
+                        return false;
+                    }
+                    Some(KeyAction::Redraw) => {
+                        self.ui.force_redraw();
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Compositor float: when a float window is focused, route keys
+        // through the compositor. The Callbacks registry handles
+        // per-window keymaps, auto-dispatches widget actions into
+        // `WinEvent::Submit/Dismiss`, and any Rust callbacks queue
+        // `AppOp`s drained below. Mouse events fall through so the
+        // regular `handle_mouse` path can run wheel/scrollbar logic
+        // over the float's rect.
+        if self.ui.focused_float().is_some() {
             if let Event::Resize(w, h) = ev {
                 self.handle_resize(w, h);
-                active_dialog.as_mut().unwrap().handle_resize();
                 return false;
             }
-            // BackTab (shift-tab): toggle mode. If the new mode auto-allows
-            // the pending tool call, accept the dialog automatically.
-            if matches!(
-                ev,
-                Event::Key(KeyEvent {
-                    code: KeyCode::BackTab,
-                    ..
-                })
-            ) {
-                self.toggle_mode();
-                if let Some(ctx) = self.confirm_context.take() {
-                    if self
-                        .permissions
-                        .decide(self.mode, &ctx.tool_name, &ctx.args, false)
-                        == Decision::Allow
-                    {
-                        active_dialog.take();
-                        self.finalize_dialog_close();
-                        self.screen
-                            .set_active_status(&ctx.call_id, ToolStatus::Pending);
-                        self.send_permission_decision(ctx.request_id, true, None);
-                    } else {
-                        // Mode changed but still needs confirmation — keep dialog open.
-                        self.confirm_context = Some(ctx);
+            if let Event::Key(k) = ev {
+                // Cmdline needs App access for command execution
+                // (CommandAction::Quit propagation, Lua completer).
+                // Intercept Enter / Esc / Tab / Ctrl+C before the
+                // generic compositor dispatch; everything else flows
+                // into the `ui::Cmdline` component for text editing.
+                if self.cmdline_is_focused() {
+                    if let Some(quit) = self.cmdline_preintercept(k) {
+                        return quit;
                     }
                 }
+                let KeyEvent {
+                    code, modifiers, ..
+                } = k;
+                let lua = &self.lua;
+                let mut lua_invoke =
+                    |handle: ui::LuaHandle,
+                     win: ui::WinId,
+                     payload: &ui::Payload,
+                     panels: &[ui::PanelSnapshot]| {
+                        lua.queue_invocation(handle, win, payload, panels);
+                    };
+                let _ = self
+                    .ui
+                    .handle_key_with_lua(code, modifiers, &mut lua_invoke);
+                self.flush_lua_callbacks();
                 return false;
             }
-            if let Event::Key(KeyEvent {
-                code, modifiers, ..
-            }) = ev
-            {
-                // Ctrl+L: full redraw (same as outside a dialog).
-                if code == KeyCode::Char('l') && modifiers.contains(KeyModifiers::CONTROL) {
-                    self.purge_redraw_debounced();
-                    active_dialog.as_mut().unwrap().mark_dirty();
-                    return false;
-                }
-                let mut d = active_dialog.take().unwrap();
-                if let Some(result) = d.handle_key(code, modifiers) {
-                    // Sync kill ring back from dialog.
-                    if let Some(kr) = d.kill_ring() {
-                        self.input.set_kill_ring(kr.to_string());
-                    }
-                    self.handle_dialog_result(result, agent);
-                    self.input.restore_stash();
-                } else {
-                    *active_dialog = Some(d);
-                }
+            if !matches!(ev, Event::Mouse(_)) {
+                return false;
             }
-            return false;
+            // Fallthrough: mouse events go to the regular dispatch
+            // below so wheel + scrollbar drag work on floats.
         }
 
         // Ctrl+C while exec is running → kill it.
@@ -123,19 +116,21 @@ impl App {
             return false;
         }
 
-        let outcome = if agent.is_some() {
+        let outcome = if self.agent.is_some() {
             self.handle_event_running(ev, t)
         } else {
             self.handle_event_idle(ev, t)
         };
 
+        // Fire `WinEvent::TextChanged` on the prompt window if the buffer
+        // changed during this event. Lua plugins use this to drive
+        // filter-as-you-type (e.g. `smelt.prompt.open_picker`).
+        self.emit_prompt_text_changed_if_dirty();
+
         match outcome {
             EventOutcome::Noop | EventOutcome::Redraw => false,
             EventOutcome::Quit => {
-                if agent.is_some() {
-                    self.finish_turn(true);
-                    *agent = None;
-                }
+                self.discard_turn(true);
                 true
             }
             EventOutcome::CancelAgent => {
@@ -146,10 +141,7 @@ impl App {
                         "reason": "user_cancel",
                     }),
                 );
-                if agent.is_some() {
-                    self.finish_turn(true);
-                    *agent = None;
-                }
+                self.discard_turn(true);
                 false
             }
             EventOutcome::InterruptWithQueued => {
@@ -158,10 +150,7 @@ impl App {
                 // We must save the queued messages before finish_turn
                 // because the cancel path dumps them into the input buffer.
                 let remaining = std::mem::take(&mut self.queued_messages);
-                if agent.is_some() {
-                    self.finish_turn(true);
-                    *agent = None;
-                }
+                self.discard_turn(true);
                 self.queued_messages = remaining;
                 false
             }
@@ -174,49 +163,10 @@ impl App {
                     }),
                 );
                 self.reset_session();
-                *agent = None;
-                false
-            }
-            EventOutcome::MenuResult(result) => {
-                match result {
-                    MenuResult::Settings(ref s) => {
-                        self.apply_settings_result(s);
-                        let items = crate::completer::Completer::settings_items(s);
-                        if let Some(comp) = self.input.completer.as_mut() {
-                            if comp.kind == crate::completer::CompleterKind::Settings {
-                                comp.refresh_items(items);
-                            }
-                        }
-                    }
-                    MenuResult::ModelSelect(ref key) => {
-                        self.apply_model(key);
-                        self.screen.erase_prompt();
-                    }
-                    MenuResult::ThemeSelect(value) => {
-                        // Live preview already set the in-memory accent;
-                        // mirror it explicitly so settings.json and the
-                        // atomic stay in lockstep regardless of preview
-                        // state.
-                        self.apply_accent(value);
-                    }
-                    MenuResult::ColorSelect(_) => {
-                        self.screen.redraw();
-                    }
-                    MenuResult::Stats | MenuResult::Cost | MenuResult::Dismissed => {}
-                }
-                let is_settings = matches!(&result, MenuResult::Settings(_));
-                if !is_settings {
-                    self.input.restore_stash();
-                }
-                self.screen.mark_dirty();
-                false
-            }
-            EventOutcome::OpenDialog(dlg) => {
-                self.open_dialog(dlg, active_dialog);
+                self.agent = None;
                 false
             }
             EventOutcome::Exec(rx, kill) => {
-                self.screen.erase_prompt();
                 self.exec_rx = Some(rx);
                 self.exec_kill = Some(kill);
                 false
@@ -234,11 +184,7 @@ impl App {
                     let text = content.text_content();
                     if !text.is_empty() {
                         self.queued_messages.push(text);
-                        self.screen.erase_prompt();
-                        self.screen.mark_dirty();
                     }
-                } else if self.try_btw_submit(&content, &display) {
-                    // handled
                 } else {
                     let text = content.text_content();
                     let has_images = content.image_count() > 0;
@@ -248,13 +194,7 @@ impl App {
                         } else {
                             self.process_input(&text)
                         };
-                        if self.apply_input_outcome(
-                            outcome,
-                            content,
-                            &display,
-                            agent,
-                            active_dialog,
-                        ) {
+                        if self.apply_input_outcome(outcome, content, &display) {
                             return true;
                         }
                     } else if !self.queued_messages.is_empty() {
@@ -264,25 +204,19 @@ impl App {
                         if let Some(cmd) =
                             crate::custom_commands::resolve(queued.trim(), self.multi_agent)
                         {
-                            self.screen.erase_prompt();
-                            *agent = Some(self.begin_custom_command_turn(cmd));
+                            let turn = self.begin_custom_command_turn(cmd);
+                            self.agent = Some(turn);
                         } else {
                             let outcome = self.process_input(&queued);
                             let content = Content::text(queued.clone());
-                            if self.apply_input_outcome(
-                                outcome,
-                                content,
-                                &queued,
-                                agent,
-                                active_dialog,
-                            ) {
+                            if self.apply_input_outcome(outcome, content, &queued) {
                                 return true;
                             }
                         }
                     }
                 }
-                // Restore stash unless a modal/dialog was opened (it will restore on close).
-                if !self.input.has_modal() && active_dialog.is_none() {
+                // Restore stash unless a dialog was opened (it will restore on close).
+                if self.ui.focused_float().is_none() {
                     self.input.restore_stash();
                 }
                 false
@@ -292,29 +226,123 @@ impl App {
 
     // ── Idle event handler ───────────────────────────────────────────────
 
-    fn handle_event_idle(&mut self, ev: Event, t: &mut Timers) -> EventOutcome {
+    /// Shared event-routing preamble for both the idle and
+    /// agent-running paths. Handles the routes that behave identically
+    /// regardless of whether the agent is streaming: paste (drops the
+    /// prompt prediction), resize, mouse (wheel, click, drag-select,
+    /// scrollbar), `Ctrl-W` pane chord, transcript-window key
+    /// routing when `Content` has focus, and dialog/overlay keys.
+    ///
+    /// Shared key/event preamble for both idle and running paths.
+    ///
+    /// Returns `Some(outcome)` when the event was fully handled;
+    /// `None` when the caller should continue with path-specific
+    /// logic (esc handling, keymap lookups, `PromptState`).
+    ///
+    /// Dispatch priority (first match wins):
+    ///  1. Resize / mouse — structural events, always handled
+    ///  2. Lua keymaps    — user-registered chords (`vim.keymap.set`)
+    ///  3. Pane chords    — Ctrl-W window management
+    ///  4. Cmdline `:`    — opens nvim-style command line (normal mode only)
+    ///  5. Content focus  — transcript navigation when content pane is focused
+    ///  6. Overlay keys   — notifications, btw block dismiss
+    fn dispatch_common(&mut self, ev: &Event, t: &mut Timers) -> Option<EventOutcome> {
         if matches!(ev, Event::Paste(_)) {
             self.input_prediction = None;
         }
-        if let Event::Resize(w, h) = ev {
+        if let Event::Resize(w, h) = *ev {
             self.handle_resize(w, h);
-            return EventOutcome::Noop;
+            return Some(EventOutcome::Noop);
+        }
+        if let Event::Mouse(me) = *ev {
+            return Some(self.handle_mouse(me));
+        }
+        // Split-scoped ("buffer-local") Lua keymaps win over global
+        // ones — matches nvim's buffer-local > global priority. The
+        // focused split (prompt_input / transcript) is resolved inside
+        // `handle_key_with_lua` via the registered split layer-id map,
+        // the same dispatch path floats use. Used by
+        // `smelt.prompt.open_picker` to capture Enter / Esc / arrows
+        // while a picker is active.
+        if let Event::Key(k) = *ev {
+            if self.ui.focused_float().is_none() {
+                let KeyEvent {
+                    code, modifiers, ..
+                } = k;
+                let lua = &self.lua;
+                let mut lua_invoke =
+                    |handle: ui::LuaHandle,
+                     win: ui::WinId,
+                     payload: &ui::Payload,
+                     panels: &[ui::PanelSnapshot]| {
+                        lua.queue_invocation(handle, win, payload, panels);
+                    };
+                let result = self
+                    .ui
+                    .handle_key_with_lua(code, modifiers, &mut lua_invoke);
+                if matches!(result, ui::KeyResult::Consumed) {
+                    self.flush_lua_callbacks();
+                    return Some(EventOutcome::Noop);
+                }
+            }
         }
 
-        if let Some(outcome) = self.handle_overlay_keys(&ev) {
+        // Lua-registered keymaps get first crack at key events, matching
+        // nvim's `vim.keymap.set` priority. Unbound chords fall through
+        // to the built-in keymap dispatcher.
+        if let Event::Key(k) = *ev {
+            if let Some(chord) = crate::lua::chord_string(k) {
+                let vim_mode = self.current_vim_mode_label();
+                let handled = self.lua.run_keymap(&chord, vim_mode.as_deref());
+                if handled {
+                    self.flush_lua_callbacks();
+                    return Some(EventOutcome::Noop);
+                }
+            }
+        }
+        if let Some(outcome) = self.handle_pane_chord(ev, t) {
+            return Some(outcome);
+        }
+        // `:` opens the cmdline from any window, unless in insert mode.
+        if let Event::Key(KeyEvent {
+            code: KeyCode::Char(':'),
+            modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+            ..
+        }) = ev
+        {
+            let in_insert = match self.app_focus {
+                crate::app::AppFocus::Prompt => {
+                    !self.input.vim_enabled() || self.input.vim_in_insert_mode()
+                }
+                crate::app::AppFocus::Content => false,
+            };
+            if !in_insert {
+                self.open_cmdline();
+                return Some(EventOutcome::Noop);
+            }
+        }
+        if self.app_focus == crate::app::AppFocus::Content {
+            return Some(self.handle_event_app_history(ev));
+        }
+        if let Some(outcome) = self.handle_overlay_keys(ev) {
+            return Some(outcome);
+        }
+        None
+    }
+
+    fn handle_event_idle(&mut self, ev: Event, t: &mut Timers) -> EventOutcome {
+        if let Some(outcome) = self.dispatch_common(&ev, t) {
             return outcome;
         }
 
-        // Esc / double-Esc (skip when a modal menu is open — let it handle Esc)
-        if !self.input.has_modal()
-            && matches!(
-                ev,
-                Event::Key(KeyEvent {
-                    code: KeyCode::Esc,
-                    ..
-                })
-            )
-        {
+        // Esc / double-Esc
+        if matches!(
+            ev,
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc,
+                ..
+            })
+        ) {
             let in_normal = !self.input.vim_enabled() || !self.input.vim_in_insert_mode();
             if in_normal {
                 let double = t
@@ -324,27 +352,29 @@ impl App {
                     t.last_esc = None;
                     let restore_mode = t.esc_vim_mode.take();
 
-                    // Cancel in-flight compaction instead of opening rewind.
-                    if self.screen.working_throbber() == Some(render::Throbber::Compacting) {
+                    // Cancel in-flight compaction on double-Esc.
+                    if self.working.is_compacting() {
                         self.compact_epoch += 1;
-                        self.screen.set_throbber(render::Throbber::Interrupted);
-                        self.screen.notify("compaction cancelled".into());
+                        {
+                            self.working.finish(TurnOutcome::Interrupted);
+                        };
+                        self.notify("compaction cancelled".into());
                         if restore_mode == Some(vim::ViMode::Insert) {
                             self.input.set_vim_mode(vim::ViMode::Insert);
                         }
                         return EventOutcome::Noop;
                     }
 
-                    let turns = self.screen.user_turns();
-                    if turns.is_empty() {
+                    if self.user_turns().is_empty() {
                         return EventOutcome::Noop;
                     }
-                    self.screen.erase_prompt();
-                    let restore_vim_insert = restore_mode == Some(vim::ViMode::Insert);
-                    return EventOutcome::OpenDialog(Box::new(render::RewindDialog::new(
-                        turns,
-                        restore_vim_insert,
-                    )));
+                    let line = if restore_mode == Some(vim::ViMode::Insert) {
+                        "/rewind insert"
+                    } else {
+                        "/rewind"
+                    };
+                    super::commands::run_command(self, line);
+                    return EventOutcome::Redraw;
                 }
                 // Single Esc in normal mode — start timer.
                 t.last_esc = Some(Instant::now());
@@ -363,7 +393,7 @@ impl App {
             t.last_esc = None;
         }
 
-        // Keymap lookup for app-level actions (before delegating to InputState).
+        // Keymap lookup for app-level actions (before delegating to PromptState).
         if let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = ev
@@ -377,15 +407,14 @@ impl App {
                 match keymap::lookup(code, modifiers, &ctx) {
                     Some(KeyAction::AcceptGhostText) => {
                         let full = self.input_prediction.take().unwrap();
-                        self.input.buf = full.lines().next().unwrap_or(&full).to_string();
-                        self.input.cpos = self.input.buf.len();
-                        self.screen.mark_dirty();
+                        let line = full.lines().next().unwrap_or(&full).to_string();
+                        crate::api::buf::replace(&mut self.input, line, None);
                         return EventOutcome::Redraw;
                     }
                     Some(
                         KeyAction::ToggleMode
                         | KeyAction::CycleReasoning
-                        | KeyAction::PurgeRedraw
+                        | KeyAction::Redraw
                         | KeyAction::ToggleStash,
                     ) => {}
                     _ => {
@@ -394,50 +423,34 @@ impl App {
                 }
             }
 
-            if !self.input.has_modal() {
-                if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
-                    // Handle actions that need app-level context.
-                    match action {
-                        KeyAction::Quit => {
-                            return EventOutcome::Quit;
-                        }
-                        KeyAction::ClearBuffer => {
-                            // Dismiss menu/completer first, then clear buffer.
-                            if let Some(result) = self.input.dismiss_menu() {
-                                self.screen.mark_dirty();
-                                return EventOutcome::MenuResult(result);
-                            }
-                            if self.input.completer.is_some() {
-                                self.input.completer = None;
-                                self.screen.mark_dirty();
-                                return EventOutcome::Redraw;
-                            }
-                            t.last_ctrlc = Some(Instant::now());
-                            self.input.clear();
-                            self.screen.mark_dirty();
+            if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
+                // Handle actions that need app-level context.
+                match action {
+                    KeyAction::Quit => {
+                        return EventOutcome::Quit;
+                    }
+                    KeyAction::ClearBuffer => {
+                        // Dismiss completer first, then clear buffer.
+                        if self.input.completer.is_some() {
+                            self.input.close_completer();
                             return EventOutcome::Redraw;
                         }
-                        KeyAction::OpenHelp => {
-                            return EventOutcome::OpenDialog(Box::new(render::HelpDialog::new(
-                                self.input.vim_enabled(),
-                            )));
-                        }
-                        KeyAction::OpenHistorySearch => {
-                            if self.input.history_search_query().is_none() {
-                                self.input.open_history_search(&self.input_history);
-                                self.screen.mark_dirty();
-                            }
-                            return EventOutcome::Redraw;
-                        }
-                        _ => {
-                            // Delegate to InputState for editing/navigation actions.
-                        }
+                        t.last_ctrlc = Some(Instant::now());
+                        self.input.clear();
+                        return EventOutcome::Redraw;
+                    }
+                    KeyAction::OpenHelp => {
+                        super::commands::run_command(self, "/help");
+                        return EventOutcome::Redraw;
+                    }
+                    _ => {
+                        // Delegate to PromptState for editing/navigation actions.
                     }
                 }
             }
         }
 
-        // Delegate to InputState::handle_event (menu, completer, vim, editing).
+        // Delegate to PromptState::handle_event (menu, completer, vim, editing).
         let action = self.input.handle_event(ev, Some(&mut self.input_history));
         self.dispatch_input_action(action)
     }
@@ -445,15 +458,7 @@ impl App {
     // ── Running event handler ────────────────────────────────────────────
 
     fn handle_event_running(&mut self, ev: Event, t: &mut Timers) -> EventOutcome {
-        if matches!(ev, Event::Paste(_)) {
-            self.input_prediction = None;
-        }
-        if let Event::Resize(w, h) = ev {
-            self.handle_resize(w, h);
-            return EventOutcome::Noop;
-        }
-
-        if let Some(outcome) = self.handle_overlay_keys(&ev) {
+        if let Some(outcome) = self.dispatch_common(&ev, t) {
             return outcome;
         }
 
@@ -471,35 +476,23 @@ impl App {
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
                     KeyAction::CancelAgent => {
-                        // Dismiss menu/completer first, then cancel.
-                        if let Some(result) = self.input.dismiss_menu() {
-                            self.screen.mark_dirty();
-                            return EventOutcome::MenuResult(result);
-                        }
+                        // Dismiss completer first, then cancel.
                         if self.input.completer.is_some() {
-                            self.input.completer = None;
-                            self.screen.mark_dirty();
+                            self.input.close_completer();
                             return EventOutcome::Noop;
                         }
                         self.queued_messages.clear();
-                        self.screen.mark_dirty();
                         return EventOutcome::CancelAgent;
                     }
                     KeyAction::ClearBuffer => {
-                        // Dismiss menu/completer first, then clear.
-                        if let Some(result) = self.input.dismiss_menu() {
-                            self.screen.mark_dirty();
-                            return EventOutcome::MenuResult(result);
-                        }
+                        // Dismiss completer first, then clear.
                         if self.input.completer.is_some() {
-                            self.input.completer = None;
-                            self.screen.mark_dirty();
+                            self.input.close_completer();
                             return EventOutcome::Noop;
                         }
                         t.last_ctrlc = Some(Instant::now());
                         self.input.clear();
                         self.queued_messages.clear();
-                        self.screen.mark_dirty();
                         return EventOutcome::Noop;
                     }
                     _ => {
@@ -517,11 +510,6 @@ impl App {
                 ..
             })
         ) {
-            if self.input.has_modal() {
-                let action = self.input.handle_event(ev, None);
-                self.screen.mark_dirty();
-                return self.dispatch_input_action(action);
-            }
             match resolve_agent_esc(
                 self.input.vim_mode(),
                 !self.queued_messages.is_empty(),
@@ -530,7 +518,6 @@ impl App {
             ) {
                 EscAction::VimToNormal => {
                     self.input.handle_event(ev, None);
-                    self.screen.mark_dirty();
                 }
                 EscAction::Unqueue => {
                     let mut combined = self.queued_messages.join("\n");
@@ -538,16 +525,13 @@ impl App {
                         combined.push('\n');
                         combined.push_str(&self.input.buf);
                     }
-                    self.input.buf = combined;
-                    self.input.cpos = self.input.buf.len();
+                    crate::api::buf::replace(&mut self.input, combined, None);
                     self.queued_messages.clear();
-                    self.screen.mark_dirty();
                 }
                 EscAction::Cancel { restore_vim } => {
                     if let Some(mode) = restore_vim {
                         self.input.set_vim_mode(mode);
                     }
-                    self.screen.mark_dirty();
                     return EventOutcome::CancelAgent;
                 }
                 EscAction::StartTimer => {}
@@ -555,18 +539,15 @@ impl App {
             return EventOutcome::Noop;
         }
 
-        // Everything else → InputState::handle_event (type-ahead with history).
-        match self.input.handle_event(ev, Some(&mut self.input_history)) {
+        // Everything else → PromptState::handle_event (type-ahead with history).
+        let input_action = self.input.handle_event(ev, Some(&mut self.input_history));
+        match input_action {
             Action::Submit {
                 mut content,
                 mut display,
             } => {
                 // Ingress: scrub secrets before queueing or running commands.
                 self.redact_user_submission(&mut content, &mut display);
-                if self.try_btw_submit(&content, &display) {
-                    self.screen.mark_dirty();
-                    return EventOutcome::Noop;
-                }
                 let text = content.text_content();
                 if let Some(outcome) = self.try_command_while_running(text.trim()) {
                     return outcome;
@@ -574,7 +555,6 @@ impl App {
                 if !text.is_empty() {
                     self.queued_messages.push(text);
                 }
-                self.screen.mark_dirty();
             }
             Action::SubmitEmpty => {
                 if !self.queued_messages.is_empty() {
@@ -584,27 +564,19 @@ impl App {
             Action::ToggleMode => {
                 self.toggle_mode();
             }
-            Action::Redraw => {
-                self.screen.mark_dirty();
-            }
+            Action::Redraw => {}
             Action::CycleReasoning => {
                 self.cycle_reasoning();
             }
             Action::EditInEditor => {
                 self.edit_in_editor();
-                self.screen.redraw();
             }
             Action::CenterScroll => {
-                self.screen.center_input_scroll();
+                self.input.win.pending_recenter = true;
             }
             Action::NotifyError(msg) => {
-                self.screen.notify_error(msg);
-                self.screen.mark_dirty();
+                self.notify_error(msg);
             }
-            Action::PurgeRedraw => {
-                self.purge_redraw_debounced();
-            }
-            Action::MenuResult(result) => return EventOutcome::MenuResult(result),
             Action::Noop | Action::Resize { .. } => {}
         }
         EventOutcome::Noop
@@ -617,7 +589,6 @@ impl App {
         match action {
             Action::Submit { content, display } => EventOutcome::Submit { content, display },
             Action::SubmitEmpty => EventOutcome::Noop,
-            Action::MenuResult(result) => EventOutcome::MenuResult(result),
             Action::ToggleMode => {
                 self.toggle_mode();
                 EventOutcome::Redraw
@@ -628,11 +599,10 @@ impl App {
             }
             Action::EditInEditor => {
                 self.edit_in_editor();
-                self.screen.redraw();
                 EventOutcome::Noop
             }
             Action::CenterScroll => {
-                self.screen.center_input_scroll();
+                self.input.win.pending_recenter = true;
                 EventOutcome::Noop
             }
             Action::Resize {
@@ -642,16 +612,9 @@ impl App {
                 self.handle_resize(w as u16, h as u16);
                 EventOutcome::Noop
             }
-            Action::Redraw => {
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            Action::PurgeRedraw => {
-                self.purge_redraw_debounced();
-                EventOutcome::Noop
-            }
+            Action::Redraw => EventOutcome::Redraw,
             Action::NotifyError(msg) => {
-                self.screen.notify_error(msg);
+                self.notify_error(msg);
                 EventOutcome::Redraw
             }
             Action::Noop => EventOutcome::Noop,
@@ -666,38 +629,41 @@ impl App {
         let tmp = match tempfile::Builder::new().suffix(".md").tempfile() {
             Ok(f) => f,
             Err(e) => {
-                self.screen.notify_error(format!("tmpfile: {e}"));
+                self.notify_error(format!("tmpfile: {e}"));
                 return;
             }
         };
         if let Err(e) = std::fs::write(tmp.path(), &self.input.buf) {
-            self.screen.notify_error(format!("write tmp: {e}"));
+            self.notify_error(format!("write tmp: {e}"));
             return;
         }
 
-        // Suspend raw mode so the editor gets a normal terminal.
+        // Suspend TUI so the editor gets a normal terminal.
+        let _ = io::stdout().execute(DisableMouseCapture);
+        let _ = io::stdout().execute(EnableLineWrap);
+        let _ = io::stdout().execute(LeaveAlternateScreen);
         terminal::disable_raw_mode().ok();
 
         let status = std::process::Command::new(&editor).arg(tmp.path()).status();
 
-        // Resume raw mode.
+        // Resume TUI.
         terminal::enable_raw_mode().ok();
+        let _ = io::stdout().execute(EnterAlternateScreen);
+        let _ = io::stdout().execute(DisableLineWrap);
+        let _ = io::stdout().execute(EnableMouseCapture);
 
         match status {
             Ok(s) if s.success() => match std::fs::read_to_string(tmp.path()) {
                 Ok(new) => {
-                    self.input.save_undo();
-                    self.input.buf = new;
-                    self.input.cpos = self.input.buf.len();
+                    crate::api::buf::replace(&mut self.input, new, None);
                 }
-                Err(e) => self.screen.notify_error(format!("read tmp: {e}")),
+                Err(e) => self.notify_error(format!("read tmp: {e}")),
             },
             Ok(s) => {
-                self.screen
-                    .notify_error(format!("{editor} exited with {s}"));
+                self.notify_error(format!("{editor} exited with {s}"));
             }
             Err(e) => {
-                self.screen.notify_error(format!("{editor}: {e}"));
+                self.notify_error(format!("{editor}: {e}"));
             }
         }
     }
@@ -709,95 +675,20 @@ impl App {
         let width_changed = w != self.last_width;
         self.last_width = w;
         self.last_height = h;
+        self.ui.set_terminal_size(w, h);
         if width_changed {
-            self.screen.redraw();
-        } else {
-            // Height-only: block layouts are still valid at this width.
-            // Soft redraw skips Clear::Purge and reuses cached layouts.
-            self.screen.redraw();
+            self.invalidate_for_width(w);
         }
     }
 
-    /// Handle overlay keys (notification dismiss + btw scroll/dismiss).
+    /// Handle overlay keys (notification dismiss).
     /// Returns `Some(EventOutcome)` if the event was consumed.
     fn handle_overlay_keys(&mut self, ev: &Event) -> Option<EventOutcome> {
-        if matches!(ev, Event::Key(_)) && self.screen.has_notification() {
-            self.screen.dismiss_notification();
-        }
-
-        if self.screen.has_btw() {
-            if let Event::Key(KeyEvent {
-                code, modifiers, ..
-            }) = ev
-            {
-                use crate::keymap::{nav_lookup, NavAction};
-                match nav_lookup(*code, *modifiers) {
-                    Some(NavAction::Down) => {
-                        self.screen.btw_scroll(1);
-                        return Some(EventOutcome::Noop);
-                    }
-                    Some(NavAction::Up) => {
-                        self.screen.btw_scroll(-1);
-                        return Some(EventOutcome::Noop);
-                    }
-                    Some(NavAction::PageDown) => {
-                        let half = (render::term_height() / 2).max(1) as isize;
-                        self.screen.btw_scroll(half);
-                        return Some(EventOutcome::Noop);
-                    }
-                    Some(NavAction::PageUp) => {
-                        let half = (render::term_height() / 2).max(1) as isize;
-                        self.screen.btw_scroll(-half);
-                        return Some(EventOutcome::Noop);
-                    }
-                    Some(NavAction::Dismiss) => {
-                        self.screen.dismiss_btw();
-                        return Some(EventOutcome::Noop);
-                    }
-                    _ => {
-                        // Let transparent actions (mode toggles, redraw)
-                        // pass through without dismissing.
-                        let ctx = self.input.key_context(false, false);
-                        match keymap::lookup(*code, *modifiers, &ctx) {
-                            Some(
-                                KeyAction::ToggleMode
-                                | KeyAction::CycleReasoning
-                                | KeyAction::PurgeRedraw
-                                | KeyAction::ToggleStash,
-                            ) => return None,
-                            _ => {
-                                self.screen.dismiss_btw();
-                                return Some(EventOutcome::Noop);
-                            }
-                        }
-                    }
-                }
-            }
+        if matches!(ev, Event::Key(_)) && self.notification.is_some() {
+            self.dismiss_notification();
         }
 
         None
-    }
-
-    /// Try to handle a submitted input as a `/btw` command.
-    /// Returns `true` if it was handled.
-    fn try_btw_submit(&mut self, content: &Content, display: &str) -> bool {
-        let text = content.text_content();
-        let trimmed = text.trim();
-        if !trimmed.starts_with("/btw ") {
-            return false;
-        }
-        let question_full = trimmed[5..].trim().to_string();
-        if question_full.is_empty() {
-            return true; // handled (as no-op)
-        }
-        let display_q = display
-            .strip_prefix("/btw ")
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| question_full.clone());
-        let labels = content.image_labels();
-        self.input_history.push(text);
-        self.start_btw(question_full, display_q, labels);
-        true
     }
 
     // ── Input processing (commands, settings, rewind, shell) ─────────────
@@ -812,7 +703,7 @@ impl App {
 
         // Skip shell escape for pasted content
         let is_from_paste = self.input.skip_shell_escape();
-        match self.handle_command(trimmed) {
+        match super::commands::run_command(self, trimmed) {
             CommandAction::Quit => return InputOutcome::Quit,
             CommandAction::CancelAndClear => {
                 return InputOutcome::CancelAndClear;
@@ -820,7 +711,6 @@ impl App {
             CommandAction::Compact { instructions } => {
                 return InputOutcome::Compact { instructions }
             }
-            CommandAction::OpenDialog(dlg) => return InputOutcome::OpenDialog(dlg),
             CommandAction::Exec(rx, kill) => return InputOutcome::Exec(rx, kill),
             CommandAction::Continue => {}
         }
@@ -837,61 +727,135 @@ impl App {
             return InputOutcome::Continue;
         }
 
-        // Regular user message → start agent
+        // Fire InputSubmit event so Lua plugins can observe/log.
+        let input_text = trimmed.to_string();
+        self.lua
+            .emit_data(crate::lua::AutocmdEvent::InputSubmit, |lua| {
+                let t = lua.create_table()?;
+                t.set("text", input_text)?;
+                Ok(t)
+            });
+        self.flush_lua_callbacks();
+
         InputOutcome::StartAgent
     }
 
     // ── Tick ─────────────────────────────────────────────────────────────
 
-    /// Render a dialog-mode frame into the provided output buffer.
-    /// Returns `(redirtied, placement)` — the bool indicates whether
-    /// content was drawn (caller should re-dirty the dialog), and the
-    /// placement carries the row budget for the dialog.
-    pub(super) fn tick_dialog(
-        &mut self,
-        out: &mut render::RenderOut,
-        dialog_height: u16,
-        constrain: bool,
-    ) -> (bool, Option<render::DialogPlacement>) {
-        let _perf = crate::perf::begin("app:tick");
-        let w = render::term_width();
-        self.screen.set_dialog_open(true);
-        self.screen.set_constrain_dialog(constrain);
-        self.screen.draw_frame(out, w, None, Some(dialog_height))
+    /// Viewport rows available for the content pane. Uses the prompt's
+    /// actual rendered height from the previous frame plus the 1-row
+    /// gap, so multi-line prompts (and completion menus) don't cause
+    /// the scroll math to overshoot.
+    pub(super) fn viewport_rows_estimate(&self) -> u16 {
+        self.layout.viewport_rows().max(1)
     }
 
-    /// Render a full-mode frame (content + prompt) in its own sync frame.
-    pub(super) fn tick_prompt(&mut self, agent_running: bool) {
-        let _perf = crate::perf::begin("app:tick");
-        // Advance the spinner before the dirty check — otherwise the
-        // status bar spinner stops animating during idle ticks where
-        // nothing else marks the screen dirty.
-        self.screen.update_spinner();
-        // Skip the entire frame/flush cycle when nothing changed. Avoids
-        // issuing BeginSync + EndSync + flush on every idle tick.
-        if !self.screen.needs_draw(false) {
+    /// Snapshot app state into the Lua ops context and return the
+    /// vim_mode + focused_window for callers that need them locally.
+    /// Build the common `DialogConfig` used by all built-in dialogs
+    /// (accent top rule, bar background, scrollbar colors, hints row).
+    pub(crate) fn builtin_dialog_config(
+        &self,
+        hint_text: Option<String>,
+        dismiss_keys: Vec<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+    ) -> ui::DialogConfig {
+        let accent = ui::grid::Style {
+            fg: Some(crate::theme::accent()),
+            ..Default::default()
+        };
+        let bg = ui::grid::Style {
+            bg: Some(crossterm::style::Color::Black),
+            ..Default::default()
+        };
+        let separator = ui::grid::Style {
+            fg: Some(crate::theme::bar()),
+            ..Default::default()
+        };
+        let hints = hint_text.map(|text| {
+            let mut sb = ui::StatusBar::new().with_bg(bg);
+            sb.set_left(vec![ui::StatusSegment::styled(
+                text,
+                ui::grid::Style { dim: true, ..bg },
+            )]);
+            sb
+        });
+        ui::DialogConfig {
+            accent_style: accent,
+            separator_style: separator,
+            background_style: bg,
+            scrollbar_track_style: ui::grid::Style {
+                bg: Some(crate::theme::scrollbar_track()),
+                ..Default::default()
+            },
+            scrollbar_thumb_style: ui::grid::Style {
+                bg: Some(crate::theme::scrollbar_thumb()),
+                ..Default::default()
+            },
+            // Sourced from `Ui::selection_style()` at dialog open time
+            // — leave default here so `dialog_open` overrides.
+            selection_style: ui::grid::Style::default(),
+            dismiss_keys,
+            hints,
+        }
+    }
+
+    pub(crate) fn close_float(&mut self, win_id: ui::WinId) {
+        for id in self.ui.win_close(win_id) {
+            self.lua.remove_callback(id);
+        }
+    }
+
+    /// Close the focused float if it doesn't block the agent (e.g. Ps,
+    /// Permissions, Resume). Used before opening a blocking dialog so
+    /// only one float is visible at a time. Fires `WinEvent::Dismiss`
+    /// so the dialog's callbacks can flush any pending state (e.g.
+    /// Permissions syncs its edits before close).
+    pub(super) fn close_focused_non_blocking_float(&mut self) {
+        let Some(win) = self.ui.focused_float() else {
+            return;
+        };
+        if self.ui.float_config(win).is_some_and(|c| c.blocks_agent) {
             return;
         }
-        let w = render::term_width();
-        let show_queued = agent_running || self.is_compacting();
-        self.screen.set_dialog_open(false);
-
-        let (queued, prediction): (&[String], Option<&str>) = if show_queued {
-            (&self.queued_messages, None)
-        } else {
-            (&[], self.input_prediction.as_deref())
+        let lua = &self.lua;
+        let mut lua_invoke = |handle: ui::LuaHandle,
+                              win: ui::WinId,
+                              payload: &ui::Payload,
+                              panels: &[ui::PanelSnapshot]| {
+            lua.queue_invocation(handle, win, payload, panels);
         };
-        let mut frame = render::Frame::begin(self.screen.backend());
-        self.screen.draw_frame(
-            &mut frame,
-            w,
-            Some(FramePrompt {
-                state: &self.input,
-                mode: self.mode,
-                queued,
-                prediction,
-            }),
-            None,
+        self.ui.dispatch_event(
+            win,
+            ui::WinEvent::Dismiss,
+            ui::Payload::None,
+            &mut lua_invoke,
         );
+        self.flush_lua_callbacks();
+    }
+
+    /// True when the focused float pauses engine-event drain
+    /// (Confirm / Question / Lua dialogs gate a pending tool call).
+    pub(super) fn focused_float_blocks_agent(&self) -> bool {
+        let Some(win) = self.ui.focused_float() else {
+            return false;
+        };
+        self.ui.float_config(win).is_some_and(|c| c.blocks_agent)
+    }
+
+    /// Snap the transcript cursor to the nearest selectable cell.
+    /// Called after every cursor motion to skip non-selectable gutters
+    /// and padding now that the cursor operates in display-text space.
+    pub(super) fn snap_transcript_cursor(&mut self) {
+        let rows = self.full_transcript_display_text(self.settings.show_thinking);
+        let snapped = self.snap_cpos_to_selectable(
+            &rows,
+            self.transcript_window.cpos,
+            self.settings.show_thinking,
+        );
+        if snapped != self.transcript_window.cpos {
+            self.transcript_window.cpos = snapped;
+            let viewport = self.viewport_rows_estimate();
+            self.transcript_window.resync(&rows, viewport);
+        }
     }
 }

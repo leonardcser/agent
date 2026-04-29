@@ -37,7 +37,7 @@ impl Tool for MessageAgentTool {
     fn execute<'a>(
         &'a self,
         args: HashMap<String, Value>,
-        _ctx: &'a ToolContext<'a>,
+        _ctx: &'a ToolContext,
     ) -> ToolFuture<'a> {
         Box::pin(async move {
             let message = str_arg(&args, "message");

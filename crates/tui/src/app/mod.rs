@@ -1,26 +1,60 @@
 mod agent;
-mod commands;
+pub mod commands;
+mod headless;
+mod transcript;
+pub(crate) mod transcript_cache;
+pub(crate) mod transcript_model;
+pub(crate) mod transcript_present;
+pub(crate) mod working;
 pub(crate) use commands::copy_to_clipboard;
+mod cmdline;
+mod content_keys;
+pub(crate) mod dialogs;
 mod events;
 mod history;
+mod lua_bridge;
+mod lua_handlers;
+mod mouse;
+mod pane_focus;
+mod render_loop;
+mod status_bar;
 
-use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, MenuResult};
-use crate::render::{
-    tool_arg_summary, ApprovalScope, Block, ConfirmChoice, ConfirmDialog, ConfirmRequest,
-    FramePrompt, QuestionDialog, ResumeEntry, Screen, ToolOutput, ToolStatus,
+pub use headless::{ColorMode, OutputFormat};
+
+/// Snapshot of a tracked agent's state, published by the main loop
+/// and consumed by the agents dialog.
+#[derive(Clone)]
+pub struct AgentSnapshot {
+    pub agent_id: String,
+    pub prompt: Arc<String>,
+    pub tool_calls: Vec<AgentToolEntry>,
+    pub context_tokens: Option<u32>,
+    pub cost_usd: f64,
+}
+
+/// Shared, live-updating list of agent snapshots.
+pub type SharedSnapshots = Arc<Mutex<Vec<AgentSnapshot>>>;
+
+pub(crate) use crate::app::transcript_model::{
+    AgentBlockStatus, ApprovalScope, Block, BlockId, ConfirmChoice, ConfirmRequest,
+    PermissionEntry, ToolOutput, ToolState, ToolStatus, ViewState,
 };
+pub(crate) use crate::app::working::{TurnOutcome, TurnPhase};
+use crate::input::{resolve_agent_esc, Action, EscAction, History, PromptState};
 use crate::session::Session;
-use crate::{render, session, state, vim};
+use crate::{content, session, state, vim};
+use engine::tools::tool_arg_summary;
 use engine::{permissions::Decision, EngineHandle, Permissions};
 use protocol::{Content, EngineEvent, Message, Mode, ReasoningEffort, Role, UiCommand};
 
 use crossterm::{
     cursor,
     event::{
-        self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
-        EventStream, KeyCode, KeyEvent, KeyModifiers,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, EventStream, KeyCode, KeyEvent, KeyModifiers,
     },
-    terminal, ExecutableCommand,
+    terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
+    ExecutableCommand,
 };
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -78,10 +112,20 @@ pub struct App {
     pub reasoning_cycle: Vec<ReasoningEffort>,
     pub mode: Mode,
     pub mode_cycle: Vec<Mode>,
-    pub screen: Screen,
+    /// Block history, tool states, layout cache — the committed transcript.
+    pub(crate) transcript: crate::content::transcript::Transcript,
+    /// Streaming parser state (active text/thinking/tool/agent/exec blocks).
+    pub(crate) parser: crate::content::stream_parser::StreamParser,
+    /// Buffer-backed projection of the transcript into a ui::Buffer.
+    pub(crate) transcript_projection: crate::content::transcript_buf::TranscriptProjection,
+    /// Plain-text snapshot of each visible row (top to bottom) captured
+    /// during `project_transcript_buffer`. Read by
+    /// `compute_transcript_cursor` to look up the glyph under the soft
+    /// cursor.
+    pub(crate) last_viewport_text: Vec<String>,
     pub history: Vec<Message>,
     pub input_history: History,
-    pub input: InputState,
+    pub input: PromptState,
     exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>>,
     exec_kill: Option<std::sync::Arc<tokio::sync::Notify>>,
     pub queued_messages: Vec<String>,
@@ -92,10 +136,68 @@ pub struct App {
     /// `RequestPermission`. The TUI writes to them when the user approves.
     pub runtime_approvals: Arc<std::sync::RwLock<engine::permissions::RuntimeApprovals>>,
     /// Current working directory (cached at startup).
-    cwd: String,
+    pub(crate) cwd: String,
     pub session: session::Session,
     pub shared_session: Arc<Mutex<Option<Session>>>,
     pub context_window: Option<u32>,
+    /// Latest observed input-token count for the active session.
+    pub context_tokens: Option<u32>,
+    /// Short task label (slug) shown on the status bar after the throbber.
+    pub task_label: Option<String>,
+    /// A permission dialog is waiting for the user to stop typing.
+    pub pending_dialog: bool,
+    /// Set by reducer handlers (e.g. `DomainOp::RunCommand` dispatching
+    /// `/quit`) to request the main loop break out on its next check.
+    pub(crate) pending_quit: bool,
+    /// Items returned by Lua-registered statusline sources. Appended
+    /// after the Rust-side built-in spans each frame; priority /
+    /// align_right on each item controls layout.
+    pub custom_status_items: Vec<content::status::StatusItem>,
+    /// Last error message reported per statusline source. Used to
+    /// rate-limit notifications so a perpetually-broken source doesn't
+    /// spam one toast per frame — only re-notify when the message
+    /// changes; clear the entry on a successful tick.
+    statusline_last_errors: HashMap<String, String>,
+    /// Open `ui::Notification` float, if one is visible. Dismissed on
+    /// any key (see `handle_overlay_keys`). `None` when no toast.
+    pub notification: Option<ui::WinId>,
+    /// Nvim-style `:` command line as a compositor float. `Some(win)`
+    /// while the prompt is active; the `ui::Cmdline` component on that
+    /// window owns all edit / history state. Events.rs pre-dispatches
+    /// Enter / Esc / Tab while the cmdline is focused and drives the
+    /// shared `cmdline_completer` + `cmdline_history` below.
+    pub cmdline_win: Option<ui::WinId>,
+    /// Persistent `:` history across open/close cycles. The component
+    /// only sees this as a snapshot at open time; on close / submit we
+    /// merge the component's working history back in.
+    pub cmdline_history: Vec<String>,
+    /// Shared completer instance for `:` command completion. Lazily
+    /// constructed on first Tab press (it queries Lua command names),
+    /// dropped on cmdline close.
+    pub cmdline_completer: Option<crate::completer::Completer>,
+    /// Terminal focus (FocusGained / FocusLost). Cursor is suppressed
+    /// when the terminal isn't focused, so input from other apps
+    /// doesn't draw a stale cursor in our window.
+    pub term_focused: bool,
+    /// Live-turn + last-turn state driving the status bar spinner and
+    /// result line. `begin(TurnPhase::...)` / `finish(TurnOutcome::...)`
+    /// are the write paths, mirrored from engine lifecycle events.
+    pub working: working::WorkingState,
+    /// Gutter reservation for the transcript window (left padding +
+    /// right scrollbar column).
+    pub transcript_gutters: crate::window::WindowGutters,
+    /// Last-computed viewport layout (status / transcript / prompt
+    /// rows). Updated each frame in `render_normal`; read by mouse
+    /// hit-testing and viewport-rows estimation.
+    pub layout: content::layout::LayoutState,
+    /// Buffer viewport for the prompt input text area, recorded after
+    /// paint. Used by scrollbar click/drag and input-focus mouse
+    /// routing.
+    pub(crate) prompt_viewport: Option<ui::WindowViewport>,
+    /// Buffer viewport for the transcript window, recorded after each
+    /// render. Used by mouse hit-testing, transcript cursor positioning,
+    /// and focus-mouse routing.
+    pub(crate) transcript_viewport: Option<ui::WindowViewport>,
     pub settings: state::ResolvedSettings,
     pub multi_agent: bool,
     /// Human-readable name for this agent.
@@ -103,13 +205,21 @@ pub struct App {
     /// All tracked subagents (blocking and background).
     pub agents: Vec<TrackedAgent>,
     /// Shared agent snapshots for live dialog updates.
-    pub agent_snapshots: render::SharedSnapshots,
+    pub agent_snapshots: crate::app::SharedSnapshots,
     pub available_models: Vec<crate::config::ResolvedModel>,
     pub engine: EngineHandle,
-    permissions: Arc<Permissions>,
-    /// Context for the currently-open confirm dialog, used to re-check
-    /// permissions when the user toggles mode.
-    confirm_context: Option<ConfirmContext>,
+    pub(crate) permissions: Arc<Permissions>,
+    /// The active turn's state, or `None` when the app is idle.
+    /// Owned by `App` so reducer handlers (`apply_ops`) can mutate
+    /// it directly rather than threading `&mut Option<TurnState>`
+    /// through every call chain.
+    pub(crate) agent: Option<TurnState>,
+    /// Pending Confirm dialog requests, keyed by Lua-side handle id.
+    /// `agent.rs` inserts a request before firing `smelt.confirm.open
+    /// (handle_id)`; the Lua dialog reads it back through Rust
+    /// primitives and removes it on resolve / dismiss.
+    pub(crate) confirm_requests: HashMap<u64, crate::app::dialogs::confirm::ConfirmEntry>,
+    pub(crate) next_confirm_handle: u64,
     /// Ghost text prediction for the input field.
     pub input_prediction: Option<String>,
     /// Monotonic counter to discard stale predictions.
@@ -124,10 +234,6 @@ pub struct App {
     pending_title: bool,
     last_width: u16,
     last_height: u16,
-    /// Last time `Action::PurgeRedraw` (Ctrl+L) actually fired a redraw.
-    /// Used to coalesce rapid double-presses within `PURGE_REDRAW_DEBOUNCE`
-    /// into a single full repaint.
-    last_purge_redraw: Option<Instant>,
     next_turn_id: u64,
     /// Incremented on rewind/clear/load to invalidate in-flight compactions.
     compact_epoch: u64,
@@ -155,17 +261,91 @@ pub struct App {
     /// Whether api_key_env was explicitly provided via CLI (takes precedence over session).
     cli_api_key_env_override: bool,
     startup_auth_error: Option<String>,
+    /// App-level focus (Prompt = editing buffer; History = navigating transcript).
+    pub app_focus: AppFocus,
+    /// Readonly pane showing the transcript. Owns its `Buffer`
+    /// (vim + kill ring + undo) and the viewport scroll / cursor
+    /// position.
+    pub transcript_window: ui::Window,
+    /// Last prompt-buffer text we dispatched a `TextChanged` event for.
+    /// After each event, if `input.buf` differs from this, we fire
+    /// `WinEvent::TextChanged` on `PROMPT_WIN` so Lua subscribers
+    /// (`smelt.win.on_event(prompt, "text_changed", …)`) get called.
+    pub last_prompt_text: String,
+    /// Last primary-mouse-Down time, cell, and click count. Successive
+    /// clicks on the same cell within a short window increment the
+    /// count: 2 → word-select, 3 → line-select.
+    pub last_click: Option<(Instant, u16, u16, u8)>,
+    /// Primary mouse button is held — we're mid-drag. The transcript
+    /// stays frozen from Down to Up so selected text can't shift
+    /// under the user's cursor while the agent streams new rows.
+    pub mouse_drag_active: bool,
+    /// When drag-autoscroll is currently engaged (cursor parked at a
+    /// viewport edge while the user holds mouse-1), the timestamp it
+    /// started. Used by `tick_drag_autoscroll` to ramp the scroll speed
+    /// up the longer the cursor stays at the edge.
+    pub drag_autoscroll_since: Option<std::time::Instant>,
+    /// When the initial mouse-down landed on a scrollbar (prompt,
+    /// transcript, or a dialog-panel float), every subsequent drag tick
+    /// re-maps the pointer row to a scroll offset instead of extending
+    /// a visual selection — even if the pointer wanders off the track
+    /// column. The stored value records which surface's scrollbar owns
+    /// the gesture.
+    pub drag_on_scrollbar: Option<ScrollbarDragTarget>,
+    /// Layer that captured the mouse on its last `Down(Left)` (because
+    /// `Component::handle_mouse` returned `KeyResult::Capture`).
+    /// Subsequent `Drag` and `Up` events route to that layer until
+    /// release, so a component (e.g. `TextInput` drag-select) can
+    /// extend a gesture even when the pointer wanders off its rect.
+    pub drag_on_layer: Option<ui::WinId>,
+    /// Prompt vim mode at the start of a mouse-drag. Set on mouse-down
+    /// inside the prompt viewport (only when vim is enabled) before the
+    /// drag enters `Visual`, restored on mouse-up so a drag from Insert
+    /// lands the user back in Insert rather than Normal. `None` outside
+    /// an active prompt drag.
+    pub prompt_drag_return_vim_mode: Option<crate::vim::ViMode>,
+    /// Lua runtime — loads `~/.config/smelt/init.lua`, dispatches
+    /// user-registered commands / keymaps / autocmds.
+    pub lua: crate::lua::LuaRuntime,
+    /// Extra instructions from AGENTS.md / config, injected into the system
+    /// prompt as a section. Set during app initialization.
+    pub extra_instructions: Option<String>,
+    /// Pre-rendered skills prompt section. Set during app initialization.
+    pub skill_section: Option<String>,
+    /// Multi-agent prompt config (agent identity, parent, siblings).
+    pub agent_prompt_config: Option<engine::AgentPromptConfig>,
+    /// Prompt sections built from app state. Rebuilt on mode changes.
+    pub prompt_sections: crate::prompt_sections::PromptSections,
+    pub ui: ui::Ui,
+    /// Stable `BufId` for the prompt input's styled display buffer.
+    /// Populated each frame by `compute_prompt` and read by the
+    /// `prompt_input` WindowView layer.
+    pub(super) input_display_buf: ui::BufId,
 }
 
-/// Retained subset of the confirm request for mode-toggle re-checks.
-struct ConfirmContext {
-    call_id: String,
-    tool_name: String,
-    args: HashMap<String, serde_json::Value>,
-    request_id: u64,
+/// Which pane currently holds focus (nvim-style window split).
+///
+/// * `Prompt` — the bottom input pane owns focus; vim Insert/Normal/Visual
+///   live inside and regular typing goes there.
+/// * `Content` — the transcript pane owns focus; motions target it and
+///   the prompt is frozen until focus returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppFocus {
+    Prompt,
+    Content,
 }
 
-struct TurnState {
+/// Which surface's scrollbar is driving an in-flight drag gesture.
+/// `Focus(_)` points at the transcript or prompt window; `DialogPanel`
+/// points at a specific buffer-backed panel inside a compositor float
+/// dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollbarDragTarget {
+    Focus(AppFocus),
+    DialogPanel { win: ui::WinId, panel: usize },
+}
+
+pub(super) struct TurnState {
     turn_id: u64,
     pending: Vec<PendingTool>,
     _perf: Option<crate::perf::Guard>,
@@ -184,85 +364,23 @@ enum EventOutcome {
         content: Content,
         display: String,
     },
-    MenuResult(MenuResult),
-    OpenDialog(Box<dyn render::Dialog>),
     Exec(
         tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
         std::sync::Arc<tokio::sync::Notify>,
     ),
 }
 
-enum CommandAction {
+pub enum CommandAction {
     Continue,
     Quit,
     CancelAndClear,
     Compact {
         instructions: Option<String>,
     },
-    OpenDialog(Box<dyn render::Dialog>),
     Exec(
         tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
         std::sync::Arc<tokio::sync::Notify>,
     ),
-}
-
-/// Arrange flat session entries into a tree: roots first (sorted by
-/// updated_at descending), each followed by its forks (also sorted).
-fn build_session_tree(mut flat: Vec<ResumeEntry>) -> Vec<ResumeEntry> {
-    use std::collections::HashMap;
-
-    // Index children by parent_id.
-    let mut children: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, entry) in flat.iter().enumerate() {
-        if let Some(ref pid) = entry.parent_id {
-            children.entry(pid.clone()).or_default().push(i);
-        }
-    }
-
-    // Collect root indices (no parent, or parent doesn't exist in the set).
-    let ids: std::collections::HashSet<&str> = flat.iter().map(|e| e.id.as_str()).collect();
-    let root_indices: Vec<usize> = flat
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| {
-            e.parent_id
-                .as_ref()
-                .is_none_or(|pid| !ids.contains(pid.as_str()))
-        })
-        .map(|(i, _)| i)
-        .collect();
-
-    // Recursively emit entries with depth.
-    let mut result = Vec::with_capacity(flat.len());
-    fn emit(
-        idx: usize,
-        depth: usize,
-        flat: &mut Vec<ResumeEntry>,
-        children: &HashMap<String, Vec<usize>>,
-        result: &mut Vec<ResumeEntry>,
-    ) {
-        let mut entry = flat[idx].clone();
-        entry.depth = depth;
-        let id = entry.id.clone();
-        result.push(entry);
-        if let Some(child_indices) = children.get(&id) {
-            let mut sorted: Vec<usize> = child_indices.clone();
-            sorted.sort_by(|a, b| {
-                let ta = flat[*b].updated_at_ms;
-                let tb = flat[*a].updated_at_ms;
-                ta.cmp(&tb)
-            });
-            for ci in sorted {
-                emit(ci, depth + 1, flat, children, result);
-            }
-        }
-    }
-
-    for ri in root_indices {
-        emit(ri, 0, &mut flat, &children, &mut result);
-    }
-
-    result
 }
 
 /// Check whether a command is allowed while the agent is running.
@@ -301,7 +419,6 @@ enum InputOutcome {
         instructions: Option<String>,
     },
     Quit,
-    OpenDialog(Box<dyn render::Dialog>),
     CustomCommand(Box<crate::custom_commands::CustomCommand>),
     Exec(
         tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
@@ -315,6 +432,9 @@ struct Timers {
     esc_vim_mode: Option<vim::ViMode>,
     last_ctrlc: Option<Instant>,
     last_keypress: Option<Instant>,
+    /// Pending `Ctrl-W` pane chord. When set, the next key consumes the
+    /// chord to navigate panes instead of flowing to input handling.
+    pending_pane_chord: Option<Instant>,
 }
 
 /// How long after the last keypress before we show a deferred permission dialog.
@@ -354,22 +474,14 @@ static NEXT_CHILD_REQUEST_ID: std::sync::atomic::AtomicU64 =
 
 /// A permission dialog deferred because the user was actively typing.
 enum DeferredDialog {
-    Confirm(ConfirmRequest),
-    AskQuestion {
-        args: HashMap<String, serde_json::Value>,
-        request_id: u64,
-    },
+    Confirm(Box<ConfirmRequest>),
 }
 
 // ── Supporting types ─────────────────────────────────────────────────────────
 
 pub enum SessionControl {
     Continue,
-    NeedsConfirm(ConfirmRequest),
-    NeedsAskQuestion {
-        args: HashMap<String, serde_json::Value>,
-        request_id: u64,
-    },
+    NeedsConfirm(Box<ConfirmRequest>),
     Done,
 }
 
@@ -409,20 +521,16 @@ impl App {
     ) -> Self {
         let saved = state::State::load();
         let mode = saved.mode();
-        let mut input = InputState::new();
-        if settings.vim {
+        let mut input = PromptState::new();
+        let vim_enabled = settings.vim;
+        if vim_enabled {
             input.set_vim_enabled(true);
         }
-        let theme_names: Vec<String> = crate::theme::PRESETS
-            .iter()
-            .map(|(n, _, _)| (*n).to_string())
-            .collect();
-        let model_keys: Vec<String> = available_models.iter().map(|m| m.key.clone()).collect();
-        input.command_arg_sources = vec![
-            ("/model".into(), model_keys),
-            ("/theme".into(), theme_names.clone()),
-            ("/color".into(), theme_names),
-        ];
+        // Arg sources for the CommandArg inline completer (type `/cmd arg`).
+        // The picker-style commands (`/model`, `/theme`, `/color`, `/settings`)
+        // now live in Lua plugins and open real `ui::Picker` windows via
+        // `smelt.prompt.open_picker`, so they're not listed here.
+        input.command_arg_sources = Vec::new();
         // Only load accent from state if not already set from config
         if crate::theme::accent_value() == crate::theme::DEFAULT_ACCENT {
             if let Some(accent) = saved.accent_color {
@@ -437,11 +545,6 @@ impl App {
         } else {
             reasoning_effort
         };
-        crate::completer::set_multi_agent(multi_agent);
-        let mut screen = Screen::new();
-        screen.set_model_label(model.clone());
-        screen.set_reasoning_effort(reasoning_effort);
-        screen.apply_settings(&settings);
 
         let cwd = std::env::current_dir()
             .ok()
@@ -450,6 +553,68 @@ impl App {
         // Runtime approvals are shared with the engine via Arc<RwLock>.
         // Load workspace rules from disk into them at startup.
         let runtime_approvals = engine.runtime_approvals();
+
+        let (ui, input_display_buf) = {
+            let (w, h) = terminal::size().unwrap_or((80, 24));
+            let mut ui = ui::Ui::new();
+            ui.set_terminal_size(w, h);
+            // One source of truth for selection bg: theme resolves it
+            // once, every Window-driven surface (transcript, prompt,
+            // dialog content panels) reads from here.
+            ui.set_selection_bg(crate::theme::selection_bg());
+            ui.set_layout(ui::LayoutTree::Split {
+                direction: ui::layout::Direction::Vertical,
+                children: vec![
+                    ui::LayoutTree::Leaf {
+                        name: "transcript".into(),
+                        constraint: ui::Constraint::Fill,
+                    },
+                    ui::LayoutTree::Leaf {
+                        name: "prompt".into(),
+                        constraint: ui::Constraint::Pct(25),
+                    },
+                ],
+            });
+            let input_display_buf = ui.buf_create(ui::buffer::BufCreateOpts {
+                modifiable: true,
+                buftype: ui::buffer::BufType::Prompt,
+            });
+            let transcript_view = crate::content::window_view::WindowView::new();
+            let prompt_chrome_view = crate::content::window_view::WindowView::new();
+            let prompt_input_view = crate::content::window_view::WindowView::new();
+            let status_bar = ui::StatusBar::new();
+            ui.add_layer(
+                "transcript",
+                Box::new(transcript_view),
+                ui::Rect::new(0, 0, w, h),
+                0,
+            );
+            ui.add_layer(
+                "prompt",
+                Box::new(prompt_chrome_view),
+                ui::Rect::new(0, 0, w, 1),
+                1,
+            );
+            ui.add_layer(
+                "prompt_input",
+                Box::new(prompt_input_view),
+                ui::Rect::new(0, 0, w, 1),
+                2,
+            );
+            // Status bar rides above all floats (default float zindex = 50;
+            // completer float uses 30, notification 40, cmdline 600). Picking
+            // 500 leaves headroom for any future always-above-status overlay.
+            ui.add_layer(
+                "status",
+                Box::new(status_bar),
+                ui::Rect::new(h.saturating_sub(1), 0, w, 1),
+                500,
+            );
+            ui.register_split("prompt_input", ui::PROMPT_WIN);
+            ui.register_split("transcript", ui::TRANSCRIPT_WIN);
+            ui.focus_layer("prompt_input");
+            (ui, input_display_buf)
+        };
 
         Self {
             model,
@@ -460,7 +625,18 @@ impl App {
             reasoning_cycle,
             mode,
             mode_cycle,
-            screen,
+            transcript: crate::content::transcript::Transcript::new(),
+            parser: crate::content::stream_parser::StreamParser::new(),
+            transcript_projection: crate::content::transcript_buf::TranscriptProjection::new(
+                ui::buffer::Buffer::new(
+                    ui::BufId(0),
+                    ui::buffer::BufCreateOpts {
+                        modifiable: true,
+                        buftype: ui::buffer::BufType::Nofile,
+                    },
+                ),
+            ),
+            last_viewport_text: Vec::new(),
             history: Vec::new(),
             input_history: History::load(),
             input,
@@ -473,6 +649,26 @@ impl App {
             session: session::Session::new(),
             shared_session,
             context_window: None,
+            context_tokens: None,
+            task_label: None,
+            pending_dialog: false,
+            pending_quit: false,
+            custom_status_items: Vec::new(),
+            statusline_last_errors: HashMap::new(),
+            notification: None,
+            cmdline_win: None,
+            cmdline_history: Vec::new(),
+            cmdline_completer: None,
+            term_focused: true,
+            working: working::WorkingState::new(),
+            transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,
+            layout: content::layout::LayoutState::compute(&content::layout::LayoutInput {
+                term_width: 80,
+                term_height: 24,
+                prompt_height: 3,
+            }),
+            prompt_viewport: None,
+            transcript_viewport: None,
             settings,
             multi_agent,
             agent_id: String::new(),
@@ -481,7 +677,9 @@ impl App {
             available_models,
             engine,
             permissions,
-            confirm_context: None,
+            agent: None,
+            confirm_requests: HashMap::new(),
+            next_confirm_handle: 1,
             input_prediction: None,
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
@@ -494,7 +692,6 @@ impl App {
             pending_title: false,
             last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
             last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
-            last_purge_redraw: None,
             next_turn_id: 1,
             compact_epoch: 0,
             pending_compact_epoch: 0,
@@ -509,13 +706,125 @@ impl App {
             cli_api_base_override,
             cli_api_key_env_override,
             startup_auth_error,
+            app_focus: AppFocus::Prompt,
+            transcript_window: {
+                let mut w = ui::Window::new(
+                    ui::TRANSCRIPT_WIN,
+                    ui::BufId(0),
+                    ui::WinConfig::Split(ui::SplitConfig {
+                        region: "transcript".into(),
+                        gutters: ui::Gutters::default(),
+                    }),
+                );
+                w.set_vim_enabled(vim_enabled);
+                w
+            },
+            last_prompt_text: String::new(),
+            last_click: None,
+            mouse_drag_active: false,
+            drag_autoscroll_since: None,
+            drag_on_scrollbar: None,
+            drag_on_layer: None,
+            prompt_drag_return_vim_mode: None,
+            lua: crate::lua::LuaRuntime::new(),
+            extra_instructions: None,
+            skill_section: None,
+            agent_prompt_config: None,
+            prompt_sections: crate::prompt_sections::PromptSections::default(),
+            ui,
+            input_display_buf,
         }
     }
 
-    pub fn settings_state(&self) -> crate::input::SettingsState {
+    /// Rebuild prompt sections from current app state (mode, instructions, etc.)
+    /// and return the assembled system prompt string.
+    pub fn rebuild_system_prompt(&mut self) -> String {
+        let cwd = std::path::Path::new(&self.cwd);
+        self.prompt_sections = crate::prompt_sections::build_defaults(
+            cwd,
+            self.mode,
+            true, // TUI is always interactive
+            self.agent_prompt_config.as_ref(),
+            self.skill_section.as_deref(),
+            self.extra_instructions.as_deref(),
+        );
+        self.prompt_sections.assemble()
+    }
+
+    pub fn settings_state(&self) -> state::ResolvedSettings {
         let mut s = self.settings.clone();
         s.vim = self.input.vim_enabled();
         s
+    }
+
+    /// Width available for transcript content. Reserves the rightmost
+    /// column for the scrollbar track so the scrollbar never overpaints
+    /// rendered content and mouse hit-testing has a stable target.
+    pub fn transcript_width(&self) -> usize {
+        let (w, _) = self.ui.terminal_size();
+        (self.transcript_gutters.content_width(w) as usize).max(1)
+    }
+
+    pub fn notify(&mut self, message: String) {
+        self.open_notification(message, ui::NotificationLevel::Info);
+    }
+
+    pub fn notify_error(&mut self, message: String) {
+        self.open_notification(message, ui::NotificationLevel::Error);
+    }
+
+    fn open_notification(&mut self, message: String, level: ui::NotificationLevel) {
+        // Replace any existing toast — one at a time.
+        if let Some(win) = self.notification.take() {
+            self.close_float(win);
+        }
+        let style = ui::NotificationStyle {
+            info_label: ui::Style {
+                bold: true,
+                ..Default::default()
+            },
+            error_label: ui::Style {
+                fg: Some(crate::theme::ERROR),
+                bold: true,
+                ..Default::default()
+            },
+            message: ui::Style::dim(),
+            background: ui::Style::default(),
+        };
+        // Position: one row above the prompt, full width. Rect is
+        // refreshed each frame by `sync_notification_float`.
+        let (tw, _th) = self.ui.terminal_size();
+        let config = ui::FloatConfig {
+            placement: ui::Placement::Manual {
+                anchor: ui::Anchor::NW,
+                row: 0,
+                col: 0,
+                width: ui::Constraint::Fixed(tw),
+                height: ui::Constraint::Fixed(1),
+            },
+            border: ui::Border::None,
+            title: None,
+            // Sits below dialogs (default float zindex 50) so a toast
+            // never obscures a modal asking for input.
+            zindex: 40,
+            focusable: false,
+            blocks_agent: false,
+        };
+        self.notification = self.ui.notification_open(config, message, level, style);
+    }
+
+    pub fn dismiss_notification(&mut self) {
+        if let Some(win) = self.notification.take() {
+            self.close_float(win);
+        }
+    }
+
+    pub fn set_task_label(&mut self, label: String) {
+        self.task_label = if label.trim().is_empty() {
+            None
+        } else {
+            Some(label)
+        };
     }
 
     // ── Unified event loop ───────────────────────────────────────────────
@@ -535,31 +844,51 @@ impl App {
     ) {
         crate::theme::detect_background();
         terminal::enable_raw_mode().ok();
+        let _ = io::stdout().execute(EnterAlternateScreen);
+        // Disable DECAWM so writing to the bottom-right cell doesn't
+        // trigger the terminal's auto-scroll (which would push a whole
+        // row up and break the status bar's last char — see "1:1 100%"
+        // wrapping regression).
+        let _ = io::stdout().execute(DisableLineWrap);
         let _ = io::stdout().execute(cursor::Hide);
         let _ = io::stdout().execute(EnableBracketedPaste);
         let _ = io::stdout().execute(EnableFocusChange);
+        let _ = io::stdout().execute(EnableMouseCapture);
 
         if !self.history.is_empty() {
             self.restore_screen();
             if let Some(tokens) = self.session.context_tokens {
-                self.screen.set_context_tokens(tokens);
+                self.context_tokens = Some(tokens);
             }
             if let Some(ref slug) = self.session.slug {
-                self.screen.set_task_label(slug.clone());
+                self.set_task_label(slug.clone());
             }
-            self.screen.flush_blocks();
+            self.finish_transcript_turn();
+            self.transcript_window.scroll_to_bottom();
         }
-        self.screen
-            .draw_prompt(&self.input, self.mode, render::term_width());
-
         if let Some(message) = self.startup_auth_error.take() {
-            self.screen.notify_error(message);
+            self.notify_error(message);
         }
+
+        // Plugins read live App state via `with_app` at registration
+        // time — e.g. `model.lua` declares `args = smelt.engine.models()`
+        // for its arg picker. Install the TLS app pointer before any
+        // Lua runs at startup so those reads land on the real App.
+        {
+            let _guard = crate::lua::install_app_ptr(self);
+            self.lua.load_plugins();
+            self.lua.emit(crate::lua::AutocmdEvent::SessionStart);
+        }
+        if let Some(err) = self.lua.load_error.take() {
+            self.notify_error(format!("lua init: {err}"));
+        }
+        self.flush_lua_callbacks();
+        // Plugins have now registered their commands — pull every
+        // declared `args = {...}` list so the CommandArg picker opens
+        // when the user types `/name ` (space).
+        self.input.command_arg_sources = self.lua.list_command_args();
 
         let mut term_events = EventStream::new();
-        let mut agent: Option<TurnState> = None;
-
-        let mut active_dialog: Option<Box<dyn render::Dialog>> = None;
 
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
         if let Some(msg) = initial_message {
@@ -569,20 +898,16 @@ impl App {
                     self.exec_rx = Some(rx);
                     self.exec_kill = Some(kill);
                 }
-            } else if trimmed == "/resume" {
-                if let CommandAction::OpenDialog(dlg) = self.handle_command(trimmed) {
-                    self.open_dialog(dlg, &mut active_dialog);
-                }
-            } else if trimmed == "/settings" {
-                self.input.open_settings(&self.settings_state());
-                self.screen.mark_dirty();
+            } else if trimmed == "/resume" || trimmed == "/settings" {
+                // Both are Lua-registered commands now; run through the
+                // normal dispatcher so the Lua handler fires.
+                self.handle_command(trimmed);
             } else if let Some(reason) = classify_startup_command(trimmed) {
-                self.screen
-                    .notify_error(format!("\"{}\" {}", trimmed, reason));
+                self.notify_error(format!("\"{}\" {}", trimmed, reason));
             } else {
-                self.screen.erase_prompt();
                 let content = Content::text(msg.clone());
-                agent = Some(self.begin_agent_turn(&msg, content));
+                let turn = self.begin_agent_turn(&msg, content);
+                self.agent = Some(turn);
             }
         }
 
@@ -591,25 +916,73 @@ impl App {
             esc_vim_mode: None,
             last_ctrlc: None,
             last_keypress: None,
+            pending_pane_chord: None,
         };
         let mut pending_dialogs: VecDeque<DeferredDialog> = VecDeque::new();
-        let mut last_frame = Instant::now();
         const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
         'main: loop {
+            if self.pending_quit {
+                self.discard_turn(true);
+                break 'main;
+            }
+            // Install the TLS app pointer for the whole tick. Any Lua
+            // binding firing during this iteration can reach `&mut App`
+            // via `crate::lua::with_app`. Guard drops at end of the
+            // iteration scope and restores the previous slot (usually
+            // None). The pointer is the Neovim-equivalent to Vim's
+            // globals — Rust code itself never reads it; only Lua
+            // bindings do, and only when their enclosing &Rust borrow
+            // is field-disjoint from whatever the binding writes.
+            let _app_guard = crate::lua::install_app_ptr(self);
+            // ── Lua timer + notification pump ────────────────────────────
+            self.lua.tick_timers();
+            self.drive_lua_tasks();
+            let (items, tick_errors) = self.lua.tick_statusline();
+            self.custom_status_items = items;
+            for (name, msg) in tick_errors {
+                match msg {
+                    Some(new_msg) => {
+                        if self.statusline_last_errors.get(&name) != Some(&new_msg) {
+                            self.notify_error(new_msg.clone());
+                            self.statusline_last_errors.insert(name, new_msg);
+                        }
+                    }
+                    None => {
+                        self.statusline_last_errors.remove(&name);
+                    }
+                }
+            }
+            for _id in self.drain_finished_blocks() {
+                self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
+            }
+            self.flush_lua_callbacks();
+            // Fire `WinEvent::Tick` on every window with a registered
+            // Tick callback — e.g. Agents pulls a fresh subagent
+            // snapshot here each frame.
+            {
+                let lua = &self.lua;
+                let mut lua_invoke =
+                    |handle: ui::LuaHandle,
+                     win: ui::WinId,
+                     payload: &ui::Payload,
+                     panels: &[ui::PanelSnapshot]| {
+                        lua.queue_invocation(handle, win, payload, panels);
+                    };
+                self.ui.dispatch_tick(&mut lua_invoke);
+            }
+            self.flush_lua_callbacks();
+
             // ── Background polls ─────────────────────────────────────────
             if let Some(ref mut rx) = ctx_rx {
                 if let Ok(result) = rx.try_recv() {
                     self.context_window = result;
-                    if let Some(w) = result {
-                        self.screen.set_context_window(w);
-                    }
                     ctx_rx = None;
                 }
             }
 
-            // ── Drain engine events (paused only for Confirm/AskQuestion) ──
-            if !active_dialog.as_ref().is_some_and(|d| d.blocks_agent()) {
+            // ── Drain engine events (paused only for Confirm) ──
+            if !self.focused_float_blocks_agent() {
                 loop {
                     let ev = match self.engine.try_recv() {
                         Ok(ev) => ev,
@@ -623,22 +996,23 @@ impl App {
                                     "source": "try_recv_drain",
                                 }),
                             );
-                            if agent.is_some() {
-                                self.finish_turn(false);
-                                agent = None;
-                            }
+                            self.discard_turn(false);
                             break;
                         }
                     };
-                    let action = if let Some(ref mut ag) = agent {
+                    // Take the TurnState out for the duration of the
+                    // dispatch so `handle_engine_event` can borrow its
+                    // fields while we still hold `&mut self`.
+                    let action = if let Some(mut ag) = self.agent.take() {
                         let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
-                        self.dispatch_control(
+                        let action = self.dispatch_control(
                             ctrl,
                             &ag.pending,
                             &mut pending_dialogs,
-                            &mut active_dialog,
                             t.last_keypress,
-                        )
+                        );
+                        self.agent = Some(ag);
+                        action
                     } else {
                         // No active turn — handle out-of-band events.
                         self.handle_engine_event_idle(ev);
@@ -647,8 +1021,7 @@ impl App {
                     match action {
                         LoopAction::Continue => {}
                         LoopAction::Done => {
-                            self.finish_turn(false);
-                            agent = None;
+                            self.discard_turn(false);
                             break;
                         }
                     }
@@ -656,32 +1029,26 @@ impl App {
             }
 
             // ── Auto-start from leftover queued messages (one per turn) ──
-            if agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
+            if self.agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
                 let text = self.queued_messages.remove(0);
                 if let Some(cmd) = crate::custom_commands::resolve(text.trim(), self.multi_agent) {
-                    self.screen.erase_prompt();
-                    agent = Some(self.begin_custom_command_turn(cmd));
+                    let turn = self.begin_custom_command_turn(cmd);
+                    self.agent = Some(turn);
                 } else if !text.is_empty() {
                     let outcome = self.process_input(&text);
                     let content = Content::text(text.clone());
                     // Quit is ignored here: a queued "/exit" shouldn't terminate
                     // the main loop from this re-entry point.
-                    self.apply_input_outcome(
-                        outcome,
-                        content,
-                        &text,
-                        &mut agent,
-                        &mut active_dialog,
-                    );
+                    self.apply_input_outcome(outcome, content, &text);
                 }
             }
 
             // ── Auto-start from pending agent messages ─────────────────
-            if agent.is_none() && !self.pending_agent_messages.is_empty() {
+            if self.agent.is_none() && !self.pending_agent_messages.is_empty() {
                 let msgs = std::mem::take(&mut self.pending_agent_messages);
                 self.history.extend(msgs);
-                self.screen.erase_prompt();
-                agent = Some(self.begin_agent_message_turn());
+                let turn = self.begin_agent_message_turn();
+                self.agent = Some(turn);
             }
 
             // ── Drain spawned children → track agents ─────────────────────
@@ -709,7 +1076,7 @@ impl App {
                     NEXT_CHILD_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.child_permission_replies.insert(request_id, reply_tx);
 
-                let ctrl = SessionControl::NeedsConfirm(ConfirmRequest {
+                let ctrl = SessionControl::NeedsConfirm(Box::new(ConfirmRequest {
                     call_id: format!("child-perm-{request_id}"),
                     tool_name,
                     desc: confirm_message,
@@ -718,118 +1085,169 @@ impl App {
                     outside_dir: None,
                     summary,
                     request_id,
-                });
-                let pending = agent.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
-                let action = self.dispatch_control(
-                    ctrl,
-                    pending,
-                    &mut pending_dialogs,
-                    &mut active_dialog,
-                    t.last_keypress,
-                );
-                match action {
-                    LoopAction::Continue => {}
-                    LoopAction::Done => {
-                        self.finish_turn(false);
-                        agent = None;
-                    }
+                }));
+                let taken = self.agent.take();
+                let pending_ref: &[crate::app::PendingTool] =
+                    taken.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
+                let action =
+                    self.dispatch_control(ctrl, pending_ref, &mut pending_dialogs, t.last_keypress);
+                self.agent = taken;
+                if matches!(action, LoopAction::Done) {
+                    self.discard_turn(false);
                 }
             }
 
             // ── Process pending permission dialogs ──────────────────────
             // If agent was cancelled while dialogs were pending, discard them.
-            if agent.is_none() && !pending_dialogs.is_empty() {
+            if self.agent.is_none() && !pending_dialogs.is_empty() {
                 pending_dialogs.clear();
-                self.screen.set_pending_dialog(false);
+                self.pending_dialog = false;
             }
             // Re-dispatch queued dialogs.  Each goes through dispatch_control
             // so auto-approval checks re-run ("always allow" → auto-approve rest).
-            if !pending_dialogs.is_empty() && active_dialog.is_none() && agent.is_some() {
+            if !pending_dialogs.is_empty()
+                && !self.focused_float_blocks_agent()
+                && self.agent.is_some()
+            {
                 let idle = t
                     .last_keypress
                     .map(|lk| lk.elapsed() >= Duration::from_millis(CONFIRM_DEFER_MS))
                     .unwrap_or(true);
                 while idle
                     && !pending_dialogs.is_empty()
-                    && active_dialog.is_none()
-                    && agent.is_some()
+                    && !self.focused_float_blocks_agent()
+                    && self.agent.is_some()
                 {
                     let deferred = pending_dialogs.pop_front().unwrap();
                     let ctrl = match deferred {
                         DeferredDialog::Confirm(req) => SessionControl::NeedsConfirm(req),
-                        DeferredDialog::AskQuestion { args, request_id } => {
-                            SessionControl::NeedsAskQuestion { args, request_id }
-                        }
                     };
-                    let pending = agent.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
+                    let taken = self.agent.take();
+                    let pending_ref: &[crate::app::PendingTool] =
+                        taken.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
                     let action = self.dispatch_control(
                         ctrl,
-                        pending,
+                        pending_ref,
                         &mut pending_dialogs,
-                        &mut active_dialog,
                         t.last_keypress,
                     );
-                    match action {
-                        LoopAction::Continue => {}
-                        LoopAction::Done => {
-                            self.finish_turn(false);
-                            agent = None;
-                        }
+                    self.agent = taken;
+                    if matches!(action, LoopAction::Done) {
+                        self.discard_turn(false);
                     }
                 }
-                self.screen.set_pending_dialog(!pending_dialogs.is_empty());
+                self.pending_dialog = !pending_dialogs.is_empty();
             }
 
             // ── Render ───────────────────────────────────────────────────
-            let will_render = self.screen.is_dirty();
-            self.render_frame(agent.is_some(), &mut active_dialog);
-            if will_render {
-                last_frame = Instant::now();
-            }
+            self.render_normal(self.agent.is_some());
+            let last_frame = Instant::now();
+
+            // Pre-compute animation signal here so the sleep expression
+            // inside `tokio::select!` below can read it without holding
+            // a borrow on `self` that conflicts with other branches.
+            let now = Instant::now();
+            let yank_flash_active = self
+                .input
+                .win
+                .kill_ring
+                .yank_flash_until()
+                .is_some_and(|t| t > now)
+                || self
+                    .transcript_window
+                    .kill_ring
+                    .yank_flash_until()
+                    .is_some_and(|t| t > now);
+            let has_animation = self.ui.focused_float().is_some()
+                || self.has_active_exec()
+                || self.working.is_animating()
+                || yank_flash_active
+                || self
+                    .agents
+                    .iter()
+                    .any(|a| a.status == AgentTrackStatus::Working);
 
             // ── Wait for next event ──────────────────────────────────────
             tokio::select! {
                 biased;
 
                 Some(Ok(ev)) = stream_next(&mut term_events) => {
-                    if self.dispatch_terminal_event(
-                        ev, &mut agent, &mut t, &mut active_dialog,
-                    ) {
-                        break 'main;
+                    // Batch scroll wheel ticks across the drain so a
+                    // rapid burst collapses into a single motion + one
+                    // render — otherwise each tick repaints the whole
+                    // screen and the terminal can't keep up, making
+                    // fast scrolling feel laggy or frozen.
+                    //
+                    // The coalescer only fires when there's no focused
+                    // float. With a dialog up, wheel events need to
+                    // reach `dispatch_terminal_event` → `handle_mouse`
+                    // so they route into the float instead of bleeding
+                    // past it into the transcript behind.
+                    let coalesce_scroll = self.ui.focused_float().is_none();
+                    let mut scroll_delta: isize = 0;
+                    let mut scroll_row: u16 = 0;
+                    let absorb = |ev: event::Event,
+                                      delta: &mut isize,
+                                      row: &mut u16|
+                     -> Option<event::Event> {
+                        if !coalesce_scroll {
+                            return Some(ev);
+                        }
+                        if let event::Event::Mouse(m) = &ev {
+                            match m.kind {
+                                event::MouseEventKind::ScrollUp => {
+                                    *delta -= 3;
+                                    *row = m.row;
+                                    return None;
+                                }
+                                event::MouseEventKind::ScrollDown => {
+                                    *delta += 3;
+                                    *row = m.row;
+                                    return None;
+                                }
+                                _ => {}
+                            }
+                        }
+                        Some(ev)
+                    };
+
+                    if let Some(ev) = absorb(ev, &mut scroll_delta, &mut scroll_row) {
+                        if self.dispatch_terminal_event(ev, &mut t) {
+                            break 'main;
+                        }
                     }
 
-                    // Drain buffered terminal events
+                    // Drain buffered terminal events (coalesce scroll).
                     while event::poll(Duration::ZERO).unwrap_or(false) {
                         if let Ok(ev) = event::read() {
-                            if self.dispatch_terminal_event(
-                                ev, &mut agent, &mut t, &mut active_dialog,
-                            ) {
-                                break 'main;
+                            if let Some(ev) = absorb(ev, &mut scroll_delta, &mut scroll_row) {
+                                if self.dispatch_terminal_event(ev, &mut t) {
+                                    break 'main;
+                                }
                             }
                         }
                     }
 
-                    // Render immediately after terminal events for responsive typing.
-                    self.render_frame(agent.is_some(), &mut active_dialog);
-                    last_frame = Instant::now();
+                    // Apply any accumulated scroll as a single motion.
+                    if scroll_delta != 0 {
+                        self.scroll_under_mouse(scroll_row, scroll_delta);
+                    }
+
+                    self.render_normal(self.agent.is_some());
                 }
 
-                Some(ev) = self.engine.recv(), if !active_dialog.as_ref().is_some_and(|d| d.blocks_agent()) => {
-                    if let Some(ref mut ag) = agent {
+                Some(ev) = self.engine.recv(), if !self.focused_float_blocks_agent() => {
+                    if let Some(mut ag) = self.agent.take() {
                         let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
                         let action = self.dispatch_control(
                             ctrl,
                             &ag.pending,
                             &mut pending_dialogs,
-                            &mut active_dialog,
                             t.last_keypress,
                         );
-                        match action {
-                            LoopAction::Continue => {}
-                            LoopAction::Done => {
-                                self.finish_turn(false);
-                                agent = None;
-                            }
+                        self.agent = Some(ag);
+                        if matches!(action, LoopAction::Done) {
+                            self.discard_turn(false);
                         }
                     } else {
                         // No active turn — handle out-of-band events.
@@ -848,11 +1266,11 @@ impl App {
                 } => {
                     match ev {
                         commands::ExecEvent::Output(line) => {
-                            self.screen.append_exec_output(&line);
+                            self.append_exec_output(&line);
                         }
                         commands::ExecEvent::Done(code) => {
-                            self.screen.finish_exec(code);
-                            self.screen.commit_exec();
+                            self.finish_exec(code);
+                            self.finalize_exec();
                             self.exec_rx = None;
                             self.exec_kill = None;
                         }
@@ -860,46 +1278,49 @@ impl App {
                 }
 
                 _ = tokio::time::sleep({
-                    // When the screen is dirty (deferred engine events), fire
-                    // at the next frame deadline (~60 fps).  When idle, use a
-                    // longer interval for spinner / timer animations.
+                    // Fires only when there's real time-driven work:
+                    // drag-autoscroll advances one line per tick (the
+                    // interval ramps down the longer the cursor is
+                    // parked at the edge), and animations (spinner,
+                    // exec output, working agent, yank flash) drive
+                    // frames at `MIN_FRAME_INTERVAL`. When neither is
+                    // active, this arm is disabled via the `if` guard
+                    // below — the loop parks on terminal / engine /
+                    // exec channels and CPU goes to ~0% until the next
+                    // event. An idle timer here would wake the loop
+                    // every 80ms to redraw the same screen.
                     let since = last_frame.elapsed();
-                    if self.screen.is_dirty() {
-                        MIN_FRAME_INTERVAL.saturating_sub(since)
+                    let want = if let Some(started) = self.drag_autoscroll_since {
+                        let held = started.elapsed().as_millis() as u64;
+                        // Start at ~33 lines/sec (30 ms), ramp to ~200 lines/sec (5 ms).
+                        let ms = 30u64.saturating_sub(held / 120).max(5);
+                        Duration::from_millis(ms)
                     } else {
-                        Duration::from_millis(80).saturating_sub(since)
-                    }
-                }) => {
-                    // Mark time-based animations dirty.
-                    if let Some(d) = active_dialog.as_mut() {
-                        d.mark_dirty();
-                    }
-                    if self.screen.has_btw() {
-                        self.screen.mark_dirty();
-                    }
-                    if self.screen.has_active_exec() {
-                        self.screen.mark_dirty();
-                    }
-                    if self.agents.iter().any(|a| a.status == AgentTrackStatus::Working) {
-                        self.screen.mark_dirty();
-                    }
+                        MIN_FRAME_INTERVAL
+                    };
+                    want.saturating_sub(since)
+                }), if has_animation || self.drag_autoscroll_since.is_some() => {
+                    // Auto-scroll while the user is mid-drag with the
+                    // cursor parked on the top/bottom row of the
+                    // transcript — extends selection past the viewport
+                    // without requiring further mouse motion.
+                    self.tick_drag_autoscroll();
                     // Render deferred engine events + animations.
-                    self.render_frame(agent.is_some(), &mut active_dialog);
-                    last_frame = Instant::now();
+                    self.render_normal(self.agent.is_some());
                 }
             }
         }
 
         // Cleanup
-        if agent.is_some() {
+        if self.agent.is_some() {
             self.finish_turn(true);
         }
+        self.lua.emit(crate::lua::AutocmdEvent::Shutdown);
         self.save_session();
 
-        // If no messages were ever sent, preserve the final prompt/tab bar on exit.
-        // When there is session history, clear below for a clean resume hint area.
-        let clear_below = !self.session.messages.is_empty();
-        self.screen.move_cursor_past_prompt(clear_below);
+        let _ = io::stdout().execute(DisableMouseCapture);
+        let _ = io::stdout().execute(EnableLineWrap);
+        let _ = io::stdout().execute(LeaveAlternateScreen);
         let _ = io::stdout().execute(cursor::Show);
         let _ = io::stdout().execute(DisableBracketedPaste);
         let _ = io::stdout().execute(DisableFocusChange);
@@ -926,7 +1347,7 @@ impl App {
     ) {
         use std::io::Write;
 
-        init_color_mode(color_mode);
+        headless::init_color_mode(color_mode);
 
         let trimmed = message.trim();
 
@@ -946,7 +1367,7 @@ impl App {
             return;
         }
 
-        // Slash commands require interactive mode.
+        // Commands require interactive mode.
         if trimmed.starts_with('/') && crate::completer::Completer::is_command(trimmed) {
             eprintln!("\"{}\" requires interactive mode", trimmed);
             std::process::exit(1);
@@ -968,6 +1389,8 @@ impl App {
             session_dir: crate::session::dir_for(&self.session),
             model_config_overrides: None,
             permission_overrides: None,
+            system_prompt: None,
+            plugin_tools: vec![],
         });
 
         // In text mode, buffer assistant text and only print to stdout at the end.
@@ -994,7 +1417,7 @@ impl App {
             match format {
                 OutputFormat::Json => {
                     // Forward every event as JSONL.
-                    emit_json(&ev);
+                    headless::emit_json(&ev);
 
                     // Still need to handle side-effect events.
                     match ev {
@@ -1006,12 +1429,6 @@ impl App {
                                 message: None,
                             });
                         }
-                        EngineEvent::RequestAnswer { request_id, .. } => {
-                            self.engine.send(UiCommand::QuestionAnswer {
-                                request_id,
-                                answer: Some("User is not available (headless mode).".into()),
-                            });
-                        }
                         EngineEvent::TurnError { .. } | EngineEvent::TurnComplete { .. } => {
                             break;
                         }
@@ -1021,7 +1438,7 @@ impl App {
                 OutputFormat::Text => match ev {
                     EngineEvent::ThinkingDelta { .. } => {}
                     EngineEvent::Thinking { content } => {
-                        log_thinking(&content);
+                        headless::log_thinking(&content);
                     }
                     EngineEvent::TextDelta { delta } => {
                         final_message.push_str(&delta);
@@ -1057,7 +1474,7 @@ impl App {
                         } else {
                             output
                         };
-                        log_tool(
+                        headless::log_tool(
                             &name,
                             &summary,
                             &display_output,
@@ -1076,7 +1493,7 @@ impl App {
                         last_tps = tokens_per_sec.or(last_tps);
                     }
                     EngineEvent::Retrying { delay_ms, attempt } => {
-                        log_retry(attempt, delay_ms);
+                        headless::log_retry(attempt, delay_ms);
                     }
                     EngineEvent::RequestPermission { request_id, .. } => {
                         let approved = self.mode == Mode::Yolo;
@@ -1086,15 +1503,9 @@ impl App {
                             message: None,
                         });
                     }
-                    EngineEvent::RequestAnswer { request_id, .. } => {
-                        self.engine.send(UiCommand::QuestionAnswer {
-                            request_id,
-                            answer: Some("User is not available (headless mode).".into()),
-                        });
-                    }
                     EngineEvent::Messages { .. } => {}
                     EngineEvent::TurnError { message } => {
-                        log_error(&message);
+                        headless::log_error(&message);
                         break;
                     }
                     EngineEvent::TurnComplete { .. } => {
@@ -1107,12 +1518,13 @@ impl App {
 
         // Print accumulated token/cost summary.
         if format == OutputFormat::Text {
-            log_token_usage(&total_usage, last_tps, total_cost);
+            headless::log_token_usage(&total_usage, last_tps, total_cost);
         }
 
         // Text mode: write the final message to stdout (only when piped).
         // `final_message` is model-generated and passes through unredacted.
         if format == OutputFormat::Text && !final_message.is_empty() {
+            use std::io::IsTerminal;
             let stdout_is_tty = std::io::stdout().is_terminal();
             let stderr_is_tty = std::io::stderr().is_terminal();
 
@@ -1149,7 +1561,7 @@ impl App {
 
     /// Forward an inter-agent message: emit to stdout and inject into engine.
     fn forward_agent_message(&self, from_id: &str, from_slug: &str, message: &str) {
-        emit_json(&EngineEvent::AgentMessage {
+        headless::emit_json(&EngineEvent::AgentMessage {
             from_id: from_id.to_string(),
             from_slug: from_slug.to_string(),
             message: message.to_string(),
@@ -1223,7 +1635,7 @@ impl App {
                         engine::socket::IncomingMessage::Query { from_id: _, question, reply_tx } => {
                             self.send_btw_query(question);
                             while let Some(ev) = self.engine.recv().await {
-                                emit_json(&ev);
+                                headless::emit_json(&ev);
                                 if let EngineEvent::BtwResponse { content } = ev {
                                     let _ = reply_tx.send(content);
                                     break;
@@ -1288,6 +1700,8 @@ impl App {
             session_dir: crate::session::dir_for(&self.session),
             model_config_overrides: None,
             permission_overrides: None,
+            system_prompt: None,
+            plugin_tools: vec![],
         });
 
         let mut pending_query_tx: Option<tokio::sync::oneshot::Sender<String>> = None;
@@ -1330,7 +1744,7 @@ impl App {
                     };
 
                     // Forward every event to stdout as JSON.
-                    emit_json(&ev);
+                    headless::emit_json(&ev);
 
                     // Handle side effects for events that need them.
                     match ev {
@@ -1344,12 +1758,6 @@ impl App {
                             ).await;
                             self.engine.send(UiCommand::PermissionDecision {
                                 request_id, approved, message,
-                            });
-                        }
-                        EngineEvent::RequestAnswer { request_id, .. } => {
-                            self.engine.send(UiCommand::QuestionAnswer {
-                                request_id,
-                                answer: Some("User is not available (subagent mode).".into()),
                             });
                         }
                         EngineEvent::Messages { messages, .. } => {
@@ -1391,68 +1799,6 @@ impl App {
         }
         engine::registry::update_status(my_pid, engine::registry::AgentStatus::Idle);
     }
-
-    /// Render a complete frame. When a dialog is active, content + dialog +
-    /// status line are all painted inside a single `Frame` (one atomic
-    /// synchronized update). Without a dialog, content + prompt are rendered
-    /// in their own frame.
-    fn render_frame(
-        &mut self,
-        agent_running: bool,
-        active_dialog: &mut Option<Box<dyn render::Dialog>>,
-    ) {
-        if let Some(d) = active_dialog.as_mut() {
-            let dialog_height = d.height();
-            let constrain = d.constrain_height();
-            let mut frame = render::Frame::begin(self.screen.backend());
-            let (redirtied, placement) = self.tick_dialog(&mut frame, dialog_height, constrain);
-            if redirtied {
-                d.mark_dirty();
-            }
-            if let Some(p) = placement {
-                let w = self.screen.size().0;
-                d.draw(&mut frame, p.row, w, p.granted_rows);
-            }
-            // Global gap + cleanup: blank line between dialog and
-            // status bar, then clear any stale rows below.
-            self.screen.queue_dialog_gap(&mut frame);
-            self.screen.queue_status_line(&mut frame);
-        } else {
-            self.tick_prompt(agent_running);
-        }
-    }
-
-    /// Open a dialog, applying all the side-effects the host needs so no
-    /// call site has to remember them:
-    ///  - erase the prompt
-    ///  - share the kill ring so Ctrl+K/Y span input ↔ dialog
-    ///  - for blocking dialogs: flush pending blocks to scrollback and
-    ///    pause the working-spinner clock (the agent is suspended until
-    ///    the user responds)
-    ///
-    /// Any dialog currently in `active_dialog` is replaced; the caller is
-    /// expected to have finalized it already (via `finalize_dialog_close`).
-    pub(super) fn open_dialog(
-        &mut self,
-        mut dialog: Box<dyn render::Dialog>,
-        active_dialog: &mut Option<Box<dyn render::Dialog>>,
-    ) {
-        if dialog.blocks_agent() {
-            self.screen.render_pending_blocks();
-            self.screen.pause_spinner();
-        }
-        self.screen.erase_prompt();
-        dialog.set_kill_ring(self.input.take_kill_ring());
-        *active_dialog = Some(dialog);
-    }
-
-    /// Clean up the screen after a dialog has been removed from
-    /// `active_dialog`. Idempotent: safe to call when no blocking dialog
-    /// was ever opened (`resume_spinner` is a no-op in that case).
-    pub(super) fn finalize_dialog_close(&mut self) {
-        self.screen.clear_dialog_area();
-        self.screen.resume_spinner();
-    }
 }
 
 /// Poll one item from a `futures_core::Stream`, equivalent to `StreamExt::next`.
@@ -1461,192 +1807,6 @@ where
     S: futures_core::Stream + Unpin,
 {
     std::future::poll_fn(|cx| Pin::new(&mut *stream).poll_next(cx)).await
-}
-
-// ── Streaming subagent helper ────────────────────────────────────────────────
-
-// ── Headless output types ───────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputFormat {
-    Text,
-    Json,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorMode {
-    Auto,
-    Always,
-    Never,
-}
-
-/// Write a single `EngineEvent` as a JSON line to stdout.
-fn emit_json(ev: &EngineEvent) {
-    println!("{}", serde_json::to_string(ev).unwrap());
-}
-
-// ── Headless / subagent log helpers ─────────────────────────────────────────
-//
-// Bare-minimum style. Assistant text flows undecorated; only tool lifecycle
-// gets markers. Thinking is dim+italic. Colors match the TUI theme.
-// Respects NO_COLOR, TERM=dumb, non-TTY stderr, and --color flag.
-
-use std::io::IsTerminal;
-use std::sync::OnceLock;
-
-/// Explicit color mode set via --color flag. `None` means auto-detect.
-static COLOR_OVERRIDE: OnceLock<Option<bool>> = OnceLock::new();
-
-fn init_color_mode(mode: ColorMode) {
-    let _ = COLOR_OVERRIDE.set(match mode {
-        ColorMode::Auto => None,
-        ColorMode::Always => Some(true),
-        ColorMode::Never => Some(false),
-    });
-}
-
-fn stderr_supports_color() -> bool {
-    static RESULT: OnceLock<bool> = OnceLock::new();
-    *RESULT.get_or_init(|| {
-        // Explicit --color flag takes precedence.
-        if let Some(Some(forced)) = COLOR_OVERRIDE.get() {
-            return *forced;
-        }
-        if std::env::var_os("NO_COLOR").is_some() {
-            return false;
-        }
-        if std::env::var("TERM").as_deref() == Ok("dumb") {
-            return false;
-        }
-        // Subagents have stderr piped to a log file, but the parent TUI
-        // renders the ANSI sequences — so honor FORCE_COLOR.
-        if std::env::var_os("FORCE_COLOR").is_some() {
-            return true;
-        }
-        std::io::stderr().is_terminal()
-    })
-}
-
-/// Map a `crossterm::style::Color` to its ANSI escape foreground string.
-fn ansi_fg(c: crossterm::style::Color) -> &'static str {
-    if !stderr_supports_color() {
-        return "";
-    }
-    use crossterm::style::Color;
-    // Leak a small string per unique color (bounded by theme constants).
-    match c {
-        Color::AnsiValue(n) => {
-            let s: String = format!("\x1b[38;5;{n}m");
-            &*Box::leak(s.into_boxed_str())
-        }
-        Color::Red => "\x1b[31m",
-        Color::DarkGrey => "\x1b[90m",
-        _ => "",
-    }
-}
-
-fn reset() -> &'static str {
-    if stderr_supports_color() {
-        "\x1b[0m"
-    } else {
-        ""
-    }
-}
-fn dim() -> &'static str {
-    if stderr_supports_color() {
-        "\x1b[2m"
-    } else {
-        ""
-    }
-}
-fn dim_italic() -> &'static str {
-    if stderr_supports_color() {
-        "\x1b[2;3m"
-    } else {
-        ""
-    }
-}
-
-fn log_thinking(content: &str) {
-    let di = dim_italic();
-    let r = reset();
-    for line in content.lines() {
-        eprintln!("{di}{line}{r}");
-    }
-}
-
-fn log_tool(tool_name: &str, summary: &str, output: &str, is_error: bool, elapsed_ms: Option<u64>) {
-    let r = reset();
-    let time = format_elapsed(elapsed_ms);
-    let d = dim();
-    let mark = if is_error {
-        let c = ansi_fg(crate::theme::ERROR);
-        format!("{c}✗{r}")
-    } else {
-        let c = ansi_fg(crate::theme::SUCCESS);
-        format!("{c}✓{r}")
-    };
-    eprintln!("{mark} {d}{tool_name}{r} {summary} {d}({time}){r}");
-
-    if !output.is_empty() {
-        for line in output.lines() {
-            eprintln!("{d}  {line}{r}");
-        }
-    }
-}
-
-fn log_retry(attempt: u32, delay_ms: u64) {
-    let d = dim();
-    let r = reset();
-    let secs = delay_ms as f64 / 1000.0;
-    eprintln!("{d}\u{27f3} retry #{attempt} ({secs:.1}s){r}");
-}
-
-fn log_error(message: &str) {
-    let c = ansi_fg(crate::theme::ERROR);
-    let r = reset();
-    eprintln!("{c}! {message}{r}");
-}
-
-fn log_token_usage(usage: &protocol::TokenUsage, tokens_per_sec: Option<f64>, cost_usd: f64) {
-    let d = dim();
-    let r = reset();
-    let mut parts = Vec::new();
-    if let Some(p) = usage.prompt_tokens {
-        parts.push(format!("{p} prompt"));
-    }
-    if let Some(c) = usage.completion_tokens {
-        parts.push(format!("{c} completion"));
-    }
-    if let Some(cached) = usage.cache_read_tokens {
-        if cached > 0 {
-            parts.push(format!("{cached} cached"));
-        }
-    }
-    if parts.is_empty() {
-        return;
-    }
-    let mut line = format!("{d}tokens: {}", parts.join(", "));
-    if let Some(tps) = tokens_per_sec {
-        line.push_str(&format!(" ({tps:.0} tok/s)"));
-    }
-    if cost_usd > 0.0 {
-        if cost_usd < 0.01 {
-            line.push_str(&format!(" | cost: ${cost_usd:.4}"));
-        } else {
-            line.push_str(&format!(" | cost: ${cost_usd:.2}"));
-        }
-    }
-    line.push_str(r);
-    eprintln!("{line}");
-}
-
-fn format_elapsed(ms: Option<u64>) -> String {
-    match ms {
-        Some(ms) if ms >= 1000 => format!("{:.1}s", ms as f64 / 1000.0),
-        Some(ms) => format!("{ms}ms"),
-        None => String::new(),
-    }
 }
 
 #[cfg(test)]
@@ -1699,11 +1859,6 @@ mod tests {
     fn startup_settings_is_none() {
         // /settings opens its UI, not blocked
         assert!(classify_startup_command("/settings").is_none());
-    }
-
-    #[test]
-    fn startup_vim_is_blocked() {
-        assert!(classify_startup_command("/vim").is_some());
     }
 
     #[test]
