@@ -40,6 +40,10 @@ Everything else is downstream of those.
 ## Phase ordering at a glance
 
 ```
+Pre-P0 baseline harness            ── L2 test harness + 5–10 scenarios
+        │                              against today's binary; goldens
+        │                              lock current behaviour
+        ▼
 P0  clear the deck                 ── delete what won't survive
         │
         ▼
@@ -71,6 +75,37 @@ P7  finalize                       ── docs, examples, dead-code sweep
 
 P1 is the load-bearing one. After it, P2/P3/P4 can interleave somewhat;
 before it, nothing else has its target shape.
+
+---
+
+## Pre-P0 — Test baseline harness
+
+**Goal:** capture today's behaviour as goldens before demolition. The L2
+harness (HeadlessApp + wiremock'd LLM + persisted-session JSON snapshots) lands
+*now*, while the binary still works end-to-end, so each phase boundary can
+re-run the same scenarios and review the diff with `cargo insta review`.
+Intended changes get blessed; unintended ones block the phase. This converts
+`FEATURES.md` from a human-walked checklist into a CI gate.
+
+See `TESTING.md` for the three-layer model. Pre-P0 only ships L2.
+
+- Add dev-deps: `wiremock`, `insta`, `tempfile` (in `crates/tui/Cargo.toml`).
+- Scaffold `crates/tui/tests/{common,scenarios,snapshots}/`.
+- `common/harness.rs` — boots `HeadlessApp` against a wiremock URL, writes a
+  per-test `init.lua` to a tempdir, sets `XDG_CONFIG_HOME`, drives `UiCommand`s,
+  awaits `TurnComplete`, returns the persisted `Vec<Message>`.
+- 5–10 baseline scenarios covering: plain turn, single tool call (allow/deny
+  via plugin hook), retry, multi-turn, mid-block turn end, compact, fork.
+  These are the parity gate for everything below.
+
+**Determinism:** wiremock is deterministic; `insta` redaction filters strip
+timestamps / IDs / durations / paths. No real network, no real `tokio::sleep`
+in tests (use `tokio::time::pause` + `advance`). Clock injection itself lands
+in P2 (where the engine restructure happens) — until then, snapshots redact
+time-derived fields.
+
+End of pre-P0: `cargo nextest run -p tui --test scenarios` is green; goldens
+on disk under `crates/tui/tests/snapshots/`.
 
 ---
 
@@ -180,6 +215,11 @@ Sub-phases below can interleave but each must end at a coherent boundary.
   - Behaviour → keymap recipe on the prompt Window.
   - Existing `crates/tui/src/completer/` and
     `crates/tui/src/attachment/` collapse along these axes.
+- **Tests (L1):** as the vim state machine breaks open, the existing vim
+  unit tests rewrite to the Helix-style marker DSL — `(input, keys, output)`
+  3-tuples with `#[primary|]#` selection markers — added next to Buffer /
+  Window / vim-recipe code under `#[cfg(test)] mod tests`. The marker-DSL
+  parser (~100 LOC) lands here. See `TESTING.md` § L1.
 
 ### P1.e — `Theme` registry
 
@@ -355,6 +395,11 @@ direct host calls:
 - `TurnComplete`, `TokenUsage`, etc. → `cells.set(name, payload)`.
   Subscribers (statusline spec bindings, plugin `smelt.au.on`
   callbacks) fan out from the same registry.
+- **Tests (L2):** clock-injection seam lands here — `Instant::now` /
+  `SystemTime::now` flow through a `Clock` handle on `Core` so tests can
+  freeze time. Pre-P0 scenarios re-point at the refactored engine; goldens
+  are reviewed with `cargo insta review` and re-blessed where the diff
+  reflects intended structural changes. See `TESTING.md` § L2 + Determinism.
 
 ### P2.e — Single `select!` loop
 
@@ -537,6 +582,12 @@ table. The Rust `App::handle_command(line)` becomes
 `modes.lua` exposes `smelt.modes` — register a mode (name, display,
 keymap-overlay). Existing `mode_cycle` and `reasoning_cycle` flows
 become Lua functions firing the right autocmds via `smelt.au.fire`.
+
+**Tests (L3a):** as each widget reaches its final shape (transcript, diff,
+status, dialogs, picker), add `#[cfg(test)] mod tests` blocks rendering into
+a fake `Grid` and asserting via `assert_eq!(actual, Grid::with_lines([...]))`.
+`Grid: PartialEq` + `Grid::with_lines` are added to `crates/ui/src/grid.rs`
+in P1, then consumed here. See `TESTING.md` § L3a.
 
 End of P4: `crates/tui/src/app/dialogs/` is empty (or near-empty).
 `crates/tui/src/builtin_commands` is gone. Statusline updates
@@ -759,6 +810,12 @@ back-compat. Specific renames:
 - Drop the `Plugin` prefix from `PluginToolDef` / `PluginToolHookFlags`
   / `PluginToolHooks` since "plugin tool" and "core tool" no longer
   exist as a distinction (engine sees one registry).
+
+**Tests (L3b):** Lua dialogs orchestrate multi-step gestures crossing
+widgets. The Pilot harness (~80 LOC, Textual-style: `pilot.click(WinId,
+offset)` / `pilot.press(...)` / `pilot.drain()`) lands here under
+`crates/tui/tests/interaction/`. Asserts on cell state and widget queries
+after gestures — no rendered-grid snapshots. See `TESTING.md` § L3b.
 
 End of P5: `engine` has no opinion on Plan/Apply/Yolo. The same
 registry holds plugin and "core" tools — engine doesn't distinguish.

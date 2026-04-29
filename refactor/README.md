@@ -11,12 +11,18 @@ backward compatibility. The only artefact that matters is the final shape.
 
 ## The plan is not final
 
-This is the most important rule. **The refactor plan in `REFACTOR.md` is a
-sketch, not a contract.** Reality will push back on it. We absolutely have not
-thought of everything. There are decisions in these docs that will turn out
-wrong, sub-phases that need to split or merge, abstractions that look elegant on
-paper and ugly in code, and better designs you'll see only once you have a file
-open.
+This is the most important rule. **Every `refactor/` doc is a sketch, not a
+contract** — the sequencing in `REFACTOR.md`, the intent in
+`ARCHITECTURE.md`, the structure in the puml diagram (and its rendered SVG),
+the file fates in `INVENTORY.md`, the parity rows in `FEATURES.md`, the test
+strategy in `TESTING.md`, the vertical slice in `TRACE.md`, the historical
+log in `DECISIONS.md`. Reality will push back on all of them. We absolutely
+have not thought of everything. There are decisions in these docs that will
+turn out wrong, sub-phases that need to split or merge, abstractions that
+look elegant on paper and ugly in code, module boundaries that don't draw
+the seam where the seam wants to be, type shapes that need different fields,
+events that need to fire at different points, and better designs you'll see
+only once you have a file open.
 
 When that happens:
 
@@ -48,8 +54,25 @@ it isn't. Either path ends with the docs updated.
   re-litigate it later.
 - **No step is too big.** If a phase wants to delete 30 files and replace them,
   that's a phase.
-- **Diagram is the spec for structure.** When `REFACTOR.md` and the puml drift,
-  follow the puml.
+- **Diagram is the spec for structure.** The puml is canonical for shape;
+  touching it means updating `REFACTOR.md` (and regenerating the SVG) in the
+  same diff. Drift is a bug, not a tiebreaker.
+- **Code stays phase-agnostic.** The code itself never references `P0` /
+  `pre-P0` / `P3.b` / "L2" or any other refactor-stage label — not in
+  comments, not in identifiers, not in test names, not in commit messages
+  beyond the `P<n>.md` log itself. Phase context lives in `P<n>.md`, the
+  `refactor/` docs, and PR descriptions. Source reads as if the new shape
+  was always there. (Same spirit as the global "no traces of what came
+  before" refactor rule.)
+  - **Carve-out for TODOs.** `TODO(P<n>): <action>` is allowed at the
+    call site to mark "blocked until phase Pn lands the prerequisite."
+    Doing the work removes the TODO; no other doc needs touching. Keep
+    the action concrete (`TODO: mount Anthropic SSE cassette`) — never
+    a lament (`TODO: this is broken`).
+  - **No `TODO.md`.** Code-coupled deferrals live as TODOs at the call
+    site. Cross-cutting open questions live in `STATUS.md`; phase-slipped
+    work lives in `P<n>.md` "Deferrals"; per-file fates live in
+    `INVENTORY.md`. A separate TODO list would drift and duplicate.
 
 ## Verify when it makes sense
 
@@ -78,6 +101,7 @@ Don't run all of these on every commit. Run what catches what you just changed.
 | `P<n>.md`                         | Per-phase log of what shipped + decisions made.     | When starting `P<n+1>`.                         | At the end of each phase. Template below.                         |
 | `DECISIONS.md`                    | Pre-P0 architectural decisions log.                 | If you wonder "why is X this way?"              | Frozen once P0 lands. Decisions thereafter live in `P<n>.md`.     |
 | `TRACE.md`                        | One vertical slice walked end-to-end through the target. Concrete `init.lua` + `bash.lua` example. | When you need a reality check on how a flow composes, or when designing a new Lua tool. | Add new slices when a different flow surfaces a design hole. |
+| `TESTING.md`                      | Three-layer testing strategy: model state / engine integration / rendering. | When adding tests or designing test harness. | When a layer's harness changes shape. |
 | `check.sh`                        | Drift-detection invariants.                         | Session start; before declaring a phase done.   | When a new invariant is worth checking.                           |
 
 ## Doc sync rule
@@ -96,7 +120,9 @@ files are updated.
 3. Read `STATUS.md` — orient in 30 seconds.
 4. Read the most recent `P<n>.md` to see what just happened.
 5. Skim `INVENTORY.md` rows for the upcoming phase.
-6. If anything feels stale, fix the docs before writing code.
+6. `grep -rn 'TODO' crates tests src` — quick read of code-level deferrals.
+   If the count is climbing without phases closing, pause and triage.
+7. If anything feels stale, fix the docs before writing code.
 
 ## `P<n>.md` template
 

@@ -52,10 +52,11 @@ FEATURES=refactor/FEATURES.md
 ARCH=refactor/ARCHITECTURE.md
 DECISIONS=refactor/DECISIONS.md
 TRACE=refactor/TRACE.md
+TESTING=refactor/TESTING.md
 PUML=refactor/tui-ui-architecture-target.puml
 SVG=refactor/tui-ui-architecture-target.svg
 
-for f in "$README" "$REFACTOR" "$STATUS" "$INVENTORY" "$FEATURES" "$ARCH" "$DECISIONS" "$TRACE" "$PUML"; do
+for f in "$README" "$REFACTOR" "$STATUS" "$INVENTORY" "$FEATURES" "$ARCH" "$DECISIONS" "$TRACE" "$TESTING" "$PUML"; do
   [[ -f $f ]] || { fail "missing: $f"; exit 1; }
 done
 
