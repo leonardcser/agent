@@ -374,6 +374,16 @@ pub struct ResolvedModel {
 }
 
 impl ResolvedModel {
+    pub fn reasoning_catalog(&self) -> ModelCatalogMetadata {
+        smelt_provider::reasoning_catalog(
+            &self.provider_type,
+            &self.api_base,
+            &self.model_name,
+            &self.config,
+            &self.catalog,
+        )
+    }
+
     /// Construct a dispatch-ready target after the caller resolves its key env.
     pub fn target(&self, api_key: String) -> protocol::ModelTarget {
         protocol::ModelTarget {

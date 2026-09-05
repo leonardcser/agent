@@ -274,6 +274,15 @@ app_story!(prompt_model_picker_with_notification, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(prompt_reasoning_picker_native_levels, |ctx| {
+    ctx.set_viewport(60, 12);
+    ctx.seed_models(&[("anthropic", "claude-opus-4-6", "anthropic")]);
+    ctx.run_command("/model anthropic/claude-opus-4-6");
+    ctx.run_command("/reasoning high");
+    ctx.run_command("/reasoning");
+    ctx.assert_snapshot();
+});
+
 app_story!(prompt_picker_with_queue_stash_and_notification, |ctx| {
     // Picker rows anchor directly above the prompt chrome and cover the
     // notification. Queue, stash, and the tip remain inside the prompt top bar.

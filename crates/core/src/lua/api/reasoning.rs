@@ -31,6 +31,28 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     m.fn_(
+        "options",
+        "Return `{ efforts, default }` for the active model. `efforts` contains supported native labels; an empty list means the supported levels are unknown. `default` is the model's default effort when known.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let catalog = crate::host::try_with_core(|core| {
+                core.config.active_model().map(|model| model.reasoning_catalog())
+            })
+            .flatten()
+            .unwrap_or_default();
+            let efforts = catalog.supported_reasoning_efforts.iter()
+                .map(|effort| effort.label().to_string())
+                .collect::<Vec<_>>();
+            let default = catalog.default_reasoning_effort
+                .map(|effort| effort.label().to_string());
+            let out = lua.create_table()?;
+            out.set("efforts", efforts)?;
+            out.set("default", default)?;
+            Ok(out)
+        },
+    )?;
+
+    m.fn_(
         "known_list",
         "Return the reasoning-effort labels known by this smelt version. Models may advertise additional labels.",
         &[],

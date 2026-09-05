@@ -288,6 +288,311 @@ fn engine_ask_models_and_efforts(
 }
 
 #[test]
+fn command_argument_callbacks_are_lazy_and_live() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        local value = "first"
+        local calls = 0
+        local registration = smelt.cmd.register("live-args", function() end, {
+            args = { "stale" },
+            args_fn = function()
+                calls = calls + 1
+                assert(#smelt.cmd.list() > 0)
+                smelt.cmd.register("from-args", function() end, { override = true })
+                return { value }
+            end,
+        })
+        local function command()
+            for _, row in ipairs(smelt.cmd.list()) do
+                if row.name == "live-args" then return row end
+            end
+        end
+        local row = command()
+        assert(row.args[1] == "stale")
+        assert(calls == 0)
+        assert(row.args_fn()[1] == "first")
+        value = "second"
+        assert(row.args_fn()[1] == "second")
+        assert(calls == 2)
+        registration:remove()
+        assert(command() == nil)
+    "#
+    ));
+}
+
+#[test]
+fn command_argument_callbacks_do_not_break_slash_completion() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    assert!(app.run_lua(
+        r#"
+        hint_calls = 0
+        smelt.cmd.register("broken-hint", function() end, {
+            args_fn = function()
+                hint_calls = hint_calls + 1
+                error("broken argument provider")
+            end,
+        })
+    "#
+    ));
+
+    app.type_text("/fast");
+    let frame = app.render_to_frame().text();
+    assert!(app.state().picker_count > 0, "{frame}");
+    assert!(frame.contains("toggle accelerated inference"), "{frame}");
+    app.press(KeyCode::Tab);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("[on|off|toggle]"), "{frame}");
+    assert!(app.run_lua("assert(hint_calls == 0)"));
+}
+
+#[test]
+fn command_argument_callbacks_fall_back_to_static_hints() {
+    for callback in [
+        "error('broken argument provider')",
+        "return nil",
+        "return 'not a list'",
+        "return { true }",
+        "return { 'first', nil, 'third', 'fourth' }",
+    ] {
+        let mut app = TestApp::builder().with_vim(false).build();
+        assert!(app.run_lua(&format!(
+            r#"
+            smelt.cmd.register("fallback-hint", function() end, {{
+                args = {{ "first", "second" }},
+                args_fn = function() {callback} end,
+            }})
+        "#
+        )));
+
+        app.type_text("/fallback-hint ");
+        let frame = app.render_to_frame().text();
+        assert!(frame.contains("[first|second]"), "{callback}: {frame}");
+    }
+}
+
+#[test]
+fn command_argument_callbacks_refresh_hints_and_allow_empty_choices() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    assert!(app.run_lua(
+        r#"
+        hint_values = { "first" }
+        smelt.cmd.register("live-hint", function() end, {
+            args = { "fallback" },
+            args_fn = function() return hint_values end,
+        })
+    "#
+    ));
+
+    app.type_text("/live-hint ");
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("[first]"), "{frame}");
+    assert!(app.run_lua("hint_values = { 'second' }"));
+    app.type_text(" ");
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("[second]"), "{frame}");
+    assert!(app.run_lua("hint_values = {}"));
+    app.type_text(" ");
+    let frame = app.render_to_frame().text();
+    assert!(!frame.contains("[second]"), "{frame}");
+    assert!(!frame.contains("[fallback]"), "{frame}");
+}
+
+#[test]
+fn budget_reasoning_preserves_max_when_budgets_match() {
+    let mut app = TestApp::builder()
+        .with_vim(false)
+        .with_reasoning_cycle(vec![
+            protocol::ReasoningEffort::Max,
+            protocol::ReasoningEffort::Low,
+        ])
+        .build();
+    let mut models = app.core_probe().config.available_models.clone();
+    let mut claude = models[0].clone();
+    claude.key = "anthropic/claude-sonnet-4-5".into();
+    claude.model_name = "claude-sonnet-4-5".into();
+    claude.provider_type = "anthropic".into();
+    models.push(claude);
+    app.set_available_models(models);
+
+    app.type_text("/model anthropic/claude-sonnet-4-5");
+    app.press(KeyCode::Enter);
+    app.type_text("/reasoning max");
+    app.press(KeyCode::Enter);
+    let frame = app.render_to_frame().text();
+    assert_eq!(
+        app.core_probe().config.reasoning_effort,
+        protocol::ReasoningEffort::Max,
+        "{frame}"
+    );
+
+    app.press_mod(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    assert_eq!(
+        app.core_probe().config.reasoning_effort,
+        protocol::ReasoningEffort::Low
+    );
+    app.press_mod(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    assert_eq!(
+        app.core_probe().config.reasoning_effort,
+        protocol::ReasoningEffort::Max
+    );
+    assert!(!app.lua_messages_contain("not supported"));
+}
+
+#[test]
+fn reasoning_hint_only_offers_active_model_levels() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    add_restricted_reasoning_model(&mut app);
+    app.type_text("/model codex/restricted-model");
+    app.press(KeyCode::Enter);
+    app.type_text("/reasoning ");
+
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("[low|high]"), "{frame}");
+    assert!(!frame.contains("ultra"), "{frame}");
+}
+
+#[test]
+fn reasoning_shortcut_skips_unsupported_configured_levels() {
+    let mut app = TestApp::builder()
+        .with_vim(false)
+        .with_reasoning_cycle(vec![
+            protocol::ReasoningEffort::Low,
+            protocol::ReasoningEffort::Ultra,
+            protocol::ReasoningEffort::High,
+        ])
+        .build();
+    add_restricted_reasoning_model(&mut app);
+    app.type_text("/model codex/restricted-model");
+    app.press(KeyCode::Enter);
+
+    app.press_mod(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    assert_eq!(
+        app.core_probe().config.reasoning_effort,
+        protocol::ReasoningEffort::High
+    );
+    app.press_mod(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    assert_eq!(
+        app.core_probe().config.reasoning_effort,
+        protocol::ReasoningEffort::Low
+    );
+    assert!(!app.lua_messages_contain("not supported"));
+}
+
+#[test]
+fn reasoning_picker_selects_supported_levels_and_marks_the_default() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    add_restricted_reasoning_model(&mut app);
+    app.type_text("/model codex/restricted-model");
+    app.press(KeyCode::Enter);
+    app.type_text("/reasoning");
+    app.press(KeyCode::Enter);
+
+    assert!(app.state().picker_count > 0);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("current, default"), "{frame}");
+    assert!(!frame.contains("ultra"), "{frame}");
+    app.press(KeyCode::Up);
+    app.press(KeyCode::Enter);
+    app.settle_lua();
+    let frame = app.render_to_frame().text();
+    assert_eq!(
+        app.core_probe().config.reasoning_effort,
+        protocol::ReasoningEffort::High,
+        "{frame}"
+    );
+    assert_eq!(app.state().picker_count, 0);
+
+    app.type_text("/reasoning");
+    app.press(KeyCode::Enter);
+    app.press(KeyCode::Enter);
+    app.settle_lua();
+    assert_eq!(
+        app.core_probe().config.reasoning_effort,
+        protocol::ReasoningEffort::High
+    );
+
+    app.type_text("/reasoning");
+    app.press(KeyCode::Enter);
+    app.press(KeyCode::Esc);
+    assert_eq!(
+        app.core_probe().config.reasoning_effort,
+        protocol::ReasoningEffort::High
+    );
+}
+
+#[test]
+fn unknown_reasoning_levels_are_not_advertised_but_allow_explicit_overrides() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.type_text("/reasoning");
+    app.press(KeyCode::Enter);
+    assert_eq!(app.state().picker_count, 0);
+    assert!(app
+        .render_to_frame()
+        .text()
+        .contains("reasoning levels unknown"));
+    app.type_text("/reasoning persistent");
+    app.press(KeyCode::Enter);
+    app.press_mod(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    assert_eq!(
+        app.core_probe().config.reasoning_effort,
+        protocol::ReasoningEffort::Custom("persistent".into())
+    );
+    assert!(app.run_lua("assert(#smelt.reasoning.options().efforts == 0)"));
+}
+
+#[test]
+fn reasoning_choices_follow_the_model_not_the_provider() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    add_restricted_reasoning_model(&mut app);
+    let mut models = app.core_probe().config.available_models.clone();
+    let mut claude = models[0].clone();
+    claude.key = "copilot/claude-opus-4.6".into();
+    claude.model_name = "claude-opus-4.6".into();
+    claude.provider_type = "copilot".into();
+    models.push(claude);
+    app.set_available_models(models);
+
+    for (model, levels) in [
+        ("codex/restricted-model", "low,high"),
+        ("copilot/claude-opus-4.6", "off,low,medium,high,max"),
+        ("test/test-model", ""),
+    ] {
+        app.type_text(&format!("/model {model}"));
+        app.press(KeyCode::Enter);
+        assert!(app.run_lua(&format!(
+            "assert(table.concat(smelt.reasoning.options().efforts, ',') == {levels:?})"
+        )));
+        assert!(app.run_lua(&format!(
+            r#"
+            for _, command in ipairs(smelt.cmd.list()) do
+                if command.name == "reasoning" then
+                    assert(table.concat(command.args_fn(), ",") == {levels:?})
+                end
+            end
+        "#
+        )));
+    }
+}
+
+#[test]
+fn reasoning_disabled_model_rejects_explicit_effort_and_does_not_cycle() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    let mut model = app.core_probe().config.available_models[0].clone();
+    model.config.supports_reasoning = Some(false);
+    app.set_available_models(vec![model]);
+    app.apply_model("test/test-model", false);
+    app.type_text("/reasoning high");
+    app.press(KeyCode::Enter);
+    app.press_mod(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    assert_eq!(
+        app.core_probe().config.reasoning_effort,
+        protocol::ReasoningEffort::Off
+    );
+    assert!(app.lua_messages_contain("not supported"));
+}
+
+#[test]
 fn codex_model_accepts_all_advertised_reasoning_efforts() {
     let mut app = TestApp::builder().with_vim(false).build();
     add_codex_gpt_5_6_sol_model(&mut app);
@@ -349,8 +654,7 @@ fn model_switch_updates_reasoning_levels_for_active_provider() {
     assert!(app.run_lua(
         r#"
         local levels = smelt.reasoning.cycle_list()
-        assert(#levels == 4)
-        assert(levels[#levels] == "high")
+        assert(#levels == 0)
         smelt.model.set("openai/reasoning-model")
         levels = smelt.reasoning.cycle_list()
         assert(#levels == 8)
@@ -360,8 +664,7 @@ fn model_switch_updates_reasoning_levels_for_active_provider() {
         assert(levels[8] == "persistent")
         smelt.model.set("test/test-model")
         levels = smelt.reasoning.cycle_list()
-        assert(#levels == 4)
-        assert(levels[#levels] == "high")
+        assert(#levels == 0)
         "#,
     ));
 }

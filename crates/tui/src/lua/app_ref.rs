@@ -821,7 +821,7 @@ impl AgentLuaHost<'_> {
                 .core
                 .config
                 .active_model()
-                .map(|model| model.catalog.clone())
+                .map(|model| model.reasoning_catalog())
                 .unwrap_or_default();
             return self
                 .app
@@ -842,7 +842,7 @@ impl AgentLuaHost<'_> {
             }
         };
         let api_key = self.app.resolve_api_key_for_env(&resolved.api_key_env)?;
-        let catalog = resolved.catalog.clone();
+        let catalog = resolved.reasoning_catalog();
         Some((resolved.target(api_key), catalog))
     }
 

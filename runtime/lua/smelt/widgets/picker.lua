@@ -105,6 +105,7 @@ function smelt.picker.open(opts)
   local items = opts.items
   local picker = smelt.picker.new(opts)
   if not picker then return nil end
+  picker:selected(math.max(1, math.min(#items, math.floor(tonumber(opts.selected) or 1))) - 1)
   local win = picker:win()
   local lifecycle = new_picker_lifecycle(picker, opts)
 

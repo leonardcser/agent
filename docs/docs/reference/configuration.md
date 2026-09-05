@@ -200,16 +200,26 @@ openai-compatible / anthropic-compatible provider that supports
 `xhigh`, `max`, and `ultra`, but non-empty provider-defined labels are also
 accepted and preserved exactly on label-based provider APIs. Budget-based APIs
 cannot interpret custom labels, so they use the configured `max` thinking
-budget. Models that don't support thinking ignore this setting.
+budget. Models explicitly marked as not supporting reasoning only accept `off`.
 
-Managed models use the provider's advertised reasoning levels when available,
-including labels unknown to this smelt version. Those advertised levels are
-authoritative. Without catalog metadata, OpenAI-compatible, OpenAI, and Codex
-models conservatively cycle through `off,low,medium,high`; other providers stop
-at `max`. When switching models, smelt keeps the current effort if supported,
-otherwise uses the new model's valid provider default, then its first advertised
-level. Explicitly selecting a level that the active model does not advertise
-returns an error without changing the current effort.
+`/reasoning` opens a compact picker with the active model's native levels,
+marking the current choice and the model default. Command hints and `Ctrl+T`
+use the same model capabilities, not a universal effort scale. Provider-advertised
+levels are authoritative, including labels unknown to this smelt version.
+Known Claude models have model-specific built-ins. Budget-based presets remain
+available even when their configured token budgets are identical.
+
+Without advertised levels or a model-specific built-in, smelt reports that the
+levels are unknown instead of guessing. `/reasoning <effort>` remains available
+as an explicit override for these endpoints. A configured `--reasoning-cycle`
+can supply a custom cycle for unknown models; for known models it is filtered
+to supported levels. If none remain, cycling uses the model's supported list.
+An explicitly empty cycle disables the shortcut.
+
+When switching models, smelt keeps the current effort if supported; otherwise it
+uses the new model's valid default, then its first supported level, and reports
+the adjustment. Selecting an unsupported level explicitly returns an error
+without changing the current effort.
 
 Set thinking block presentation at runtime with
 `/thinking [open|close|peek|toggle]`.

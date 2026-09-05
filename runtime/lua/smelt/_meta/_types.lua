@@ -85,6 +85,7 @@
 ---@class smelt.cmd.RegisterOpts
 ---@field desc? string Human-readable description shown in `/help` and the slash-command picker.
 ---@field args? string[] Positional argument labels used for help text and completion hints.
+---@field args_fn? fun(): string[] Return live argument labels for this command's hint. Overrides `args`; errors or invalid results fall back to `args`.
 ---@field busy? string Busy behavior while an agent turn is running: `run` (default), `reject`, `queue_request`, or `queue_command`.
 ---@field startup_ok? boolean If true, the command may run before the runtime has finished bootstrapping. Defaults to `false`.
 ---@field hidden? boolean If true, the command is hidden from `/help` and the picker (still callable). Defaults to `false`.
@@ -545,6 +546,7 @@
 ---@field poll_ms? integer Refresh interval while provider returns `{ scanning = true }` or `{ searching = true }`.
 ---@field loading_delay_ms? integer Delay before showing an initial loading row when there are no stale rows to keep.
 ---@field loading_poll_ms? integer Quiet polling interval before the initial loading row appears.
+---@field selected? integer Initial selected row (1-based, clamped); defaults to 1.
 ---@field on_select? fun(item: string|smelt.picker.Item): nil Fires on every cursor move.
 ---@field on_enter? fun(item: string|smelt.picker.Item, idx: integer): nil Persistent-mode accept handler.
 ---@field rank? fun(items: table[], query: string, original: (string|smelt.picker.Item)[]): integer[] Custom filter/ranker. Return 1-based row indices in display order.

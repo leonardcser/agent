@@ -1140,7 +1140,7 @@ impl TuiApp {
                     .core
                     .config
                     .active_model()
-                    .map(|model| model.catalog.clone())
+                    .map(|model| model.reasoning_catalog())
                     .unwrap_or_default();
                 return self.resolve_model_target().map(|target| (target, catalog));
             }
@@ -1156,7 +1156,7 @@ impl TuiApp {
             }
         };
         let api_key = self.resolve_api_key_for_env(&resolved.api_key_env)?;
-        Some((resolved.target(api_key), resolved.catalog))
+        Some((resolved.target(api_key), resolved.reasoning_catalog()))
     }
 
     pub(crate) fn begin_command_request_turn(

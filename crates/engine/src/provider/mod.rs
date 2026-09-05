@@ -1205,35 +1205,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn default_reasoning_cycle_openai_family_is_conservative() {
-        let expected = [
-            ReasoningEffort::Off,
-            ReasoningEffort::Low,
-            ReasoningEffort::Medium,
-            ReasoningEffort::High,
-        ];
-        for kind in [
-            ProviderKind::OpenAiCompatible,
-            ProviderKind::OpenAi,
-            ProviderKind::Codex,
-        ] {
-            assert_eq!(kind.default_reasoning_cycle(), expected);
-        }
-    }
-
-    #[test]
-    fn default_reasoning_cycle_other_kinds_include_max() {
-        for k in [
-            ProviderKind::Anthropic,
-            ProviderKind::AnthropicCompatible,
-            ProviderKind::Copilot,
-            ProviderKind::KimiCode,
-        ] {
-            assert!(k.default_reasoning_cycle().contains(&ReasoningEffort::Max));
-        }
-    }
-
     // ---- sanitize_tool_call_arguments ----
 
     #[test]

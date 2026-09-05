@@ -50,6 +50,16 @@ fun(): string[]
 
 Return the reasoning-effort labels known by this smelt version. Models may advertise additional labels.
 
+## `smelt.reasoning.options`
+
+```lua
+fun(): table
+```
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
+Return `{ efforts, default }` for the active model. `efforts` contains supported native labels; an empty list means the supported levels are unknown. `default` is the model's default effort when known.
+
 ## `smelt.reasoning.set`
 
 ```lua

@@ -71,6 +71,7 @@ pub struct RegisteredCommand {
     pub token: u64,
     pub description: Option<String>,
     pub args: Vec<String>,
+    pub args_fn: Option<LuaHandle>,
     pub busy: CommandBusyBehavior,
     pub startup_ok: bool,
     /// If true, hidden from the completer but still dispatchable by name.

@@ -18,6 +18,9 @@ pub struct LuaCmdRegisterOpts {
     /// Positional argument labels used for help text and completion hints.
     #[lua(default)]
     pub args: Vec<String>,
+    /// Return live argument labels for this command's hint. Overrides `args`;
+    /// errors or invalid results fall back to `args`.
+    pub args_fn: Option<LuaCallback<(), Vec<String>>>,
     /// Busy behavior while an agent turn is running: `run` (default), `reject`, `queue_request`, or `queue_command`.
     pub busy: Option<String>,
     /// If true, the command may run before the runtime has finished bootstrapping. Defaults to `false`.
@@ -53,7 +56,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "register",
-            "Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.",
+            "Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `args_fn` (live argument labels), `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.",
             &["name", "handler", "opts"],
             move |lua,
                   (name, handler, opts): (
@@ -73,6 +76,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             token: 0,
                             description: opts.desc,
                             args: opts.args,
+                            args_fn: opts.args_fn
+                                .map(|callback| LuaHandle::from_func(lua, callback.into_inner()))
+                                .transpose()?,
                             busy,
                             startup_ok: opts.startup_ok.unwrap_or(false),
                             hidden: opts.hidden.unwrap_or(false),
@@ -91,13 +97,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "list",
-            "Return every registered slash command as a Lua array of `{ name, desc, args, busy, startup_ok, hidden }` rows. Sorted by name.",
+            "Return every registered slash command as a Lua array of `{ name, desc, args, args_fn, busy, startup_ok, hidden }` rows. Sorted by name. Argument callbacks are returned without being invoked.",
             &[],
             move |lua, ()| -> LuaResult<mlua::Table> {
                 struct Row {
                     name: String,
                     desc: Option<String>,
                     args: Vec<String>,
+                    args_fn: Option<mlua::Function>,
                     busy: &'static str,
                     startup_ok: bool,
                     hidden: bool,
@@ -105,22 +112,27 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let rows: Vec<Row> = s
                     .commands
                     .lock()
-                    .map(|m| {
-                        let mut rows: Vec<Row> = m
+                    .map(|m| -> LuaResult<Vec<Row>> {
+                        let mut rows = m
                             .iter()
-                            .map(|(name, cmd)| Row {
-                                name: name.clone(),
-                                desc: cmd.description.clone(),
-                                args: cmd.args.clone(),
-                                busy: cmd.busy.as_str(),
-                                startup_ok: cmd.startup_ok,
-                                hidden: cmd.hidden,
+                            .map(|(name, cmd)| -> LuaResult<Row> {
+                                Ok(Row {
+                                    name: name.clone(),
+                                    desc: cmd.description.clone(),
+                                    args: cmd.args.clone(),
+                                    args_fn: cmd.args_fn.as_ref()
+                                        .map(|handle| lua.registry_value(&handle.key))
+                                        .transpose()?,
+                                    busy: cmd.busy.as_str(),
+                                    startup_ok: cmd.startup_ok,
+                                    hidden: cmd.hidden,
+                                })
                             })
-                            .collect();
+                            .collect::<LuaResult<Vec<_>>>()?;
                         rows.sort_by(|a, b| a.name.cmp(&b.name));
-                        rows
+                        Ok(rows)
                     })
-                    .unwrap_or_default();
+                    .unwrap_or_else(|_| Ok(Vec::new()))?;
                 let table = lua.create_table()?;
                 for (
                     i,
@@ -128,6 +140,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         name,
                         desc,
                         args,
+                        args_fn,
                         busy,
                         startup_ok,
                         hidden,
@@ -139,6 +152,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     if let Some(d) = desc {
                         row.set("desc", d)?;
                     }
+                    row.set("args_fn", args_fn)?;
                     let args_tbl = lua.create_table()?;
                     for (j, a) in args.iter().enumerate() {
                         args_tbl.set(j + 1, a.as_str())?;

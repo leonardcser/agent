@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+ max
+ high    current, default
+ medium
+ low
+ off
+─────────────────────────── anthropic/claude-opus-4-6 high ─
+
+────────────────────────────────────────────────────────────
+ ○ normal                                           1:1 100%

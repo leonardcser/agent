@@ -538,6 +538,13 @@ impl TuiApp {
         }
         if self.core.config.reasoning_effort != old_reasoning {
             self.publish_reasoning_effort_change();
+            if record {
+                self.notify(format!(
+                    "reasoning: {} ({} unavailable on this model)",
+                    self.core.config.reasoning_effort.label(),
+                    old_reasoning.label(),
+                ));
+            }
         }
         self.core.engine.send(UiCommand::SetFastMode {
             enabled: self.fast_mode_active(),
@@ -766,14 +773,16 @@ impl TuiApp {
         record: bool,
     ) -> Result<(), String> {
         let effort = match self.core.config.active_model() {
-            Some(model) if record && !model.catalog.supports_reasoning_effort(&effort) => {
+            Some(model)
+                if record && !model.reasoning_catalog().supports_reasoning_effort(&effort) =>
+            {
                 return Err(format!(
                     "reasoning effort '{}' is not supported by model '{}'",
                     effort.label(),
                     model.key
                 ));
             }
-            Some(model) if !record => model.catalog.reconcile_reasoning_effort(effort),
+            Some(model) if !record => model.reasoning_catalog().reconcile_reasoning_effort(effort),
             _ => effort,
         };
         if self.core.config.reasoning_effort == effort {

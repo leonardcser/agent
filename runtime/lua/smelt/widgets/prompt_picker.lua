@@ -98,6 +98,7 @@ end
 ---@field poll_ms? integer Refresh interval while provider returns `{ scanning = true }` or `{ searching = true }`.
 ---@field loading_delay_ms? integer Delay before showing an initial loading row when there are no stale rows to keep.
 ---@field loading_poll_ms? integer Quiet polling interval before the initial loading row appears.
+---@field selected? integer Initial selected row (1-based, clamped); defaults to 1.
 ---@field on_select? fun(item: string|smelt.picker.Item): nil Fires on every cursor move.
 ---@field on_enter? fun(item: string|smelt.picker.Item, idx: integer): nil Persistent-mode accept handler.
 ---@field rank? fun(items: table[], query: string, original: (string|smelt.picker.Item)[]): integer[] Custom filter/ranker. Return 1-based row indices in display order.
@@ -160,12 +161,13 @@ function __smelt_internal.picker.open_prompt(opts)
   provider_state = initial_provider_state
   local all_items = stamp(original)
   local current = provider_fn and all_items or ((query == "" and not rank) and all_items or filter_items(all_items, query, rank, original))
-  local selected = 1
+  local selected = math.max(1, math.min(#current, math.floor(tonumber(opts.selected) or 1)))
 
   local picker = smelt.picker.new({
     items     = to_picker_items(current),
     placement = "prompt_docked",
   })
+  picker:selected(selected - 1)
 
   -- Claim modal ownership of the prompt so auto-completers (slash / @file /
   -- arg) stay quiet while this picker uses the prompt as its filter input.

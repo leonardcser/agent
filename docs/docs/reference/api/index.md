@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Rust-registered signatures come from the closure's argument and return types; bundled Lua signatures come from LuaCATS annotations beside the implementation.
 
-**Coverage:** 85 namespace(s), 431 function(s), 100 class(es), 13 alias(es).
+**Coverage:** 85 namespace(s), 432 function(s), 100 class(es), 13 alias(es).
 
 `Supported` identifies the primary alpha plugin facade. `Advanced` identifies lower-level composition primitives that may evolve more freely. These labels guide API design and documentation; the alpha surface is not compatibility-frozen. Internal runtime machinery is excluded from this reference and IDE completion.
 
@@ -108,7 +108,7 @@ Contains both Host and UiHost functions; per-function pages list the exact tier.
 - [`smelt.notify`](notify.md) - 4 function(s)
 - [`smelt.permissions`](permissions.md) - 7 function(s)
 - [`smelt.prompt`](prompt.md) - 11 function(s)
-- [`smelt.reasoning`](reasoning.md) - 5 function(s)
+- [`smelt.reasoning`](reasoning.md) - 6 function(s)
 - [`smelt.theme`](theme.md) - 10 function(s)
 - [`smelt.transcript`](transcript.md) - 22 function(s)
 

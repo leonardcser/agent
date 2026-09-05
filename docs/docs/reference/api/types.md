@@ -128,6 +128,7 @@ Options accepted by `smelt.cmd.register`.
 | --- | --- | --- | --- |
 | `desc` | `string` |  | Human-readable description shown in `/help` and the slash-command picker. |
 | `args` | `string[]` |  | Positional argument labels used for help text and completion hints. |
+| `args_fn` | `fun(): string[]` |  | Return live argument labels for this command's hint. Overrides `args`; errors or invalid results fall back to `args`. |
 | `busy` | `string` |  | Busy behavior while an agent turn is running: `run` (default), `reject`, `queue_request`, or `queue_command`. |
 | `startup_ok` | `boolean` |  | If true, the command may run before the runtime has finished bootstrapping. Defaults to `false`. |
 | `hidden` | `boolean` |  | If true, the command is hidden from `/help` and the picker (still callable). Defaults to `false`. |
@@ -827,6 +828,7 @@ persistent `on_enter` handling.
 | `poll_ms` | `integer` |  | Refresh interval while provider returns `{ scanning = true }` or `{ searching = true }`. |
 | `loading_delay_ms` | `integer` |  | Delay before showing an initial loading row when there are no stale rows to keep. |
 | `loading_poll_ms` | `integer` |  | Quiet polling interval before the initial loading row appears. |
+| `selected` | `integer` |  | Initial selected row (1-based, clamped); defaults to 1. |
 | `on_select` | `fun(item: string\|smelt.picker.Item): nil` |  | Fires on every cursor move. |
 | `on_enter` | `fun(item: string\|smelt.picker.Item, idx: integer): nil` |  | Persistent-mode accept handler. |
 | `rank` | `fun(items: table[], query: string, original: (string\|smelt.picker.Item)[]): integer[]` |  | Custom filter/ranker. Return 1-based row indices in display order. |

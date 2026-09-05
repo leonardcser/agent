@@ -114,6 +114,16 @@ impl ActiveModel {
         }
     }
 
+    pub fn reasoning_catalog(&self) -> ModelCatalogMetadata {
+        smelt_provider::reasoning_catalog(
+            &self.provider_type,
+            &self.api_base,
+            &self.model_name,
+            &self.config,
+            &self.catalog,
+        )
+    }
+
     pub fn target(&self, api_key: String) -> ModelTarget {
         ModelTarget {
             model: self.model_name.clone(),
@@ -178,8 +188,7 @@ impl RuntimeState {
     ) {
         self.reasoning_effort =
             reconcile_reasoning_effort(self.reasoning_effort.clone(), selection.active.as_ref());
-        self.reasoning_cycle =
-            resolve_reasoning_cycle(startup, &self.reasoning_effort, selection.active.as_ref());
+        self.reasoning_cycle = resolve_reasoning_cycle(startup, selection.active.as_ref());
         self.model_selection = selection;
     }
 
@@ -326,32 +335,27 @@ fn resolve_mode(inputs: &RuntimeInputs<'_>, cycle: &mut Vec<AgentMode>) -> Agent
 
 fn resolve_reasoning_cycle(
     startup: &StartupOverrides,
-    selected: &ReasoningEffort,
     active: Option<&ActiveModel>,
 ) -> Vec<ReasoningEffort> {
-    let fixed_cycle = startup.reasoning_cycle.is_some();
-    let mut cycle = startup.reasoning_cycle.clone().unwrap_or_else(|| {
-        active.map_or_else(
-            || vec![ReasoningEffort::Off],
-            |model| {
-                if model.catalog.supported_reasoning_efforts.is_empty() {
-                    smelt_provider::ProviderKind::from_config_and_url(
-                        &model.provider_type,
-                        &model.api_base,
-                    )
-                    .default_reasoning_cycle()
-                    .to_vec()
-                } else {
-                    model.catalog.supported_reasoning_efforts.clone()
-                }
-            },
-        )
-    });
-    cycle = dedup_preserving_order(cycle);
-    if !fixed_cycle && !cycle.contains(selected) {
-        cycle.push(selected.clone());
+    let supported = active.map_or_else(
+        || vec![ReasoningEffort::Off],
+        |model| model.reasoning_catalog().supported_reasoning_efforts,
+    );
+    let Some(configured) = &startup.reasoning_cycle else {
+        return dedup_preserving_order(supported);
+    };
+    let cycle = dedup_preserving_order(
+        configured
+            .iter()
+            .filter(|effort| supported.is_empty() || supported.contains(effort))
+            .cloned()
+            .collect(),
+    );
+    if cycle.is_empty() && !configured.is_empty() {
+        dedup_preserving_order(supported)
+    } else {
+        cycle
     }
-    cycle
 }
 
 fn reconcile_reasoning_effort(
@@ -359,7 +363,9 @@ fn reconcile_reasoning_effort(
     active: Option<&ActiveModel>,
 ) -> ReasoningEffort {
     match active {
-        Some(model) => model.catalog.reconcile_reasoning_effort(selected),
+        Some(model) => model
+            .reasoning_catalog()
+            .reconcile_reasoning_effort(selected),
         None => selected,
     }
 }
@@ -646,7 +652,7 @@ pub fn resolve_runtime(inputs: RuntimeInputs<'_>) -> Result<RuntimeState, Resolv
     if let (Some(effort), Some(model)) =
         (explicit_reasoning_effort, model_selection.active.as_ref())
     {
-        if !model.catalog.supports_reasoning_effort(effort) {
+        if !model.reasoning_catalog().supports_reasoning_effort(effort) {
             return Err(ResolveError(format!(
                 "reasoning effort '{}' is not supported by model '{}'",
                 effort.label(),
@@ -672,16 +678,12 @@ pub fn resolve_runtime(inputs: RuntimeInputs<'_>) -> Result<RuntimeState, Resolv
             model_selection
                 .active
                 .as_ref()
-                .and_then(|model| model.catalog.default_reasoning_effort.clone())
+                .and_then(|model| model.reasoning_catalog().default_reasoning_effort)
         })
         .unwrap_or(ReasoningEffort::Off);
     let reasoning_effort =
         reconcile_reasoning_effort(reasoning_effort, model_selection.active.as_ref());
-    let reasoning_cycle = resolve_reasoning_cycle(
-        inputs.startup,
-        &reasoning_effort,
-        model_selection.active.as_ref(),
-    );
+    let reasoning_cycle = resolve_reasoning_cycle(inputs.startup, model_selection.active.as_ref());
     let context_window = inputs.previous.and_then(|previous| {
         same_context_target(
             previous.model_selection.active.as_ref(),
@@ -1082,6 +1084,34 @@ mod tests {
     }
 
     #[test]
+    fn budget_reasoning_accepts_max_from_cli_and_defaults() {
+        let mut config = provider_config();
+        config.providers[0].provider_type = Some("anthropic".into());
+        config.providers[0].models[0].name = Some("claude-sonnet-4-5".into());
+        let models = config.resolve_models();
+
+        for from_cli in [false, true] {
+            config.defaults.reasoning_effort = (!from_cli).then(|| "max".into());
+            let resolved = resolve_runtime(RuntimeInputs {
+                config: &config,
+                startup: &StartupOverrides {
+                    model: Some(models[0].key.clone()),
+                    reasoning_effort: from_cli.then_some(ReasoningEffort::Max),
+                    ..Default::default()
+                },
+                available_models: &models,
+                registered_modes: &[],
+                selections: &RuntimeSelections::default(),
+                previous: None,
+                headless: false,
+            })
+            .unwrap();
+            assert_eq!(resolved.reasoning_effort, ReasoningEffort::Max);
+            assert!(resolved.reasoning_cycle.contains(&ReasoningEffort::Max));
+        }
+    }
+
+    #[test]
     fn explicit_unsupported_startup_reasoning_is_rejected() {
         let config = provider_config();
         let mut models = config.resolve_models();
@@ -1352,6 +1382,27 @@ mod tests {
             state.reasoning_cycle,
             vec![ReasoningEffort::Off, ReasoningEffort::High]
         );
+    }
+
+    #[test]
+    fn reasoning_cycle_falls_back_when_all_configured_levels_are_unsupported() {
+        let models = provider_config().resolve_models();
+        let mut active = ActiveModel::from_resolved(&models[0]);
+        active.catalog.supported_reasoning_efforts =
+            vec![ReasoningEffort::Low, ReasoningEffort::High];
+        let startup = StartupOverrides {
+            reasoning_cycle: Some(vec![ReasoningEffort::Ultra]),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_reasoning_cycle(&startup, Some(&active)),
+            vec![ReasoningEffort::Low, ReasoningEffort::High]
+        );
+        let disabled = StartupOverrides {
+            reasoning_cycle: Some(Vec::new()),
+            ..startup
+        };
+        assert!(resolve_reasoning_cycle(&disabled, Some(&active)).is_empty());
     }
 
     #[test]

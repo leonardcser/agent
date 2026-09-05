@@ -16,7 +16,7 @@ fun(): table
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Return every registered slash command as a Lua array of `{ name, desc, args, busy, startup_ok, hidden }` rows. Sorted by name.
+Return every registered slash command as a Lua array of `{ name, desc, args, args_fn, busy, startup_ok, hidden }` rows. Sorted by name. Argument callbacks are returned without being invoked.
 
 ## `smelt.cmd.register`
 
@@ -28,7 +28,7 @@ Types: [`smelt.cmd.RegisterOpts`](types.md#smeltcmdregisteropts), [`smelt.Reg`](
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
+Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `args_fn` (live argument labels), `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
 
 ## `smelt.cmd.register_picker`
 
@@ -40,8 +40,9 @@ fun(name: string, opts: table?): nil
 
 Register a slash command `name` that opens a prompt-docked picker when
 called without arguments, or invokes `opts.apply(arg)` directly when given
-one. `opts` accepts `desc`, `args`, `items` (an array or producer function),
-`apply`, `prepare`, `on_select`, `on_enter`, `on_dismiss`, `stay_open`,
+one. `opts` accepts `desc`, `args`, `args_fn`, `items` (an array or producer function),
+`selected` (1-based index or producer), `apply`, `prepare`, `on_select`,
+`on_enter`, `on_dismiss`, `stay_open`,
 `busy`, and `startup_ok`. With `stay_open = true`, the item producer is
 re-evaluated after each Enter action. Returns nothing; the command lives
 until `/reload`.

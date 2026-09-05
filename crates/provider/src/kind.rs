@@ -2,7 +2,6 @@ use crate::{
     anthropic, chat_completions, openai, CancellationToken, ParsedResponse, ProviderError,
     ProviderStreamEvent,
 };
-use protocol::ReasoningEffort;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
@@ -16,24 +15,6 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub fn default_reasoning_cycle(self) -> &'static [ReasoningEffort] {
-        match self {
-            Self::OpenAiCompatible | Self::OpenAi | Self::Codex => &[
-                ReasoningEffort::Off,
-                ReasoningEffort::Low,
-                ReasoningEffort::Medium,
-                ReasoningEffort::High,
-            ],
-            Self::AnthropicCompatible | Self::Anthropic | Self::Copilot | Self::KimiCode => &[
-                ReasoningEffort::Off,
-                ReasoningEffort::Low,
-                ReasoningEffort::Medium,
-                ReasoningEffort::High,
-                ReasoningEffort::Max,
-            ],
-        }
-    }
-
     pub fn from_config(provider_type: &str) -> Self {
         match provider_type {
             "openai" => Self::OpenAi,
@@ -288,23 +269,6 @@ mod tests {
             ProviderKind::from_config("unknown"),
             ProviderKind::OpenAiCompatible
         );
-    }
-
-    #[test]
-    fn openai_family_fallback_does_not_advertise_extended_reasoning_levels() {
-        let expected = [
-            ReasoningEffort::Off,
-            ReasoningEffort::Low,
-            ReasoningEffort::Medium,
-            ReasoningEffort::High,
-        ];
-        for provider in [
-            ProviderKind::OpenAiCompatible,
-            ProviderKind::OpenAi,
-            ProviderKind::Codex,
-        ] {
-            assert_eq!(provider.default_reasoning_cycle(), expected);
-        }
     }
 
     #[test]

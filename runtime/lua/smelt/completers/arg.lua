@@ -18,11 +18,19 @@ local function find_cmd(text, cpos)
   local prefix_len = 1 + #name + 1 -- "/" + name + " "
   if cpos < prefix_len then return nil end
   for _, c in ipairs(smelt.cmd.list()) do
-    if c.name == name and c.args and #c.args > 0 then
-      return c
-    end
+    if c.name == name then return c end
   end
   return nil
+end
+
+local function command_args(cmd)
+  if not cmd.args_fn then return cmd.args end
+  local ok, args = pcall(cmd.args_fn)
+  if not ok or type(args) ~= "table" then return cmd.args end
+  for i = 1, #args do
+    if type(args[i]) ~= "string" then return cmd.args end
+  end
+  return args
 end
 
 local function build_placeholder(args, max_width)
@@ -37,7 +45,7 @@ local function build_placeholder(args, max_width)
     end
   end
 
-  -- Finite choice set: [off|low|medium|high|xhigh|max|ultra]
+  -- Finite choice set: [low|medium|high]
   local full = "[" .. table.concat(args, "|") .. "]"
   if #full <= max_width then return full end
   for i = #args, 1, -1 do
@@ -56,13 +64,15 @@ local function update()
   local cpos = smelt.prompt.cursor()
   local cmd = find_cmd(text, cpos)
   if not cmd then return end
+  local args = command_args(cmd)
+  if not args or #args == 0 then return end
 
   local win = smelt.prompt.win()
   local content_width = win and win:content_width()
   if not content_width then return end
 
   local available = math.max(0, content_width - #text)
-  local placeholder = build_placeholder(cmd.args, available)
+  local placeholder = build_placeholder(args, available)
   if not placeholder then return end
 
   local line = buf:line(1) or ""
@@ -75,6 +85,7 @@ end
 local win = smelt.prompt.win()
 win:on("text_changed", update)
 win:on("resized", update)
+smelt.signal.subscribe("model", update)
 smelt.events.on("cmd_pre", function()
   local buf = prompt_buf()
   if buf then buf:clear_ns(ns) end

@@ -23,7 +23,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/stats`                                 | Show token usage statistics |
 | `/usage`, `/cost`                        | Show session cost and active-provider usage limits |
 | `/thinking [mode]`                       | Set thinking block presentation: `open`, `close`, `peek`, `toggle` |
-| `/reasoning [level]`                     | Set or show a known or provider-defined reasoning effort |
+| `/reasoning [level]`                     | Pick a model-supported reasoning effort, or set one explicitly |
 | `/permissions`                           | Manage saved permissions |
 | `/ps`                                    | Manage background processes |
 | `/notify [once|on|off|clear|status]`      | Override turn-end terminal notifications for this session |

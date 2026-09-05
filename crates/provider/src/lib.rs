@@ -35,7 +35,7 @@ pub use client::{
     ChatOptions, ChatProvider, ChatRequest, ChatRequestOptions, CopilotInitiator, ProviderClient,
     RequestAttemptInfo,
 };
-pub use config::effective_reasoning_effort;
+pub use config::{effective_reasoning_effort, reasoning_catalog};
 #[cfg(not(feature = "test-support"))]
 pub(crate) use endpoint::endpoint_url;
 #[cfg(feature = "test-support")]

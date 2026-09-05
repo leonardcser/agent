@@ -42,8 +42,41 @@ smelt.cmd.register("fast", function(arg)
   smelt.notify.info("fast mode: " .. (enabled and "on" or "off"))
 end, { desc = "toggle accelerated inference", args = { "on", "off", "toggle" } })
 
--- `/reasoning` - set explicitly or show current effort.
-smelt.cmd.register("reasoning", function(arg)
-  if arg then smelt.reasoning.set(arg) end
+-- `/reasoning` - select a native effort supported by the active model.
+local function reasoning_items()
+  local options = smelt.reasoning.options()
+  local current = smelt.reasoning.current()
+  local items = {}
+  for _, effort in ipairs(options.efforts) do
+    local notes = {}
+    if effort == current then notes[#notes + 1] = "current" end
+    if effort == options.default then notes[#notes + 1] = "default" end
+    items[#items + 1] = { label = effort, description = table.concat(notes, ", ") }
+  end
+  return items
+end
+
+local function set_reasoning(effort)
+  smelt.reasoning.set(effort)
   smelt.notify.info("reasoning effort: " .. smelt.reasoning.current())
-end, { desc = "set or show reasoning effort", args = smelt.reasoning.known_list() })
+end
+
+smelt.cmd.register_picker("reasoning", {
+  desc = "select reasoning effort",
+  args_fn = function() return smelt.reasoning.options().efforts end,
+  items = reasoning_items,
+  selected = function()
+    for i, effort in ipairs(smelt.reasoning.options().efforts) do
+      if effort == smelt.reasoning.current() then return i end
+    end
+  end,
+  apply = set_reasoning,
+  prepare = function()
+    if not smelt.model.current() then
+      smelt.notify.info("no model selected")
+    elseif #smelt.reasoning.options().efforts == 0 then
+      smelt.notify.info("reasoning levels unknown; use /reasoning <effort> to set explicitly")
+    end
+  end,
+  on_enter = function(item) set_reasoning(item.label) end,
+})

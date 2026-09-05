@@ -28,6 +28,10 @@ reasoning.cycle_list = nil
 ---@type fun(): string[]
 reasoning.known_list = nil
 
+--- Return `{ efforts, default }` for the active model. `efforts` contains supported native labels; an empty list means the supported levels are unknown. `default` is the model's default effort when known.
+---@type fun(): table
+reasoning.options = nil
+
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Set the active reasoning effort. The change is applied immediately to the UI and persisted according to the active remember policy.
 ---@type fun(effort: string): nil
