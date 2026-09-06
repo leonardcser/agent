@@ -225,6 +225,43 @@ jobs:
           cargo install --path . --locked --debug --root $installRoot
           & (Join-Path $binDir "smelt.exe") --version
 
+  fuzz-tooling-integration:
+    name: Fuzz tooling integration
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install pinned Rust
+        run: rustup toolchain install
+
+      - name: Set up Rust (nightly for cargo-fuzz)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-tooling-integration
+
+      - name: Install fuzz tooling
+        run: |
+          cargo install cargo-fuzz --version 0.13.2 --locked
+          rustup component add llvm-tools-preview --toolchain nightly
+
+      - name: Check isolated fixture formatting
+        run: cargo fmt --manifest-path crates/xtask/tests/fixtures/fuzz-triage/Cargo.toml -- --check
+
+      - name: Exercise real libFuzzer subprocesses
+        run: |
+          cargo test --locked -p xtask fuzz::real_cli_tests:: -- \
+            --ignored --nocapture --test-threads=1
+
   fuzz-regression:
     name: Fuzz regression replay
     if: github.event_name != 'pull_request_target'

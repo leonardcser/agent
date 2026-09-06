@@ -33,5 +33,9 @@ format. Both forms replay the same production path as their fuzz target.
   smelt_loop bugs, hand-write the minimal `ops` sequence using the
   existing `FuzzOp` variants.
 - Every other registered target uses raw byte artifacts. The xtask registry
-  classifies these targets and `cargo xtask fuzz replay-regression` feeds each
-  regression directory to `cargo fuzz run -runs=0`.
+  classifies these targets. `cargo xtask fuzz replay-regression` builds selected
+  targets once, then executes each seed directly with `-runs=1` and an independent
+  30-second watchdog. Use `--timeout SECONDS` to change that deadline. Nested seed
+  directories are supported; symlinks and non-regular inputs are rejected.
+- A replay failure is reported with its target and relative seed path. Remaining
+  seeds still run, and the command exits nonzero if any seed failed or timed out.

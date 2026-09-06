@@ -6,6 +6,7 @@ rust-version = "1.95"
 publish = false
 
 [workspace]
+exclude = ["vendor/libfuzzer-sys"]
 
 [package.metadata]
 cargo-fuzz = true
@@ -17,7 +18,7 @@ path = "src/lib.rs"
 scenario-tools = []
 
 [dependencies]
-libfuzzer-sys = "0.4"
+libfuzzer-sys = { version = "0.4.13", path = "vendor/libfuzzer-sys" }
 arbitrary = { version = "1", features = ["derive"] }
 smelt-tui = { path = "../crates/tui", features = ["harness"] }
 smelt-edit = { path = "../crates/edit" }

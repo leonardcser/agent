@@ -2,160 +2,246 @@
 //! preserving its failure identity. Structured targets produce JSON scenarios;
 //! byte targets retain exact libFuzzer inputs.
 
-use super::{die, iso_utc, repo_root, step, target_named, TargetKind};
+use super::build::{path_arg, Project};
+use super::process::{OutputMode, Termination};
+use super::{iso_utc, target_named, FuzzData, TargetKind};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
-pub fn run(args: Vec<String>) {
-    if args.len() != 2 {
-        die("usage: cargo xtask fuzz triage <target> <crash-artifact>");
-    }
-    let target = &args[0];
-    let artifact = PathBuf::from(&args[1]);
+#[derive(clap::Args)]
+pub(super) struct Options {
+    #[arg(value_parser = super::parse_target)]
+    target: String,
+    artifact: PathBuf,
+    /// Watchdog for each decode, shrink, or replay step, excluding builds
+    #[arg(long, overrides_with = "timeout", default_value = "300", value_name = "SECONDS", value_parser = super::parse_seconds)]
+    pub(super) timeout: Duration,
+}
+
+pub fn run(project: &Project, options: Options) -> Result<()> {
+    let timeout = options.timeout;
+    let target = target_named(&options.target).context("unknown fuzz target")?;
+    let artifact = options
+        .artifact
+        .canonicalize()
+        .context("locate crash artifact")?;
     if !artifact.is_file() {
-        die(&format!("artifact not found: {}", artifact.display()));
+        bail!("artifact is not a regular file: {}", artifact.display());
     }
-    let Some(target_meta) = target_named(target) else {
-        die(&format!("unknown fuzz target `{target}`"));
-    };
-
-    let root = repo_root();
-    let minimized = match target_meta.kind {
-        TargetKind::Json => triage_json(&root, target, &artifact),
-        TargetKind::Bytes => triage_bytes(&root, target, &artifact),
-    };
-    write_metadata(&root, target, &artifact, &minimized, target_meta.kind);
-
-    eprintln!();
-    eprintln!("minimized artifact: {}", minimized.display());
-    eprintln!("to commit as a regression seed:");
-    let extension = if target_meta.kind == TargetKind::Json {
-        ".json"
+    let parent = artifact
+        .parent()
+        .context("artifact has no parent directory")?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".triage-")
+        .tempdir_in(parent)?;
+    let result = temporary.path().join("result");
+    std::fs::create_dir(&result)?;
+    let name = if target.kind == TargetKind::Json {
+        "minimized.json"
     } else {
-        ""
+        "minimized"
     };
+    let candidate = temporary.path().join(name);
+    let identity = match target.kind {
+        TargetKind::Json => triage_json(project, target.name, &artifact, &candidate, timeout)?,
+        TargetKind::Bytes => triage_bytes(project, target.name, &artifact, &candidate, timeout)?,
+    };
+    std::fs::rename(&candidate, result.join(name))?;
+    let metadata = serde_json::json!({
+        "schema": 3,
+        "target": target.name,
+        "input_kind": match target.kind { TargetKind::Json => "json", TargetKind::Bytes => "bytes" },
+        "sanitizer": match target.kind { TargetKind::Json => "structured-replay", TargetKind::Bytes => "address" },
+        "commit": super::git_text(project, &["rev-parse", "HEAD"] )?,
+        "triaged_at": iso_utc(),
+        "original": artifact.to_string_lossy(),
+        "minimized": name,
+        "original_bytes": std::fs::metadata(&artifact)?.len(),
+        "minimized_bytes": std::fs::metadata(result.join(name))?.len(),
+        "failure_fingerprint": identity,
+    });
+    std::fs::write(
+        result.join("metadata.json"),
+        serde_json::to_vec_pretty(&metadata)?,
+    )?;
+    project.runner.check_cancelled()?;
+    // The unique staging name reserves the result identity. One rename exposes
+    // the verified artifact and its metadata together, never a partial pair.
+    let mut published_name = artifact
+        .file_name()
+        .context("artifact has no name")?
+        .to_os_string();
+    published_name.push(
+        temporary
+            .path()
+            .file_name()
+            .context("staging directory has no name")?,
+    );
+    let published = parent.join(published_name);
+    std::fs::rename(&result, &published).context("publish verified triage result")?;
+    eprintln!("minimized artifact: {}", published.join(name).display());
     eprintln!(
-        "  cp {} fuzz/seeds/{}/regression/<slug>{extension}",
-        minimized.display(),
-        target
+        "triage metadata: {}",
+        published.join("metadata.json").display()
     );
+    eprintln!("failure fingerprint: {identity}");
+    eprintln!(
+        "regression destination: fuzz/seeds/{}/regression/",
+        target.name
+    );
+    Ok(())
 }
 
-fn triage_json(root: &Path, target: &str, artifact: &Path) -> PathBuf {
-    let fuzz_cargo = root.join("fuzz/Cargo.toml");
-    eprintln!(">>> 1/3 building structured triage tools");
-    step(
-        "build crash_to_scenario, shrink_scenario, replay_scenario",
-        Command::new("cargo")
-            .args([
-                "build",
-                "--manifest-path",
-                fuzz_cargo.to_str().expect("fuzz manifest path utf-8"),
-                "--features",
-                "scenario-tools",
-                "--bin",
-                "crash_to_scenario",
-                "--bin",
-                "shrink_scenario",
-                "--bin",
-                "replay_scenario",
-                "-q",
-            ])
-            .current_dir(root),
-    );
-
-    let tmp = tempdir();
-    let raw = tmp.join("raw.json");
-    let minimized = sibling_path(artifact, ".min.json");
-    let crash_to_scenario = root.join("fuzz/target/debug/crash_to_scenario");
-    let shrink_scenario = root.join("fuzz/target/debug/shrink_scenario");
-
-    let raw_file =
-        std::fs::File::create(&raw).unwrap_or_else(|e| die(&format!("create raw.json: {e}")));
-    step(
-        "decode bytes to JSON scenario",
-        Command::new(&crash_to_scenario)
-            .args(["--target", target])
-            .arg(artifact)
-            .stdout(raw_file),
-    );
-
-    eprintln!(">>> 2/3 shrinking with panic identity");
-    step(
-        "shrink JSON scenario",
-        Command::new(&shrink_scenario)
-            .args(["--target", target])
-            .arg(&raw)
-            .arg(&minimized),
-    );
-
-    eprintln!(">>> 3/3 minimized scenario:");
-    let body = std::fs::read_to_string(&minimized)
-        .unwrap_or_else(|e| die(&format!("read {}: {e}", minimized.display())));
-    if let Err(error) = std::fs::remove_dir_all(&tmp) {
-        eprintln!("xtask fuzz: remove temporary {}: {error}", tmp.display());
-    }
-    println!("{body}");
-    minimized
-}
-
-fn triage_bytes(root: &Path, target: &str, artifact: &Path) -> PathBuf {
-    let minimized = sibling_path(artifact, ".min");
-    let original_fingerprint = replay_fingerprint(root, target, artifact);
-    eprintln!(">>> minimizing byte artifact");
-    step(
-        "cargo fuzz tmin",
-        Command::new("cargo")
-            .args(["+nightly", "fuzz", "tmin", "--sanitizer=address", target])
-            .arg(artifact)
-            .arg("--")
-            .arg(format!("-exact_artifact_path={}", minimized.display()))
-            .current_dir(root),
-    );
-    if !minimized.is_file() {
-        die(&format!(
-            "cargo fuzz tmin did not write {}",
-            minimized.display()
-        ));
-    }
-    let minimized_fingerprint = replay_fingerprint(root, target, &minimized);
-    if original_fingerprint != minimized_fingerprint {
-        die(&format!(
-            "minimized artifact changed failure identity\noriginal: {original_fingerprint}\nminimized: {minimized_fingerprint}"
-        ));
-    }
-    eprintln!("failure fingerprint: {original_fingerprint}");
-    minimized
-}
-
-fn replay_fingerprint(root: &Path, target: &str, artifact: &Path) -> String {
-    let output = Command::new("cargo")
-        .args(["+nightly", "fuzz", "run", "--sanitizer=address", target])
+fn triage_json(
+    project: &Project,
+    target: &str,
+    artifact: &Path,
+    candidate: &Path,
+    timeout: Duration,
+) -> Result<String> {
+    project.build_helpers(&["crash_to_scenario", "shrink_scenario", "replay_scenario"])?;
+    let raw = candidate.with_extension("raw.json");
+    let mut decode = Command::new(project.helper("crash_to_scenario")?);
+    decode
+        .args(["--target", target])
         .arg(artifact)
-        .args(["--", "-runs=1"])
-        .current_dir(root)
-        .output()
-        .unwrap_or_else(|e| die(&format!("replay {}: {e}", artifact.display())));
-    if output.status.success() {
-        die(&format!(
-            "artifact does not fail when replayed: {}",
-            artifact.display()
-        ));
+        .arg(&raw)
+        .current_dir(&project.root);
+    project
+        .runner
+        .run(decode, Some(timeout), OutputMode::Capture)?
+        .success("decode crash scenario")?;
+    let replay = |path: &Path| -> Result<Command> {
+        let mut command = Command::new(project.helper("replay_scenario")?);
+        command
+            .args(["--target", target])
+            .arg(path)
+            .current_dir(&project.root);
+        Ok(command)
+    };
+    let original = replay_fingerprint(project, replay(&raw)?, timeout)?;
+    let mut shrink = Command::new(project.helper("shrink_scenario")?);
+    shrink
+        .args(["--target", target])
+        .arg(&raw)
+        .arg(candidate)
+        .current_dir(&project.root);
+    project
+        .runner
+        .run(shrink, Some(timeout), OutputMode::Capture)?
+        .success("shrink crash scenario")?;
+    verify_identity(
+        &original,
+        &replay_fingerprint(project, replay(candidate)?, timeout)?,
+    )?;
+    Ok(original)
+}
+
+fn triage_bytes(
+    project: &Project,
+    target: &str,
+    artifact: &Path,
+    candidate: &Path,
+    timeout: Duration,
+) -> Result<String> {
+    project.build_targets(&[target.to_string()], "address")?;
+    let data = FuzzData::for_repo(project)?;
+    data.prepare_target(target)?;
+    let replay = |path: &Path| -> Result<Command> {
+        let mut command = project.target_command(target, "address", &data)?;
+        command.arg("-runs=1").arg(path);
+        Ok(command)
+    };
+    let original = replay_fingerprint(project, replay(artifact)?, timeout)?;
+    // Supervise each mutation step and replay to bound diagnostics, preserve the
+    // original failure identity, and share one deadline across the shrink loop.
+    let started = Instant::now();
+    let next = candidate.with_extension("next");
+    let mut current = artifact;
+    loop {
+        let mut minimize = project.target_command(target, "address", &data)?;
+        minimize
+            .args(["-minimize_crash_internal_step=1", "-runs=100000"])
+            .arg(path_arg("-exact_artifact_path=", &next))
+            .arg(current);
+        let output = project.runner.run(
+            minimize,
+            Some(timeout.saturating_sub(started.elapsed())),
+            OutputMode::Capture,
+        )?;
+        if !matches!(output.termination, Termination::Exited(_)) {
+            output.success("minimize byte artifact")?;
+            unreachable!();
+        }
+        // A successful step found no smaller crash, including a one-byte input.
+        if output.termination.success() {
+            if current != candidate {
+                std::fs::copy(current, candidate)?;
+            }
+            break;
+        }
+        if !next.is_file() {
+            output.print_diagnostics();
+            bail!("minimizer did not write {}", next.display());
+        }
+        if std::fs::metadata(&next)?.len() >= std::fs::metadata(current)?.len() {
+            output.print_diagnostics();
+            bail!("minimizer did not shrink the input");
+        }
+        verify_identity(
+            &original,
+            &replay_fingerprint(
+                project,
+                replay(&next)?,
+                timeout.saturating_sub(started.elapsed()),
+            )?,
+        )?;
+        std::fs::rename(&next, candidate)?;
+        current = candidate;
+    }
+    verify_identity(
+        &original,
+        &replay_fingerprint(project, replay(candidate)?, timeout)?,
+    )?;
+    Ok(original)
+}
+
+fn verify_identity(original: &str, minimized: &str) -> Result<()> {
+    if original != minimized {
+        bail!("minimized artifact changed failure identity\noriginal: {original}\nminimized: {minimized}");
+    }
+    Ok(())
+}
+
+fn replay_fingerprint(project: &Project, command: Command, timeout: Duration) -> Result<String> {
+    let output = project
+        .runner
+        .run(command, Some(timeout), OutputMode::Capture)?;
+    if !matches!(output.termination, Termination::Exited(_)) {
+        output.success("replay crash artifact")?;
+        unreachable!();
+    }
+    if output.termination.success() {
+        bail!("artifact does not fail when replayed");
     }
     let text = format!(
         "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stdout.complete()?),
+        String::from_utf8_lossy(&output.stderr.complete()?)
     );
-    failure_fingerprint(&text)
+    failure_fingerprint(&text).with_context(|| {
+        output.print_diagnostics();
+        "failing replay did not contain a recognizable crash fingerprint"
+    })
 }
 
-fn failure_fingerprint(output: &str) -> String {
+fn failure_fingerprint(output: &str) -> Option<String> {
     let lines: Vec<_> = output.lines().collect();
     let mut panic_identity = Vec::new();
     let mut sanitizer_summaries = Vec::new();
     let mut runtime_errors = Vec::new();
-    let mut fallback_errors = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if line.contains("panicked at") {
             // Source line and column are part of the identity. Normalizing them
@@ -169,27 +255,30 @@ fn failure_fingerprint(output: &str) -> String {
             {
                 panic_identity.push(normalize_numbers(message));
             }
-        } else if line.contains("SUMMARY:") {
-            sanitizer_summaries.push(normalize_numbers(line.trim()));
-        } else if line.contains("runtime error:") {
-            runtime_errors.push(normalize_numbers(line.trim()));
-        } else if line.contains("ERROR:") {
-            fallback_errors.push(normalize_numbers(line.trim()));
+        } else if line.contains("SUMMARY: AddressSanitizer:")
+            || line.contains("SUMMARY: MemorySanitizer:")
+            || line.contains("SUMMARY: ThreadSanitizer:")
+            || line.contains("SUMMARY: LeakSanitizer:")
+            || line.contains("SUMMARY: UndefinedBehaviorSanitizer:")
+        {
+            // Keep source positions and sanitizer categories distinct.
+            sanitizer_summaries.push(line.trim().to_string());
+        } else if let Some((location, message)) = line.split_once("runtime error:") {
+            runtime_errors.push(format!(
+                "{}runtime error:{}",
+                location.trim_start(),
+                normalize_numbers(message)
+            ));
         }
     }
     let relevant = if !panic_identity.is_empty() {
         panic_identity
     } else if !sanitizer_summaries.is_empty() {
         sanitizer_summaries
-    } else if !runtime_errors.is_empty() {
-        runtime_errors
     } else {
-        fallback_errors
+        runtime_errors
     };
-    if relevant.is_empty() {
-        die("failing fuzz replay did not contain a recognizable crash fingerprint");
-    }
-    relevant.join(" | ")
+    (!relevant.is_empty()).then(|| relevant.join(" | "))
 }
 
 fn normalize_panic_line(line: &str) -> String {
@@ -221,58 +310,6 @@ fn normalize_numbers(line: &str) -> String {
     normalized
 }
 
-fn sibling_path(artifact: &Path, suffix: &str) -> PathBuf {
-    let name = artifact
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("artifact");
-    artifact.with_file_name(format!("{name}{suffix}"))
-}
-
-fn write_metadata(root: &Path, target: &str, artifact: &Path, minimized: &Path, kind: TargetKind) {
-    let commit = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(root)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let metadata = serde_json::json!({
-        "schema": 1,
-        "target": target,
-        "input_kind": match kind { TargetKind::Json => "json", TargetKind::Bytes => "bytes" },
-        "sanitizer": match kind { TargetKind::Json => "structured-replay", TargetKind::Bytes => "address" },
-        "commit": commit,
-        "triaged_at": iso_utc(),
-        "original": artifact,
-        "minimized": minimized,
-        "original_bytes": file_size(artifact),
-        "minimized_bytes": file_size(minimized),
-        "failure_identity_preserved": true,
-    });
-    let path = sibling_path(artifact, ".triage.json");
-    let body = serde_json::to_vec_pretty(&metadata)
-        .unwrap_or_else(|e| die(&format!("serialize triage metadata: {e}")));
-    std::fs::write(&path, body).unwrap_or_else(|e| die(&format!("write {}: {e}", path.display())));
-    eprintln!("triage metadata: {}", path.display());
-}
-
-fn file_size(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
-}
-
-fn tempdir() -> std::path::PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    let dir = std::env::temp_dir().join(format!("xtask-fuzz-triage-{pid}-{stamp}"));
-    std::fs::create_dir_all(&dir).unwrap_or_else(|e| die(&format!("mkdir {}: {e}", dir.display())));
-    dir
-}
-
 #[cfg(test)]
 mod tests {
     use super::failure_fingerprint;
@@ -291,8 +328,28 @@ mod tests {
 
         assert_eq!(first, minimized);
         assert_ne!(first, other_location);
+        let first = first.unwrap();
         assert!(first.contains("example.rs:42:7"));
         assert!(first.contains("value # failed"));
+    }
+
+    #[test]
+    fn rejects_tool_errors_and_preserves_sanitizer_source_locations() {
+        for text in [
+            "ERROR: could not compile fuzz target",
+            "SUMMARY: libFuzzer: timeout",
+            "exit status: 1",
+        ] {
+            assert_eq!(failure_fingerprint(text), None);
+        }
+        let first = failure_fingerprint(
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow example.rs:42:7 in example",
+        );
+        let second = failure_fingerprint(
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow example.rs:43:7 in example",
+        );
+        assert!(first.is_some());
+        assert_ne!(first, second);
     }
 
     #[test]
