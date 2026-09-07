@@ -13,11 +13,11 @@ independent-crates = ["smelt-perf", "smelt-style", "smelt-ansi", "smelt-term"]
 smelt-protocol = { path = "crates/protocol" }
 smelt-provider = { path = "crates/provider" }
 smelt-engine = { path = "crates/engine" }
-smelt-style = { path = "crates/style", version = "0.3.0" }
-smelt-ansi = { path = "crates/ansi", version = "0.2.2" }
+smelt-style = { path = "crates/style", version = "0.4.0" }
+smelt-ansi = { path = "crates/ansi", version = "0.3.0" }
 smelt-perf = { path = "crates/perf", version = "0.2.0" }
 smelt-buffer = { path = "crates/buffer" }
-smelt-term = { path = "crates/term", version = "0.4.0" }
+smelt-term = { path = "crates/term", version = "0.5.0" }
 smelt-edit = { path = "crates/edit" }
 smelt-core = { path = "crates/core" }
 smelt-store = { path = "crates/store" }

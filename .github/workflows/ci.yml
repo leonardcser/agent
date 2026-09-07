@@ -157,16 +157,20 @@ jobs:
           CRATE: ${{ matrix.crate }}
           LOCAL_DEPS: ${{ matrix.local_deps }}
         run: |
+          packages=(-p "$CRATE")
           for dep in $LOCAL_DEPS; do
-            cargo package -p "$dep" --no-verify
-            archive="$(find target/package -maxdepth 1 -type f -name "$dep-*.crate" -print -quit)"
+            packages+=(-p "$dep")
+          done
+          cargo package "${packages[@]}" --no-verify --target-dir /tmp/msrv-artifacts
+
+          for dep in $LOCAL_DEPS; do
+            archive="$(find /tmp/msrv-artifacts/package -maxdepth 1 -type f -name "$dep-*.crate" -print -quit)"
             test -n "$archive"
             mkdir -p "/tmp/msrv-deps/$dep"
             tar -xzf "$archive" -C "/tmp/msrv-deps/$dep" --strip-components=1
           done
 
-          cargo package -p "$CRATE" --no-verify
-          archive="$(find target/package -maxdepth 1 -type f -name "$CRATE-*.crate" -print -quit)"
+          archive="$(find /tmp/msrv-artifacts/package -maxdepth 1 -type f -name "$CRATE-*.crate" -print -quit)"
           test -n "$archive"
           mkdir /tmp/msrv-package
           tar -xzf "$archive" -C /tmp/msrv-package --strip-components=1

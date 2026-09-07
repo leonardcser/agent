@@ -1,6 +1,6 @@
 [package]
 name = "smelt-term"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.71"
 description = "Terminal rendering library: Grid, Compositor, LayoutTree, diff-flush renderer."
