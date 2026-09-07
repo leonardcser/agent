@@ -2,7 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
-
+                                                                      14:37:03
  Finish the current task.
 
 
