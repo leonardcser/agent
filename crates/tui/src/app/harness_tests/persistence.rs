@@ -1473,7 +1473,7 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
     assert_eq!(source_records.len(), 700);
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.load_session_by_id(&session_id);
+    assert!(resumed.load_session_by_id(&session_id));
     resumed.set_transcript_memory_budget_for_harness(
         crate::app::transcript::TranscriptMemoryBudget {
             hydrated_blocks: 1,
@@ -1497,10 +1497,15 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
     let (_, allocated_after) = smelt_perf::alloc::thread_snapshot();
     let allocated_bytes = allocated_after.saturating_sub(allocated_before);
 
-    assert!(
-        fork_elapsed < std::time::Duration::from_millis(100),
-        "large visible fork exceeded the interaction ceiling: {fork_elapsed:?}"
-    );
+    // Coverage instrumentation distorts latency, but allocation and canonical
+    // history checks remain valid in every build.
+    let enforce_interaction_budget = std::env::var_os("LLVM_PROFILE_FILE").is_none();
+    if enforce_interaction_budget {
+        assert!(
+            fork_elapsed < std::time::Duration::from_millis(100),
+            "large visible fork exceeded the interaction ceiling: {fork_elapsed:?}"
+        );
+    }
     assert!(
         allocated_bytes <= 4 * 1024 * 1024,
         "large visible fork allocated {allocated_bytes} bytes on the UI thread"
@@ -1509,6 +1514,11 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
     assert_ne!(fork_id, session_id);
     let fork = lineage_reader(&fork_id);
     let fork_state = fork.snapshot().unwrap();
+    assert_eq!(fork_state.history_root_id, source_state.history_root_id);
+    assert_eq!(
+        fork_state.transcript_root_id,
+        source_state.transcript_root_id
+    );
     assert_eq!(fork.history_range(0, 700).unwrap(), source_history);
     assert_eq!(
         fork.transcript_range(0, fork_state.transcript_len).unwrap(),
@@ -1523,16 +1533,19 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
             &fork_id
         };
         let started = std::time::Instant::now();
-        resumed.load_session_by_id(target);
+        assert!(resumed.load_session_by_id(target));
         switch_durations.push(started.elapsed());
+        assert_eq!(resumed.session_snapshot().id.as_str(), target.as_str());
         assert_eq!(resumed.app.session_history_len(), 700);
     }
-    switch_durations.sort_unstable();
-    assert!(
-        switch_durations[18] < std::time::Duration::from_millis(100),
-        "large branch-switch p95 exceeded the interaction ceiling: {:?}",
-        switch_durations[18]
-    );
+    if enforce_interaction_budget {
+        switch_durations.sort_unstable();
+        assert!(
+            switch_durations[18] < std::time::Duration::from_millis(100),
+            "large branch-switch p95 exceeded the interaction ceiling: {:?}",
+            switch_durations[18]
+        );
+    }
 }
 
 #[test]
