@@ -595,6 +595,7 @@ impl TuiApp {
         &mut self,
         display: &str,
         content: Content,
+        sent_at_ms: u64,
     ) -> Option<TurnState> {
         let _perf = smelt_perf::perf::begin("agent:begin_turn");
         if self.block_read_only_mutation("submit a turn to this read-only session") {
@@ -641,11 +642,12 @@ impl TuiApp {
             .is_none()
             .then(|| text.clone().into_owned());
         let history = self.stage_request_history_item_with_first_user(
-            protocol::history_item_from_user_content(content.clone()),
+            protocol::history_item_from_user_content(content.clone()).with_sent_at_ms(sent_at_ms),
             Some(Block::User {
                 text: display.to_string(),
                 image_labels: content.image_labels(),
                 command: false,
+                sent_at_ms: Some(sent_at_ms),
             }),
             first_user_message,
         );
@@ -653,7 +655,7 @@ impl TuiApp {
         let rewind_history_idx = Some(submitted_history_idx);
         self.publish_turn_input(submitted);
         self.dispatch_prepared_turn(PreparedTurn {
-            input: protocol::StartTurnInput::user(content),
+            input: protocol::StartTurnInput::user(content).with_sent_at_ms(sent_at_ms),
             history,
             kind: smelt_store::TurnKind::User,
             submitted_history_idx: smelt_store::HistoryIndex::new(submitted_history_idx as u64),
@@ -1123,14 +1125,22 @@ impl TuiApp {
     pub(crate) fn begin_custom_command_turn(
         &mut self,
         cmd: smelt_core::custom_commands::CustomCommand,
+        sent_at_ms: u64,
     ) -> Option<TurnState> {
         let (display, evaluated, overrides) = self.custom_command_parts(cmd);
-        self.begin_command_request_turn(display, evaluated, overrides, CommandTurnStart::Fresh)
+        self.begin_command_request_turn(
+            display,
+            evaluated,
+            overrides,
+            CommandTurnStart::Fresh,
+            sent_at_ms,
+        )
     }
 
     pub(crate) fn begin_custom_command_continuation(
         &mut self,
         cmd: smelt_core::custom_commands::CustomCommand,
+        sent_at_ms: u64,
     ) -> Option<TurnState> {
         let (display, evaluated, overrides) = self.custom_command_parts(cmd);
         self.begin_command_request_turn(
@@ -1138,6 +1148,7 @@ impl TuiApp {
             evaluated,
             overrides,
             CommandTurnStart::ContinueFromLast,
+            sent_at_ms,
         )
     }
 
@@ -1187,6 +1198,7 @@ impl TuiApp {
         evaluated: String,
         overrides: smelt_core::custom_commands::CommandOverrides,
         start: CommandTurnStart,
+        sent_at_ms: u64,
     ) -> Option<TurnState> {
         if self.block_read_only_mutation("submit a turn to this read-only session") {
             return None;
@@ -1246,11 +1258,13 @@ impl TuiApp {
                 protocol::HistoryItem::user_command(
                     Content::text(evaluated.clone()),
                     display.clone(),
-                ),
+                )
+                .with_sent_at_ms(sent_at_ms),
                 Some(Block::User {
                     text: display.clone(),
                     image_labels: vec![],
                     command: true,
+                    sent_at_ms: Some(sent_at_ms),
                 }),
                 first_user_message,
             )
@@ -1260,6 +1274,7 @@ impl TuiApp {
                     text: display.clone(),
                     image_labels: vec![],
                     command: true,
+                    sent_at_ms: Some(sent_at_ms),
                 });
             }
             self.model_history_source()
@@ -1329,7 +1344,8 @@ impl TuiApp {
         let rewind_history_idx = (!evaluated.is_empty()).then_some(submitted_history_idx);
         let request_config = self.core.config.request_runtime_config();
         self.dispatch_prepared_turn(PreparedTurn {
-            input: protocol::StartTurnInput::user_command(Content::text(evaluated), display),
+            input: protocol::StartTurnInput::user_command(Content::text(evaluated), display)
+                .with_sent_at_ms(sent_at_ms),
             history,
             kind,
             submitted_history_idx: smelt_store::HistoryIndex::new(submitted_history_idx as u64),
@@ -1468,11 +1484,13 @@ impl TuiApp {
             return false;
         }
         let overrides = self.conversation.turn_request_overrides().clone();
+        let sent_at_ms = engine::clock::unix_time_ms(self.core.clock.as_ref());
         let turn = self.begin_command_request_turn(
             String::new(),
             String::new(),
             overrides,
             CommandTurnStart::ContinueFromLast,
+            sent_at_ms,
         );
         let started = turn.is_some() || self.turn_submission_is_pending();
         self.conversation.set_active(turn);
@@ -2816,7 +2834,7 @@ mod tests {
 
         let turn = app
             .app
-            .begin_agent_turn("try again", Content::text("try again"))
+            .begin_agent_turn("try again", Content::text("try again"), 0)
             .expect("test app has a usable model");
         app.app.conversation.set_active(Some(turn));
 
@@ -2833,7 +2851,7 @@ mod tests {
 
         let turn = app
             .app
-            .begin_agent_turn("try again", Content::text("try again"))
+            .begin_agent_turn("try again", Content::text("try again"), 0)
             .expect("test app has a usable model");
         app.app.conversation.set_active(Some(turn));
 
@@ -2849,7 +2867,7 @@ mod tests {
 
         let turn = app
             .app
-            .begin_agent_turn("try again", Content::text("try again"))
+            .begin_agent_turn("try again", Content::text("try again"), 0)
             .expect("test app has a usable model");
         app.app.conversation.set_active(Some(turn));
 
@@ -2870,7 +2888,7 @@ mod tests {
 
         let turn = app
             .app
-            .begin_agent_turn("try again", Content::text("try again"))
+            .begin_agent_turn("try again", Content::text("try again"), 0)
             .expect("test app has a usable model");
         app.app.conversation.set_active(Some(turn));
 
@@ -2887,7 +2905,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let previous = app
             .app
-            .begin_agent_turn("previous", Content::text("previous"))
+            .begin_agent_turn("previous", Content::text("previous"), 0)
             .expect("previous turn starts");
         app.app.conversation.set_active(Some(previous));
         app.app.discard_turn(crate::app::TurnEnd::Complete);
@@ -2902,6 +2920,7 @@ mod tests {
                 String::new(),
                 smelt_core::custom_commands::CommandOverrides::default(),
                 crate::app::CommandTurnStart::ContinueFromLast,
+                0,
             )
             .expect("test app has a usable model");
         app.app.conversation.set_active(Some(turn));
@@ -2915,7 +2934,7 @@ mod tests {
 
         let turn = app
             .app
-            .begin_agent_turn("first request", Content::text("first request"))
+            .begin_agent_turn("first request", Content::text("first request"), 0)
             .expect("test app has a usable model");
         app.app.conversation.set_active(Some(turn));
 
@@ -2958,7 +2977,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let turn = app
             .app
-            .begin_agent_turn("finish me", Content::text("finish me"))
+            .begin_agent_turn("finish me", Content::text("finish me"), 0)
             .expect("turn starts");
         let turn_id = turn.turn_id;
         app.app.conversation.set_active(Some(turn));
@@ -3546,6 +3565,7 @@ mod tests {
         let turn = app.app.begin_agent_turn(
             "locked catalog marker",
             Content::text("locked catalog marker"),
+            0,
         );
         let elapsed = started.elapsed();
         drop(catalog_lock);
@@ -3642,7 +3662,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let turn = app
             .app
-            .begin_agent_turn("first", Content::text("first"))
+            .begin_agent_turn("first", Content::text("first"), 0)
             .expect("turn starts");
         let turn_id = turn.turn_id;
         app.app.conversation.set_active(Some(turn));
@@ -3986,6 +4006,7 @@ mod tests {
                 "retry command".into(),
                 smelt_core::custom_commands::CommandOverrides::default(),
                 crate::app::CommandTurnStart::Fresh,
+                0,
             )
             .is_none());
 
@@ -4018,6 +4039,7 @@ mod tests {
                 "retry command".into(),
                 smelt_core::custom_commands::CommandOverrides::default(),
                 crate::app::CommandTurnStart::Fresh,
+                0,
             )
             .expect("command retry starts");
         app.app.conversation.set_active(Some(turn));
@@ -4104,7 +4126,7 @@ mod tests {
         app.app.save_session_and_flush();
         assert_eq!(app.app.conversation.last_terminal_turn_id(), None);
 
-        assert!(app.app.begin_agent_turn("", Content::text("")).is_none());
+        assert!(app.app.begin_agent_turn("", Content::text(""), 0).is_none());
         assert!(app.app.overlays.notification().is_some_and(|notification| {
             notification.summary.contains("no durable prior turn")
         }));
@@ -4115,6 +4137,7 @@ mod tests {
                 String::new(),
                 smelt_core::custom_commands::CommandOverrides::default(),
                 crate::app::CommandTurnStart::ContinueFromLast,
+                0,
             )
             .is_none());
         assert!(app
@@ -4132,7 +4155,7 @@ mod tests {
 
         assert!(app
             .app
-            .begin_agent_turn("rejected", Content::text("rejected"))
+            .begin_agent_turn("rejected", Content::text("rejected"), 0)
             .is_none());
         let _ = app.app.flush_persist();
 
@@ -4233,7 +4256,7 @@ mod tests {
                 .build();
             let turn = app
                 .app
-                .begin_agent_turn("before restart", Content::text("before restart"))
+                .begin_agent_turn("before restart", Content::text("before restart"), 0)
                 .expect("turn starts");
             turn_id = turn.turn_id;
             app.app.conversation.set_active(Some(turn));
@@ -4295,7 +4318,7 @@ mod tests {
         smelt_perf::perf::clear();
         let turn = app
             .app
-            .begin_agent_turn("new request", Content::text("new request"))
+            .begin_agent_turn("new request", Content::text("new request"), 0)
             .expect("test app has a usable model");
         let snapshot = smelt_perf::perf::snapshot();
         smelt_perf::perf::set_enabled(false);
@@ -4377,7 +4400,7 @@ mod tests {
         smelt_perf::perf::clear();
         let turn = app
             .app
-            .begin_agent_turn("new request", Content::text("new request"))
+            .begin_agent_turn("new request", Content::text("new request"), 0)
             .unwrap_or_else(|| {
                 panic!(
                     "request did not start: read_only={}, notification={:?}",
@@ -4419,6 +4442,7 @@ mod tests {
                 "fix it".into(),
                 smelt_core::custom_commands::CommandOverrides::default(),
                 crate::app::CommandTurnStart::Fresh,
+                0,
             )
             .expect("test app has a usable model");
         app.app.conversation.set_active(Some(turn));

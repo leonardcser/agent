@@ -58,6 +58,7 @@ local groups = {
   -- Background fills, light/dark aware.
   SmeltStatusBg       = bg(dl(233, 253)),
   SmeltUserBg         = bg(dl(236, 252)),
+  SmeltUserTimestamp  = fg({ dark = { rgb = { 128, 128, 128 } }, light = { rgb = { 112, 112, 112 } } }),
   SmeltScrollPillBg   = bg(dl(234, 253)),
   SmeltCodeBlockBg    = bg(dl(233, 253)),
   SmeltSeparator      = fg(dl(237, 250)),

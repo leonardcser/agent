@@ -751,6 +751,7 @@
 ---@field kind "user"|"assistant"|"thinking"|"tool"|"group"|"code"|"exec"|"mode"|"process_status"|"compacted"|"compaction_preview" Block kind.
 ---@field text? string User/mode/process text.
 ---@field user_lines? table User text as styled span lines, including slash/ref/image accents.
+---@field sent_at_ms? integer User-message submission time as Unix epoch milliseconds; absent for undated history.
 ---@field content? string Code content.
 ---@field content_id? integer Stable shared-content id for assistant and thinking blocks.
 ---@field content_revision? integer Monotonic shared-content revision.

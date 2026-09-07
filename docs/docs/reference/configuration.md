@@ -433,8 +433,20 @@ states: `"collapsed"`, `"peek"`, or `"expanded"` for block kinds, tool names,
 and group names; use `false` to disable a built-in group. Use `limits` for
 UI-only row caps.
 
+`show_timestamps` defaults to `true`. Set
+`smelt.settings.transcript.show_timestamps = false` to hide timestamps on user
+messages, tool calls, and tool groups without hiding tool execution durations.
+This preference and its rendering policy are Lua-owned; it is not a `--set` key.
+Changes apply to existing transcript blocks as well as new ones.
+
+Timestamps use local time: `HH:MM:SS` today, `mon DD HH:MM:SS` on earlier days,
+and `YYYY mon DD HH:MM:SS` in earlier years. Undated history stays undated.
+User timestamps occupy the panel's top padding row, use the theme's
+`SmeltUserTimestamp` foreground, and are excluded from copied message text.
+
 ```lua
 smelt.settings.transcript = {
+  show_timestamps = true,
   view = {
     blocks = { thinking = "peek" },
     tools = {

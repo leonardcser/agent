@@ -1128,6 +1128,7 @@ Bounded semantic transcript metadata passed to the root renderer.
 | `kind` | `"user"\|"assistant"\|"thinking"\|"tool"\|"group"\|"code"\|"exec"\|"mode"\|"process_status"\|"compacted"\|"compaction_preview"` | yes | Block kind. |
 | `text` | `string` |  | User/mode/process text. |
 | `user_lines` | `table` |  | User text as styled span lines, including slash/ref/image accents. |
+| `sent_at_ms` | `integer` |  | User-message submission time as Unix epoch milliseconds; absent for undated history. |
 | `content` | `string` |  | Code content. |
 | `content_id` | `integer` |  | Stable shared-content id for assistant and thinking blocks. |
 | `content_revision` | `integer` |  | Monotonic shared-content revision. |

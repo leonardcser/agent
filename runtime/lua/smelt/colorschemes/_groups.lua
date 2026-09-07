@@ -29,6 +29,7 @@ return {
 
   { name = "SmeltStatusBg", role = "background", owner = "statusline", description = "Statusline row background." },
   { name = "SmeltUserBg", role = "background", owner = "transcript", description = "User and exec transcript block background." },
+  { name = "SmeltUserTimestamp", role = "foreground", owner = "transcript", description = "Muted timestamp on a user-message panel." },
   { name = "SmeltScrollPillBg", role = "background", owner = "transcript", description = "Scroll position pill background." },
   { name = "SmeltCodeBlockBg", role = "background", owner = "transcript", description = "Fenced code block background." },
   { name = "SmeltSeparator", role = "foreground", owner = "chrome", description = "Prompt bars, borders, and inline separators." },

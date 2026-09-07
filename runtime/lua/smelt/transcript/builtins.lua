@@ -53,7 +53,7 @@ local function tool_group_header(name, count, hl, suffix, called_at_ms, ctx)
     { text = " ×" .. tostring(count), dim = true, selectable = false },
     { text = suffix or "", hl = suffix ~= "" and "ErrorMsg" or nil, selectable = false },
   } })
-  local called_at, refresh_after = defaults.tool_called_at(called_at_ms, ctx and ctx.now_ms)
+  local called_at, refresh_after = defaults.timestamp(called_at_ms, ctx and ctx.now_ms)
   if called_at then
     header = layout.hbox({
       { header, weight = 1, copy_owner = true },

@@ -480,7 +480,8 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
 
     draft_streamed_rx.await.unwrap();
     handle.send(UiCommand::Steer {
-        input: protocol::StartTurnInput::user(Content::text("queued follow-up")),
+        input: protocol::StartTurnInput::user(Content::text("queued follow-up"))
+            .with_sent_at_ms(1_742_567_823_000),
     });
     let barrier_id = 0xA11CE;
     handle.send(UiCommand::EngineAsk {
@@ -523,7 +524,7 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
                 Some(EngineEvent::ToolFinished { call_id, .. }) if call_id == TOOL_CALL_ID => {
                     lifecycle.push("tool_finished");
                 }
-                Some(EngineEvent::Steered { text, count }) => {
+                Some(EngineEvent::Steered { text, count, .. }) => {
                     assert_eq!(text, "queued follow-up");
                     assert_eq!(count, 1);
                     lifecycle.push("steered");
@@ -544,9 +545,23 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
     );
 
     tokio::time::timeout(TEST_DEADLINE, async {
+        let mut acknowledged = false;
         loop {
             match handle.recv().await {
-                Some(EngineEvent::Steered { .. }) => break,
+                Some(EngineEvent::Steered { sent_at_ms, .. }) => {
+                    assert_eq!(sent_at_ms, 1_742_567_823_000);
+                    acknowledged = true;
+                }
+                Some(EngineEvent::HistoryAppended { delta, .. }) if acknowledged => {
+                    assert!(matches!(
+                        delta.items.as_slice(),
+                        [protocol::HistoryItem::User {
+                            sent_at_ms: Some(1_742_567_823_000),
+                            ..
+                        }]
+                    ));
+                    break;
+                }
                 Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
                 Some(_) => {}
                 None => panic!("engine stopped before queued message was acknowledged"),
@@ -648,7 +663,7 @@ async fn queued_message_is_acknowledged_after_all_parallel_tools_finish() {
                     assert!(finished.insert(call_id), "tool finished more than once");
                     lifecycle.push("tool_finished");
                 }
-                Some(EngineEvent::Steered { text, count }) => {
+                Some(EngineEvent::Steered { text, count, .. }) => {
                     assert_eq!(text, "queued follow-up");
                     assert_eq!(count, 1);
                     lifecycle.push("steered");
@@ -888,7 +903,7 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
             Some(EngineEvent::ToolFinished { call_id, .. }) if call_id == TOOL_CALL_ID => {
                 lifecycle.push("tool_finished");
             }
-            Some(EngineEvent::Steered { text, count }) => {
+            Some(EngineEvent::Steered { text, count, .. }) => {
                 assert_eq!(text, "queued during tool");
                 assert_eq!(count, 1);
                 lifecycle.push("steered");

@@ -1941,7 +1941,11 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         }
         FuzzOp::EngineSteered { text, count } => {
             let n = usize::from(count);
-            let ev = SourceEvent::engine(EngineEvent::Steered { text, count: n });
+            let ev = SourceEvent::engine(EngineEvent::Steered {
+                text,
+                count: n,
+                sent_at_ms: 1_742_567_823_000,
+            });
             (Some(ev), PostCheck::Steered { count: n })
         }
         FuzzOp::EngineRetrying { delay_ms, attempt } => {

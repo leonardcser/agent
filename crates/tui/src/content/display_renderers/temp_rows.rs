@@ -22,6 +22,9 @@ pub(super) fn apply_temp_decoration(
     } else if dec.copy_continuation {
         out.mark_copy_continuation();
     }
+    if dec.copy_excluded {
+        out.exclude_from_copy();
+    }
     if dec.cell_selectable {
         out.mark_cell_selectable();
     }

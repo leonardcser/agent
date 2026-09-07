@@ -216,6 +216,17 @@ impl CopyRangeAccumulator {
         cell_start: usize,
         cell_end: usize,
     ) {
+        if copy_row.decoration.copy_excluded
+            && copy_row.decoration.source_text.is_none()
+            && copy_row.decoration.external_source_text.is_none()
+        {
+            let width = text::byte_to_cell(copy_row.text, copy_row.text.len());
+            let unselectable = collect_unselectable(copy_row.highlights, width);
+            if all_selectable_in_range(&unselectable, width, 0, 0) {
+                self.flush_group();
+                return;
+            }
+        }
         if external_source_group_decoration(copy_row.decoration) {
             self.pending_group.push(OwnedCopyRow {
                 row,
@@ -652,6 +663,81 @@ mod tests {
         buf.add_highlight_group_with_meta(0, 0, 2, hl_for_test(), unselectable_meta());
         let line_bytes = "│ hi".len();
         assert_eq!(copy_byte_range(&buf, 0, line_bytes), "hi");
+    }
+
+    #[test]
+    fn copy_excludes_decorative_rows_without_removing_content_blank_lines() {
+        let mut buf = Buffer::new(BufId(1), Default::default());
+        let text = "header\nfirst\n\nchrome\nsecond\nfooter";
+        buf.set_all_lines(text.lines().map(str::to_owned).collect());
+        for row in [0, 3, 5] {
+            buf.add_highlight_group_with_meta(row, 0, 6, hl_for_test(), unselectable_meta());
+            buf.set_decoration(
+                row,
+                LineDecoration {
+                    copy_excluded: true,
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(copy_byte_range(&buf, 0, text.len()), "first\n\nsecond");
+        assert_eq!(copy_byte_range(&buf, 1, 6), "");
+    }
+
+    #[test]
+    fn composed_copyable_content_overrides_decorative_row_exclusion() {
+        let mut buf = Buffer::new(BufId(1), Default::default());
+        buf.set_all_lines(vec!["icon body".into()]);
+        buf.set_decoration(
+            0,
+            LineDecoration {
+                copy_excluded: true,
+                ..Default::default()
+            },
+        );
+        buf.add_highlight_group_with_meta(0, 0, 5, hl_for_test(), unselectable_meta());
+        assert_eq!(copy_byte_range(&buf, 0, 9), "body");
+        assert_eq!(copy_byte_range(&buf, 0, 4), "");
+
+        buf.add_highlight_group_with_meta(0, 5, 9, hl_for_test(), unselectable_meta());
+        buf.set_decoration(
+            0,
+            LineDecoration {
+                copy_excluded: true,
+                source_text: Some("canonical body".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(copy_byte_range(&buf, 0, 9), "canonical body");
+    }
+
+    #[test]
+    fn decorative_rows_separate_external_source_groups() {
+        let mut buf = Buffer::new(BufId(1), Default::default());
+        let text = "first\nchrome\nsecond";
+        buf.set_all_lines(text.lines().map(str::to_owned).collect());
+        for (row, source) in [(0, "first"), (2, "second")] {
+            buf.set_decoration(
+                row,
+                LineDecoration {
+                    source_text: Some(source.into()),
+                    external_source_text: Some(format!("```\n{source}\n```")),
+                    ..Default::default()
+                },
+            );
+        }
+        buf.add_highlight_group_with_meta(1, 0, 6, hl_for_test(), unselectable_meta());
+        buf.set_decoration(
+            1,
+            LineDecoration {
+                copy_excluded: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            copy_byte_range(&buf, 0, text.len()),
+            "```\nfirst\n```\n```\nsecond\n```"
+        );
     }
 
     #[test]

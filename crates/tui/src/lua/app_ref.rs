@@ -261,15 +261,26 @@ impl RuntimeLuaHost<'_> {
         Some((decl.read)(&self.app.core.config.settings))
     }
 
-    pub(crate) fn apply_theme(&mut self, spec: &crate::theme::ThemeSpec) -> Result<(), String> {
+    pub(crate) fn apply_theme(
+        &mut self,
+        lua: &mlua::Lua,
+        spec: &crate::theme::ThemeSpec,
+    ) -> Result<(), String> {
         let is_light = self.app.ui.theme().is_light();
         let theme = crate::theme::compile(spec, is_light)?;
         self.app.install_theme(theme);
+        super::api::theme::sync_metadata(lua, self.app.ui.theme());
         Ok(())
     }
 
-    pub(crate) fn set_theme_group(&mut self, group: String, style: smelt_core::style::Style) {
+    pub(crate) fn set_theme_group(
+        &mut self,
+        lua: &mlua::Lua,
+        group: String,
+        style: smelt_core::style::Style,
+    ) {
         self.app.mutate_theme(|theme| theme.set(group, style));
+        super::api::theme::sync_metadata(lua, self.app.ui.theme());
     }
 
     pub(crate) fn theme_is_light(&self) -> bool {
@@ -652,6 +663,8 @@ impl AgentLuaHost<'_> {
         &mut self,
         command: smelt_core::custom_commands::CustomCommand,
     ) {
+        let sent_at_ms = smelt_core::lua::current_command_sent_at_ms()
+            .unwrap_or_else(|| engine::clock::unix_time_ms(self.app.core.clock.as_ref()));
         if self.app.prompt_input_is_busy()
             || self.app.prompt_work_state() == crate::app::PromptWorkState::Paused
         {
@@ -665,8 +678,12 @@ impl AgentLuaHost<'_> {
             } else {
                 format!("/{}", command.display)
             };
-            let queued =
-                crate::app::QueuedInput::custom_command_request(display, text, command.overrides);
+            let queued = crate::app::QueuedInput::custom_command_request(
+                display,
+                text,
+                command.overrides,
+                sent_at_ms,
+            );
             let target = smelt_core::lua::current_command_queue_target()
                 .map(crate::app::QueueStage::from_command_target)
                 .unwrap_or(crate::app::QueueStage::Turn);
@@ -680,7 +697,7 @@ impl AgentLuaHost<'_> {
             }
             return;
         }
-        let turn = self.app.begin_custom_command_turn(command);
+        let turn = self.app.begin_custom_command_turn(command, sent_at_ms);
         self.app.conversation.set_active(turn);
     }
 
@@ -711,7 +728,11 @@ impl AgentLuaHost<'_> {
         {
             return false;
         }
-        let turn = self.app.begin_custom_command_continuation(command);
+        let sent_at_ms = smelt_core::lua::current_command_sent_at_ms()
+            .unwrap_or_else(|| engine::clock::unix_time_ms(self.app.core.clock.as_ref()));
+        let turn = self
+            .app
+            .begin_custom_command_continuation(command, sent_at_ms);
         let started = turn.is_some() || self.app.turn_submission_is_pending();
         self.app.conversation.set_active(turn);
         started

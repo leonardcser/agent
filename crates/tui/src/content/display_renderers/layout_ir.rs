@@ -1568,6 +1568,9 @@ fn render_line_spec(
     if let Some(gutter) = gutter {
         out.print_gutter(&gutter.text);
     }
+    if !spec.spans.is_empty() && spec.spans.iter().all(|span| !span.selectable) {
+        out.exclude_from_copy();
+    }
     let default_hl = spec.hl_group.as_deref();
     print_styled_spans(out, &spec.spans, default_hl, Some(&spec.syntax_highlights));
     out.newline();
@@ -2590,7 +2593,7 @@ fn print_styled_text_range(
         }
         Some(lang) if span.selectable => {
             let _perf = smelt_perf::perf::begin("render:layout:inline_syntax");
-            let mut highlighter = InlineSyntax::new(lang);
+            let mut highlighter = InlineSyntax::new(lang, out.theme());
             highlighter.print_line_range(out, text, range);
         }
         _ if span.selectable => out.print(piece),

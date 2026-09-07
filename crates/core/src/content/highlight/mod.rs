@@ -60,17 +60,15 @@ fn embedded_syntax_theme(name: &str) -> Option<EmbeddedThemeName> {
         .find(|theme| theme.as_name() == name)
 }
 
-/// Pick the syntect theme variant requested by the active `Theme`. When a
-/// colorscheme omits `syntax`, fall back to the historical Monokai dark/light
-/// pair keyed by the active theme's light flag.
-pub(super) fn syntax_theme() -> &'static syntect::highlighting::Theme {
-    let active = crate::theme::active();
-    if let Some(name) = active.syntax_theme() {
+/// Pick the requested syntax theme, falling back to the matching Monokai
+/// dark/light palette when the colorscheme omits `syntax`.
+pub(super) fn syntax_theme(theme: &crate::theme::Theme) -> &'static syntect::highlighting::Theme {
+    if let Some(name) = theme.syntax_theme() {
         if let Some(theme) = embedded_syntax_theme(name) {
             return &THEME_SET[theme];
         }
     }
-    if active.is_light() {
+    if theme.is_light() {
         &THEME_SET[EmbeddedThemeName::MonokaiExtendedLight]
     } else {
         &THEME_SET[EmbeddedThemeName::MonokaiExtended]

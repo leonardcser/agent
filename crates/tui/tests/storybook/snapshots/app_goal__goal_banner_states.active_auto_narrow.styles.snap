@@ -6,7 +6,9 @@ dim: 32 16
   0   0   6 fg=AnsiValue(0) bg=AnsiValue(39) attrs=bold
   0   6  20 fg=AnsiValue(0) bg=AnsiValue(39)
   0  26   6 fg=AnsiValue(0) bg=AnsiValue(39) attrs=bold
-  1   0  31 bg=AnsiValue(236)
+  1   0  22 bg=AnsiValue(236)
+  1  22   8 fg=Rgb { r: 128, g: 128, b: 128 } bg=AnsiValue(236)
+  1  30   1 bg=AnsiValue(236)
   2   0   1 bg=AnsiValue(236)
   2   1  27 bg=AnsiValue(236) attrs=bold
   2  28   3 bg=AnsiValue(236)

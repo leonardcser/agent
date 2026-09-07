@@ -1498,6 +1498,7 @@ fn heterogeneous_resume_records(count: usize) -> Vec<TranscriptBlockRecord> {
                 ),
                 image_labels: vec![format!("image-{idx}")],
                 command: false,
+                sent_at_ms: None,
             }),
             1 => source.push(Block::Text {
                 content: format!(

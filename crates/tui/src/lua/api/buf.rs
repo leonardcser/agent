@@ -698,7 +698,7 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
                         }
                         sink.push(group, style);
                         if let Some(lang) = &span.syntax {
-                            let mut hi = InlineSyntax::new(lang);
+                            let mut hi = InlineSyntax::new(lang, sink.theme());
                             hi.print_line(sink, &span.text);
                         } else {
                             sink.print(&span.text);

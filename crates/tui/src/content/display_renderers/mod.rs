@@ -80,6 +80,7 @@ mod tests {
             text: s.to_string(),
             image_labels: vec![],
             command: false,
+            sent_at_ms: None,
         }
     }
 

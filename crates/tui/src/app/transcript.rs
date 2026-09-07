@@ -7425,6 +7425,7 @@ mod document_tests {
             text: "durable user".into(),
             image_labels: vec![],
             command: false,
+            sent_at_ms: None,
         });
         source.push_tool_call(
             Block::ToolCall {
@@ -8671,6 +8672,7 @@ mod document_tests {
                     ),
                     image_labels: vec![format!("image-{idx}")],
                     command: false,
+                    sent_at_ms: None,
                 }),
                 _ => source.push_tool_call(
                     Block::ToolCall {
@@ -9810,6 +9812,7 @@ mod document_tests {
                     text: format!("user {idx}"),
                     image_labels: Vec::new(),
                     command: false,
+                    sent_at_ms: None,
                 });
             } else {
                 source.push(Block::Text {
@@ -9873,6 +9876,7 @@ mod document_tests {
                     text: format!("user {idx}"),
                     image_labels: Vec::new(),
                     command: false,
+                    sent_at_ms: None,
                 });
             } else {
                 source.push(Block::Text {
@@ -9992,6 +9996,7 @@ mod document_tests {
                     text: format!("user {idx}"),
                     image_labels: Vec::new(),
                     command: false,
+                    sent_at_ms: None,
                 });
             } else {
                 source.push(Block::Text {
@@ -10952,20 +10957,20 @@ impl TuiApp {
             .invalidate_transcript_renderer(generation, cache_key);
     }
 
-    /// Install a complete theme and publish it to the process-wide active slot.
+    /// Install a complete theme and invalidate themed rendering.
     pub(crate) fn install_theme(&mut self, theme: Theme) {
         *self.ui.theme_mut() = theme;
-        smelt_core::theme::set_active(self.ui.theme().clone());
+        crate::lua::api::theme::sync_metadata(self.lua.lua(), self.ui.theme());
         self.sync_inline_options();
         self.sync_transcript_renderer_generation();
         self.lua.shared().invalidate_win_renderers();
         self.invalidate_for_theme();
     }
 
-    /// Mutate the current theme and republish.
+    /// Mutate the current theme and invalidate themed rendering.
     pub(crate) fn mutate_theme(&mut self, f: impl FnOnce(&mut Theme)) {
         f(self.ui.theme_mut());
-        smelt_core::theme::set_active(self.ui.theme().clone());
+        crate::lua::api::theme::sync_metadata(self.lua.lua(), self.ui.theme());
         self.sync_inline_options();
         self.sync_transcript_renderer_generation();
         self.lua.shared().invalidate_win_renderers();

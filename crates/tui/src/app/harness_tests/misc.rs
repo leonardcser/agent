@@ -1073,6 +1073,7 @@ fn resume_overlay_scrolls_virtualized_preview_across_sparse_session() {
             text: "resume preview regression".into(),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         });
         for index in 0..80 {
             let call_id = format!("resume-preview-tool-{index}");
@@ -2224,6 +2225,7 @@ fn transcript_user_resize_keeps_viewport_top_content_stable() {
         text: format!("{before}\nANCHOR stay at viewport top\nafter"),
         image_labels: vec![],
         command: false,
+        sent_at_ms: None,
     });
     for i in 0..120 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
@@ -3671,6 +3673,7 @@ fn committed_view_previous_user_includes_block_containing_viewport_top() {
         text: "older user target".into(),
         image_labels: Vec::new(),
         command: false,
+        sent_at_ms: None,
     });
     app.push_transcript_block(smelt_core::transcript_model::Block::Text {
         content: "older assistant response".into(),
@@ -3682,6 +3685,7 @@ fn committed_view_previous_user_includes_block_containing_viewport_top() {
             .join("\n"),
         image_labels: Vec::new(),
         command: false,
+        sent_at_ms: None,
     });
     app.push_transcript_block(smelt_core::transcript_model::Block::Text {
         content: (0..40)
@@ -3784,6 +3788,7 @@ fn scroll_pill_clicks_jump_to_previous_user_then_back_to_tail() {
             text: format!("user target {i:03}"),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         });
         let content = if i == 119 {
             (0..48)
@@ -3947,6 +3952,7 @@ fn committed_view_watcher_dispatches_once_per_revision() {
         text: "anchored user".into(),
         image_labels: Vec::new(),
         command: false,
+        sent_at_ms: None,
     });
     app.push_transcript_block(smelt_core::transcript_model::Block::Text {
         content: (0..40)
@@ -4038,6 +4044,7 @@ fn stale_committed_views_and_cross_session_targets_are_rejected() {
         text: "first user".into(),
         image_labels: Vec::new(),
         command: false,
+        sent_at_ms: None,
     });
     app.push_transcript_block(smelt_core::transcript_model::Block::Text {
         content: "first response".into(),
@@ -4046,6 +4053,7 @@ fn stale_committed_views_and_cross_session_targets_are_rejected() {
         text: "second user".into(),
         image_labels: Vec::new(),
         command: false,
+        sent_at_ms: None,
     });
     app.push_transcript_block(smelt_core::transcript_model::Block::Text {
         content: (0..30)
@@ -6602,6 +6610,7 @@ fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlock
                 ),
                 image_labels: vec![format!("image-{idx}")],
                 command: false,
+                sent_at_ms: None,
             }),
             1 => source.push(Block::Text {
                 content: format!(
@@ -6691,6 +6700,7 @@ fn tail_consecutive_user_records(count: usize) -> Vec<smelt_core::TranscriptBloc
                 text: format!("{marker} user prompt {}", "u ".repeat(8)),
                 image_labels: Vec::new(),
                 command: false,
+                sent_at_ms: None,
             });
         } else {
             source.push(Block::Text {

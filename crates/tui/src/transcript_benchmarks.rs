@@ -138,6 +138,7 @@ fn transcript_navigation_bench_app() -> TestApp {
                 text: format!("navigation bench prompt {i:04}"),
                 image_labels: Vec::new(),
                 command: false,
+                sent_at_ms: None,
             });
         let marker = if i == 3_777 { " needle-target" } else { "" };
         let content = if i == 3_999 {
@@ -265,6 +266,7 @@ fn push_search_bench_transcript(app: &mut TestApp, target_bytes: usize) -> usize
                 text: user,
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             });
 
         let assistant = format!(
@@ -2563,6 +2565,7 @@ fn transcript_sparse_watcher_benchmark_suite() {
                 text: format!("sparse watcher user {index}"),
                 image_labels: Vec::new(),
                 command: false,
+                sent_at_ms: None,
             }
         } else {
             smelt_core::transcript_model::Block::Text {
@@ -3182,6 +3185,7 @@ fn push_stream_boundary_transcript(app: &mut TestApp, record_bytes: usize) -> us
                 text: content,
                 image_labels: Vec::new(),
                 command: false,
+                sent_at_ms: None,
             }
         } else {
             smelt_core::transcript_model::Block::Text {
@@ -3236,6 +3240,7 @@ fn stream_benchmark_app(
                     ),
                     image_labels: Vec::new(),
                     command: false,
+                    sent_at_ms: None,
                 },
                 1 => smelt_core::transcript_model::Block::Text {
                     content: format!(
@@ -4635,6 +4640,7 @@ fn run_request_append_hot_path(history_len: usize) -> (HotPathSample, smelt_perf
                 text: "hot path new user".into(),
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             }),
         );
         assert!(matches!(

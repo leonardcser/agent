@@ -39,8 +39,8 @@ impl AppStoryCtx {
             .without_model()
             .with_wall_time(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_742_567_823))
             .build();
-        app.run_lua_result("smelt.time.format = smelt.time.format_utc")
-            .expect("pin storybook timestamp formatting to UTC");
+        app.run_lua_result("smelt.time.format = smelt.time.format_utc; smelt.theme.use('default')")
+            .expect("pin storybook time formatting and theme");
         app.allow_permissions_outside_cwd();
         Self {
             app,
@@ -444,6 +444,7 @@ impl AppStoryCtx {
     /// Commit a fresh Lua generation through the production reload pipeline.
     pub fn reload_lua(&mut self) {
         self.app.reload_lua();
+        self.run_lua("smelt.time.format = smelt.time.format_utc");
     }
 
     /// Type a string into the prompt as individual key events.

@@ -1,6 +1,5 @@
 ---
 source: tests/scenarios.rs
-assertion_line: 66
 expression: out.events
 ---
 [
@@ -13,7 +12,8 @@ expression: out.events
         "items": [
           {
             "content": "hi",
-            "kind": "user"
+            "kind": "user",
+            "sent_at_ms": "[sent_at_ms]"
           }
         ]
       }

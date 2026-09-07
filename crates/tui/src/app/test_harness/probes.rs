@@ -92,7 +92,8 @@ impl TestApp {
             body: "fuzz custom body".to_string(),
             overrides: smelt_core::custom_commands::CommandOverrides::default(),
         };
-        let turn = self.app.begin_custom_command_turn(cmd)?;
+        let sent_at_ms = engine::clock::unix_time_ms(self.app.core.clock.as_ref());
+        let turn = self.app.begin_custom_command_turn(cmd, sent_at_ms)?;
         self.app.conversation.set_active(Some(turn));
         self.drain_cmd();
         self.actions.iter().rev().find_map(|a| match a {

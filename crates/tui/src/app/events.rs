@@ -215,7 +215,8 @@ impl TuiApp {
                 false
             }
             EventOutcome::ContinueTurn => {
-                let turn = self.begin_agent_turn("", protocol::Content::text(""));
+                let sent_at_ms = engine::clock::unix_time_ms(self.core.clock.as_ref());
+                let turn = self.begin_agent_turn("", protocol::Content::text(""), sent_at_ms);
                 self.conversation.set_active(turn);
                 false
             }
@@ -228,6 +229,7 @@ impl TuiApp {
                 mut display,
                 edit,
             } => {
+                let sent_at_ms = engine::clock::unix_time_ms(self.core.clock.as_ref());
                 self.clear_prompt_prediction();
                 self.redact_user_submission(&mut content, &mut display);
                 let mut edit = Some(edit);
@@ -241,8 +243,11 @@ impl TuiApp {
                             false
                         } else {
                             self.commit_prompt_submission(edit.take().expect("submit edit"));
-                            self.prompt
-                                .try_queue_turn(QueuedInput::request(display.clone(), content));
+                            self.prompt.try_queue_turn(QueuedInput::request(
+                                display.clone(),
+                                content,
+                                sent_at_ms,
+                            ));
                             true
                         }
                     }
@@ -257,7 +262,7 @@ impl TuiApp {
                             };
                             let accepted = match outcome {
                                 InputOutcome::StartAgent => {
-                                    match self.begin_agent_turn(&display, content) {
+                                    match self.begin_agent_turn(&display, content, sent_at_ms) {
                                         Some(turn) => {
                                             self.commit_prompt_submission(
                                                 edit.take().expect("submit edit"),
@@ -278,7 +283,9 @@ impl TuiApp {
                                     self.commit_prompt_submission(
                                         edit.take().expect("submit edit"),
                                     );
-                                    self.apply_input_outcome(outcome, content, &display);
+                                    self.apply_input_outcome(
+                                        outcome, content, &display, sent_at_ms,
+                                    );
                                     true
                                 }
                             };
@@ -788,13 +795,16 @@ impl TuiApp {
         edit: crate::input::SubmitEdit,
         target: QueueStage,
     ) -> EventOutcome {
+        let sent_at_ms = engine::clock::unix_time_ms(self.core.clock.as_ref());
         self.clear_prompt_prediction();
         self.redact_user_submission(&mut content, &mut display);
         let text = content.text_content().into_owned();
         if content.image_count() == 0 {
-            if let Some(outcome) =
-                self.try_command_while_running(smelt_buffer::text::trim_whitespace(&text), target)
-            {
+            if let Some(outcome) = self.try_command_while_running(
+                smelt_buffer::text::trim_whitespace(&text),
+                target,
+                sent_at_ms,
+            ) {
                 self.commit_prompt_submission(edit);
                 return outcome;
             }
@@ -810,7 +820,7 @@ impl TuiApp {
             return EventOutcome::Noop;
         }
         self.commit_prompt_submission(edit);
-        let queued = QueuedInput::request(display, content);
+        let queued = QueuedInput::request(display, content, sent_at_ms);
         match target {
             QueueStage::Turn => {
                 self.prompt.try_queue_turn(queued);
@@ -2676,6 +2686,7 @@ mod tests {
             protocol::EngineEvent::Steered {
                 text: "request now".to_string(),
                 count: 1,
+                sent_at_ms: 1_742_567_823_000,
             },
         ));
 

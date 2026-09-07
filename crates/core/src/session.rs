@@ -3075,6 +3075,7 @@ mod tests {
             content: Content::Text(text.into()),
             display: None,
             command: false,
+            sent_at_ms: None,
         }
     }
     fn assistant_text_item(text: &str) -> HistoryItem {
@@ -3505,6 +3506,7 @@ mod tests {
             content: Content::Text("expanded command body".into()),
             display: Some("/reflect".into()),
             command: true,
+            sent_at_ms: Some(1_742_567_823_000),
         });
 
         let json = serde_json::to_value(&s).expect("serialize session");
@@ -3512,6 +3514,7 @@ mod tests {
         assert!(json.get("messages").is_none());
         assert_eq!(json["history"][0]["display"], "/reflect");
         assert_eq!(json["history"][0]["command"], true);
+        assert_eq!(json["history"][0]["sent_at_ms"], 1_742_567_823_000u64);
 
         let loaded: Session = serde_json::from_value(json).expect("deserialize session");
         assert!(matches!(
@@ -3520,6 +3523,7 @@ mod tests {
                 content,
                 display: Some(display),
                 command: true,
+                sent_at_ms: Some(1_742_567_823_000),
             } if content.text_content() == "expanded command body" && display == "/reflect"
         ));
     }
@@ -4067,6 +4071,7 @@ mod tests {
             }]),
             display: None,
             command: false,
+            sent_at_ms: None,
         }
     }
 

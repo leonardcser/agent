@@ -395,7 +395,11 @@ pub enum EngineEvent {
     },
 
     /// A queued user message was consumed by the engine.
-    Steered { text: String, count: usize },
+    Steered {
+        text: String,
+        count: usize,
+        sent_at_ms: u64,
+    },
 
     /// A tool call has started.
     ToolStarted {
@@ -566,6 +570,9 @@ pub enum StartTurnInput {
         /// Whether `display` is a slash-command invocation rather than ordinary input.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         command: bool,
+        /// Original submission time, when captured by the frontend.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sent_at_ms: Option<u64>,
     },
     Note {
         note: crate::history::HistoryNote,
@@ -578,6 +585,7 @@ impl StartTurnInput {
             content,
             display: None,
             command: false,
+            sent_at_ms: None,
         }
     }
 
@@ -586,6 +594,21 @@ impl StartTurnInput {
             content,
             display: Some(display.into()),
             command: true,
+            sent_at_ms: None,
+        }
+    }
+
+    pub fn with_sent_at_ms(mut self, timestamp_ms: u64) -> Self {
+        if let Self::User { sent_at_ms, .. } = &mut self {
+            *sent_at_ms = Some(timestamp_ms);
+        }
+        self
+    }
+
+    pub fn sent_at_ms(&self) -> Option<u64> {
+        match self {
+            Self::User { sent_at_ms, .. } => *sent_at_ms,
+            Self::Note { .. } => None,
         }
     }
 

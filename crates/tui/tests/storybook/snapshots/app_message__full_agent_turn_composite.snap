@@ -1,8 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
-
+                                                            14:37:03
  rename `add` to `checked_add`
 
 

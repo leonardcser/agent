@@ -1469,7 +1469,7 @@ impl LuaRuntime {
     }
 
     pub fn run_command(&self, name: &str, arg: Option<String>) -> bool {
-        self.run_command_with_queue_target(name, arg, crate::lua::CommandQueueTarget::Turn)
+        self.run_command_with_queue_target(name, arg, crate::lua::CommandQueueTarget::Turn, None)
     }
 
     pub fn run_command_with_queue_target(
@@ -1477,6 +1477,7 @@ impl LuaRuntime {
         name: &str,
         arg: Option<String>,
         queue_target: crate::lua::CommandQueueTarget,
+        sent_at_ms: Option<u64>,
     ) -> bool {
         let func = {
             let Ok(map) = self.shared.commands.lock() else {
@@ -1521,6 +1522,7 @@ impl LuaRuntime {
                 TaskCompletion::Command {
                     name: name.to_string(),
                     queue_target,
+                    sent_at_ms,
                 },
             )
         };
@@ -3045,10 +3047,12 @@ fn transcript_render_node_to_lua_table(
             text,
             user_lines,
             image_labels,
+            sent_at_ms,
         } => {
             table.set("text", text.as_str())?;
             table.set("user_lines", crate::lua::serde_to_lua(lua, user_lines)?)?;
             table.set("image_labels", crate::lua::serde_to_lua(lua, image_labels)?)?;
+            table.set("sent_at_ms", *sent_at_ms)?;
         }
         TranscriptRenderFields::Mode {
             text,
@@ -3370,6 +3374,7 @@ enum TranscriptRenderFields {
         text: String,
         user_lines: protocol::StyledLines,
         image_labels: Vec<String>,
+        sent_at_ms: Option<u64>,
     },
     Mode {
         text: String,
@@ -3549,10 +3554,12 @@ pub fn transcript_block_render_node(
             text,
             image_labels,
             command,
+            sent_at_ms,
         } => TranscriptRenderFields::User {
             text: text.clone(),
             user_lines: user_styled_lines(text, image_labels, *command),
             image_labels: image_labels.clone(),
+            sent_at_ms: *sent_at_ms,
         },
         Block::Mode {
             text,

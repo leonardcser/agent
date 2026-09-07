@@ -1652,8 +1652,12 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn run_queued_command_line(&mut self, line: &str) {
-        crate::commands::run_command(self, line);
+    pub(crate) fn run_queued_command_line(&mut self, line: &str, sent_at_ms: u64) {
+        crate::commands::run_command_with_context(
+            self,
+            line,
+            crate::commands::CommandContext::prompt().with_sent_at_ms(sent_at_ms),
+        );
     }
 
     pub(crate) fn start_queued_input(&mut self, queued: QueuedInput) -> Result<(), QueuedInput> {
@@ -1670,13 +1674,14 @@ impl TuiApp {
                             text,
                             *overrides,
                             CommandTurnStart::Fresh,
+                            req.sent_at_ms,
                         );
                         let started = turn.is_some() || self.turn_submission_is_pending();
                         self.conversation.set_active(turn);
                         started
                     }
                     QueuedTurnOptions::Default if !req.content.is_empty() => {
-                        let turn = self.begin_agent_turn(&req.display, req.content);
+                        let turn = self.begin_agent_turn(&req.display, req.content, req.sent_at_ms);
                         let started = turn.is_some() || self.turn_submission_is_pending();
                         self.conversation.set_active(turn);
                         started
@@ -1684,8 +1689,10 @@ impl TuiApp {
                     QueuedTurnOptions::Default => true,
                 }
             }
-            QueuedInput::Command { line, .. } => {
-                self.run_queued_command_line(&line);
+            QueuedInput::Command {
+                line, sent_at_ms, ..
+            } => {
+                self.run_queued_command_line(&line, sent_at_ms);
                 true
             }
             QueuedInput::ProcessStatus(note) if !note.text().is_empty() => {
@@ -3534,6 +3541,7 @@ impl TuiApp {
                     ));
                 }
             } else {
+                let sent_at_ms = engine::clock::unix_time_ms(self.core.clock.as_ref());
                 let content = Content::text(msg.clone());
                 let pending_mcp = self
                     .core
@@ -3542,8 +3550,10 @@ impl TuiApp {
                     .filter(|manager| !manager.controller_status().is_ready())
                     .cloned();
                 if let Some(manager) = pending_mcp {
-                    self.prompt
-                        .queue_front(QueueStage::Turn, QueuedInput::request(msg, content));
+                    self.prompt.queue_front(
+                        QueueStage::Turn,
+                        QueuedInput::request(msg, content, sent_at_ms),
+                    );
                     let busy_token = self.busy_stack.push("connecting MCP tools".into());
                     let app_event_tx = self.platform.app_event_sender();
                     tokio::spawn(async move {
@@ -3556,7 +3566,7 @@ impl TuiApp {
                         });
                     });
                 } else {
-                    let turn = self.begin_agent_turn(&msg, content);
+                    let turn = self.begin_agent_turn(&msg, content, sent_at_ms);
                     self.conversation.set_active(turn);
                 }
             }

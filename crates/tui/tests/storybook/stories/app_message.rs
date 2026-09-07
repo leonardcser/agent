@@ -212,6 +212,113 @@ app_story!(user_message_block_single_line, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(user_message_timestamp_submission, |ctx| {
+    ctx.run_lua("assert(smelt.settings.transcript.show_timestamps == true)");
+    ctx.set_viewport(60, 12);
+    ctx.use_test_model();
+    ctx.type_prompt("Keep the parser API stable.");
+    ctx.press_enter();
+
+    let visible = ctx.frame_text();
+    assert!(visible.contains("Keep the parser API stable."), "{visible}");
+    assert!(visible.contains("14:37:03"), "{visible}");
+    ctx.assert_snapshot_named("visible");
+
+    ctx.run_lua("smelt.settings.transcript.show_timestamps = false");
+    let hidden = ctx.frame_text();
+    assert!(!hidden.contains("14:37:03"), "{hidden}");
+    assert!(hidden.contains("Keep the parser API stable."), "{hidden}");
+    ctx.assert_snapshot_named("hidden");
+
+    ctx.run_lua("smelt.settings.transcript.show_timestamps = true");
+    assert_eq!(ctx.frame_text(), visible);
+});
+
+app_story!(user_message_timestamp_wrapping_and_themes, |ctx| {
+    ctx.set_viewport(44, 16);
+    ctx.push_user_turn("Preserve wrapping for Unicode 語界 and a long user message.\nKeep this second line intact.");
+    let visible = ctx.frame_text();
+    assert!(visible.lines().next().unwrap().ends_with("14:37:03"));
+    ctx.assert_snapshot_named("dark");
+
+    ctx.run_lua("smelt.settings.transcript.show_timestamps = false");
+    let hidden = ctx.frame_text();
+    assert_eq!(
+        visible.lines().skip(1).collect::<Vec<_>>(),
+        hidden.lines().skip(1).collect::<Vec<_>>()
+    );
+    ctx.run_lua("smelt.settings.transcript = {}");
+    assert_eq!(
+        ctx.frame_text(),
+        visible,
+        "omitting the setting enables timestamps"
+    );
+
+    ctx.run_lua(
+        "local t = require('smelt.colorschemes.default'); t.light = true; smelt.theme.apply(t)",
+    );
+    ctx.assert_snapshot_named("light");
+    for name in ["catppuccin-mocha", "catppuccin-latte"] {
+        ctx.run_lua(&format!("smelt.theme.use('{name}')"));
+        ctx.assert_snapshot_named(name);
+    }
+    ctx.set_viewport(18, 18);
+    ctx.assert_snapshot_named("narrow");
+    for width in 1..12 {
+        ctx.set_viewport(width, 18);
+        ctx.frame_text();
+    }
+});
+
+app_story!(
+    transcript_timestamp_toggle_includes_tools_and_groups,
+    |ctx| {
+        ctx.set_viewport(72, 18);
+        ctx.push_user_turn("Inspect the files, then run the tests.");
+        ctx.tool_call(
+            "read_file",
+            &[("file_path", json!("src/a.rs"))],
+            "first",
+            Some(2_400),
+        );
+        ctx.tool_call(
+            "read_file",
+            &[("file_path", json!("src/b.rs"))],
+            "second",
+            Some(2_400),
+        );
+        ctx.engine(EngineEvent::ToolStarted {
+            invocation_id: protocol::InvocationId::new(100),
+            call_id: "timestamp-bash".into(),
+            tool_name: "bash".into(),
+            args: std::collections::HashMap::from([("command".into(), json!("cargo test"))]),
+            called_at_ms: 1_742_567_823_000,
+        });
+        ctx.advance_time(2_400);
+        ctx.engine(EngineEvent::ToolFinished {
+            invocation_id: protocol::InvocationId::new(100),
+            call_id: "timestamp-bash".into(),
+            result: protocol::ToolOutcome::new("passed".into(), false, None),
+            elapsed_ms: Some(2_400),
+        });
+
+        let visible = ctx.frame_text();
+        assert_eq!(visible.matches("14:37:03").count(), 3, "{visible}");
+        assert!(visible.contains("2.4s"), "{visible}");
+        ctx.assert_snapshot_named("visible");
+
+        ctx.run_lua("smelt.settings.transcript.show_timestamps = false");
+        let hidden = ctx.frame_text();
+        assert!(!hidden.contains("14:37:03"), "{hidden}");
+        assert!(hidden.contains("2.4s"), "{hidden}");
+        ctx.assert_snapshot_named("hidden");
+        ctx.run_lua("smelt.transcript.fold_all('open')");
+        assert!(!ctx.frame_text().contains("14:37:03"));
+        ctx.run_lua("smelt.settings.transcript.show_timestamps = true");
+        assert!(ctx.frame_text().contains("14:37:03"));
+    }
+);
+
 app_story!(user_message_block_multiline_chrome, |ctx| {
     // Multi-line user messages get the panel chrome (rounded box,
     // `block_w` width). Exercises `UserBlockGeometry::new` + the

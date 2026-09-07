@@ -73,6 +73,7 @@ fn top_scroll_pill_click_preserves_focus_and_cursor_and_advances_target() {
             text: format!("user turn {turn}"),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         });
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
             content: (0..18)
@@ -292,6 +293,51 @@ fn transcript_triple_click_event_pipeline_yanks_clicked_display_line() {
 }
 
 #[test]
+fn decorative_copy_owner_does_not_exclude_adjacent_content() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.set_terminal_size(44, 18);
+    assert!(app.run_lua(
+        r#"
+        smelt.transcript.set_renderer(function(block)
+          local l = smelt.layout
+          return l.hbox({
+            { l.line({ { text = "icon", selectable = false } }), cols = 5 },
+            l.line("Keep this selectable message.")
+          })
+        end)
+    "#
+    ));
+    app.push_user_block("source");
+    app.render_silent();
+    drag_transcript_text(&mut app, "Keep", "message.");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current(),
+        "Keep this selectable message."
+    );
+}
+
+#[test]
+fn user_timestamp_is_excluded_from_drag_copy_without_changing_wrapping() {
+    let mut app = TestApp::builder()
+        .with_vim(false)
+        .with_wall_time(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_742_567_823))
+        .build();
+    app.set_terminal_size(44, 18);
+    assert!(app.run_lua("smelt.time.format = smelt.time.format_utc"));
+    let message = "Preserve Unicode 語界 and long lines that wrap across the panel.\n\nKeep hard newlines at the end.";
+    app.push_user_block(message);
+    app.render_silent();
+
+    let selected_rows = drag_transcript_text(&mut app, "14:37:03", "end.");
+    assert!(selected_rows.count() >= 4);
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), message);
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.last_clipboard_write(),
+        Some(message)
+    );
+}
+
+#[test]
 fn transcript_drag_copy_preserves_bash_command_hard_newlines_only() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.set_terminal_size(52, 16);
@@ -430,6 +476,7 @@ fn user_message_padding_click_snaps_cursor_after_left_pad() {
         text: "hello".into(),
         image_labels: vec![],
         command: false,
+        sent_at_ms: None,
     });
     app.render_silent();
 
@@ -472,6 +519,7 @@ fn user_message_drag_to_line_end_does_not_select_bottom_padding_row() {
         text: "hello".into(),
         image_labels: vec![],
         command: false,
+        sent_at_ms: None,
     });
     app.render_silent();
 

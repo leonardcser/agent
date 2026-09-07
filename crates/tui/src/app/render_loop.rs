@@ -1947,7 +1947,7 @@ mod tests {
             .app
             .prompt
             .try_queue_turn(crate::app::QueuedInput::request_from_text(
-                "queued", "queued"
+                "queued", "queued", 0
             )));
         app.app.publish_diff_signals();
         app.render_silent();

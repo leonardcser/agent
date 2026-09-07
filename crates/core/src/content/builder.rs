@@ -397,6 +397,11 @@ impl<'a> LineBuilder<'a> {
         self.cur_decoration.copy_continuation = true;
     }
 
+    /// Omit this decorative row on copy unless composition adds copyable content.
+    pub fn exclude_from_copy(&mut self) {
+        self.cur_decoration.copy_excluded = true;
+    }
+
     /// Mark the current row as a chrome-delimited selection row. Double-click
     /// selection may choose the selectable run between neighboring
     /// non-selectable spans (for example, a table cell).

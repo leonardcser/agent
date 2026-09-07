@@ -24,6 +24,7 @@ pub(crate) enum ShellSink {
 pub(crate) struct CommandContext {
     pub(crate) source: CommandSource,
     pub(crate) queue_target: QueueStage,
+    pub(crate) sent_at_ms: Option<u64>,
 }
 
 impl CommandContext {
@@ -31,6 +32,7 @@ impl CommandContext {
         Self {
             source: CommandSource::Prompt,
             queue_target: QueueStage::Turn,
+            sent_at_ms: None,
         }
     }
 
@@ -38,6 +40,7 @@ impl CommandContext {
         Self {
             source: CommandSource::Cmdline,
             queue_target: QueueStage::Turn,
+            sent_at_ms: None,
         }
     }
 
@@ -45,7 +48,13 @@ impl CommandContext {
         Self {
             source: CommandSource::Lua,
             queue_target: QueueStage::Turn,
+            sent_at_ms: None,
         }
+    }
+
+    pub(crate) fn with_sent_at_ms(mut self, sent_at_ms: u64) -> Self {
+        self.sent_at_ms = Some(sent_at_ms);
+        self
     }
 
     pub(crate) fn with_queue_target(mut self, queue_target: QueueStage) -> Self {
@@ -156,11 +165,6 @@ fn ex_command_effect(
     }
 }
 
-/// Dispatch a raw command line with prompt semantics.
-pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
-    run_command_with_context(app, line, CommandContext::prompt())
-}
-
 pub(crate) fn run_command_with_context(
     app: &mut TuiApp,
     line: &str,
@@ -240,6 +244,10 @@ impl TuiApp {
         arg: Option<&str>,
         ctx: CommandContext,
     ) -> CommandAction {
+        let sent_at_ms = ctx
+            .sent_at_ms
+            .or_else(smelt_core::lua::current_command_sent_at_ms)
+            .unwrap_or_else(|| engine::clock::unix_time_ms(self.core.clock.as_ref()));
         let name = name.to_string();
         let arg = arg.map(str::to_string);
         let next_turn_id = self.conversation.next_turn_id();
@@ -251,7 +259,12 @@ impl TuiApp {
             let lua = self.lua.execution();
             let lua_name = name.clone();
             crate::lua::scope_app(self, move || {
-                lua.run_command_with_queue_target(&lua_name, arg, ctx.queue_target.into());
+                lua.run_command_with_queue_target(
+                    &lua_name,
+                    arg,
+                    ctx.queue_target.into(),
+                    Some(sent_at_ms),
+                );
             });
         } else {
             let prefix = match ctx.source {
@@ -299,14 +312,19 @@ impl TuiApp {
         outcome: InputOutcome,
         content: Content,
         display: &str,
+        sent_at_ms: u64,
     ) {
         match outcome {
             InputOutcome::StartAgent => {
-                let turn = self.begin_agent_turn(display, content);
+                let turn = self.begin_agent_turn(display, content, sent_at_ms);
                 self.conversation.set_active(turn);
             }
             InputOutcome::Command(line) => {
-                if let CommandAction::Exec(handle) = run_command(self, &line) {
+                if let CommandAction::Exec(handle) = run_command_with_context(
+                    self,
+                    &line,
+                    CommandContext::prompt().with_sent_at_ms(sent_at_ms),
+                ) {
                     self.overlays.install_execution(handle);
                 }
             }
@@ -318,11 +336,14 @@ impl TuiApp {
         &mut self,
         input: &str,
         queue_target: QueueStage,
+        sent_at_ms: u64,
     ) -> CommandAction {
         run_command_with_context(
             self,
             input,
-            CommandContext::prompt().with_queue_target(queue_target),
+            CommandContext::prompt()
+                .with_queue_target(queue_target)
+                .with_sent_at_ms(sent_at_ms),
         )
     }
 
@@ -332,11 +353,12 @@ impl TuiApp {
         &mut self,
         input: &str,
         queue_target: QueueStage,
+        sent_at_ms: u64,
     ) -> Option<EventOutcome> {
         let is_from_paste = self.prompt.skip_shell_escape();
 
         if input.starts_with('!') && !is_from_paste {
-            return match self.run_command_with_queue_target(input, queue_target) {
+            return match self.run_command_with_queue_target(input, queue_target, sent_at_ms) {
                 CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
                 CommandAction::Continue => Some(EventOutcome::Noop),
             };
@@ -359,7 +381,7 @@ impl TuiApp {
             .unwrap_or(smelt_core::lua::CommandBusyBehavior::Run)
         {
             smelt_core::lua::CommandBusyBehavior::QueueCommand => {
-                let queued = QueuedInput::command(normalized);
+                let queued = QueuedInput::command(normalized, sent_at_ms);
                 match queue_target {
                     QueueStage::Turn => {
                         self.prompt.try_queue_turn(queued);
@@ -371,7 +393,11 @@ impl TuiApp {
                 return Some(EventOutcome::Noop);
             }
             smelt_core::lua::CommandBusyBehavior::QueueRequest => {
-                return match self.run_command_with_queue_target(&normalized, queue_target) {
+                return match self.run_command_with_queue_target(
+                    &normalized,
+                    queue_target,
+                    sent_at_ms,
+                ) {
                     CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
                     CommandAction::Continue => Some(EventOutcome::Noop),
                 };
@@ -383,7 +409,7 @@ impl TuiApp {
             smelt_core::lua::CommandBusyBehavior::Run => {}
         }
 
-        match self.run_command_with_queue_target(&normalized, queue_target) {
+        match self.run_command_with_queue_target(&normalized, queue_target, sent_at_ms) {
             CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
             CommandAction::Continue => Some(EventOutcome::Noop),
         }

@@ -36,6 +36,109 @@ fn worktree_repo() -> tempfile::TempDir {
 }
 
 #[test]
+fn app_themes_are_isolated_across_interleaved_renders() {
+    let guard = test_home_guard();
+    let mut dark = TestApp::builder().build_with_test_home_guard(&guard);
+    assert!(dark.run_lua("smelt.theme.use('catppuccin-mocha')"));
+    assert!(dark.run_lua(
+        r#"
+        smelt.transcript.set_renderer(function()
+            assert(smelt.theme.syntax_theme() == 'Catppuccin Mocha')
+            local l = smelt.layout
+            return l.vbox({
+                l.markdown('```rust\nfn main() { println!("hello"); }\n```'),
+                l.line({ { text = "printf '%s' hello", syntax = 'bash' } }),
+                l.code('let answer = 42;', { lang = 'rust' }),
+                l.diff({ old = 'let answer = 41;', new = 'let answer = 42;',
+                    path = 'example.rs', full_file = true }),
+            })
+        end)
+    "#
+    ));
+    dark.set_terminal_size(80, 24);
+    dark.push_transcript_block(smelt_core::Block::Text {
+        content: "```rust\nfn main() { println!(\"hello\"); }\n```".into(),
+    });
+    dark.start_turn(1);
+    let frame = dark.render_to_frame();
+    assert!(
+        frame.text().contains("printf '%s' hello"),
+        "{}",
+        frame.text()
+    );
+    assert!(
+        frame.text().contains("let answer = 42;"),
+        "{}",
+        frame.text()
+    );
+    let before = frame.styles_text();
+
+    let mut light = TestApp::builder().build_with_test_home_guard(&guard);
+    assert!(light.run_lua("smelt.theme.use('catppuccin-latte')"));
+    light.render_silent();
+    assert!(dark.run_lua("assert(not smelt.theme.is_light()); assert(smelt.theme.syntax_theme() == 'Catppuccin Mocha')"));
+    for width in [79, 78] {
+        dark.set_terminal_size(width, 24);
+        dark.render_silent();
+    }
+    dark.set_terminal_size(80, 24);
+    assert_eq!(dark.render_to_frame().styles_text(), before);
+}
+
+#[test]
+fn theme_metadata_tracks_launch_reload_and_failed_candidates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    let renderer = r#"
+        smelt.transcript.set_renderer(function()
+            return smelt.layout.text('palette: ' .. tostring(smelt.theme.is_light())
+                .. ' / ' .. smelt.theme.syntax_theme())
+        end)
+    "#;
+    std::fs::write(
+        &init,
+        format!("smelt.theme.use('catppuccin-mocha')\n{renderer}"),
+    )
+    .unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    app.set_terminal_size(80, 24);
+    app.push_transcript_block(smelt_core::Block::Text {
+        content: "fallback renderer".into(),
+    });
+    assert!(app
+        .render_to_frame()
+        .text()
+        .contains("palette: false / Catppuccin Mocha"));
+
+    for (source, succeeds) in [
+        (
+            format!("smelt.theme.use('catppuccin-latte')\n{renderer}"),
+            true,
+        ),
+        (
+            "smelt.theme.use('catppuccin-mocha'); error('reject candidate')".into(),
+            false,
+        ),
+        (renderer.into(), true),
+    ] {
+        let generation = app.lua_probe().id;
+        std::fs::write(&init, source).unwrap();
+        app.reload_lua();
+        assert_eq!(app.app.lua_reload_failure().is_none(), succeeds);
+        assert_eq!(app.lua_probe().id, generation + u64::from(succeeds));
+        app.set_terminal_size(79, 24);
+        app.render_silent();
+        app.set_terminal_size(80, 24);
+        let frame = app.render_to_frame();
+        assert!(
+            frame.text().contains("palette: true / Catppuccin Latte"),
+            "{}",
+            frame.text()
+        );
+    }
+}
+
+#[test]
 fn launch_and_reload_evaluate_each_config_phase_once_per_generation() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -1407,6 +1510,7 @@ fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
                 text: content,
                 image_labels: Vec::new(),
                 command: false,
+                sent_at_ms: None,
             });
         } else {
             app.push_transcript_block(smelt_core::Block::Text {
@@ -1541,6 +1645,7 @@ fn lua_context_note_updates_named_history_notes_independently() {
         content: protocol::Content::text("hello"),
         display: None,
         command: false,
+        sent_at_ms: None,
     });
 
     assert!(app.run_lua(

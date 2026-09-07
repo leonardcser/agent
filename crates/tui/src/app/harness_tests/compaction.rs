@@ -147,6 +147,7 @@ fn compact_command_keeps_completed_block_at_compaction_position() {
             text: "old user".into(),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         }),
     );
     app.commit_request_history_item(
@@ -166,6 +167,7 @@ fn compact_command_keeps_completed_block_at_compaction_position() {
             text: retained,
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         }),
     );
     app.set_context_token_baseline_for_harness(Some(500));
@@ -975,6 +977,7 @@ async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
                 text: user,
                 image_labels: Vec::new(),
                 command: false,
+                sent_at_ms: None,
             }),
         );
         let assistant = format!("old assistant {index}");

@@ -1054,8 +1054,7 @@ struct DiffPalette {
     del: DiffSidePalette,
 }
 
-fn active_diff_palette() -> DiffPalette {
-    let theme = crate::theme::active();
+fn diff_palette(theme: &crate::theme::Theme) -> DiffPalette {
     let del_row = theme.get("SmeltDiffDeleteBg").bg;
     let add_row = theme.get("SmeltDiffAddBg").bg;
     DiffPalette {
@@ -1622,7 +1621,7 @@ pub fn print_retained_file_view(
     let syntax = SYNTAX_SET
         .find_syntax_by_extension(syntax_ext)
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    let theme = syntax_theme();
+    let theme = syntax_theme(out.theme());
     let theme_id = std::ptr::from_ref(theme) as usize;
     let mut highlighter =
         retained_file_highlighter_at_line(content, cache, first_line, syntax, theme);
@@ -1838,7 +1837,7 @@ pub fn print_retained_code_block(
         .find_syntax_by_extension(super::lang_to_ext(lang))
         .or_else(|| SYNTAX_SET.find_syntax_by_name(lang))
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    let theme = syntax_theme();
+    let theme = syntax_theme(out.theme());
     let theme_id = std::ptr::from_ref(theme) as usize;
     let mut highlighter =
         retained_file_highlighter_at_line(content, cache, first_line, syntax, theme);
@@ -1995,15 +1994,15 @@ pub fn print_diff_ir_with_width(
     } else {
         max_rows.min(usize::from(u16::MAX)) as u16
     };
-    // Diff row fills come from the active theme. Themes that omit
+    // Diff row fills come from the render theme. Themes that omit
     // `SmeltDiffAddBg` / `SmeltDiffDeleteBg` produce diffs without a row
     // background (text still highlights via syntax colors).
-    let palette = active_diff_palette();
+    let palette = diff_palette(out.theme());
 
     let syntax = SYNTAX_SET
         .find_syntax_by_extension(&cache.syntax_ext)
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    let syntax_theme = syntax_theme();
+    let syntax_theme = syntax_theme(out.theme());
     let row_layout = diff_row_layout(cache, max_content);
     let Some(first_line_index) = row_layout.line_index_for_row(skip) else {
         smelt_perf::perf::record_value("render:inline_diff_cached:source_lines", 0);
@@ -2372,9 +2371,9 @@ pub fn print_split_diff_side(
     let syntax = SYNTAX_SET
         .find_syntax_by_extension(ext)
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    let theme = syntax_theme();
+    let theme = syntax_theme(out.theme());
     let mut h = HighlightLines::new(syntax, theme);
-    let side_palette = active_diff_palette().split_side(side);
+    let side_palette = diff_palette(out.theme()).split_side(side);
     for row in &plan.rows {
         let cell = match side {
             SplitSide::Left => row.left.as_ref(),
@@ -2657,7 +2656,7 @@ mod tests {
 
     #[test]
     fn syntax_spans_preserve_inline_highlight_metadata_when_wrapping() {
-        let theme = syntax_theme();
+        let theme = syntax_theme(&crate::theme::Theme::default());
         let syntax = SYNTAX_SET.find_syntax_plain_text();
         let mut h = HighlightLines::new(syntax, theme);
         let rows = split_syntax_spans_into_rows_with_highlights(
@@ -2686,7 +2685,7 @@ mod tests {
 
     #[test]
     fn split_syntax_spans_into_rows_wraps_at_max_width() {
-        let theme = syntax_theme();
+        let theme = syntax_theme(&crate::theme::Theme::default());
         let syntax = SYNTAX_SET.find_syntax_plain_text();
         let mut h = HighlightLines::new(syntax, theme);
         let rows = split_syntax_spans_into_rows(&mut h, "abcdefghij", 4);
@@ -2703,7 +2702,7 @@ mod tests {
 
     #[test]
     fn split_syntax_spans_into_rows_counts_display_width() {
-        let theme = syntax_theme();
+        let theme = syntax_theme(&crate::theme::Theme::default());
         let syntax = SYNTAX_SET.find_syntax_plain_text();
         let mut h = HighlightLines::new(syntax, theme);
         let rows = split_syntax_spans_into_rows(&mut h, "😀abc", 2);
@@ -2713,7 +2712,7 @@ mod tests {
 
     #[test]
     fn split_syntax_spans_into_rows_clamps_max_width_to_one() {
-        let theme = syntax_theme();
+        let theme = syntax_theme(&crate::theme::Theme::default());
         let syntax = SYNTAX_SET.find_syntax_plain_text();
         let mut h = HighlightLines::new(syntax, theme);
         let rows = split_syntax_spans_into_rows(&mut h, "ab", 0);
@@ -2724,7 +2723,7 @@ mod tests {
 
     #[test]
     fn split_syntax_spans_into_rows_emits_empty_row_for_empty_input() {
-        let theme = syntax_theme();
+        let theme = syntax_theme(&crate::theme::Theme::default());
         let syntax = SYNTAX_SET.find_syntax_plain_text();
         let mut h = HighlightLines::new(syntax, theme);
         let rows = split_syntax_spans_into_rows(&mut h, "", 4);
@@ -2734,7 +2733,7 @@ mod tests {
 
     #[test]
     fn syntax_spans_for_line_returns_non_empty_for_plain_text() {
-        let theme = syntax_theme();
+        let theme = syntax_theme(&crate::theme::Theme::default());
         let syntax = SYNTAX_SET.find_syntax_plain_text();
         let mut h = HighlightLines::new(syntax, theme);
         let spans = syntax_spans_for_line(&mut h, "hello world");
@@ -2745,7 +2744,7 @@ mod tests {
 
     #[test]
     fn syntax_spans_for_line_strips_trailing_newline_and_cr() {
-        let theme = syntax_theme();
+        let theme = syntax_theme(&crate::theme::Theme::default());
         let syntax = SYNTAX_SET.find_syntax_plain_text();
         let mut h = HighlightLines::new(syntax, theme);
         let spans = syntax_spans_for_line(&mut h, "ab");

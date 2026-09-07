@@ -430,6 +430,113 @@ fn engine_history_replacement_preserves_work_elapsed() {
 }
 
 #[test]
+fn queued_timestamp_survives_waiting_and_promotion() {
+    const SENT_AT_MS: u64 = 1_742_567_823_000;
+    for disposition in ["complete", "promote", "interrupt"] {
+        let mut app = TestApp::builder()
+            .with_vim(false)
+            .with_wall_time(std::time::UNIX_EPOCH + Duration::from_millis(SENT_AT_MS))
+            .build();
+        app.start_turn(1);
+        app.type_text("Keep the original submission time.");
+        assert_eq!(
+            app.state().prompt_text,
+            "Keep the original submission time."
+        );
+        app.press(KeyCode::Enter);
+        assert!(app.next_queued_input_starts_turn());
+        app.feed_one(SourceEvent::Tick(60_000));
+        app.clear_actions();
+        if disposition == "complete" {
+            app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+                turn_id: 1,
+                history: None,
+                meta: None,
+            }));
+        } else {
+            app.press(KeyCode::Enter);
+            if disposition == "interrupt" {
+                app.feed_one(SourceEvent::Tick(60_000));
+                app.clear_actions();
+                app.press(KeyCode::Enter);
+            }
+        }
+        let input = app
+            .actions()
+            .iter()
+            .find_map(|action| match action {
+                Action::EngineSend(cmd) => match cmd.as_ref() {
+                    protocol::UiCommand::StartTurn(payload) => Some(&payload.input),
+                    protocol::UiCommand::Steer { input } => Some(input),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("queued input dispatched");
+        assert_eq!(input.sent_at_ms(), Some(SENT_AT_MS), "{disposition}");
+    }
+}
+
+#[test]
+fn command_timestamp_survives_queueing_and_coroutine_yields() {
+    const SENT_AT_MS: u64 = 1_742_567_823_000;
+    for busy in ["idle", "queue_command", "queue_request"] {
+        let mut app = TestApp::builder()
+            .with_vim(false)
+            .with_wall_time(std::time::UNIX_EPOCH + Duration::from_millis(SENT_AT_MS))
+            .build();
+        let behavior = if busy == "idle" { "run" } else { busy };
+        assert!(app.run_lua(&format!(
+            r#"
+            smelt.cmd.register("delayed", function()
+                _G.command_wait_id = smelt.task.alloc()
+                smelt.task.wait(_G.command_wait_id)
+                smelt.engine.submit_command("delayed", "expanded body", nil, "delayed")
+            end, {{ busy = "{behavior}" }})
+        "#
+        )));
+        if busy != "idle" {
+            app.start_turn(1);
+        }
+        app.type_text("/delayed");
+        app.press(KeyCode::Enter);
+        app.feed_one(SourceEvent::Tick(60_000));
+        if busy == "queue_command" {
+            assert!(app.finish_turn());
+        }
+        assert!(app.lua_int_global("command_wait_id").is_some(), "{busy}");
+        assert!(app.run_lua("smelt.task.resume(_G.command_wait_id, true)"));
+        drive_lua_tasks(&mut app);
+        if busy == "queue_request" {
+            assert!(app.next_queued_input_starts_turn());
+            app.feed_one(SourceEvent::Tick(60_000));
+            assert!(app.finish_turn());
+        }
+        let input = app
+            .actions()
+            .iter()
+            .find_map(|action| match action {
+                Action::EngineSend(cmd) => match cmd.as_ref() {
+                    protocol::UiCommand::StartTurn(payload) => Some(&payload.input),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("command dispatched");
+        assert_eq!(input.provider_content().text_content(), "expanded body");
+        assert_eq!(input.sent_at_ms(), Some(SENT_AT_MS), "{busy}");
+        assert!(
+            app.session_history().iter().any(|item| matches!(
+                item,
+                protocol::HistoryItem::User { content, sent_at_ms: Some(time), .. }
+                    if content.text_content() == "expanded body" && *time == SENT_AT_MS
+            )),
+            "{busy}"
+        );
+    }
+}
+
+#[test]
 fn request_queue_bindings_steer_running_turn() {
     for code in [KeyCode::Enter, KeyCode::Char('q')] {
         let mut app = TestApp::builder().build();
@@ -545,6 +652,7 @@ fn queued_request_stays_out_of_transcript_until_all_tools_finish() {
     app.feed_one(SourceEvent::engine(EngineEvent::Steered {
         text: "queued follow-up".into(),
         count: 1,
+        sent_at_ms: 1_742_567_823_000,
     }));
 
     assert_eq!(app.queued_message_count(), 0);
@@ -554,6 +662,12 @@ fn queued_request_stays_out_of_transcript_until_all_tools_finish() {
         transcript_blocks_before_ack + 1
     );
     assert!(app.render_to_frame().text().contains("queued follow-up"));
+    let history = app.conversation_probe().transcript().history();
+    assert!(history.order.iter().any(|id| matches!(
+        history.block(*id),
+        Some(smelt_core::Block::User { text, sent_at_ms: Some(1_742_567_823_000), .. })
+            if text == "queued follow-up"
+    )));
 }
 
 #[test]
@@ -597,6 +711,7 @@ fn steering_during_streamed_tool_call_leaves_one_completed_transcript_row() {
     app.feed_one(SourceEvent::engine(EngineEvent::Steered {
         text: "queued follow-up".into(),
         count: 1,
+        sent_at_ms: 1_742_567_823_000,
     }));
 
     let transcript = app.render_to_frame().text();

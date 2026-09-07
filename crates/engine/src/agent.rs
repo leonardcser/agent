@@ -1093,14 +1093,23 @@ impl<'a> Turn<'a> {
     }
 
     /// Append current-turn content that may be a synthetic internal note.
-    fn push_turn_content(&mut self, mut content: Content, display: Option<String>, command: bool) {
+    fn push_turn_content(
+        &mut self,
+        mut content: Content,
+        display: Option<String>,
+        command: bool,
+        sent_at_ms: Option<u64>,
+    ) {
         let display = if self.request_config.redact_secrets {
             crate::redact::redact_content(&mut content);
             display.map(|text| crate::redact::redact(&text))
         } else {
             display
         };
-        let mut item = protocol::history_item_from_user_content(content);
+        let sent_at_ms =
+            sent_at_ms.unwrap_or_else(|| crate::clock::unix_time_ms(self.config.clock.as_ref()));
+        let mut item =
+            protocol::history_item_from_user_content(content).with_sent_at_ms(sent_at_ms);
         if let HistoryItem::User {
             display: slot,
             command: is_command,
@@ -1450,9 +1459,14 @@ impl<'a> Turn<'a> {
     fn handle_turn_cmd(&mut self, cmd: UiCommand) -> bool {
         match cmd {
             UiCommand::Steer { input } => {
+                let sent_at_ms = input
+                    .sent_at_ms()
+                    .unwrap_or_else(|| crate::clock::unix_time_ms(self.config.clock.as_ref()));
+                let input = input.with_sent_at_ms(sent_at_ms);
                 self.emit(EngineEvent::Steered {
                     text: input.provider_content().text_content().into_owned(),
                     count: 1,
+                    sent_at_ms,
                 });
                 let first_index = self.public_history_len();
                 self.push_current_turn_input(input);
@@ -1515,8 +1529,9 @@ impl<'a> Turn<'a> {
                 content,
                 display,
                 command,
+                sent_at_ms,
             } if !content.is_empty() => {
-                self.push_turn_content(content, display, command);
+                self.push_turn_content(content, display, command, sent_at_ms);
             }
             protocol::StartTurnInput::Note { note } => {
                 self.mark_append_history_changed();
@@ -3712,11 +3727,13 @@ mod tests {
             )),
             None,
             false,
+            None,
         );
         turn.push_turn_content(
             Content::text(protocol::mode_change_note("now in apply mode.")),
             None,
             false,
+            None,
         );
 
         assert!(matches!(
@@ -3743,16 +3760,20 @@ mod tests {
             HistoryItem::Note(note) if note == &typed_note
         ));
 
-        turn.push_current_turn_input(protocol::StartTurnInput::user_command(
-            Content::text("expanded command body"),
-            "/reflect",
-        ));
+        turn.push_current_turn_input(
+            protocol::StartTurnInput::user_command(
+                Content::text("expanded command body"),
+                "/reflect",
+            )
+            .with_sent_at_ms(1_742_567_823_000),
+        );
         assert!(matches!(
             &turn.history[4],
             HistoryItem::User {
                 content,
                 display: Some(display),
                 command: true,
+                sent_at_ms: Some(1_742_567_823_000),
             } if content.text_content() == "expanded command body" && display == "/reflect"
         ));
     }
@@ -4007,11 +4028,7 @@ mod tests {
             }
         }
 
-        let prior = HistoryItem::User {
-            content: Content::text("prior"),
-            display: None,
-            command: false,
-        };
+        let prior = HistoryItem::user(Content::text("prior"));
         handle.send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
             turn_id: 1,
             input: protocol::StartTurnInput::note(note.clone()),

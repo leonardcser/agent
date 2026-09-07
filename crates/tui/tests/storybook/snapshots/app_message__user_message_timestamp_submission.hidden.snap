@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+ Keep the parser API stable.
+
+
+
+
+
+
+─ ✿ working… ───────────────────────────── test/test-model ─
+
+────────────────────────────────────────────────────────────
+ ○ normal                                           1:1 100%

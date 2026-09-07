@@ -70,7 +70,8 @@ impl TestApp {
         &mut self,
         command: smelt_core::custom_commands::CustomCommand,
     ) -> bool {
-        let Some(turn) = self.app.begin_custom_command_turn(command) else {
+        let sent_at_ms = engine::clock::unix_time_ms(self.app.core.clock.as_ref());
+        let Some(turn) = self.app.begin_custom_command_turn(command, sent_at_ms) else {
             return false;
         };
         self.app.conversation.set_active(Some(turn));
@@ -84,10 +85,13 @@ impl TestApp {
         overrides: smelt_core::custom_commands::CommandOverrides,
         start: crate::app::CommandTurnStart,
     ) -> bool {
-        let Some(turn) = self
-            .app
-            .begin_command_request_turn(display, evaluated, overrides, start)
-        else {
+        let Some(turn) = self.app.begin_command_request_turn(
+            display,
+            evaluated,
+            overrides,
+            start,
+            engine::clock::unix_time_ms(self.app.core.clock.as_ref()),
+        ) else {
             return false;
         };
         self.app.conversation.set_active(Some(turn));
@@ -338,23 +342,27 @@ impl TestApp {
     /// Append a canonical user turn and its transcript block without a real
     /// engine roundtrip.
     pub fn push_user_block(&mut self, text: &str) {
+        let sent_at_ms = engine::clock::unix_time_ms(self.clock.as_ref());
         self.app.stage_request_history_item(
-            protocol::HistoryItem::user(protocol::Content::text(text)),
+            protocol::HistoryItem::user(protocol::Content::text(text)).with_sent_at_ms(sent_at_ms),
             Some(smelt_core::transcript_model::Block::User {
                 text: text.to_string(),
                 image_labels: Vec::new(),
                 command: false,
+                sent_at_ms: Some(sent_at_ms),
             }),
         );
     }
 
     /// Append a command-marked user block to the transcript history.
     pub fn push_command_block(&mut self, text: &str) {
+        let sent_at_ms = engine::clock::unix_time_ms(self.clock.as_ref());
         self.app
             .push_block(smelt_core::transcript_model::Block::User {
                 text: text.to_string(),
                 image_labels: Vec::new(),
                 command: true,
+                sent_at_ms: Some(sent_at_ms),
             });
     }
 
@@ -534,6 +542,7 @@ impl TestApp {
                 .try_queue_request(crate::app::QueuedInput::request_from_text(
                     text.to_string(),
                     text.to_string(),
+                    engine::clock::unix_time_ms(self.app.core.clock.as_ref()),
                 ));
         }
     }

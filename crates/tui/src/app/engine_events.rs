@@ -487,7 +487,11 @@ impl TuiApp {
                 self.append_active_output_line(invocation_id, line);
                 SessionControl::Continue
             }
-            EngineEvent::Steered { text, count } => {
+            EngineEvent::Steered {
+                text,
+                count,
+                sent_at_ms,
+            } => {
                 self.flush_streaming_thinking();
                 self.flush_streaming_text();
                 let drained = self.prompt.acknowledge_requests(count);
@@ -505,12 +509,15 @@ impl TuiApp {
                         text,
                         image_labels: vec![],
                         command,
+                        sent_at_ms: Some(sent_at_ms),
                     });
-                    for line in drained
-                        .iter()
-                        .filter_map(crate::app::QueuedInput::command_line)
-                    {
-                        self.run_queued_command_line(line);
+                    for queued in &drained {
+                        if let crate::app::QueuedInput::Command {
+                            line, sent_at_ms, ..
+                        } = queued
+                        {
+                            self.run_queued_command_line(line, *sent_at_ms);
+                        }
                     }
                 }
                 SessionControl::Continue

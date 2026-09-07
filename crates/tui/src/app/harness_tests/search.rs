@@ -226,6 +226,7 @@ fn hydration_preserves_terminal_transition_before_following_submit() {
         .begin_agent_turn(
             "second ordered turn",
             protocol::Content::text("second ordered turn"),
+            0,
         )
         .is_none());
     assert!(app.app.turn_submission_is_pending());

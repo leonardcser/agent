@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+ Inspect the files, then run the tests.
+
+
+* explore ×2
+  read_file src/a.rs
+  read_file src/b.rs
+
+* bash cargo test  2.4s
+  passed
+
+
+
+
+─ ✿ working… 2s ────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────
+ ○ normal                                                       1:1 100%

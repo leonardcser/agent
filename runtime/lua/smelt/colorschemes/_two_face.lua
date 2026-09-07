@@ -100,6 +100,7 @@ local function build(p)
 
     SmeltStatusBg       = bg(surface),
     SmeltUserBg         = bg(surface2),
+    SmeltUserTimestamp  = fg(mix(surface2.rgb, fg0, p.light and 0.65 or 0.45)),
     SmeltScrollPillBg   = bg(surface),
     SmeltCodeBlockBg    = bg(surface),
     SmeltSeparator      = fg(mix(accent, bg0, 0.55)),

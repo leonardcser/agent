@@ -1,0 +1,56 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.styles_text()
+---
+dim: 18 18
+  0   0   8 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  0   8   8 fg=Rgb { r: 125, g: 127, b: 146 } bg=Rgb { r: 215, g: 217, b: 221 }
+  0  16   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  0  17   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  1   0   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  1   1   9 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 } attrs=bold
+  1  10   7 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  1  17   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  2   0   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  2   1  13 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 } attrs=bold
+  2  14   3 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  2  17   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  3   0   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  3   1  13 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 } attrs=bold
+  3  14   3 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  3  17   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  4   0   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  4   1  11 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 } attrs=bold
+  4  12   5 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  4  17   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  5   0   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  5   1  13 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 } attrs=bold
+  5  14   3 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  5  17   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  6   0   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  6   1  10 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 } attrs=bold
+  6  11   6 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  6  17   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  7   0   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  7   1  12 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 } attrs=bold
+  7  13   4 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  7  17   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  8   0   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  8   1   7 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 } attrs=bold
+  8   8   9 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  8  17   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  9   0  17 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  9  17   1 fg=Rgb { r: 76, g: 79, b: 105 }
+ 10   0  18 fg=Rgb { r: 76, g: 79, b: 105 }
+ 11   0  18 fg=Rgb { r: 76, g: 79, b: 105 }
+ 12   0  18 fg=Rgb { r: 76, g: 79, b: 105 }
+ 13   0   6 fg=Rgb { r: 136, g: 57, b: 239 } attrs=bold
+ 13   6  10 fg=Rgb { r: 124, g: 127, b: 147 }
+ 13  16   2 fg=Rgb { r: 76, g: 79, b: 105 }
+ 14   0  18 fg=Rgb { r: 193, g: 158, b: 242 }
+ 15   0   1 fg=Rgb { r: 76, g: 79, b: 105 }
+ 15   1   1 fg=White bg=Black
+ 15   2  16 fg=Rgb { r: 76, g: 79, b: 105 }
+ 16   0  18 fg=Rgb { r: 193, g: 158, b: 242 }
+ 17   0  10 fg=Rgb { r: 124, g: 127, b: 147 } bg=Rgb { r: 227, g: 229, b: 233 }
+ 17  10   8 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 227, g: 229, b: 233 }

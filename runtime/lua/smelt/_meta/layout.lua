@@ -48,7 +48,7 @@ layout.gutter = nil
 ---@type fun(items: table): smelt.layout.Node
 layout.hbox = nil
 
---- Single styled line layout leaf. `spans` is a string or a one-dimensional span table; unlike `runs`, this does not wrap.
+--- Single styled line layout leaf. `spans` is a string or a one-dimensional span table; unlike `runs`, this does not wrap. A nonempty span table whose spans are all `selectable = false` is decorative: copying skips the row and its newline unless layout composition adds selectable cells or source text.
 ---@type fun(spans: any, opts: table?): smelt.layout.Node
 layout.line = nil
 

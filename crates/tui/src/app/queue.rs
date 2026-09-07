@@ -203,14 +203,16 @@ pub(crate) enum QueuedTurnOptions {
 pub(crate) struct QueuedRequest {
     pub(crate) display: String,
     pub(crate) content: Content,
+    pub(crate) sent_at_ms: u64,
     pub(crate) turn_options: QueuedTurnOptions,
 }
 
 impl QueuedRequest {
-    pub(crate) fn prompt(display: impl Into<String>, content: Content) -> Self {
+    pub(crate) fn prompt(display: impl Into<String>, content: Content, sent_at_ms: u64) -> Self {
         Self {
             display: display.into(),
             content,
+            sent_at_ms,
             turn_options: QueuedTurnOptions::Default,
         }
     }
@@ -219,10 +221,12 @@ impl QueuedRequest {
         display: impl Into<String>,
         text: impl Into<String>,
         overrides: smelt_core::custom_commands::CommandOverrides,
+        sent_at_ms: u64,
     ) -> Self {
         Self {
             display: display.into(),
             content: Content::text(text.into()),
+            sent_at_ms,
             turn_options: QueuedTurnOptions::CustomCommand {
                 overrides: Box::new(overrides),
             },
@@ -233,38 +237,53 @@ impl QueuedRequest {
 #[derive(Clone)]
 pub(crate) enum QueuedInput {
     Request(Box<QueuedRequest>),
-    Command { display: String, line: String },
+    Command {
+        display: String,
+        line: String,
+        sent_at_ms: u64,
+    },
     ProcessStatus(protocol::HistoryNote),
 }
 
 impl QueuedInput {
-    pub(crate) fn request(display: impl Into<String>, content: Content) -> Self {
-        QueuedInput::Request(Box::new(QueuedRequest::prompt(display, content)))
+    pub(crate) fn request(display: impl Into<String>, content: Content, sent_at_ms: u64) -> Self {
+        QueuedInput::Request(Box::new(QueuedRequest::prompt(
+            display, content, sent_at_ms,
+        )))
     }
 
     #[cfg(any(test, feature = "harness"))]
-    pub(crate) fn request_from_text(display: impl Into<String>, text: impl Into<String>) -> Self {
-        QueuedInput::request(display, Content::text(text.into()))
+    pub(crate) fn request_from_text(
+        display: impl Into<String>,
+        text: impl Into<String>,
+        sent_at_ms: u64,
+    ) -> Self {
+        QueuedInput::request(display, Content::text(text.into()), sent_at_ms)
     }
 
     pub(crate) fn custom_command_request(
         display: impl Into<String>,
         text: impl Into<String>,
         overrides: smelt_core::custom_commands::CommandOverrides,
+        sent_at_ms: u64,
     ) -> Self {
         QueuedInput::Request(Box::new(QueuedRequest::custom_command(
-            display, text, overrides,
+            display, text, overrides, sent_at_ms,
         )))
     }
 
-    pub(crate) fn command(line: impl Into<String>) -> Self {
+    pub(crate) fn command(line: impl Into<String>, sent_at_ms: u64) -> Self {
         let line = line.into();
         let display = if line.starts_with('/') {
             line.clone()
         } else {
             format!("/{line}")
         };
-        QueuedInput::Command { display, line }
+        QueuedInput::Command {
+            display,
+            line,
+            sent_at_ms,
+        }
     }
 
     pub(crate) fn display(&self) -> String {
@@ -282,25 +301,26 @@ impl QueuedInput {
         ) || matches!(self, QueuedInput::Command { .. })
     }
 
-    pub(crate) fn steer_input(&self) -> Option<protocol::StartTurnInput> {
+    pub(crate) fn sent_at_ms(&self) -> Option<u64> {
         match self {
-            QueuedInput::Request(req) if self.is_command() => Some(
-                protocol::StartTurnInput::user_command(req.content.clone(), req.display.clone()),
-            ),
-            QueuedInput::Request(req) => Some(protocol::StartTurnInput::user(req.content.clone())),
-            QueuedInput::Command { display, line } => Some(protocol::StartTurnInput::user_command(
-                Content::text(line.clone()),
-                display.clone(),
-            )),
-            QueuedInput::ProcessStatus(_) => None,
+            Self::Request(req) => Some(req.sent_at_ms),
+            Self::Command { sent_at_ms, .. } => Some(*sent_at_ms),
+            Self::ProcessStatus(_) => None,
         }
     }
 
-    pub(crate) fn command_line(&self) -> Option<&str> {
-        match self {
-            QueuedInput::Command { line, .. } => Some(line.as_str()),
-            _ => None,
-        }
+    pub(crate) fn steer_input(&self) -> Option<protocol::StartTurnInput> {
+        let input = match self {
+            QueuedInput::Request(req) if self.is_command() => {
+                protocol::StartTurnInput::user_command(req.content.clone(), req.display.clone())
+            }
+            QueuedInput::Request(req) => protocol::StartTurnInput::user(req.content.clone()),
+            QueuedInput::Command { display, line, .. } => {
+                protocol::StartTurnInput::user_command(Content::text(line.clone()), display.clone())
+            }
+            QueuedInput::ProcessStatus(_) => return None,
+        };
+        Some(input.with_sent_at_ms(self.sent_at_ms()?))
     }
 
     pub(crate) fn is_command(&self) -> bool {

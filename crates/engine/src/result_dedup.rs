@@ -127,6 +127,7 @@ mod tests {
             content: Content::text(body.clone()),
             display: None,
             command: false,
+            sent_at_ms: None,
         }];
         assert!(duplicate_of(&body, false, &history).is_none());
     }

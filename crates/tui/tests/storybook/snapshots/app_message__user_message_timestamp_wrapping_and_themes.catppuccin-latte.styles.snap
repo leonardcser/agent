@@ -1,0 +1,42 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.styles_text()
+---
+dim: 44 16
+  0   0  34 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  0  34   8 fg=Rgb { r: 125, g: 127, b: 146 } bg=Rgb { r: 215, g: 217, b: 221 }
+  0  42   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  0  43   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  1   0   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  1   1  41 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 } attrs=bold
+  1  42   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  1  43   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  2   0   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  2   1  18 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 } attrs=bold
+  2  19  24 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  2  43   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  3   0   1 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  3   1  29 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 } attrs=bold
+  3  30  13 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  3  43   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  4   0  43 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 215, g: 217, b: 221 }
+  4  43   1 fg=Rgb { r: 76, g: 79, b: 105 }
+  5   0  44 fg=Rgb { r: 76, g: 79, b: 105 }
+  6   0  44 fg=Rgb { r: 76, g: 79, b: 105 }
+  7   0  44 fg=Rgb { r: 76, g: 79, b: 105 }
+  8   0  44 fg=Rgb { r: 76, g: 79, b: 105 }
+  9   0  44 fg=Rgb { r: 76, g: 79, b: 105 }
+ 10   0  44 fg=Rgb { r: 76, g: 79, b: 105 }
+ 11   0   6 fg=Rgb { r: 136, g: 57, b: 239 } attrs=bold
+ 11   6  19 fg=Rgb { r: 124, g: 127, b: 147 }
+ 11  25   2 fg=Rgb { r: 124, g: 127, b: 147 } attrs=dim
+ 11  27  15 fg=Rgb { r: 124, g: 127, b: 147 }
+ 11  42   2 fg=Rgb { r: 76, g: 79, b: 105 }
+ 12   0  44 fg=Rgb { r: 193, g: 158, b: 242 }
+ 13   0   1 fg=Rgb { r: 76, g: 79, b: 105 }
+ 13   1   1 fg=White bg=Black
+ 13   2  42 fg=Rgb { r: 76, g: 79, b: 105 }
+ 14   0  44 fg=Rgb { r: 193, g: 158, b: 242 }
+ 15   0  10 fg=Rgb { r: 124, g: 127, b: 147 } bg=Rgb { r: 227, g: 229, b: 233 }
+ 15  10  26 fg=Rgb { r: 76, g: 79, b: 105 } bg=Rgb { r: 227, g: 229, b: 233 }
+ 15  36   8 fg=Rgb { r: 124, g: 127, b: 147 } bg=Rgb { r: 227, g: 229, b: 233 }

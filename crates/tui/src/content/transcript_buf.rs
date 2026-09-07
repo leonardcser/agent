@@ -4434,6 +4434,7 @@ pub(crate) mod tests {
             text: "run the tool".into(),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         });
         transcript.push_tool_call(
             Block::ToolCall {
@@ -5045,6 +5046,7 @@ pub(crate) mod tests {
             text: "hello".into(),
             image_labels: vec![],
             command: false,
+            sent_at_ms: None,
         });
 
         let rows = project_fresh(&mut transcript.history);
@@ -5233,6 +5235,7 @@ pub(crate) mod tests {
             text: "show a table".into(),
             image_labels: vec![],
             command: false,
+            sent_at_ms: None,
         });
         let mut parser = StreamParser::new();
         parser.append_streaming_text(
@@ -5274,6 +5277,7 @@ pub(crate) mod tests {
             text: "run ls".into(),
             image_labels: vec![],
             command: false,
+            sent_at_ms: None,
         });
         let mut parser = StreamParser::new();
         let invocation_id = next_invocation_id();
@@ -6606,6 +6610,7 @@ pub(crate) mod tests {
             text: "continue".into(),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         });
         let mut parser = StreamParser::new();
         parser.append_streaming_text(&mut transcript.history, "streaming response\n");
@@ -6672,6 +6677,7 @@ pub(crate) mod tests {
             text: "continue".into(),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         });
         let mut parser = StreamParser::new();
         parser.append_streaming_text(&mut transcript.history, "streaming response\n");
@@ -7654,6 +7660,7 @@ pub(crate) mod tests {
                 text: randomish_text(seed, 12),
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             },
             1 => Block::Text {
                 content: format!(
@@ -7768,6 +7775,7 @@ pub(crate) mod tests {
                 text: user,
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             });
 
             let markdown = large_mixed_markdown_payload(i);
@@ -7970,6 +7978,7 @@ pub(crate) mod tests {
                     text,
                     image_labels: vec![],
                     command: false,
+                    sent_at_ms: None,
                 }),
                 1 => transcript.push(Block::Text {
                     content: text.into(),

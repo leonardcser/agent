@@ -8,7 +8,9 @@ dim: 60 16
   1   0  59 bg=AnsiValue(236)
   1  59   1 bg=AnsiValue(243)
   2  59   1 bg=AnsiValue(243)
-  3   0  59 bg=AnsiValue(236)
+  3   0  50 bg=AnsiValue(236)
+  3  50   8 fg=Rgb { r: 128, g: 128, b: 128 } bg=AnsiValue(236)
+  3  58   1 bg=AnsiValue(236)
   3  59   1 bg=AnsiValue(243)
   4   0   1 bg=AnsiValue(236)
   4   1  16 bg=AnsiValue(236) attrs=bold
@@ -17,7 +19,9 @@ dim: 60 16
   5   0  59 bg=AnsiValue(236)
   5  59   1 bg=AnsiValue(243)
   6  59   1 bg=AnsiValue(243)
-  7   0  59 bg=AnsiValue(236)
+  7   0  50 bg=AnsiValue(236)
+  7  50   8 fg=Rgb { r: 128, g: 128, b: 128 } bg=AnsiValue(236)
+  7  58   1 bg=AnsiValue(236)
   7  59   1 bg=AnsiValue(243)
   8   0   1 bg=AnsiValue(236)
   8   1  20 bg=AnsiValue(236) attrs=bold

@@ -5,7 +5,7 @@ use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
 use smelt_core::buffer::LineDecoration;
 use smelt_core::content::block_layout::{
     BlockLayout, ContentRenderSpec, GutterSpec, HboxItem, IrLeaf, LayoutIr, LineSpec, LuaLeaf,
-    RetainedContentSpec, RetainedInlineSyntax, RunsSpec, SourceViewIr, StyleSpec, TextSpec,
+    RetainedContentSpec, RetainedInlineSyntax, SourceViewIr, StyleSpec, TextSpec,
 };
 use smelt_core::content::builder::{LineBuilder, Outcome};
 use smelt_core::content::highlight::InlineOptions;
@@ -184,7 +184,6 @@ impl CompileJob {
     fn compile(
         self,
         env: TranscriptRenderEnv<'_>,
-        inline_syntax: &mut InlineSyntaxCache,
     ) -> (
         RenderNodeId,
         DisplayCacheKey,
@@ -197,7 +196,6 @@ impl CompileJob {
                 content_sources,
             } => {
                 let mut cache = CompileLayoutCache {
-                    inline_syntax,
                     content_sources: &content_sources,
                     group_children: None,
                     refresh_after_ms: None,
@@ -209,7 +207,6 @@ impl CompileJob {
                 let mut refresh_after_ms = None;
                 for child in children {
                     let mut cache = CompileLayoutCache {
-                        inline_syntax,
                         content_sources: &child.content_sources,
                         group_children: None,
                         refresh_after_ms: None,
@@ -228,7 +225,6 @@ impl CompileJob {
                 }
                 let children = BlockLayout::Vbox(child_layouts);
                 let mut cache = CompileLayoutCache {
-                    inline_syntax,
                     content_sources: &[],
                     group_children: Some(&children),
                     refresh_after_ms: None,
@@ -239,13 +235,10 @@ impl CompileJob {
                     earliest_delay(compiled.refresh_after_ms, refresh_after_ms);
                 compiled
             }
-            CompileJobSource::Ready(mut layout) => {
-                compile_layout_syntax(&mut layout, inline_syntax);
-                CompiledLayout {
-                    layout,
-                    refresh_after_ms: None,
-                }
-            }
+            CompileJobSource::Ready(layout) => CompiledLayout {
+                layout,
+                refresh_after_ms: None,
+            },
         };
         (
             self.id,
@@ -278,7 +271,7 @@ pub(crate) struct RenderCtx<'a> {
 struct CachedLayout {
     key: DisplayCacheKey,
     layout: LayoutIr,
-    syntax_theme_revision: u64,
+    syntax_theme_revision: Option<u64>,
     measurements: VecDeque<CachedMeasurement>,
     rendered_ranges: VecDeque<CachedRenderRange>,
     weight: usize,
@@ -345,18 +338,19 @@ fn rendered_buffer_retained_bytes(buffer: &Buffer) -> usize {
         )
 }
 
+// Syntax colors are paint state. Compile them with the render theme, not during layout measurement.
 fn ensure_cached_syntax_theme(
     entry: &mut CachedLayout,
-    theme_revision: u64,
+    theme: &Theme,
     inline_syntax: &mut InlineSyntaxCache,
 ) -> isize {
-    if entry.syntax_theme_revision == theme_revision {
+    if entry.syntax_theme_revision == Some(theme.revision()) {
         return 0;
     }
     let old_bytes = entry.layout.retained_bytes();
-    compile_layout_syntax(&mut entry.layout, inline_syntax);
+    compile_layout_syntax(&mut entry.layout, inline_syntax, theme);
     let new_bytes = entry.layout.retained_bytes();
-    entry.syntax_theme_revision = theme_revision;
+    entry.syntax_theme_revision = Some(theme.revision());
     entry.weight = entry
         .weight
         .saturating_sub(old_bytes)
@@ -458,11 +452,11 @@ struct InlineSyntaxCache {
 impl InlineSyntaxCache {
     fn get_or_compile(
         &mut self,
-        theme_revision: u64,
+        theme: &Theme,
         language: &str,
         source: &str,
     ) -> Arc<[smelt_core::content::highlight::InlineSyntaxSpan]> {
-        self.ensure_theme(theme_revision);
+        self.ensure_theme(theme.revision());
         let mut hasher = DefaultHasher::new();
         language.hash(&mut hasher);
         source.hash(&mut hasher);
@@ -477,7 +471,7 @@ impl InlineSyntaxCache {
             return spans;
         }
 
-        let spans: Arc<[_]> = smelt_core::content::highlight::InlineSyntax::new(language)
+        let spans: Arc<[_]> = smelt_core::content::highlight::InlineSyntax::new(language, theme)
             .highlight_spans(source)
             .into();
         let retained_bytes = std::mem::size_of::<CachedInlineSyntax>()
@@ -540,7 +534,6 @@ impl InlineSyntaxCache {
 }
 
 struct CompileLayoutCache<'a> {
-    inline_syntax: &'a mut InlineSyntaxCache,
     content_sources: &'a [TranscriptContent],
     group_children: Option<&'a LayoutIr>,
     refresh_after_ms: Option<u64>,
@@ -899,7 +892,7 @@ impl LayoutCache {
         {
             let _perf = smelt_perf::perf::begin("transcript:layout_cache:compile_layouts");
             for job in jobs {
-                layouts.push(job.compile(env.clone(), &mut self.inline_syntax));
+                layouts.push(job.compile(env.clone()));
             }
         }
         self.insert_compiled_blocks(layouts);
@@ -926,7 +919,7 @@ impl LayoutCache {
                 CachedLayout {
                     key,
                     layout,
-                    syntax_theme_revision: smelt_core::theme::active().revision(),
+                    syntax_theme_revision: None,
                     measurements: VecDeque::new(),
                     rendered_ranges: VecDeque::new(),
                     weight,
@@ -1011,8 +1004,7 @@ impl LayoutCache {
                 .blocks
                 .get_mut(&id)
                 .filter(|cached| cached.key == display_key)?;
-            retained_delta +=
-                ensure_cached_syntax_theme(entry, ctx.theme.revision(), inline_syntax);
+            retained_delta += ensure_cached_syntax_theme(entry, ctx.theme, inline_syntax);
             retained_delta += ensure_cached_measurement(
                 entry,
                 MeasurementKey {
@@ -1244,10 +1236,8 @@ fn retained_content_spec_mut(
 #[cfg(test)]
 pub(crate) fn compile_block(block: &Block) -> LayoutIr {
     let lua = LuaRuntime::new();
-    let mut inline_syntax = InlineSyntaxCache::default();
     let content_sources = block_content_sources(block, None);
     let mut cache = CompileLayoutCache {
-        inline_syntax: &mut inline_syntax,
         content_sources: &content_sources,
         group_children: None,
         refresh_after_ms: None,
@@ -1373,9 +1363,7 @@ fn compile_node_with_lua(
 }
 
 pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {
-    let mut inline_syntax = InlineSyntaxCache::default();
     let mut cache = CompileLayoutCache {
-        inline_syntax: &mut inline_syntax,
         content_sources: &[],
         group_children: None,
         refresh_after_ms: None,
@@ -1430,12 +1418,8 @@ fn compile_layout_ir_with_cache(
             .group_children
             .cloned()
             .ok_or_else(|| "group child layouts are only available in group renderers".to_string()),
-        BlockLayout::Leaf(LuaLeaf::Runs(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Runs(
-            compile_runs_syntax(spec.clone(), cache.inline_syntax),
-        ))),
-        BlockLayout::Leaf(LuaLeaf::Line(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Line(
-            compile_line_syntax(spec.clone(), cache.inline_syntax),
-        ))),
+        BlockLayout::Leaf(LuaLeaf::Runs(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Runs(spec.clone()))),
+        BlockLayout::Leaf(LuaLeaf::Line(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Line(spec.clone()))),
         BlockLayout::Leaf(LuaLeaf::Markdown(spec)) => {
             Ok(BlockLayout::Leaf(IrLeaf::Markdown(spec.clone())))
         }
@@ -1533,7 +1517,11 @@ fn compile_layout_ir_with_cache(
     }
 }
 
-fn compile_layout_syntax(layout: &mut LayoutIr, inline_syntax: &mut InlineSyntaxCache) {
+fn compile_layout_syntax(
+    layout: &mut LayoutIr,
+    inline_syntax: &mut InlineSyntaxCache,
+    theme: &Theme,
+) {
     match layout {
         BlockLayout::Empty
         | BlockLayout::Leaf(IrLeaf::Text(_))
@@ -1543,19 +1531,19 @@ fn compile_layout_syntax(layout: &mut LayoutIr, inline_syntax: &mut InlineSyntax
         | BlockLayout::Leaf(IrLeaf::Separator(_))
         | BlockLayout::Leaf(IrLeaf::SourceView(_)) => {}
         BlockLayout::Leaf(IrLeaf::Runs(spec)) => {
-            spec.syntax_highlights = compile_styled_syntax(&spec.lines.0, inline_syntax);
+            spec.syntax_highlights = compile_styled_syntax(&spec.lines.0, inline_syntax, theme);
         }
         BlockLayout::Leaf(IrLeaf::Line(spec)) => {
-            spec.syntax_highlights = compile_span_syntax(&spec.spans, inline_syntax);
+            spec.syntax_highlights = compile_span_syntax(&spec.spans, inline_syntax, theme);
         }
         BlockLayout::Vbox(items) => {
             for child in items {
-                compile_layout_syntax(child, inline_syntax);
+                compile_layout_syntax(child, inline_syntax, theme);
             }
         }
         BlockLayout::Hbox(items) => {
             for item in items {
-                compile_layout_syntax(&mut item.layout, inline_syntax);
+                compile_layout_syntax(&mut item.layout, inline_syntax, theme);
             }
         }
         BlockLayout::Gutter { child, .. }
@@ -1563,23 +1551,14 @@ fn compile_layout_syntax(layout: &mut LayoutIr, inline_syntax: &mut InlineSyntax
         | BlockLayout::Panel { child, .. }
         | BlockLayout::Style { child, .. }
         | BlockLayout::Cap { child, .. }
-        | BlockLayout::Refresh { child, .. } => compile_layout_syntax(child, inline_syntax),
+        | BlockLayout::Refresh { child, .. } => compile_layout_syntax(child, inline_syntax, theme),
     }
-}
-
-fn compile_runs_syntax(mut spec: RunsSpec, inline_syntax: &mut InlineSyntaxCache) -> RunsSpec {
-    spec.syntax_highlights = compile_styled_syntax(&spec.lines.0, inline_syntax);
-    spec
-}
-
-fn compile_line_syntax(mut spec: LineSpec, inline_syntax: &mut InlineSyntaxCache) -> LineSpec {
-    spec.syntax_highlights = compile_span_syntax(&spec.spans, inline_syntax);
-    spec
 }
 
 fn compile_styled_syntax(
     lines: &[Vec<protocol::StyledSpan>],
     inline_syntax: &mut InlineSyntaxCache,
+    theme: &Theme,
 ) -> RetainedInlineSyntax {
     if !lines.iter().flatten().any(has_inline_syntax) {
         return RetainedInlineSyntax::default();
@@ -1589,7 +1568,7 @@ fn compile_styled_syntax(
     let mut line_offsets = Vec::with_capacity(lines.len().saturating_add(1));
     line_offsets.push(0);
     for spans in lines {
-        append_span_syntax(spans, inline_syntax, &mut source_spans);
+        append_span_syntax(spans, inline_syntax, theme, &mut source_spans);
         line_offsets.push(source_spans.len());
     }
     RetainedInlineSyntax::new(source_spans, line_offsets)
@@ -1598,12 +1577,13 @@ fn compile_styled_syntax(
 fn compile_span_syntax(
     spans: &[protocol::StyledSpan],
     inline_syntax: &mut InlineSyntaxCache,
+    theme: &Theme,
 ) -> RetainedInlineSyntax {
     if !spans.iter().any(has_inline_syntax) {
         return RetainedInlineSyntax::default();
     }
     let mut source_spans = Vec::with_capacity(spans.len());
-    append_span_syntax(spans, inline_syntax, &mut source_spans);
+    append_span_syntax(spans, inline_syntax, theme, &mut source_spans);
     let source_span_count = source_spans.len();
     RetainedInlineSyntax::new(source_spans, vec![0, source_span_count])
 }
@@ -1611,15 +1591,15 @@ fn compile_span_syntax(
 fn append_span_syntax(
     spans: &[protocol::StyledSpan],
     inline_syntax: &mut InlineSyntaxCache,
+    theme: &Theme,
     out: &mut Vec<Arc<[smelt_core::content::highlight::InlineSyntaxSpan]>>,
 ) {
-    let theme_revision = smelt_core::theme::active().revision();
     out.extend(spans.iter().map(|span| {
         span.syntax
             .as_deref()
             .filter(|_| span.selectable)
             .map_or_else(Arc::default, |language| {
-                inline_syntax.get_or_compile(theme_revision, language, &span.text)
+                inline_syntax.get_or_compile(theme, language, &span.text)
             })
     }));
 }
@@ -2131,6 +2111,7 @@ mod tests {
                     .into(),
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             },
             Block::ProcessStatus {
                 text: "running a long process status that wraps on narrow terminals".into(),
@@ -2204,9 +2185,7 @@ mod tests {
             },
         ));
         let sources = [old, new];
-        let mut inline_syntax = InlineSyntaxCache::default();
         let mut cache = CompileLayoutCache {
-            inline_syntax: &mut inline_syntax,
             content_sources: &sources,
             group_children: None,
             refresh_after_ms: None,
@@ -2233,15 +2212,17 @@ mod tests {
         };
         let fallback = BlockLayout::Leaf(IrLeaf::Runs(spec.clone()));
         let input = BlockLayout::Leaf(LuaLeaf::Runs(spec));
-        let mut inline_syntax = InlineSyntaxCache::default();
         let mut cache = CompileLayoutCache {
-            inline_syntax: &mut inline_syntax,
             content_sources: &[],
             group_children: None,
             refresh_after_ms: None,
         };
-        let compiled = compile_layout_ir_with_cache(&input, &mut cache).unwrap();
-        let compiled_again = compile_layout_ir_with_cache(&input, &mut cache).unwrap();
+        let mut compiled = compile_layout_ir_with_cache(&input, &mut cache).unwrap();
+        let mut compiled_again = compile_layout_ir_with_cache(&input, &mut cache).unwrap();
+        let mut inline_syntax = InlineSyntaxCache::default();
+        let theme = Theme::default();
+        compile_layout_syntax(&mut compiled, &mut inline_syntax, &theme);
+        compile_layout_syntax(&mut compiled_again, &mut inline_syntax, &theme);
 
         let width = 14;
         let fallback_buffer = rendered_buffer(&fallback, width);
@@ -2429,9 +2410,7 @@ mod tests {
             ])),
             spec: smelt_core::content::block_layout::RefreshSpec { after_ms: 250 },
         };
-        let mut inline_syntax = InlineSyntaxCache::default();
         let mut cache = CompileLayoutCache {
-            inline_syntax: &mut inline_syntax,
             content_sources: &[],
             group_children: None,
             refresh_after_ms: None,
@@ -2524,11 +2503,13 @@ mod tests {
             text: "dynamic".into(),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         });
         transcript.push(Block::User {
             text: "static".into(),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         });
         let ids = transcript.history.order.clone();
         let keys = ids

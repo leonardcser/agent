@@ -198,6 +198,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
                 EngineEvent::Steered {
                     text: small_text(text),
                     count: usize::from(count),
+                    sent_at_ms: 1_742_567_823_000,
                 },
             );
             let streaming = app.streaming_state();

@@ -36,6 +36,9 @@ pub enum HistoryItem {
         /// Whether `display` is a slash-command invocation rather than ordinary input.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         command: bool,
+        /// Submission time as Unix epoch milliseconds, absent for undated history.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sent_at_ms: Option<u64>,
     },
     Assistant(AssistantStep),
     Note(HistoryNote),
@@ -593,6 +596,7 @@ impl HistoryItem {
             content,
             display: None,
             command: false,
+            sent_at_ms: None,
         }
     }
 
@@ -601,7 +605,15 @@ impl HistoryItem {
             content,
             display: Some(display.into()),
             command: true,
+            sent_at_ms: None,
         }
+    }
+
+    pub fn with_sent_at_ms(mut self, timestamp_ms: u64) -> Self {
+        if let Self::User { sent_at_ms, .. } = &mut self {
+            *sent_at_ms = Some(timestamp_ms);
+        }
+        self
     }
 
     pub fn note(note: HistoryNote) -> Self {
@@ -936,11 +948,7 @@ pub fn transcript_block_kind_matches_history_item(block_kind: &str, item: &Histo
 pub fn history_item_from_user_content(content: Content) -> HistoryItem {
     match note_from_user_content(&content) {
         Some(note) => HistoryItem::Note(note),
-        None => HistoryItem::User {
-            content,
-            display: None,
-            command: false,
-        },
+        None => HistoryItem::user(content),
     }
 }
 
@@ -1227,6 +1235,25 @@ mod tests {
         let msgs = history_to_messages(std::slice::from_ref(&item));
         let back = history_from_messages(msgs);
         assert_eq!(back, vec![item]);
+    }
+
+    #[test]
+    fn user_timestamp_round_trips_without_entering_provider_messages() {
+        let undated = HistoryItem::user(Content::text("hello"));
+        let dated = undated.clone().with_sent_at_ms(1_742_567_823_000);
+        let json = serde_json::to_value(&dated).unwrap();
+        assert_eq!(json["sent_at_ms"], 1_742_567_823_000u64);
+        assert_eq!(serde_json::from_value::<HistoryItem>(json).unwrap(), dated);
+        assert_eq!(
+            history_to_messages(&[dated]),
+            history_to_messages(std::slice::from_ref(&undated))
+        );
+        let json = serde_json::to_value(&undated).unwrap();
+        assert!(json.get("sent_at_ms").is_none());
+        assert_eq!(
+            serde_json::from_value::<HistoryItem>(json).unwrap(),
+            undated
+        );
     }
 
     #[test]

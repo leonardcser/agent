@@ -1,0 +1,42 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.styles_text()
+---
+dim: 44 16
+  0   0  34 fg=Rgb { r: 205, g: 214, b: 244 } bg=Rgb { r: 53, g: 53, b: 67 }
+  0  34   8 fg=Rgb { r: 121, g: 125, b: 147 } bg=Rgb { r: 53, g: 53, b: 67 }
+  0  42   1 fg=Rgb { r: 205, g: 214, b: 244 } bg=Rgb { r: 53, g: 53, b: 67 }
+  0  43   1 fg=Rgb { r: 205, g: 214, b: 244 }
+  1   0   1 fg=Rgb { r: 205, g: 214, b: 244 } bg=Rgb { r: 53, g: 53, b: 67 }
+  1   1  41 fg=Rgb { r: 205, g: 214, b: 244 } bg=Rgb { r: 53, g: 53, b: 67 } attrs=bold
+  1  42   1 fg=Rgb { r: 205, g: 214, b: 244 } bg=Rgb { r: 53, g: 53, b: 67 }
+  1  43   1 fg=Rgb { r: 205, g: 214, b: 244 }
+  2   0   1 fg=Rgb { r: 205, g: 214, b: 244 } bg=Rgb { r: 53, g: 53, b: 67 }
+  2   1  18 fg=Rgb { r: 205, g: 214, b: 244 } bg=Rgb { r: 53, g: 53, b: 67 } attrs=bold
+  2  19  24 fg=Rgb { r: 205, g: 214, b: 244 } bg=Rgb { r: 53, g: 53, b: 67 }
+  2  43   1 fg=Rgb { r: 205, g: 214, b: 244 }
+  3   0   1 fg=Rgb { r: 205, g: 214, b: 244 } bg=Rgb { r: 53, g: 53, b: 67 }
+  3   1  29 fg=Rgb { r: 205, g: 214, b: 244 } bg=Rgb { r: 53, g: 53, b: 67 } attrs=bold
+  3  30  13 fg=Rgb { r: 205, g: 214, b: 244 } bg=Rgb { r: 53, g: 53, b: 67 }
+  3  43   1 fg=Rgb { r: 205, g: 214, b: 244 }
+  4   0  43 fg=Rgb { r: 205, g: 214, b: 244 } bg=Rgb { r: 53, g: 53, b: 67 }
+  4  43   1 fg=Rgb { r: 205, g: 214, b: 244 }
+  5   0  44 fg=Rgb { r: 205, g: 214, b: 244 }
+  6   0  44 fg=Rgb { r: 205, g: 214, b: 244 }
+  7   0  44 fg=Rgb { r: 205, g: 214, b: 244 }
+  8   0  44 fg=Rgb { r: 205, g: 214, b: 244 }
+  9   0  44 fg=Rgb { r: 205, g: 214, b: 244 }
+ 10   0  44 fg=Rgb { r: 205, g: 214, b: 244 }
+ 11   0   6 fg=Rgb { r: 203, g: 166, b: 247 } attrs=bold
+ 11   6  19 fg=Rgb { r: 108, g: 112, b: 134 }
+ 11  25   2 fg=Rgb { r: 108, g: 112, b: 134 } attrs=dim
+ 11  27  15 fg=Rgb { r: 108, g: 112, b: 134 }
+ 11  42   2 fg=Rgb { r: 205, g: 214, b: 244 }
+ 12   0  44 fg=Rgb { r: 108, g: 91, b: 136 }
+ 13   0   1 fg=Rgb { r: 205, g: 214, b: 244 }
+ 13   1   1 fg=Black bg=White
+ 13   2  42 fg=Rgb { r: 205, g: 214, b: 244 }
+ 14   0  44 fg=Rgb { r: 108, g: 91, b: 136 }
+ 15   0  10 fg=Rgb { r: 108, g: 112, b: 134 } bg=Rgb { r: 41, g: 41, b: 56 }
+ 15  10  26 fg=Rgb { r: 205, g: 214, b: 244 } bg=Rgb { r: 41, g: 41, b: 56 }
+ 15  36   8 fg=Rgb { r: 108, g: 112, b: 134 } bg=Rgb { r: 41, g: 41, b: 56 }

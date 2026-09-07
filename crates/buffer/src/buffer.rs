@@ -241,6 +241,9 @@ pub struct LineDecoration {
     /// `soft_wrapped` so each display row is a hard selection boundary while
     /// still coalescing into a single `source_text` on copy.
     pub copy_continuation: bool,
+    /// Omit this decorative row and its separator if the composed row has no
+    /// selectable cells or source text. Copyable content from siblings wins.
+    pub copy_excluded: bool,
     pub source_text: Option<String>,
     /// Alternate row source used when a selection spans outside a structured
     /// copy group. Code blocks use this to preserve fenced markdown for full
@@ -1539,6 +1542,7 @@ impl Buffer {
             cell_selectable: false,
             block_selectable: false,
             copy_continuation: false,
+            copy_excluded: false,
             source_text: None,
             external_source_text: None,
             source_line: None,

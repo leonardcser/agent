@@ -631,17 +631,13 @@ fn wait_for_input(fd: std::os::fd::RawFd, timeout_ms: u64) -> bool {
 /// Process-wide fallback theme, built once from the baked default spec
 /// and reused by offline render paths that don't have access to the
 /// live app theme (e.g. `format.rs`, transcript parser unit tests).
-/// First call also publishes the theme as the process-wide active
-/// theme, so the diff renderer has working colors before the TUI app
-/// starts. The `is_light` flag defaults to dark - light-mode callers
-/// should clone and flip.
+/// The fallback is immutable and dark; light-mode callers use
+/// `default_baked_with_background`.
 pub fn default_baked() -> &'static Arc<Theme> {
     static T: OnceLock<Arc<Theme>> = OnceLock::new();
     T.get_or_init(|| {
         let spec = baked_default_spec();
-        let theme = Arc::new(compile(&spec, false).expect("baked default spec must compile"));
-        smelt_core::theme::set_active(theme.clone());
-        theme
+        Arc::new(compile(&spec, false).expect("baked default spec must compile"))
     })
 }
 

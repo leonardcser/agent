@@ -46,9 +46,10 @@ impl TestApp {
     }
 
     pub fn start_submitted_turn(&mut self, text: &str) {
+        let sent_at_ms = engine::clock::unix_time_ms(self.app.core.clock.as_ref());
         let turn = self
             .app
-            .begin_agent_turn(text, protocol::Content::text(text))
+            .begin_agent_turn(text, protocol::Content::text(text), sent_at_ms)
             .expect("test app has a usable model");
         self.app.conversation.set_active(Some(turn));
     }
@@ -171,6 +172,7 @@ impl TestApp {
             .try_queue_turn(crate::app::QueuedInput::request_from_text(
                 text.clone(),
                 text,
+                engine::clock::unix_time_ms(self.app.core.clock.as_ref()),
             ));
     }
 

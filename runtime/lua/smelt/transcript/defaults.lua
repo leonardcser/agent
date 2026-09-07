@@ -6,6 +6,11 @@ local M = {}
 local layout = smelt.layout
 local is_layout_node = __smelt_internal.layout.__is_node
 
+local preferences = smelt.settings and smelt.settings.transcript
+if preferences and preferences.show_timestamps == nil then
+  preferences.show_timestamps = true
+end
+
 local status_hl = {
   drafting = "SmeltToolPending",
   pending = "SmeltToolPending",
@@ -214,29 +219,32 @@ local function boundary_after_ms(now_ms, year_only)
   return math.max(1, math.floor(boundary * 1000 - now_ms))
 end
 
---- Format an invocation timestamp and return the next delay at which its adaptive
---- date label can change. Both values are derived from the render-pass `now_ms`.
-function M.tool_called_at(called_at_ms, now_ms)
-  local timestamp_ms = tonumber(called_at_ms)
+--- Return the visible timestamp and its next adaptive-date refresh delay.
+--- Visibility and formatting are shared by user messages and tool headers.
+function M.timestamp(timestamp_ms, now_ms)
+  local settings = smelt.settings and smelt.settings.transcript
+  if settings and settings.show_timestamps == false then return nil, nil end
+
+  timestamp_ms = tonumber(timestamp_ms)
   local current_ms = tonumber(now_ms)
   if not timestamp_ms or not current_ms then return nil, nil end
-  local called_at = math.floor(timestamp_ms / 1000)
+  local timestamp = math.floor(timestamp_ms / 1000)
   local now = math.floor(current_ms / 1000)
 
-  local called_day = smelt.time.format(called_at, "%Y-%m-%d")
+  local day = smelt.time.format(timestamp, "%Y-%m-%d")
   local current_day = smelt.time.format(now, "%Y-%m-%d")
-  if called_day == current_day then
-    return smelt.time.format(called_at, "%H:%M:%S"), boundary_after_ms(current_ms, false)
+  if day == current_day then
+    return smelt.time.format(timestamp, "%H:%M:%S"), boundary_after_ms(current_ms, false)
   end
 
-  local month = tonumber(smelt.time.format(called_at, "%m"))
-  local day_and_time = smelt.time.format(called_at, "%d %H:%M:%S")
+  local month = tonumber(smelt.time.format(timestamp, "%m"))
+  local day_and_time = smelt.time.format(timestamp, "%d %H:%M:%S")
   if not month or not day_and_time then return nil, nil end
   local date_and_time = months[month] .. " " .. day_and_time
-  if smelt.time.format(called_at, "%Y") == smelt.time.format(now, "%Y") then
+  if smelt.time.format(timestamp, "%Y") == smelt.time.format(now, "%Y") then
     return date_and_time, boundary_after_ms(current_ms, true)
   end
-  return smelt.time.format(called_at, "%Y") .. " " .. date_and_time, nil
+  return smelt.time.format(timestamp, "%Y") .. " " .. date_and_time, nil
 end
 
 local function elapsed_text(elapsed_ms)
@@ -268,7 +276,7 @@ function M.render_tool_header(block, ctx, opts, presentation)
   end
 
   local header = layout.runs(lines)
-  local called_at, called_at_refresh = M.tool_called_at(block.called_at_ms, ctx.now_ms)
+  local called_at, called_at_refresh = M.timestamp(block.called_at_ms, ctx.now_ms)
   if called_at then
     header = layout.hbox({
       { header, weight = 1, copy_owner = true },
@@ -539,15 +547,31 @@ function M.render_tool_output(output, ctx, opts)
   )
 end
 
---- Render a user block. Custom renderers can layer richer panel/text
---- annotations; the bundled default keeps the same full-width prompt chrome as
---- the Rust renderer while leaving the content policy in Lua.
+--- Render a user panel with a timestamp in its top padding row.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function M.render_user(block, ctx)
-  return layout.panel(M.render_user_text(block, ctx), {
-    hl = "SmeltUserBg",
-    padding = 1,
+  local text = M.render_user_text(block, ctx)
+  local timestamp, refresh_after = M.timestamp(block.sent_at_ms, ctx and ctx.now_ms)
+  if not timestamp then
+    return layout.panel(text, { hl = "SmeltUserBg", padding = 1 })
+  end
+
+  local empty = layout.line({})
+  local header = layout.hbox({
+    { empty, weight = 1 },
+    {
+      layout.line({ { text = timestamp, hl = "SmeltUserTimestamp", selectable = false } }),
+      fit = true,
+      copy_owner = true,
+    },
   })
+  local panel = layout.panel(layout.hbox({
+    { empty, cols = 1 },
+    { layout.vbox({ header, text, empty }), weight = 1, copy_owner = true },
+    { empty, cols = 1 },
+  }), { hl = "SmeltUserBg", padding = 0 })
+  if refresh_after then panel = layout.refresh(panel, { after_ms = refresh_after }) end
+  return panel
 end
 
 --- Render user text.

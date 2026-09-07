@@ -298,7 +298,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "line",
-        "Single styled line layout leaf. `spans` is a string or a one-dimensional span table; unlike `runs`, this does not wrap.",
+        "Single styled line layout leaf. `spans` is a string or a one-dimensional span table; unlike `runs`, this does not wrap. A nonempty span table whose spans are all `selectable = false` is decorative: copying skips the row and its newline unless layout composition adds selectable cells or source text.",
         &["spans", "opts"],
         |_, (spans, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
             let hl_group = opts

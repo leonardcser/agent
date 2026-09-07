@@ -66,6 +66,7 @@ smelt.transcript = smelt.transcript or {}
 ---@field kind "user"|"assistant"|"thinking"|"tool"|"group"|"code"|"exec"|"mode"|"process_status"|"compacted"|"compaction_preview" Block kind.
 ---@field text? string User/mode/process text.
 ---@field user_lines? table User text as styled span lines, including slash/ref/image accents.
+---@field sent_at_ms? integer User-message submission time as Unix epoch milliseconds; absent for undated history.
 ---@field content? string Code content.
 ---@field content_id? integer Stable shared-content id for assistant and thinking blocks.
 ---@field content_revision? integer Monotonic shared-content revision.
@@ -172,7 +173,7 @@ smelt.transcript = smelt.transcript or {}
 ---@field draft? fun(draft: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Draft body renderer. Return nil to suppress the body.
 ---@field compact? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.layout.Node|nil Collapsed detail renderer. Return nil to suppress the detail.
 
-local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v3"
+local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v4"
 local transcript = smelt.transcript
 local internal_transcript = __smelt_internal.transcript
 local base_renderer = internal_transcript.__get_renderer and internal_transcript.__get_renderer() or nil

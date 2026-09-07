@@ -40,6 +40,14 @@ fn save_and_close_record_backed_session(mut app: TestApp) -> String {
     app.app
         .shutdown_persist()
         .expect("close saved fixture persistence");
+    // A fresh runtime resolves the session through the asynchronously published catalog.
+    assert!(
+        app.app
+            .core
+            .sessions
+            .wait_for_session_catalog(std::time::Duration::from_secs(120)),
+        "saved fixture catalog entry was not published"
+    );
     session_id
 }
 
@@ -194,6 +202,75 @@ fn session_save_notification_dismissal_uses_typed_scope() {
 
     app.dismiss_session_save_failure_notification(&session_id);
     assert!(app.overlays_probe().notification().is_none());
+}
+
+#[test]
+fn user_timestamp_survives_submission_save_resume_and_history_rebuild() {
+    const SENT_AT_MS: u64 = 1_742_567_823_000;
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder()
+            .with_wall_time(std::time::UNIX_EPOCH + std::time::Duration::from_millis(SENT_AT_MS))
+            .build_with_test_home_guard(&guard);
+        assert!(app.run_lua("smelt.settings.transcript.show_timestamps = false"));
+        app.type_text("Preserve this message's submission time.");
+        app.press(KeyCode::Enter);
+        let input = app
+            .actions()
+            .iter()
+            .find_map(|action| match action {
+                Action::EngineSend(cmd) => match cmd.as_ref() {
+                    protocol::UiCommand::StartTurn(payload) => Some(&payload.input),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("start turn dispatched");
+        assert_eq!(input.sent_at_ms(), Some(SENT_AT_MS));
+        let turn_id = app.current_turn_id().expect("submitted turn");
+        app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+            turn_id,
+            history: None,
+            meta: None,
+        }));
+        app.save_session_and_flush();
+        let session_id = app.session_snapshot().id.clone();
+        let saved = loaded_session(&app, &session_id);
+        assert!(saved.history.iter().any(|item| matches!(
+            item,
+            HistoryItem::User {
+                sent_at_ms: Some(SENT_AT_MS),
+                ..
+            }
+        )));
+        let rebuilt = crate::app::history::build_transcript_from_session(&app.app.lua, &saved);
+        assert!(rebuilt.history.order.iter().any(|id| matches!(
+            rebuilt.history.block(*id),
+            Some(Block::User {
+                sent_at_ms: Some(SENT_AT_MS),
+                ..
+            })
+        )));
+        app.app.shutdown_persist().expect("close saved session");
+        session_id
+    };
+
+    let mut resumed = TestApp::builder()
+        .with_wall_time(
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(SENT_AT_MS + 86_400_000),
+        )
+        .build_without_test_home_reset(&guard);
+    resumed.load_session_by_id(&session_id);
+    resumed.render_silent();
+    let history = resumed.app.conversation.transcript().history();
+    assert!(history.order.iter().any(|id| matches!(
+        history.block(*id),
+        Some(Block::User {
+            sent_at_ms: Some(SENT_AT_MS),
+            ..
+        })
+    )));
+    assert!(resumed.run_lua("assert(smelt.settings.transcript.show_timestamps == true)"));
 }
 
 #[test]
@@ -605,6 +682,7 @@ fn rewind_reuses_prior_roots_across_restart_without_synchronous_reclamation() {
             text: "first prompt".into(),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         }),
     );
     app.commit_request_history_item(
@@ -627,6 +705,7 @@ fn rewind_reuses_prior_roots_across_restart_without_synchronous_reclamation() {
             text: "discarded prompt".into(),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         }),
     );
     app.commit_request_history_item(
@@ -1453,6 +1532,7 @@ fn record_resume_interrupt_save_compacts_and_appends_again() {
                 text: "sparse record prompt".into(),
                 image_labels: Vec::new(),
                 command: false,
+                sent_at_ms: None,
             }),
         );
         app.push_transcript_block(Block::Text {
@@ -1658,6 +1738,7 @@ fn successful_compactions_remain_after_canonical_transcript_rebuild() {
                 text: format!("{label} user"),
                 image_labels: Vec::new(),
                 command: false,
+                sent_at_ms: None,
             }),
         );
         app.commit_request_history_item(
@@ -1804,6 +1885,7 @@ fn resumed_rewind_restores_prior_turn_context_before_next_request() {
                     text: prompt.into(),
                     image_labels: Vec::new(),
                     command: false,
+                    sent_at_ms: None,
                 }),
             );
             app.commit_request_history_item(
@@ -1911,6 +1993,7 @@ fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
                 text: "first prompt".into(),
                 image_labels: Vec::new(),
                 command: false,
+                sent_at_ms: None,
             }),
         );
         app.commit_request_history_item(
@@ -1947,6 +2030,7 @@ fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
                 text: "second prompt".into(),
                 image_labels: Vec::new(),
                 command: false,
+                sent_at_ms: None,
             }),
         );
         app.start_turn(2);
@@ -2489,6 +2573,7 @@ async fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
             text: "request after compaction".into(),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         }),
     );
     app.start_turn(42);
@@ -2634,6 +2719,7 @@ fn sparse_resume_compaction_keeps_completed_marker_at_tail() {
                     text: format!("user {index}"),
                     image_labels: Vec::new(),
                     command: false,
+                    sent_at_ms: None,
                 }),
             );
             app.session_append_history(HistoryItem::assistant(AssistantStep::terminal(
@@ -2732,6 +2818,7 @@ fn live_rewind_below_checkpoint_then_next_append_saves_without_bad_checkpoint() 
                     text,
                     image_labels: Vec::new(),
                     command: false,
+                    sent_at_ms: None,
                 }),
             );
         }

@@ -330,6 +330,7 @@ impl TuiApp {
         });
         self.lua
             .finish_launch(launch, &target_cwd, project_trust.clone());
+        crate::lua::api::theme::sync_metadata(self.lua.lua(), self.ui.theme());
         self.project_trust = Some(project_trust);
 
         let load_failure = self.lua.load_error().map(|error| LuaBringUpError {
@@ -857,6 +858,7 @@ impl TuiApp {
             placeholders: self.prompt.swap_lua_placeholders(committed.placeholders),
             busy_stack: std::mem::replace(&mut self.busy_stack, committed.busy_stack),
         };
+        crate::lua::api::theme::sync_metadata(self.lua.lua(), self.ui.theme());
         self.sync_prompt_placeholder_display();
         candidate
     }
@@ -868,6 +870,7 @@ impl TuiApp {
         self.overlays.swap_lua_pickers(candidate.picker_state);
         self.prompt.swap_lua_placeholders(candidate.placeholders);
         self.busy_stack = candidate.busy_stack;
+        crate::lua::api::theme::sync_metadata(self.lua.lua(), self.ui.theme());
         self.sync_prompt_placeholder_display();
     }
 

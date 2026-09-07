@@ -264,6 +264,9 @@ pub enum Block {
         /// Whether the leading slash-command token receives accent styling.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         command: bool,
+        /// Submission time as Unix epoch milliseconds, absent for undated history.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sent_at_ms: Option<u64>,
     },
     Mode {
         text: String,
@@ -6096,6 +6099,7 @@ mod tests {
             text: "Explain **this** in detail.".into(),
             image_labels: vec!["[screenshot.png]".into()],
             command: false,
+            sent_at_ms: None,
         };
         // Image labels are a render-time annotation, not part of the
         // user's typed message.
@@ -6553,6 +6557,7 @@ mod tests {
             text: "user".into(),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         });
         let navigation_generation = history.navigation_generation();
 
@@ -6669,6 +6674,7 @@ mod tests {
             text: "q".into(),
             image_labels: vec![],
             command: false,
+            sent_at_ms: None,
         });
         // Text -> User: 1
         assert_eq!(history.block_gap(1), 1);
@@ -6751,6 +6757,7 @@ mod tests {
             text: s.into(),
             image_labels: vec![],
             command: false,
+            sent_at_ms: None,
         }
     }
     fn thinking(s: &str) -> Block {

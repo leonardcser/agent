@@ -663,6 +663,7 @@ impl LuaRuntime {
         let shared = Arc::new(LuaShared::with_core(core_shared));
         let core = self.core.fresh_with_shared(shared.core_arc(), target_cwd);
         let mut candidate = Self::with_core(core, shared, false);
+        api::theme::inherit_metadata(&self.core.lua, &candidate.core.lua);
         candidate.core.inherit_launch_inputs(&self.core);
         candidate
     }
@@ -2027,7 +2028,68 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_timestamp_format_and_boundary_refresh_are_adaptive() {
+    fn user_timestamp_refresh_and_visibility_are_lua_owned() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        let (sent_at_ms, midnight): (u64, u64) = rt
+            .lua
+            .load(
+                r#"
+                return os.time({ year = 2025, month = 3, day = 21, hour = 20 }) * 1000,
+                  os.time({ year = 2025, month = 3, day = 22, hour = 0 }) * 1000
+                "#,
+            )
+            .eval()
+            .unwrap();
+        let block = Block::User {
+            text: "Keep the timestamp stable.".into(),
+            image_labels: vec![],
+            command: false,
+            sent_at_ms: Some(sent_at_ms),
+        };
+        let node = smelt_core::lua::runtime::transcript_block_render_node(
+            BlockId::new(1),
+            0,
+            &block,
+            None,
+        );
+        let view = smelt_core::transcript_model::ViewState::Expanded;
+        let before = render_transcript_node(&rt, &node, view, midnight - 500);
+        assert!(matches!(before, BlockLayout::Refresh { ref spec, .. } if spec.after_ms == 500));
+        assert!(serde_json::to_string(&before).unwrap().contains("20:00:00"));
+        let after = render_transcript_node(&rt, &node, view, midnight + 1);
+        assert!(serde_json::to_string(&after)
+            .unwrap()
+            .contains("mar 21 20:00:00"));
+
+        rt.lua
+            .load("smelt.settings.transcript.show_timestamps = false")
+            .exec()
+            .unwrap();
+        let hidden = render_transcript_node(&rt, &node, view, midnight - 500);
+        assert!(matches!(hidden, BlockLayout::Panel { .. }));
+        assert!(!serde_json::to_string(&hidden).unwrap().contains("20:00:00"));
+        let (tool, state) = tool_block("bash", "done");
+        assert_tool_header_has_lua_duration(&render_transcript_block(&rt, &tool, Some(&state)));
+
+        rt.lua
+            .load("smelt.settings.transcript.show_timestamps = true")
+            .exec()
+            .unwrap();
+        let undated = Block::User {
+            sent_at_ms: None,
+            text: "Older history has no timestamp.".into(),
+            image_labels: vec![],
+            command: false,
+        };
+        assert!(matches!(
+            render_transcript_block(&rt, &undated, None),
+            BlockLayout::Panel { .. }
+        ));
+    }
+
+    #[test]
+    fn timestamp_format_and_boundary_refresh_are_adaptive() {
         let rt = LuaRuntime::new();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
 
@@ -2039,22 +2101,22 @@ mod tests {
                 local function ms(t) return assert(os.time(t)) * 1000 end
 
                 local now = ms({ year = 2025, month = 3, day = 21, hour = 12, min = 0, sec = 0 })
-                local same_day, same_day_refresh = defaults.tool_called_at(
+                local same_day, same_day_refresh = defaults.timestamp(
                   ms({ year = 2025, month = 3, day = 21, hour = 11, min = 37, sec = 3 }), now)
-                local prior_day, prior_day_refresh = defaults.tool_called_at(
+                local prior_day, prior_day_refresh = defaults.timestamp(
                   ms({ year = 2025, month = 3, day = 20, hour = 18, min = 42, sec = 3 }), now)
-                local prior_year, prior_year_refresh = defaults.tool_called_at(
+                local prior_year, prior_year_refresh = defaults.timestamp(
                   ms({ year = 2024, month = 3, day = 20, hour = 18, min = 42, sec = 3 }), now)
 
                 local midnight = ms({ year = 2025, month = 3, day = 22, hour = 0, min = 0, sec = 0 })
                 local called_today = ms({ year = 2025, month = 3, day = 21, hour = 20, min = 0, sec = 0 })
-                local before_midnight, midnight_refresh = defaults.tool_called_at(called_today, midnight - 500)
-                local after_midnight = defaults.tool_called_at(called_today, midnight + 1)
+                local before_midnight, midnight_refresh = defaults.timestamp(called_today, midnight - 500)
+                local after_midnight = defaults.timestamp(called_today, midnight + 1)
 
                 local new_year = ms({ year = 2026, month = 1, day = 1, hour = 0, min = 0, sec = 0 })
                 local called_this_year = ms({ year = 2025, month = 12, day = 31, hour = 20, min = 0, sec = 0 })
-                local before_new_year, new_year_refresh = defaults.tool_called_at(called_this_year, new_year - 500)
-                local after_new_year = defaults.tool_called_at(called_this_year, new_year + 1)
+                local before_new_year, new_year_refresh = defaults.timestamp(called_this_year, new_year - 500)
+                local after_new_year = defaults.timestamp(called_this_year, new_year + 1)
 
                 return same_day, same_day_refresh, prior_day, prior_day_refresh,
                   prior_year, prior_year_refresh == nil, before_midnight, midnight_refresh,
@@ -2791,6 +2853,7 @@ mod tests {
             text: "hello".into(),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         };
         let layout = render_transcript_block(&rt, &block, None);
         let BlockLayout::Gutter { child, spec } = layout else {

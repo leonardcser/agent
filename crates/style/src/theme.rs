@@ -10,7 +10,7 @@
 use crate::style::Style;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 
 static NEXT_THEME_REVISION: AtomicU64 = AtomicU64::new(1);
 
@@ -261,35 +261,6 @@ impl Theme {
     pub fn is_empty(&self) -> bool {
         self.styles.is_empty()
     }
-}
-
-// ── Process-wide active theme ───────────────────────────────────────────
-//
-// Deep renderers (the diff renderer in `smelt_core`, future syntax
-// theming) can't reasonably thread `&Theme` through every signature -
-// they're called from worker threads that have no live app context. So
-// the runtime publishes the current `Theme` to one process-wide slot
-// that anyone can read with a single locked Arc clone.
-//
-// `smelt_tui::theme::compile` (and `smelt.theme.set` overrides) push
-// new themes here. Callers that hold their own `Arc<Theme>` (e.g. the
-// TUI `Surface`) should mirror it into the slot via `set_active` so
-// downstream readers see the same state.
-
-fn active_slot() -> &'static RwLock<Arc<Theme>> {
-    static SLOT: OnceLock<RwLock<Arc<Theme>>> = OnceLock::new();
-    SLOT.get_or_init(|| RwLock::new(Arc::new(Theme::new())))
-}
-
-/// Snapshot the active process-wide theme. Reads are uncontended in the
-/// steady state - the lock is only held during a theme swap.
-pub fn active() -> Arc<Theme> {
-    active_slot().read().unwrap().clone()
-}
-
-/// Install `theme` as the process-wide active theme.
-pub fn set_active(theme: Arc<Theme>) {
-    *active_slot().write().unwrap() = theme;
 }
 
 #[cfg(test)]

@@ -255,6 +255,7 @@ pub(crate) fn build_transcript_from_session(
                 content,
                 display,
                 command,
+                sent_at_ms,
             } => push_user_block(
                 &mut transcript,
                 lua,
@@ -262,6 +263,7 @@ pub(crate) fn build_transcript_from_session(
                 content,
                 display.as_deref(),
                 *command,
+                *sent_at_ms,
             ),
             HistoryItem::Assistant(turn) => {
                 push_assistant_blocks(&mut transcript, &summary_resolver, idx, turn)
@@ -584,6 +586,7 @@ fn push_user_block(
     content: &Content,
     display: Option<&str>,
     command: bool,
+    sent_at_ms: Option<u64>,
 ) {
     let record = match protocol::classify_user_history_content(content) {
         protocol::UserHistoryContent::CompactionSummary { summary } => Block::Compacted { summary },
@@ -611,6 +614,7 @@ fn push_user_block(
                 text: display_text,
                 image_labels,
                 command,
+                sent_at_ms,
             }
         }
     };
@@ -867,6 +871,7 @@ mod tests {
                 text: "first".into(),
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             },
             smelt_core::BlockOrigin::History(0),
         );
@@ -881,6 +886,7 @@ mod tests {
                 text: "submitted command".into(),
                 image_labels: vec![],
                 command: true,
+                sent_at_ms: None,
             },
             smelt_core::BlockOrigin::History(0),
         );
@@ -1673,6 +1679,7 @@ impl TuiApp {
                     content,
                     display,
                     command,
+                    sent_at_ms,
                 } => push_user_block(
                     &mut transcript,
                     &lua,
@@ -1680,6 +1687,7 @@ impl TuiApp {
                     content,
                     display.as_deref(),
                     *command,
+                    *sent_at_ms,
                 ),
                 HistoryItem::Assistant(turn) => push_assistant_blocks(
                     &mut transcript,
@@ -2647,6 +2655,7 @@ impl TuiApp {
             text: input.to_string(),
             image_labels,
             command: false,
+            sent_at_ms: None,
         });
     }
 }
@@ -2988,6 +2997,7 @@ mod checkpoint_tests {
                 text: "new user".into(),
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             }),
         );
 
@@ -3046,6 +3056,7 @@ mod checkpoint_tests {
                 text: "new user".into(),
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             }),
         );
 
@@ -3092,6 +3103,7 @@ mod checkpoint_tests {
                 text: "new user".into(),
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             }),
         );
         smelt_perf::perf::set_enabled(false);
@@ -3360,6 +3372,7 @@ mod checkpoint_tests {
                 text: "replacement user".into(),
                 image_labels: Vec::new(),
                 command: false,
+                sent_at_ms: None,
             }),
             None,
         );
@@ -3434,6 +3447,7 @@ mod checkpoint_tests {
                 ]),
                 display: Some("/inspect".into()),
                 command: true,
+                sent_at_ms: None,
             },
             assistant("done"),
         ];
@@ -3512,6 +3526,8 @@ mod checkpoint_tests {
         assert_eq!(app.app.session_history_len(), 0);
 
         app.type_text("fresh user");
+        let submitted = user("fresh user")
+            .with_sent_at_ms(engine::clock::unix_time_ms(app.app.core.clock.as_ref()));
         app.press(crossterm::event::KeyCode::Enter);
 
         let turn_id = app.current_turn_id().expect("fresh turn is active");
@@ -3532,7 +3548,7 @@ mod checkpoint_tests {
                 .filter(|item| matches!(item, HistoryItem::User { .. }))
                 .cloned()
                 .collect::<Vec<_>>(),
-            vec![user("fresh user")]
+            vec![submitted.clone()]
         );
         assert!(!history
             .iter()
@@ -3543,7 +3559,7 @@ mod checkpoint_tests {
                 turn_id,
                 history: Some(protocol::CanonicalHistoryDelta::new(
                     submitted_history_idx,
-                    vec![user("fresh user")],
+                    vec![submitted.clone()],
                 )),
                 meta: None,
             },
@@ -3554,7 +3570,7 @@ mod checkpoint_tests {
             app.app
                 .session_history_range(submitted_history_idx..submitted_history_idx + 1)
                 .unwrap(),
-            vec![user("fresh user")]
+            vec![submitted.clone()]
         );
     }
 
@@ -3704,6 +3720,7 @@ mod checkpoint_tests {
                 text: "new user".into(),
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             }),
             Some("new user".into()),
         );
@@ -3798,6 +3815,7 @@ mod checkpoint_tests {
                 content: Content::text("expanded command body"),
                 display: Some("/reflect".into()),
                 command: true,
+                sent_at_ms: None,
             }]);
 
         app.app.restore_screen();
@@ -4012,6 +4030,7 @@ mod checkpoint_tests {
                 text: "old".into(),
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             },
             Block::Text {
                 content: "old reply".into(),
@@ -4020,6 +4039,7 @@ mod checkpoint_tests {
                 text: "recent".into(),
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             },
             Block::Text {
                 content: "recent reply".into(),
@@ -4095,6 +4115,7 @@ mod checkpoint_tests {
                 text: "live old".into(),
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             },
             Block::Text {
                 content: "live old reply".into(),
@@ -4103,6 +4124,7 @@ mod checkpoint_tests {
                 text: "live recent".into(),
                 image_labels: vec![],
                 command: false,
+                sent_at_ms: None,
             },
             Block::Text {
                 content: "live recent reply".into(),

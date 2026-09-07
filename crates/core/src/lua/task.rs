@@ -39,6 +39,7 @@ pub enum TaskCompletion {
     Command {
         name: String,
         queue_target: CommandQueueTarget,
+        sent_at_ms: Option<u64>,
     },
     ToolResult {
         invocation: ToolInvocationContext,
@@ -57,6 +58,13 @@ impl TaskCompletion {
     fn command_queue_target(&self) -> Option<CommandQueueTarget> {
         match self {
             TaskCompletion::Command { queue_target, .. } => Some(*queue_target),
+            _ => None,
+        }
+    }
+
+    fn command_sent_at_ms(&self) -> Option<u64> {
+        match self {
+            TaskCompletion::Command { sent_at_ms, .. } => *sent_at_ms,
             _ => None,
         }
     }
@@ -377,12 +385,17 @@ pub(crate) fn step_task_owned(
     };
     let cancel = task.cancel.clone();
     let queue_target = task.completion.command_queue_target();
+    let sent_at_ms = task.completion.command_sent_at_ms();
     let tool_invocation = task.completion.tool_invocation();
     let scope = task.scope;
-    let result: LuaResult<LuaValue> =
-        with_task_context(cancel, queue_target, tool_invocation, scope, || {
-            task.thread.resume(resume_args)
-        });
+    let result: LuaResult<LuaValue> = with_task_context(
+        cancel,
+        queue_target,
+        sent_at_ms,
+        tool_invocation,
+        scope,
+        || task.thread.resume(resume_args),
+    );
 
     match result {
         Ok(v) => {
@@ -459,6 +472,7 @@ pub(crate) fn step_task_owned(
 thread_local! {
     static CURRENT_TASK_CANCEL: RefCell<Option<CancellationToken>> = const { RefCell::new(None) };
     static CURRENT_COMMAND_QUEUE_TARGET: RefCell<Option<CommandQueueTarget>> = const { RefCell::new(None) };
+    static CURRENT_COMMAND_SENT_AT_MS: RefCell<Option<u64>> = const { RefCell::new(None) };
     static CURRENT_TOOL_INVOCATION: RefCell<Option<ToolInvocationContext>> = const { RefCell::new(None) };
     static CURRENT_TASK_SCOPE: RefCell<Option<TaskScope>> = const { RefCell::new(None) };
 }
@@ -467,17 +481,20 @@ thread_local! {
 fn with_task_context<R>(
     cancel: CancellationToken,
     queue_target: Option<CommandQueueTarget>,
+    sent_at_ms: Option<u64>,
     tool_invocation: Option<ToolInvocationContext>,
     scope: TaskScope,
     f: impl FnOnce() -> R,
 ) -> R {
     let previous_cancel = CURRENT_TASK_CANCEL.with(|c| c.replace(Some(cancel)));
     let previous_target = CURRENT_COMMAND_QUEUE_TARGET.with(|c| c.replace(queue_target));
+    let previous_sent_at_ms = CURRENT_COMMAND_SENT_AT_MS.with(|c| c.replace(sent_at_ms));
     let previous_tool_invocation = CURRENT_TOOL_INVOCATION.with(|c| c.replace(tool_invocation));
     let previous_scope = CURRENT_TASK_SCOPE.with(|c| c.replace(Some(scope)));
     let r = f();
     CURRENT_TASK_SCOPE.with(|c| c.replace(previous_scope));
     CURRENT_TOOL_INVOCATION.with(|c| c.replace(previous_tool_invocation));
+    CURRENT_COMMAND_SENT_AT_MS.with(|c| c.replace(previous_sent_at_ms));
     CURRENT_COMMAND_QUEUE_TARGET.with(|c| c.replace(previous_target));
     CURRENT_TASK_CANCEL.with(|c| c.replace(previous_cancel));
     r
@@ -485,7 +502,7 @@ fn with_task_context<R>(
 
 /// Install the task's cancellation token for the closure's duration.
 pub fn with_task_cancel<R>(cancel: CancellationToken, f: impl FnOnce() -> R) -> R {
-    with_task_context(cancel, None, None, TaskScope::App, f)
+    with_task_context(cancel, None, None, None, TaskScope::App, f)
 }
 
 /// Current task's cancellation token; `None` when called outside `step_task`.
@@ -496,6 +513,11 @@ pub fn current_task_cancel() -> Option<CancellationToken> {
 /// Current slash-command queue target; `None` outside slash-command tasks.
 pub fn current_command_queue_target() -> Option<CommandQueueTarget> {
     CURRENT_COMMAND_QUEUE_TARGET.with(|c| *c.borrow())
+}
+
+/// Submission time of the current slash command, preserved across coroutine yields.
+pub fn current_command_sent_at_ms() -> Option<u64> {
+    CURRENT_COMMAND_SENT_AT_MS.with(|c| *c.borrow())
 }
 
 pub(crate) fn with_tool_invocation_context<R>(

@@ -52,7 +52,7 @@ pub fn render_code_block(
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:code_block");
     let syntax = syntax_for_lang(block.lang());
-    let theme = syntax_theme();
+    let theme = syntax_theme(out.theme());
     let content_width = if let Some(b) = bctx { b.inner_w } else { width };
     let text_w = content_width.max(1);
     let mut rows = 0u16;
@@ -123,7 +123,7 @@ pub(super) fn render_highlighted(
     max_rows: u16,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:highlighted");
-    let theme = syntax_theme();
+    let theme = syntax_theme(out.theme());
     let lineno_digits = lines.len().max(1).to_string().len();
     // `Stamped` reserves gutter cells for the host window's `LineNumberGutter`.
     // `None` reserves nothing. Inline-gutter callers go through
@@ -244,8 +244,8 @@ pub struct InlineSyntax<'a> {
 }
 
 impl<'a> InlineSyntax<'a> {
-    pub fn new(lang: &str) -> Self {
-        let theme = syntax_theme();
+    pub fn new(lang: &str, theme: &crate::theme::Theme) -> Self {
+        let theme = syntax_theme(theme);
         Self {
             h: HighlightLines::new(syntax_for_lang(lang), theme),
         }
@@ -316,7 +316,7 @@ impl<'a> InlineSyntax<'a> {
 /// would be too heavy.
 pub fn print_code_lines(out: &mut LineBuilder, content: &str, lang: &str) {
     let _perf = smelt_perf::perf::begin("render:code_lines");
-    let mut hi = InlineSyntax::new(lang);
+    let mut hi = InlineSyntax::new(lang, out.theme());
     for line in content.lines() {
         hi.print_line(out, line);
         out.newline();
@@ -767,8 +767,8 @@ mod tests {
 
     #[test]
     fn inline_syntax_print_line_emits_text_into_buffer() {
-        let mut hi = InlineSyntax::new("bash");
         let block = render_test(80, |out| {
+            let mut hi = InlineSyntax::new("bash", out.theme());
             hi.print_line(out, "echo hello");
             out.newline();
         });
@@ -777,8 +777,8 @@ mod tests {
 
     #[test]
     fn inline_syntax_print_line_strips_trailing_newline_artifacts() {
-        let mut hi = InlineSyntax::new("bash");
         let block = render_test(80, |out| {
+            let mut hi = InlineSyntax::new("bash", out.theme());
             hi.print_line(out, "ls");
             out.newline();
         });

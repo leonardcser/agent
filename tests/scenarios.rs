@@ -78,6 +78,7 @@ async fn plain_turn() {
     let out = h.run("hi", "test/claude-test");
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     insta::assert_json_snapshot!(out.events, {
+        "[].HistoryUpdated.update.items[].sent_at_ms" => "[sent_at_ms]",
         "[].TurnComplete.meta.elapsed_ms" => "[elapsed_ms]",
         "[].TurnComplete.meta.avg_tps" => "[avg_tps]",
         "[].TokenUsage.tokens_per_sec" => "[tps]",
@@ -197,6 +198,7 @@ async fn streaming_concat_across_deltas() {
 
     let out = h.run("hi", "test/claude-test");
     insta::assert_json_snapshot!(out.events, {
+        "[].HistoryUpdated.update.items[].sent_at_ms" => "[sent_at_ms]",
         "[].TurnComplete.meta.elapsed_ms" => "[elapsed_ms]",
         "[].TurnComplete.meta.avg_tps" => "[avg_tps]",
         "[].TokenUsage.tokens_per_sec" => "[tps]",
@@ -221,6 +223,7 @@ async fn provider_auth_error() {
     let out = h.run("hi", "test/claude-test");
     assert_eq!(out.status, 3, "stderr: {}", out.stderr);
     insta::assert_json_snapshot!(out.events, {
+        "[].HistoryUpdated.update.items[].sent_at_ms" => "[sent_at_ms]",
         "[].TurnComplete.meta.elapsed_ms" => "[elapsed_ms]",
         "[].TurnComplete.meta.avg_tps" => "[avg_tps]",
         "[].TokenUsage.tokens_per_sec" => "[tps]",
@@ -266,6 +269,7 @@ async fn incomplete_stream() {
     let out = h.run("hi", "test/claude-test");
     assert_eq!(out.status, 3, "stderr: {}", out.stderr);
     insta::assert_json_snapshot!(out.events, {
+        "[].HistoryUpdated.update.items[].sent_at_ms" => "[sent_at_ms]",
         "[].TurnComplete.meta.elapsed_ms" => "[elapsed_ms]",
         "[].TurnComplete.meta.avg_tps" => "[avg_tps]",
         "[].TokenUsage.tokens_per_sec" => "[tps]",
@@ -334,6 +338,7 @@ async fn thinking_then_text() {
 
     let out = h.run("solve it", "test/claude-test");
     insta::assert_json_snapshot!(out.events, {
+        "[].HistoryUpdated.update.items[].sent_at_ms" => "[sent_at_ms]",
         "[].TurnComplete.meta.elapsed_ms" => "[elapsed_ms]",
         "[].TurnComplete.meta.avg_tps" => "[avg_tps]",
         "[].TokenUsage.tokens_per_sec" => "[tps]",

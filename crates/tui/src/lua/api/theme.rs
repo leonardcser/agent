@@ -13,7 +13,28 @@ use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 use smelt_core::style::{Color, Style};
 
+#[derive(Clone)]
+struct ThemeMetadata {
+    is_light: bool,
+    syntax_theme: Option<String>,
+}
+
+/// Host-tier render callbacks can read theme metadata without borrowing the UI.
+pub(crate) fn sync_metadata(lua: &Lua, theme: &smelt_core::theme::Theme) {
+    lua.set_app_data(ThemeMetadata {
+        is_light: theme.is_light(),
+        syntax_theme: theme.syntax_theme().map(str::to_owned),
+    });
+}
+
+pub(crate) fn inherit_metadata(source: &Lua, target: &Lua) {
+    if let Some(metadata) = source.app_data_ref::<ThemeMetadata>() {
+        target.set_app_data(metadata.clone());
+    }
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+    sync_metadata(lua, crate::theme::default_baked());
     let m = LuaMod::supported(
         lua,
         smelt,
@@ -32,8 +53,8 @@ highlight-group access and mutations require UiHost.",
 install it as the active theme. String-valued group entries are resolved \
 at compile time; cycles and dangling references raise a runtime error.",
         &["spec"],
-        |_, spec: ThemeSpec| -> LuaResult<()> {
-            crate::lua::with_runtime_host(|host| host.apply_theme(&spec))
+        |lua, spec: ThemeSpec| -> LuaResult<()> {
+            crate::lua::with_runtime_host(|host| host.apply_theme(lua, &spec))
                 .map_err(|error| LuaError::RuntimeError(format!("theme.apply: {error}")))
         },
     )?;
@@ -44,10 +65,10 @@ at compile time; cycles and dangling references raise a runtime error.",
 `StyleDecl` table (`{ fg = { ansi = 244 }, bold = true }`). The override \
 sticks until the next `apply()` or `use()` call.",
         &["group", "style"],
-        |_, (group, style): (String, StyleDecl)| -> LuaResult<()> {
+        |lua, (group, style): (String, StyleDecl)| -> LuaResult<()> {
             crate::lua::with_runtime_host(|host| {
                 let style = style_decl_to_style(&style, host.theme_is_light());
-                host.set_theme_group(group, style);
+                host.set_theme_group(lua, group, style);
             });
             Ok(())
         },
@@ -85,17 +106,24 @@ resolve to an empty table.",
         "Return `true` if the active theme is a light theme. Lets \
 plugins flip glyphs or contrast levels based on the current palette.",
         &[],
-        |_, ()| Ok(smelt_core::theme::active().is_light()),
+        |lua, ()| {
+            Ok(lua
+                .app_data_ref::<ThemeMetadata>()
+                .expect("theme metadata is initialized")
+                .is_light)
+        },
     )?;
 
     host.fn_(
         "syntax_theme",
         "Return the active bundled syntect/two-face syntax theme name, if the colorscheme set one.",
         &[],
-        |_, ()| {
-            Ok(smelt_core::theme::active()
-                .syntax_theme()
-                .map(str::to_string))
+        |lua, ()| {
+            Ok(lua
+                .app_data_ref::<ThemeMetadata>()
+                .expect("theme metadata is initialized")
+                .syntax_theme
+                .clone())
         },
     )?;
 

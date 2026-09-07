@@ -387,6 +387,7 @@ mod tests {
             text: "  question  ".into(),
             image_labels: vec![],
             command: false,
+            sent_at_ms: None,
         });
         match block_at(&t.history, 0) {
             Block::User { text, .. } => assert_eq!(text, "  question  "),
@@ -448,6 +449,7 @@ mod tests {
             text: "first".into(),
             image_labels: vec![],
             command: false,
+            sent_at_ms: None,
         });
         t.push(Block::Text {
             content: "between".into(),
@@ -456,6 +458,7 @@ mod tests {
             text: "second".into(),
             image_labels: vec![],
             command: false,
+            sent_at_ms: None,
         });
         let turns = t.user_turns();
         assert_eq!(
@@ -473,6 +476,7 @@ mod tests {
                     text: "first line\nfull stored prompt".into(),
                     image_labels: vec![],
                     command: false,
+                    sent_at_ms: None,
                 },
                 content_hash: 0,
                 origin: Some(BlockOrigin::History(0)),
@@ -502,6 +506,7 @@ mod tests {
             text: "first".into(),
             image_labels: vec![],
             command: false,
+            sent_at_ms: None,
         });
         t.push(Block::Text {
             content: "assistant".into(),
@@ -510,6 +515,7 @@ mod tests {
             text: "second".into(),
             image_labels: vec![],
             command: false,
+            sent_at_ms: None,
         });
         t.push(Block::Text {
             content: "tail".into(),

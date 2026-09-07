@@ -684,6 +684,7 @@ Quick display preferences live in `smelt.settings.transcript`:
 
 ```lua
 smelt.settings.transcript = {
+  show_timestamps = true, -- user messages, tool calls, and tool groups
   view = {
     blocks = { thinking = "peek" },
     tools = { read_file = "collapsed", grep = "collapsed", glob = "collapsed" },

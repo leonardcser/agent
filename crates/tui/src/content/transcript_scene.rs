@@ -1539,6 +1539,7 @@ mod tests {
             text: "continue".into(),
             image_labels: Vec::new(),
             command: false,
+            sent_at_ms: None,
         });
         let mut parser = StreamParser::new();
         parser.append_streaming_text(&mut transcript.history, "first line\n");

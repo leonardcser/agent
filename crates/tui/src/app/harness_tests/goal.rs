@@ -48,6 +48,7 @@ fn request_queued_goal_command_waits_for_steered_transcript_ack() {
     app.feed_one(SourceEvent::engine(EngineEvent::Steered {
         text: "/goal finish steered activation".into(),
         count: 1,
+        sent_at_ms: 1_742_567_823_000,
     }));
 
     assert!(app.run_lua(
@@ -306,6 +307,7 @@ fn lua_goal_banner_stays_above_transcript_scroll_pill() {
         text: "earlier user message".into(),
         image_labels: Vec::new(),
         command: false,
+        sent_at_ms: None,
     });
     for i in 0..40 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
