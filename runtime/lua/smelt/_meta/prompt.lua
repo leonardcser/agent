@@ -31,7 +31,7 @@ prompt.has_stash = nil
 ---@type fun(): boolean
 prompt.is_modal = nil
 
---- Return the queued prompt text rows. Empty when the prompt is idle and no active turn, compaction, or busy work is in flight. Queue changes invalidate the retained top bar so waiting messages appear above the input.
+--- Return the queued prompt text rows, including while execution is paused. Queue changes invalidate the retained top bar so waiting messages remain visible above the input.
 ---@type fun(): string[]
 prompt.queued = nil
 

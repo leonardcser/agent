@@ -64,7 +64,7 @@ fun(): string[]
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return the queued prompt text rows. Empty when the prompt is idle and no active turn, compaction, or busy work is in flight. Queue changes invalidate the retained top bar so waiting messages appear above the input.
+Return the queued prompt text rows, including while execution is paused. Queue changes invalidate the retained top bar so waiting messages remain visible above the input.
 
 ## `smelt.prompt.queued_rows`
 

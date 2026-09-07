@@ -614,13 +614,14 @@ impl NotificationLifetime {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PromptWorkState {
     Idle,
+    Paused,
     BackgroundBusy,
     TurnActive,
 }
 
 impl PromptWorkState {
     pub(crate) fn is_busy(self) -> bool {
-        !matches!(self, Self::Idle)
+        matches!(self, Self::BackgroundBusy | Self::TurnActive)
     }
 
     pub(crate) fn turn_is_active(self) -> bool {
@@ -1339,6 +1340,12 @@ impl TuiApp {
             PromptWorkState::TurnActive
         } else if self.busy_stack.is_busy() {
             PromptWorkState::BackgroundBusy
+        } else if self
+            .conversation
+            .turn_pause()
+            .is_some_and(|pause| pause.kind != Some(protocol::EngineAskErrorKind::Cancelled))
+        {
+            PromptWorkState::Paused
         } else {
             PromptWorkState::Idle
         }
@@ -1396,6 +1403,9 @@ impl TuiApp {
     }
 
     pub(crate) fn queue_input_for_request(&mut self, queued: QueuedInput) -> bool {
+        if self.conversation.turn_pause().is_some() {
+            return self.prompt.try_queue_request(queued);
+        }
         if !self.turn_input_is_active() {
             return self.prompt.try_queue_turn(queued);
         }
@@ -1694,7 +1704,10 @@ impl TuiApp {
     }
 
     pub(crate) fn start_next_queued_input_if_idle(&mut self) -> bool {
-        if self.prompt_input_is_busy() || self.prompt.queue_is_empty() {
+        if self.prompt_input_is_busy()
+            || self.conversation.turn_pause().is_some()
+            || self.prompt.queue_is_empty()
+        {
             return false;
         }
         let Some((stage, queued)) = self.prompt.pop_next_for_turn() else {
@@ -2386,6 +2399,18 @@ impl TuiApp {
             .signals
             .publish_if_changed("work_state", state.as_str().to_string());
         self.core.signals.publish_if_changed("work_label", label);
+        self.core.signals.publish_if_changed(
+            "work_continuation_token",
+            self.conversation.continuation_token().unwrap_or(0),
+        );
+        self.core.signals.publish_if_changed(
+            "work_pause_kind",
+            self.conversation
+                .turn_pause()
+                .map(|pause| pause.kind.map_or("other", |kind| kind.as_str()))
+                .unwrap_or("")
+                .to_string(),
+        );
         self.core
             .signals
             .publish_if_changed("work_elapsed_ms", elapsed_ms);

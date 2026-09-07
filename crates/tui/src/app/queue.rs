@@ -70,6 +70,10 @@ impl InputQueues {
         !self.request.is_empty()
     }
 
+    pub(crate) fn request_inputs(&self) -> impl Iterator<Item = protocol::StartTurnInput> + '_ {
+        self.request.iter().filter_map(QueuedInput::steer_input)
+    }
+
     pub(crate) fn front_turn_is_request(&self) -> bool {
         self.turn
             .front()

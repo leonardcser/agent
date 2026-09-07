@@ -20,6 +20,8 @@ pub(crate) struct TurnLifecycle {
     last_terminal_turn_id: Option<u64>,
     next_continuation_token: u64,
     pending_continuation_token: Option<u64>,
+    pub(super) pause: Option<TurnPause>,
+    pub(super) request_overrides: smelt_core::custom_commands::CommandOverrides,
     pending_meta: Option<protocol::TurnMeta>,
     pending_history_appends: Vec<PendingHistoryAppend>,
     context_tokens_updated: bool,
@@ -28,6 +30,13 @@ pub(crate) struct TurnLifecycle {
     cancel_generation: u64,
     dispatching_turn_id: Option<u64>,
     dispatching_permissions: Option<std::sync::Arc<smelt_core::permissions::Permissions>>,
+}
+
+/// Stops automatic dispatch without treating an interrupted turn as idle work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TurnPause {
+    pub(crate) kind: Option<protocol::EngineAskErrorKind>,
+    pub(crate) retry_at_ms: Option<u64>,
 }
 
 pub(crate) struct DispatchingTurn {
@@ -55,6 +64,8 @@ impl TurnLifecycle {
             last_terminal_turn_id: None,
             next_continuation_token: 1,
             pending_continuation_token: None,
+            pause: None,
+            request_overrides: Default::default(),
             pending_meta: None,
             pending_history_appends: Vec::new(),
             context_tokens_updated: false,
@@ -299,8 +310,13 @@ impl TurnLifecycle {
         self.active = Some(dispatch.state);
     }
 
-    pub(crate) fn begin_prepared_turn(&mut self) {
+    pub(crate) fn begin_prepared_turn(
+        &mut self,
+        overrides: smelt_core::custom_commands::CommandOverrides,
+    ) {
         self.pending_continuation_token = None;
+        self.pause = None;
+        self.request_overrides = overrides;
     }
 
     pub(crate) fn record_started_turn(
@@ -321,7 +337,6 @@ impl TurnLifecycle {
         token
     }
 
-    #[cfg(test)]
     pub(crate) fn pending_continuation_token(&self) -> Option<u64> {
         self.pending_continuation_token
     }
@@ -340,6 +355,7 @@ impl TurnLifecycle {
 
     pub(crate) fn invalidate_turn_callbacks(&mut self) {
         self.cancel_generation = self.cancel_generation.wrapping_add(1);
+        self.clear_continuation();
     }
 
     pub(crate) fn cancel_generation(&self) -> u64 {
@@ -351,6 +367,8 @@ impl TurnLifecycle {
         self.pending_meta = None;
         self.pending_history_appends.clear();
         self.context_tokens_updated = false;
+        self.pause = None;
+        self.request_overrides = Default::default();
         self.clear_continuation();
     }
 }
@@ -388,6 +406,7 @@ struct PreparedTurn {
     reasoning_effort: protocol::ReasoningEffort,
     permission_overrides: Option<protocol::PermissionOverrides>,
     permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
+    request_overrides: smelt_core::custom_commands::CommandOverrides,
     rewind_history_idx: Option<usize>,
     rollback: Option<StagedTurnRollback>,
 }
@@ -414,15 +433,11 @@ struct PreparedTurnDispatch {
     history: protocol::ModelHistorySource,
 }
 
-fn is_resumable_turn_error(
-    kind: Option<protocol::EngineAskErrorKind>,
-    retry_at_ms: Option<u64>,
-) -> bool {
-    retry_at_ms.is_some()
-        && matches!(
-            kind,
-            Some(protocol::EngineAskErrorKind::Quota | protocol::EngineAskErrorKind::RateLimited)
-        )
+fn is_resumable_turn_error(kind: Option<protocol::EngineAskErrorKind>) -> bool {
+    matches!(
+        kind,
+        Some(protocol::EngineAskErrorKind::Quota | protocol::EngineAskErrorKind::RateLimited)
+    )
 }
 
 fn annotate_cwd_metadata(
@@ -609,6 +624,7 @@ impl TuiApp {
                 reasoning_effort: self.core.config.reasoning_effort.clone(),
                 permission_overrides: None,
                 permissions: self.core.permissions.snapshot(),
+                request_overrides: Default::default(),
                 rewind_history_idx: None,
                 rollback: None,
             });
@@ -647,6 +663,7 @@ impl TuiApp {
             reasoning_effort: self.core.config.reasoning_effort.clone(),
             permission_overrides: None,
             permissions: self.core.permissions.snapshot(),
+            request_overrides: Default::default(),
             rewind_history_idx,
             rollback: Some(rollback),
         })
@@ -664,7 +681,8 @@ impl TuiApp {
     }
 
     fn dispatch_prepared_turn(&mut self, turn: PreparedTurn) -> Option<TurnState> {
-        self.conversation.begin_prepared_turn();
+        self.conversation
+            .begin_prepared_turn(turn.request_overrides.clone());
         self.working.begin(TurnPhase::Working);
 
         self.core.signals.set_dyn(
@@ -846,6 +864,9 @@ impl TuiApp {
                 "engine stopped before accepting the request".into(),
             );
             return None;
+        }
+        for input in self.prompt.queued_request_inputs() {
+            self.core.engine.send(UiCommand::Steer { input });
         }
         if let Some(durable_receipt_at) = durable_receipt_at {
             smelt_perf::perf::record_value(
@@ -1072,6 +1093,7 @@ impl TuiApp {
             reasoning_effort: self.core.config.reasoning_effort.clone(),
             permission_overrides: None,
             permissions: self.core.permissions.snapshot(),
+            request_overrides: Default::default(),
             rewind_history_idx: None,
             rollback: (adds_history || adds_block).then_some(rollback),
         })
@@ -1233,11 +1255,13 @@ impl TuiApp {
                 first_user_message,
             )
         } else {
-            self.push_block(Block::User {
-                text: display.clone(),
-                image_labels: vec![],
-                command: true,
-            });
+            if !display.is_empty() {
+                self.push_block(Block::User {
+                    text: display.clone(),
+                    image_labels: vec![],
+                    command: true,
+                });
+            }
             self.model_history_source()
         };
         self.publish_turn_input(submitted);
@@ -1315,6 +1339,7 @@ impl TuiApp {
             reasoning_effort: reasoning,
             permission_overrides,
             permissions,
+            request_overrides: overrides,
             rewind_history_idx,
             rollback: Some(rollback),
         })
@@ -1378,19 +1403,29 @@ impl TuiApp {
         }
     }
 
-    /// Stop the engine turn without saving session or triggering auto-compact; used before rewind/clear.
-    pub(crate) fn cancel_agent(&mut self) {
+    /// Cancel tasks and invalidate late callbacks without finalizing the turn again.
+    pub(crate) fn cancel_turn_work(&mut self) {
         self.cancel_request_hook();
-        let turn = self
-            .conversation
-            .active()
-            .map(|turn| (turn.turn_id, turn.canonical));
         self.platform.set_sleep_inhibited(false);
         self.core.engine.send(UiCommand::Cancel);
         self.cancel_turn_lua_tasks();
         self.conversation.invalidate_turn_callbacks();
         self.busy_stack.clear();
         self.discard_pending_transcript_work();
+        self.clear_compaction_preview();
+    }
+
+    /// Stop the engine turn without saving session or triggering auto-compact; used before rewind/clear.
+    pub(crate) fn cancel_agent(&mut self) {
+        let turn = self
+            .conversation
+            .active()
+            .map(|turn| (turn.turn_id, turn.canonical));
+        self.cancel_turn_work();
+        self.conversation.set_turn_pause(Some(TurnPause {
+            kind: Some(protocol::EngineAskErrorKind::Cancelled),
+            retry_at_ms: None,
+        }));
         // A turn is ending without going through `finish_turn`. Commit any
         // in-flight streaming buffers so the post-cancel state honors the
         // "no agent ⇒ no active stream" invariant (an empty thinking delta
@@ -1399,7 +1434,6 @@ impl TuiApp {
         self.flush_streaming_thinking();
         self.flush_streaming_text();
         self.clear_tool_drafts();
-        self.clear_compaction_preview();
         self.conversation.clear_pending_history_appends();
         let meta = self.working.finish(TurnOutcome::Cancelled);
         self.record_finished_turn_state(meta);
@@ -1423,8 +1457,30 @@ impl TuiApp {
         self.prompt.clear_queue();
     }
 
-    pub(crate) fn consume_continuation_token(&mut self, token: u64) -> bool {
-        self.conversation.consume_continuation(token)
+    pub(crate) fn resume_paused_turn(&mut self, token: Option<u64>) -> bool {
+        let Some(pause) = self.conversation.turn_pause() else {
+            return false;
+        };
+        if self.prompt_input_is_busy()
+            || self.modal_blocks_agent()
+            || token.is_some_and(|token| self.conversation.continuation_token() != Some(token))
+        {
+            return false;
+        }
+        let overrides = self.conversation.turn_request_overrides().clone();
+        let turn = self.begin_command_request_turn(
+            String::new(),
+            String::new(),
+            overrides,
+            CommandTurnStart::ContinueFromLast,
+        );
+        let started = turn.is_some() || self.turn_submission_is_pending();
+        self.conversation.set_active(turn);
+        if !started {
+            self.conversation.set_turn_pause(Some(pause));
+            self.conversation.clear_continuation();
+        }
+        started
     }
 
     pub(crate) fn discard_turn(&mut self, end: crate::app::TurnEnd) -> TerminalCommitStatus {
@@ -1438,16 +1494,13 @@ impl TuiApp {
             }
             outcome.terminal_commit
         } else if matches!(end, crate::app::TurnEnd::Cancelled) {
-            // No active turn but user requested cancel - still notify the
-            // engine and kill any stale turn-owned Lua tasks (tool calls,
-            // bash executions, etc.). App-scoped background work survives.
-            self.platform.set_sleep_inhibited(false);
-            self.core.engine.send(UiCommand::Cancel);
-            self.cancel_turn_lua_tasks();
-            self.conversation.invalidate_turn_callbacks();
-            self.busy_stack.clear();
-            self.discard_pending_transcript_work();
-            self.clear_compaction_preview();
+            if self.conversation.turn_pause().is_none() {
+                self.conversation.set_turn_pause(Some(TurnPause {
+                    kind: Some(protocol::EngineAskErrorKind::Cancelled),
+                    retry_at_ms: None,
+                }));
+            }
+            self.cancel_turn_work();
             // Archive an interrupted outcome so the prompt bar shows
             // "interrupted" rather than falling back to idle/done.
             let meta = self.working.finish(TurnOutcome::Cancelled);
@@ -1487,16 +1540,11 @@ impl TuiApp {
             ),
         };
 
-        self.platform.set_sleep_inhibited(false);
         match end {
-            TurnEnd::Cancelled => {
-                self.discard_pending_transcript_work();
-                self.core.engine.send(UiCommand::Cancel);
-                self.cancel_turn_lua_tasks();
-                self.conversation.invalidate_turn_callbacks();
-                self.busy_stack.clear();
+            TurnEnd::Cancelled => self.cancel_turn_work(),
+            TurnEnd::Complete | TurnEnd::Errored { .. } => {
+                self.platform.set_sleep_inhibited(false);
             }
-            TurnEnd::Complete | TurnEnd::Errored { .. } => {}
         }
 
         let interrupted = !matches!(end, TurnEnd::Complete);
@@ -1504,7 +1552,15 @@ impl TuiApp {
             TurnEnd::Errored { kind, retry_at_ms } => (*kind, *retry_at_ms),
             _ => (None, None),
         };
-        let resumable = interrupted && is_resumable_turn_error(error_kind, retry_at_ms);
+        self.conversation.set_turn_pause(match end {
+            TurnEnd::Complete => None,
+            TurnEnd::Cancelled => Some(TurnPause {
+                kind: Some(protocol::EngineAskErrorKind::Cancelled),
+                retry_at_ms: None,
+            }),
+            TurnEnd::Errored { kind, retry_at_ms } => Some(TurnPause { kind, retry_at_ms }),
+        });
+        let resumable = interrupted && is_resumable_turn_error(error_kind);
         let continuation_token = if !interrupted || resumable {
             Some(self.conversation.issue_continuation_token())
         } else {
@@ -1566,9 +1622,7 @@ impl TuiApp {
                     (meta, false)
                 }
                 TurnEnd::Errored { .. } => {
-                    self.conversation.retain_session_history_appends();
                     let meta = self.working.finish(TurnOutcome::Errored);
-                    // On error the queue is preserved so the user can resubmit.
                     (meta, false)
                 }
             }
@@ -1578,7 +1632,7 @@ impl TuiApp {
             let _perf = smelt_perf::perf::begin("tui:finish_turn:document_state");
             self.record_finished_turn_state(meta);
         }
-        if matches!(end, TurnEnd::Complete) {
+        if matches!(end, TurnEnd::Complete | TurnEnd::Errored { .. }) {
             self.apply_pending_history_appends_for_request();
         }
         self.sync_agent_mode_applied();
@@ -1773,9 +1827,9 @@ impl TuiApp {
 
     fn handle_process_status_event(&mut self, event: protocol::ProcessStatusEvent) {
         let note = protocol::HistoryNote::process_status_event(event);
-        if self.agent_is_running() {
+        if self.agent_is_running() || self.conversation.turn_pause().is_some() {
             self.queue_history_append(crate::app::PendingHistoryAppend::process_status(note));
-        } else if self.prompt_input_is_busy() {
+        } else if self.prompt_input_is_busy() || !self.prompt.queue_is_empty() {
             self.prompt
                 .try_queue_turn(crate::app::QueuedInput::ProcessStatus(note));
         } else {

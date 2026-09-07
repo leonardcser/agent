@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+ Finish the current task.
+
+
+
+
+
+  › Then run the tests.
+─ quota exceeded ───────────────────
+
+────────────────────────────────────
+ ○ normal                   1:1 100%

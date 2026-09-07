@@ -260,6 +260,12 @@ impl PromptRuntime {
         self.queues.is_empty()
     }
 
+    pub(crate) fn queued_request_inputs(
+        &self,
+    ) -> impl Iterator<Item = protocol::StartTurnInput> + '_ {
+        self.queues.request_inputs()
+    }
+
     pub(crate) fn has_queued_request(&self) -> bool {
         self.queues.has_request()
     }

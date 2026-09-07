@@ -1,6 +1,31 @@
 //! Statusline width and priority stories.
 
 use crate::app_story;
+use protocol::{EngineAskErrorKind, EngineEvent};
+
+app_story!(quota_pause, |ctx| {
+    ctx.set_viewport(80, 12);
+    ctx.run_lua(
+        r#"
+        smelt.settings.auto_continue = "always"
+        smelt.time.now_ms = function() return 1704110400000 end
+        smelt.time.format = smelt.time.format_utc
+    "#,
+    );
+    ctx.push_user_turn("Finish the current task.");
+    ctx.push_queued_message("Then run the tests.");
+    ctx.engine(EngineEvent::TurnError {
+        message: "quota exceeded".into(),
+        kind: Some(EngineAskErrorKind::Quota),
+        retry_at_ms: Some(1704119400000),
+    });
+    ctx.assert_snapshot_named("scheduled");
+    ctx.set_viewport(36, 12);
+    ctx.assert_snapshot_named("narrow");
+    ctx.set_viewport(80, 12);
+    ctx.run_lua(r#"smelt.settings.auto_continue = "off""#);
+    ctx.assert_snapshot_named("manual");
+});
 
 app_story!(statusline_width_ladder, |ctx| {
     // Pin the statusline compositor's hide/show stages: a truncatable slug,

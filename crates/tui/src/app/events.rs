@@ -178,7 +178,7 @@ impl TuiApp {
             return false;
         }
 
-        let outcome = if self.prompt_input_is_busy() {
+        let outcome = if self.prompt_work_state() != PromptWorkState::Idle {
             self.handle_event_running(ev)
         } else {
             self.handle_event_idle(ev)
@@ -232,7 +232,9 @@ impl TuiApp {
                 self.redact_user_submission(&mut content, &mut display);
                 let mut edit = Some(edit);
                 let accepted = match self.prompt_work_state() {
-                    PromptWorkState::TurnActive | PromptWorkState::BackgroundBusy => {
+                    PromptWorkState::TurnActive
+                    | PromptWorkState::BackgroundBusy
+                    | PromptWorkState::Paused => {
                         // Queue while an active turn or background plugin owns the
                         // input lifecycle so messages run against the next stable state.
                         if content.is_empty() {
@@ -836,6 +838,10 @@ impl TuiApp {
                 self.clear_prompt_prediction();
                 return EventOutcome::Noop;
             }
+            PromptWorkState::Paused => {
+                self.resume_paused_turn(None);
+                return EventOutcome::Noop;
+            }
             PromptWorkState::Idle => {}
         }
 
@@ -875,6 +881,8 @@ impl TuiApp {
         }
         let terminal_commit = self.discard_turn(crate::app::TurnEnd::Cancelled);
         if let Some(queued) = self.prompt.restore_after_interrupt(interrupted) {
+            // Interrupt-and-send authorizes the replacement, even if persistence is still pending.
+            self.conversation.set_turn_pause(None);
             if terminal_commit.is_durable() {
                 if let Err(queued) = self.start_queued_input(queued) {
                     self.prompt.queue_front(QueueStage::Turn, queued);
@@ -917,6 +925,10 @@ impl TuiApp {
             return outcome;
         }
 
+        if self.conversation.turn_pause().is_some() {
+            self.conversation.clear_continuation();
+            return EventOutcome::Noop;
+        }
         if !self.prompt.queue_is_empty() {
             self.drain_queued_inputs_into_prompt();
             return EventOutcome::Noop;

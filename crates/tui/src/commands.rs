@@ -643,6 +643,11 @@ impl TuiApp {
         if auto_reload_changed {
             self.set_auto_reload_enabled(auto_reload);
         }
+        if settings.auto_continue != old.auto_continue {
+            self.core
+                .signals
+                .publish_if_changed("settings_auto_continue", settings.auto_continue);
+        }
     }
 
     fn committed_watch_paths(&self) -> crate::auto_reload::WatchPaths {

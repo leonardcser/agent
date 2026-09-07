@@ -201,6 +201,27 @@ end
 
 local function indicator_spans(opts)
   local bar_style = (opts and opts.bar_style) or DEFAULT_BAR_STYLE
+  local pause_status = smelt.signal.get("auto_continue_status")
+  if pause_status then
+    local reason = pause_status.kind == "quota" and "quota exceeded"
+      or pause_status.kind == "rate_limited" and "rate limited" or "interrupted"
+    local action = "paused"
+    if pause_status.phase == "waiting_for_idle" then
+      action = "resuming when idle"
+    elseif pause_status.phase == "scheduled" then
+      local at = math.floor(pause_status.next_attempt_at_ms / 1000)
+      local today = smelt.time.format(math.floor(smelt.time.now_ms() / 1000), "%Y-%m-%d")
+      local format = smelt.time.format(at, "%Y-%m-%d") == today and "%H:%M" or "%b %d %H:%M"
+      local time = smelt.time.format(at, format)
+      if time then action = "resuming at " .. time end
+    end
+    return {
+      { text = "─", style = bar_style, priority = INDICATOR_PRIORITY, selectable = false },
+      { text = " " .. reason, style = COMMENT_DIM_STYLE, priority = INDICATOR_PRIORITY },
+      { text = " ·", style = bar_style, priority = LABEL_PRIORITY, selectable = false },
+      { text = " " .. action, style = COMMENT_DIM_STYLE, priority = LABEL_PRIORITY },
+    }
+  end
   local state = smelt.signal.get("work_state")
   if not state or state == "idle" then return nil end
 
@@ -498,6 +519,7 @@ invalidate_on(M.aux_win, {
   "work_state",
 })
 invalidate_on(M.top_win, {
+  "auto_continue_status",
   "fast_mode",
   "input_epoch",
   "model",

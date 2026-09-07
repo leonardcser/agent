@@ -1749,8 +1749,15 @@ impl ConversationRuntime {
         self.turn.finish_dispatch(dispatch);
     }
 
-    pub(crate) fn begin_prepared_turn(&mut self) {
-        self.turn.begin_prepared_turn();
+    pub(crate) fn begin_prepared_turn(
+        &mut self,
+        overrides: smelt_core::custom_commands::CommandOverrides,
+    ) {
+        self.turn.begin_prepared_turn(overrides);
+    }
+
+    pub(crate) fn turn_request_overrides(&self) -> &smelt_core::custom_commands::CommandOverrides {
+        &self.turn.request_overrides
     }
 
     pub(crate) fn record_started_turn(
@@ -1769,6 +1776,18 @@ impl ConversationRuntime {
 
     pub(crate) fn clear_continuation(&mut self) {
         self.turn.clear_continuation();
+    }
+
+    pub(crate) fn turn_pause(&self) -> Option<super::agent::TurnPause> {
+        self.turn.pause
+    }
+
+    pub(crate) fn set_turn_pause(&mut self, pause: Option<super::agent::TurnPause>) {
+        self.turn.pause = pause;
+    }
+
+    pub(crate) fn continuation_token(&self) -> Option<u64> {
+        self.turn.pending_continuation_token()
     }
 
     pub(crate) fn consume_continuation(&mut self, token: u64) -> bool {

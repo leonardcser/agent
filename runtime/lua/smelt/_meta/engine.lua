@@ -16,10 +16,14 @@ engine.ask = nil
 ---@type fun(spec: smelt.engine.InheritedAskSpec): integer
 engine.ask_inherited = nil
 
---- Cancel the in-flight turn or foreground/background work. If queued prompt messages are waiting during a turn, restores them to the prompt instead of cancelling. In-flight `smelt.engine.ask` requests are unaffected and may still fire callbacks unless their lifecycle guard expires.
+--- Cancel the in-flight turn or foreground/background work. During an error pause, stops automatic resume and cancels foreground busy work without discarding queued messages. If queued prompt messages are waiting during an active turn, restores them to the prompt instead of cancelling. In-flight `smelt.engine.ask` requests are unaffected and may still fire callbacks unless their lifecycle guard expires.
 ---@see smelt.engine.ask
 ---@type fun(): nil
 engine.cancel = nil
+
+--- Return the current session's continuation token and pause state. A new turn, cancellation, or session change invalidates scheduled continuations.
+---@type fun(): smelt.engine.ContinuationState
+engine.continuation_state = nil
 
 --- Return `true` while a turn is being prepared, persisted, executed, or finalized.
 ---@type fun(): boolean
@@ -46,6 +50,10 @@ engine.reload = nil
 --- Schedule a full config reload for the next safe idle point, including prompt inputs such as AGENTS.md, skills, and `--system-prompt`. Returns `true` when this call queued a new reload and `false` when one was already pending.
 ---@type fun(): boolean
 engine.reload_when_idle = nil
+
+--- Resume the interrupted conversation with its command-scoped overrides, without adding a user message or advancing the turn queue. Returns false if the token is stale, the session is not paused, or execution is blocked by busy work or a modal. The token must come from continuation_state; callers choose the retry timing.
+---@type fun(token: integer): boolean
+engine.resume_paused = nil
 
 --- Start an agent turn from a Lua-defined custom command (`/name`). `display` overrides the transcript label while `name` remains the command id. Queues behind the active turn if the agent is already running. See `smelt.engine.CommandOverrides` for the override shape.
 ---@see smelt.engine.CommandOverrides

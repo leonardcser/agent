@@ -1002,16 +1002,10 @@ impl TuiApp {
         // semantic update rather than repainting a frame late.
         self.drain_signals_pending();
 
-        let show_queued = self.prompt_input_is_busy();
-
         self.ui.resolve_tail_scrolls();
         self.ui.sync_scroll_links();
 
-        let queued_owned: Vec<String> = if show_queued {
-            self.prompt.queued_texts()
-        } else {
-            Vec::new()
-        };
+        let queued_owned = self.prompt.queued_texts();
         let queued: &[String] = &queued_owned;
 
         let (has_prompt_cursor, has_transcript_cursor) = self.compute_cursor_ownership();

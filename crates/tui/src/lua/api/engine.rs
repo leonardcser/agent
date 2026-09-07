@@ -9,6 +9,31 @@ use smelt_core::lua::module::LuaMod;
 use smelt_core::lua::AskCallbacks;
 use std::sync::Arc;
 
+/// Current continuation identity and automatic-dispatch pause. Scoped to the current session.
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.engine.ContinuationState")]
+pub struct LuaContinuationState {
+    /// Single-use identity of the latest continuable turn, if one exists.
+    pub token: Option<u64>,
+    /// Whether automatic turn dispatch is stopped after an error or cancellation.
+    pub paused: bool,
+    /// Provider error kind, or `"cancelled"` after a user cancellation.
+    pub error_kind: Option<String>,
+    /// Provider-supplied reset time in Unix milliseconds, if known.
+    pub retry_at_ms: Option<u64>,
+}
+
+impl mlua::IntoLua for LuaContinuationState {
+    fn into_lua(self, lua: &Lua) -> LuaResult<mlua::Value> {
+        let table = lua.create_table()?;
+        table.set("token", self.token)?;
+        table.set("paused", self.paused)?;
+        table.set("error_kind", self.error_kind)?;
+        table.set("retry_at_ms", self.retry_at_ms)?;
+        Ok(mlua::Value::Table(table))
+    }
+}
+
 /// One text-only message used by request hooks that exchange plain
 /// user/assistant rows.
 #[allow(dead_code)]
@@ -307,7 +332,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let host = LuaMod::extend_supported(lua, m.tbl.clone(), "smelt.engine", Tier::Host);
     m.live_only_fn(
         "cancel",
-        "Cancel the in-flight turn or foreground/background work. If queued prompt messages are waiting during a turn, restores them to the prompt instead of cancelling. In-flight `smelt.engine.ask` requests are unaffected and may still fire callbacks unless their lifecycle guard expires.",
+        "Cancel the in-flight turn or foreground/background work. During an error pause, stops automatic resume and cancels foreground busy work without discarding queued messages. If queued prompt messages are waiting during an active turn, restores them to the prompt instead of cancelling. In-flight `smelt.engine.ask` requests are unaffected and may still fire callbacks unless their lifecycle guard expires.",
         &[],
         |_, ()| -> LuaResult<()> {
             crate::lua::with_agent_host(|host| host.cancel_engine_work());
@@ -329,6 +354,29 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 crate::lua::try_with_agent_host(|host| host.turn_lifecycle_is_active())
                     .unwrap_or(false),
             )
+        },
+    )?;
+    m.fn_(
+        "continuation_state",
+        "Return the current session's continuation token and pause state. A new turn, cancellation, or session change invalidates scheduled continuations.",
+        &[],
+        |_, ()| {
+            let (token, pause) = crate::lua::try_with_agent_host(|host| host.continuation_state())
+                .unwrap_or_default();
+            Ok(LuaContinuationState {
+                token,
+                paused: pause.is_some(),
+                error_kind: pause.and_then(|pause| pause.kind).map(|kind| kind.as_str().to_string()),
+                retry_at_ms: pause.and_then(|pause| pause.retry_at_ms),
+            })
+        },
+    )?;
+    m.live_only_fn(
+        "resume_paused",
+        "Resume the interrupted conversation with its command-scoped overrides, without adding a user message or advancing the turn queue. Returns false if the token is stale, the session is not paused, or execution is blocked by busy work or a modal. The token must come from continuation_state; callers choose the retry timing.",
+        &["token"],
+        |_, token: u64| -> LuaResult<bool> {
+            Ok(crate::lua::with_agent_host(|host| host.resume_paused_turn(token)))
         },
     )?;
     host.fn_(

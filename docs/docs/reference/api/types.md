@@ -328,6 +328,19 @@ Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors w
 | `tools` | [smelt.engine.RuleOverride](types.md#smeltengineruleoverride) |  | Per-tool `allow`/`ask`/`deny` patterns for the duration of the turn. |
 | `[string]` | [smelt.engine.RuleOverride](types.md#smeltengineruleoverride) |  | Per-subcommand pattern buckets keyed by tool name. |
 
+### `smelt.engine.ContinuationState`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Current continuation identity and automatic-dispatch pause. Scoped to the current session.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `token` | `integer` |  | Single-use identity of the latest continuable turn, if one exists. |
+| `paused` | `boolean` | yes | Whether automatic turn dispatch is stopped after an error or cancellation. |
+| `error_kind` | `string` |  | Provider error kind, or `"cancelled"` after a user cancellation. |
+| `retry_at_ms` | `integer` |  | Provider-supplied reset time in Unix milliseconds, if known. |
+
 ### `smelt.engine.InheritedAskSpec`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
@@ -1594,7 +1607,7 @@ Variants: `"allow"` \| `"ask"` \| `"deny"`
 
 Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
 
-Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"cwd_branch"` \| `"cwd_managed_worktree"` \| `"cwd_project"` \| `"cwd_worktree"` \| `"cwd_worktree_path"` \| `"errors"` \| `"fast_mode"` \| `"history"` \| `"history_epoch"` \| `"input_epoch"` \| `"input_submit"` \| `"keymap_pending"` \| `"model"` \| `"now"` \| `"notification_visible"` \| `"permission_pending"` \| `"prompt_queue_revision"` \| `"prompt_resize_active"` \| `"prompt_resize_chrome"` \| `"reasoning"` \| `"running_procs"` \| `"session_ended"` \| `"session_epoch"` \| `"session_started"` \| `"session_slug"` \| `"session_title"` \| `"settings_terminal_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"stream_phase"` \| `"task_label"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"tps"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"viewport_pos"` \| `"vim_mode"` \| `"vim_pending_input"` \| `"work_busy"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
+Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"auto_continue_status"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"cwd_branch"` \| `"cwd_managed_worktree"` \| `"cwd_project"` \| `"cwd_worktree"` \| `"cwd_worktree_path"` \| `"errors"` \| `"fast_mode"` \| `"history"` \| `"history_epoch"` \| `"input_epoch"` \| `"input_submit"` \| `"keymap_pending"` \| `"model"` \| `"now"` \| `"notification_visible"` \| `"permission_pending"` \| `"prompt_queue_revision"` \| `"prompt_resize_active"` \| `"prompt_resize_chrome"` \| `"reasoning"` \| `"running_procs"` \| `"session_ended"` \| `"session_epoch"` \| `"session_started"` \| `"session_slug"` \| `"session_title"` \| `"settings_auto_continue"` \| `"settings_terminal_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"stream_phase"` \| `"task_label"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"tps"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"viewport_pos"` \| `"vim_mode"` \| `"vim_pending_input"` \| `"work_busy"` \| `"work_continuation_token"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_pause_kind"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
 
 ### `smelt.tools.Decision`
 

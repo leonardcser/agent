@@ -352,6 +352,42 @@ smelt.settings.brave_search_api_key_env = "BRAVE_SEARCH_API_KEY"
 export BRAVE_SEARCH_API_KEY=...
 ```
 
+### Auto-continue and quota pauses
+
+`smelt.settings.auto_continue` controls automatic continuation in interactive
+sessions: `"off"` disables it, `"goal"` continues active goals with auto-continue
+enabled, and `"always"` also allows continuation without a goal.
+
+A quota or rate-limit error pauses the interrupted conversation. Queued messages
+stay visible above the prompt and are not sent while paused. When the provider
+supplies a reset time and auto-continue allows it, the same row shows
+`quota exceeded · resuming at 14:30` in local time, showing the next attempt.
+To detect early quota resets, retries back off from 1 minute to 2 minutes,
+4 minutes, and then every 5 minutes. The original provider reset time is retained:
+if it arrives before the next periodic retry, smelt tries just after that reset
+instead. Later estimates cannot postpone an untried reset deadline, and a retry
+response that omits reset metadata does not stop an established recovery schedule.
+Resumption defers while a draft, dialog, or busy task needs attention.
+If the initial error has no known reset time, the status reads
+`quota exceeded · paused` and recovery requires a manual retry.
+
+Press **Enter** with an empty prompt to retry the interrupted conversation
+manually. **Esc Esc**, the usual cancel chord, stops a scheduled retry and cancels
+foreground busy work without discarding queued messages (close any open picker
+first). New input submitted during the pause is queued. Resuming retries the
+original work first; turn-queued messages follow after it finishes. Request-queued
+steering retains its separate delivery stage. Command-scoped model, sampling,
+reasoning, and permission overrides survive retries and reloads without being
+applied to subsequent queued turns. Changes to global settings while paused still
+apply where the interrupted command has no override.
+
+Background-process completions are recorded during the pause but cannot bypass
+the retry schedule. A repeated, expired reset time does not trigger rapid retries;
+periodic backoff continues. Reloading preserves the backoff and the next attempt.
+Settings and goal changes are rechecked before resuming, and cancellation or a
+session change invalidates the pending continuation. Successful recovery or a
+manual resume starts a fresh backoff for any subsequent quota pause.
+
 ### Request audit
 
 `smelt.settings.request_audit` controls the provider-request records stored in

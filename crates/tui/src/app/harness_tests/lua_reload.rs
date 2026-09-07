@@ -1695,7 +1695,9 @@ fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
     assert!(app.run_lua(
         r#"
             local goal = require("smelt.goal")
-            smelt.engine.is_running = function() return _G.__goal_running == true end
+            smelt.engine.has_active_turn = function() return _G.__goal_running == true end
+            smelt.engine.continuation_state = function() return { token = 42, paused = false } end
+            smelt.time.now_ms = function() return _G.__goal_now_ms or 0 end
             smelt.engine.submit_command_continuation = function(name, body, _overrides, display, continuation_token)
                 _G.__goal_submit = { name = name, body = body, display = display, continuation_token = continuation_token }
                 return continuation_token == 42
@@ -1703,11 +1705,20 @@ fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
             _G.__goal_running = true
             assert(goal.create("finish <the> & goal", { auto_continue = true }))
             goal.schedule_auto_continue(42)
-            _G.__goal_running = false
+            _G.__goal_now_ms = 1300
         "#,
     ));
 
     app.feed_one(SourceEvent::Tick(1300));
+    app.tick_timers();
+    assert!(app.run_lua(
+        r#"
+        assert(_G.__goal_submit == nil)
+        _G.__goal_running = false
+        _G.__goal_now_ms = 1600
+    "#
+    ));
+    app.feed_one(SourceEvent::Tick(300));
     app.tick_timers();
     assert!(app.run_lua(
         r##"

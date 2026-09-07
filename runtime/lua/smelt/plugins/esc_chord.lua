@@ -4,7 +4,9 @@
 smelt.keymap.set("", "<Esc><Esc>", function(ctx)
   local restore_insert = ctx.vim_mode_at_chord_start == "insert"
 
-  if smelt.engine.has_active_turn() or smelt.work.is_busy() then
+  local continuation = smelt.engine.continuation_state()
+  local paused = continuation.paused and continuation.error_kind ~= "cancelled"
+  if paused or smelt.engine.has_active_turn() or smelt.work.is_busy() then
     if smelt.engine.is_running() and __smelt_internal.session._rewind_active_turn_if_clean({ restore_vim_insert = restore_insert }) then
       return
     end

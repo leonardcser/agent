@@ -366,24 +366,16 @@ impl ConversationLuaHost<'_> {
     }
 
     pub(crate) fn queued_prompt_texts(&self) -> Vec<String> {
-        if self.app.prompt_input_is_busy() {
-            self.app.prompt.queued_texts()
-        } else {
-            Vec::new()
-        }
+        self.app.prompt.queued_texts()
     }
 
     pub(crate) fn queued_prompt_rows(&self) -> Vec<(String, &'static str)> {
-        if self.app.prompt_input_is_busy() {
-            self.app
-                .prompt
-                .queued_rows()
-                .into_iter()
-                .map(|row| (row.text, row.stage.as_str()))
-                .collect()
-        } else {
-            Vec::new()
-        }
+        self.app
+            .prompt
+            .queued_rows()
+            .into_iter()
+            .map(|row| (row.text, row.stage.as_str()))
+            .collect()
     }
 
     pub(crate) fn prompt_has_stash(&self) -> bool {
@@ -625,7 +617,9 @@ impl AgentLuaHost<'_> {
     }
 
     pub(crate) fn cancel_engine_work(&mut self) {
-        if self.app.prompt.queue_is_empty() {
+        if self.app.conversation.turn_pause().is_some() {
+            self.app.cancel_turn_work();
+        } else if self.app.prompt.queue_is_empty() {
             self.app.discard_turn(crate::app::TurnEnd::Cancelled);
         } else {
             self.app.drain_queued_inputs_into_prompt();
@@ -658,7 +652,9 @@ impl AgentLuaHost<'_> {
         &mut self,
         command: smelt_core::custom_commands::CustomCommand,
     ) {
-        if self.app.prompt_input_is_busy() {
+        if self.app.prompt_input_is_busy()
+            || self.app.prompt_work_state() == crate::app::PromptWorkState::Paused
+        {
             let text = if self.app.core.config.settings.redact_secrets {
                 engine::redact::redact(&command.body)
             } else {
@@ -688,13 +684,30 @@ impl AgentLuaHost<'_> {
         self.app.conversation.set_active(turn);
     }
 
+    pub(crate) fn continuation_state(&self) -> (Option<u64>, Option<crate::app::agent::TurnPause>) {
+        (
+            self.app.conversation.continuation_token(),
+            self.app.conversation.turn_pause(),
+        )
+    }
+
+    pub(crate) fn resume_paused_turn(&mut self, token: u64) -> bool {
+        self.app.resume_paused_turn(Some(token))
+    }
+
     pub(crate) fn submit_custom_command_continuation(
         &mut self,
         command: smelt_core::custom_commands::CustomCommand,
         continuation_token: u64,
     ) -> bool {
         if self.app.prompt_input_is_busy()
-            || !self.app.consume_continuation_token(continuation_token)
+            || self.app.modal_blocks_agent()
+            || self.app.conversation.turn_pause().is_some()
+            || !self.app.prompt.queue_is_empty()
+            || !self
+                .app
+                .conversation
+                .consume_continuation(continuation_token)
         {
             return false;
         }

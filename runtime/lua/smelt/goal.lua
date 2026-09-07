@@ -128,7 +128,7 @@ end
 local function store_goal(goal)
   sessions()[session_id()] = normalize_goal(goal)
   state.save()
-  auto_continue.bump_generation()
+  auto_continue.refresh()
   if headerline then headerline.invalidate() end
 end
 

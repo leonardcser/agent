@@ -853,7 +853,23 @@ impl TuiApp {
                         message: message.clone(),
                     }),
                 );
-                self.notify_turn_error_sticky(message);
+                if matches!(
+                    kind,
+                    Some(
+                        protocol::EngineAskErrorKind::Quota
+                            | protocol::EngineAskErrorKind::RateLimited
+                    )
+                ) {
+                    if let Ok(mut messages) = self.lua.core_shared().messages.lock() {
+                        messages.append(
+                            smelt_core::messages::MessageKind::Error,
+                            "smelt".into(),
+                            message,
+                        );
+                    }
+                } else {
+                    self.notify_turn_error_sticky(message);
+                }
                 SessionControl::Error { kind, retry_at_ms }
             }
             EngineEvent::Shutdown { .. } => SessionControl::Error {

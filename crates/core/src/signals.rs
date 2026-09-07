@@ -518,6 +518,7 @@ const fn event(name: &'static str) -> BuiltinSignal {
 
 pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("agent_mode"),
+    state("auto_continue_status"),
     event("block_done"),
     state("branch"),
     event("cmd_post"),
@@ -553,6 +554,7 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     event("session_started"),
     state("session_slug"),
     state("session_title"),
+    state("settings_auto_continue"),
     state("settings_terminal_title"),
     event("shutdown"),
     state("spinner_frame"),
@@ -571,9 +573,11 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("vim_mode"),
     state("vim_pending_input"),
     state("work_busy"),
+    state("work_continuation_token"),
     state("work_elapsed_ms"),
     state("work_label"),
     state("work_outcome"),
+    state("work_pause_kind"),
     state("work_retry_attempt"),
     state("work_retry_remaining_ms"),
     state("work_state"),
@@ -838,6 +842,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
 
     signals.declare("vim_mode", seeds.vim_mode);
     signals.declare("agent_mode", seeds.agent_mode);
+    signals.declare("auto_continue_status", None::<String>);
     signals.declare("model", seeds.model);
     signals.declare("reasoning", seeds.reasoning);
     signals.declare("fast_mode", false);
@@ -853,6 +858,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("session_epoch", 0u64);
     signals.declare("session_slug", String::new());
     signals.declare("session_title", seeds.session_title);
+    signals.declare("settings_auto_continue", String::from("goal"));
     signals.declare("settings_terminal_title", true);
     signals.declare("branch", seeds.branch);
     signals.declare("history_epoch", 0u64);
@@ -886,6 +892,8 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("work_label", String::new());
     signals.declare("work_elapsed_ms", 0u64);
     signals.declare("work_busy", Vec::<WorkBusyEntry>::new());
+    signals.declare("work_continuation_token", 0u64);
+    signals.declare("work_pause_kind", String::new());
     signals.declare("work_outcome", String::new());
     signals.declare("work_retry_attempt", 0u32);
     signals.declare("work_retry_remaining_ms", 0u64);
@@ -1254,8 +1262,9 @@ mod tests {
             }
         }
 
-        // Event-shaped signals project to nil before their first payload.
+        // Absent state and event payloads project to nil.
         for name in [
+            "auto_continue_status",
             "history",
             "turn_complete",
             "turn_error",
@@ -1290,15 +1299,19 @@ mod tests {
             other => panic!("expected Table, got {other:?}"),
         }
 
-        // Every name in `BUILTIN_SIGNALS` must round-trip through
-        // `Signals::get_lua` (i.e. actually be declared above). Adding a
-        // new builtin without updating the metadata trips this test.
+        // Nullable state must still have a declared slot and a Lua projector.
         for signal in BUILTIN_SIGNALS {
             let name = signal.name;
-            let v = signals.get_lua(name, &lua);
+            let slot = signals
+                .slots
+                .get(name)
+                .unwrap_or_else(|| panic!("builtin signal `{name}` is not declared"));
             assert!(
-                !matches!(v, mlua::Value::Nil) || signal.kind == BuiltinSignalKind::Event,
-                "BUILTIN_SIGNALS lists `{name}` but Signals::get_lua returned Nil for a non-event signal"
+                signal.kind == BuiltinSignalKind::Event
+                    || signals
+                        .lua_projectors
+                        .contains_key(&(*slot.value).type_id()),
+                "builtin state signal `{name}` has no Lua projector"
             );
         }
     }
