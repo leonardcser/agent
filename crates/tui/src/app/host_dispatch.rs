@@ -102,7 +102,7 @@ struct DeferredHostReply {
 
 fn current_model_history_decision(app: &TuiApp) -> HostRequestDecision {
     let coordinates = app.model_history_source().coordinates();
-    HostRequestDecision::replace_model_history(app.model_history_messages(), coordinates)
+    HostRequestDecision::replace_model_history(app.model_history(), coordinates)
 }
 
 fn request_decision_from_lua(

@@ -23,6 +23,11 @@ pub enum HostRequestDecision {
         messages: Vec<Message>,
         coordinates: protocol::ModelHistoryCoordinates,
     },
+    /// Replace the model view without discarding canonical message metadata.
+    ReplaceModelHistory {
+        history: Vec<protocol::HistoryItem>,
+        coordinates: protocol::ModelHistoryCoordinates,
+    },
     Abort(String),
 }
 
@@ -35,11 +40,11 @@ impl HostRequestDecision {
     }
 
     pub fn replace_model_history(
-        messages: Vec<Message>,
+        history: Vec<protocol::HistoryItem>,
         coordinates: protocol::ModelHistoryCoordinates,
     ) -> Self {
-        Self::Replace {
-            messages,
+        Self::ReplaceModelHistory {
+            history,
             coordinates,
         }
     }
@@ -89,10 +94,10 @@ pub enum HostCall {
     /// Engine hit a context-window error mid-turn. The host's registered
     /// recovery hook (`smelt.engine.on_context_limit`) is invoked with
     /// the conversation up to that point and returns a shorter
-    /// conversation to retry with. `Replace { .. }` swaps the engine's
-    /// `messages` (excluding the system prompt at index 0) and re-runs
-    /// the loop; `Continue` (no hook registered, hook returned nil, or hook
-    /// failed) aborts the turn with the existing `TurnError`; `Abort(message)`
+    /// conversation to retry with. Both replacement variants swap the engine's
+    /// history (excluding the system prompt at index 0) and re-run the loop;
+    /// `Continue` (no hook registered, hook returned nil, or hook failed)
+    /// aborts the turn with the existing `TurnError`; `Abort(message)`
     /// aborts with a host-provided terminal error.
     RecoverFromContextLimit {
         turn_id: u64,

@@ -399,7 +399,7 @@ fn auto_compaction_does_not_recompact_checkpoint_summary_without_new_old_groups(
     }
     assert!(matches!(
         rx.try_recv().expect("first prepare reply"),
-        engine::HostRequestDecision::Replace { .. }
+        engine::HostRequestDecision::ReplaceModelHistory { .. }
     ));
     let checkpoint = app
         .conversation_probe()
@@ -1346,6 +1346,7 @@ async fn real_engine_compaction_preserves_queued_inputs() {
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
+    const SENT_AT_MS: u64 = 1_742_567_823_000;
     for recovery in [false, true] {
         for action in ["promote", "steer", "pop", "multi", "withdraw"] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1433,6 +1434,7 @@ async fn real_engine_compaction_preserves_queued_inputs() {
                 .with_cwd(cwd.path())
                 .with_lua_load_paths(&config_dir, None)
                 .with_engine(engine)
+                .with_wall_time(std::time::UNIX_EPOCH + Duration::from_millis(SENT_AT_MS))
                 .build();
             app.set_terminal_size(80, 24);
             app.use_model(smelt_core::config::ResolvedModel {
@@ -1495,6 +1497,7 @@ async fn real_engine_compaction_preserves_queued_inputs() {
                     );
                     if summary_delta {
                         assert_eq!(app.working_probe().phase_label(), Some("compacting"));
+                        app.clock.advance(Duration::from_secs(1));
                         app.type_text("QUEUED_FIRST");
                         if action == "steer" {
                             app.press_mod(KeyCode::Char('q'), KeyModifiers::CONTROL);
@@ -1522,6 +1525,7 @@ async fn real_engine_compaction_preserves_queued_inputs() {
                             "recovery={recovery}, action={action}"
                         );
                         assert_eq!(app.working_probe().phase_label(), Some("compacting"));
+                        app.clock.advance(Duration::from_secs(60));
                         release.take().expect("one compaction").send(()).unwrap();
                     }
                     app.render_to_frame();
@@ -1566,6 +1570,25 @@ async fn real_engine_compaction_preserves_queued_inputs() {
             )
             .expect("saved canonical history")
             .history;
+            for (content, expected_time) in [
+                ("CURRENT_TASK", SENT_AT_MS),
+                ("QUEUED_FIRST", SENT_AT_MS + 1_000),
+                ("QUEUED_SECOND", SENT_AT_MS + 1_000),
+                ("QUEUED_THIRD", SENT_AT_MS + 1_000),
+            ] {
+                if (content == "QUEUED_FIRST" && action == "withdraw")
+                    || (matches!(content, "QUEUED_SECOND" | "QUEUED_THIRD") && action != "multi")
+                {
+                    continue;
+                }
+                assert!(
+                    history.iter().any(|item| matches!(item,
+                        protocol::HistoryItem::User { content: actual, sent_at_ms: Some(time), .. }
+                            if actual.text_content() == content && *time == expected_time
+                    )),
+                    "submission time lost: recovery={recovery}, action={action}, content={content}, history={history:?}"
+                );
+            }
             let text = serde_json::to_string(&history).unwrap();
             assert_eq!(
                 text.matches("QUEUED_FIRST").count(),

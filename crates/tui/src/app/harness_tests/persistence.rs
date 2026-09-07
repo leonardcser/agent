@@ -2615,20 +2615,19 @@ async fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
         .try_recv()
         .expect("compaction prepare reply should be ready")
     {
-        engine::HostRequestDecision::Replace {
-            messages,
+        engine::HostRequestDecision::ReplaceModelHistory {
+            history,
             coordinates,
-        } => (messages, coordinates),
+        } => (history, coordinates),
         decision => panic!("expected model-history replacement, got {decision:?}"),
     };
     assert_eq!(coordinates.model_prefix_len(), 1);
     assert_eq!(coordinates.canonical_start().get(), compacted_prefix_len);
     assert_eq!(replacement.len(), 2);
 
-    let replacement_history = protocol::history_from_messages(replacement);
     app.feed_one(SourceEvent::engine(EngineEvent::HistoryUpdated {
         turn_id: 42,
-        update: coordinates.canonical_delta(protocol::ModelHistoryIndex::ZERO, replacement_history),
+        update: coordinates.canonical_delta(protocol::ModelHistoryIndex::ZERO, replacement),
     }));
     assert_eq!(compacted_marker_count(&app), 1);
     app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {

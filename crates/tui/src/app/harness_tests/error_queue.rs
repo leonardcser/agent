@@ -321,6 +321,9 @@ fn quota_retry_resumes_original_work_without_consuming_the_turn_queue() {
     let mut app = isolated_app();
     create_auto_goal(&mut app, "finish original work");
     start_canonical_turn(&mut app);
+    let original_history = app.session_history().to_vec();
+    app.feed_one(SourceEvent::Tick(1_000));
+    let sent_at_ms = engine::clock::unix_time_ms(app.clock.as_ref());
     app.steer("pending steering");
     app.push_queued_message("next turn".into());
     let _ = app.drain_engine_sends();
@@ -333,8 +336,13 @@ fn quota_retry_resumes_original_work_without_consuming_the_turn_queue() {
         1
     );
     assert!(cmds.iter().any(|cmd| matches!(cmd, protocol::UiCommand::StartTurn(payload) if payload.input.provider_content().is_empty())));
-    assert!(cmds.iter().any(|cmd| matches!(cmd, protocol::UiCommand::Steer { input } if input.provider_content().text_content() == "pending steering")));
+    assert!(cmds
+        .iter()
+        .any(|cmd| matches!(cmd, protocol::UiCommand::Steer { input }
+        if input.provider_content().text_content() == "pending steering"
+            && input.sent_at_ms() == Some(sent_at_ms))));
     assert_eq!(app.state().queued_inputs.len(), 2);
+    assert_eq!(app.session_history(), original_history);
 }
 
 #[test]

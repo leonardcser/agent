@@ -1405,7 +1405,21 @@ impl<'a> Turn<'a> {
                     coordinates,
                 },
                 deferred,
-            ) => (messages, coordinates, deferred),
+            ) => {
+                warn_if_replacement_has_orphans(&messages, "prepare_request");
+                (
+                    protocol::history_from_messages(messages),
+                    coordinates,
+                    deferred,
+                )
+            }
+            HostCallResult::Replied(
+                crate::host::HostRequestDecision::ReplaceModelHistory {
+                    history,
+                    coordinates,
+                },
+                deferred,
+            ) => (history, coordinates, deferred),
         };
         if replacement.is_empty() {
             log::entry(
@@ -1416,17 +1430,15 @@ impl<'a> Turn<'a> {
             self.apply_deferred_turn_cmds(deferred);
             return continue_request();
         }
-        warn_if_replacement_has_orphans(&replacement, "prepare_request");
-        let new = protocol::history_from_messages(replacement);
         log::entry(
             log::Level::Info,
             "prepare_request_replaced",
             &serde_json::json!({
                 "estimated_tokens_before": estimated_tokens,
-                "new_message_count": new.len() + 1,
+                "new_message_count": replacement.len() + 1,
             }),
         );
-        self.replace_model_history(new, coordinates);
+        self.replace_model_history(replacement, coordinates);
         self.apply_deferred_turn_cmds(deferred);
         PrepareRequestOutcome::Restart
     }
@@ -1692,10 +1704,10 @@ impl<'a> Turn<'a> {
                         // conversation. On success we swap history
                         // (preserving the system prompt at index 0)
                         // and re-enter the loop transparently. The view
-                        // sent to the host is the wire-shape; the
-                        // returned `Vec<Message>` is folded back into
-                        // `HistoryItem`s, which repairs any orphan
-                        // tool_use the compaction plugin might emit.
+                        // sent to the host is the wire shape; a canonical
+                        // replacement retains its metadata, while message
+                        // replacements are folded back into `HistoryItem`s
+                        // and repaired for orphan tool calls.
                         let recovery_view: Vec<Message> = protocol::history_to_messages(
                             &self.history.iter().skip(1).cloned().collect::<Vec<_>>(),
                         );
@@ -1708,7 +1720,7 @@ impl<'a> Turn<'a> {
                                 }
                             })
                             .await;
-                        match recovery_decision {
+                        let replacement = match recovery_decision {
                             HostCallResult::Cancelled
                             | HostCallResult::Replied(crate::host::HostRequestDecision::Stop, _) => {
                                 self.emit_turn_complete(true);
@@ -1734,22 +1746,35 @@ impl<'a> Turn<'a> {
                                 deferred,
                             ) => {
                                 warn_if_replacement_has_orphans(&shorter, "context_limit_recovery");
-                                let new = protocol::history_from_messages(shorter);
-                                log::entry(
-                                    log::Level::Info,
-                                    "context_limit_recovered",
-                                    &serde_json::json!({"new_message_count": new.len() + 1}),
-                                );
-                                self.replace_model_history(new, coordinates);
-                                provider_turn_cmds.extend(deferred);
-                                self.apply_deferred_turn_cmds(provider_turn_cmds);
-                                continue;
+                                Some((
+                                    protocol::history_from_messages(shorter),
+                                    coordinates,
+                                    deferred,
+                                ))
                             }
+                            HostCallResult::Replied(
+                                crate::host::HostRequestDecision::ReplaceModelHistory {
+                                    history,
+                                    coordinates,
+                                },
+                                deferred,
+                            ) => Some((history, coordinates, deferred)),
                             HostCallResult::Replied(
                                 crate::host::HostRequestDecision::Continue,
                                 _,
                             )
-                            | HostCallResult::Dropped(_) => {}
+                            | HostCallResult::Dropped(_) => None,
+                        };
+                        if let Some((history, coordinates, deferred)) = replacement {
+                            log::entry(
+                                log::Level::Info,
+                                "context_limit_recovered",
+                                &serde_json::json!({"new_message_count": history.len() + 1}),
+                            );
+                            self.replace_model_history(history, coordinates);
+                            provider_turn_cmds.extend(deferred);
+                            self.apply_deferred_turn_cmds(provider_turn_cmds);
+                            continue;
                         }
                     }
                     let message = if is_ctx {

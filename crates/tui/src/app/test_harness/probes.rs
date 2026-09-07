@@ -529,7 +529,7 @@ impl TestApp {
             .try_recv()
             .expect("compaction prepare reply should be ready")
         {
-            engine::HostRequestDecision::Replace { messages, .. } => messages,
+            engine::HostRequestDecision::ReplaceModelHistory { history, .. } => history,
             decision => panic!("expected compaction replacement, got {decision:?}"),
         };
         assert!(!replacement.is_empty(), "compaction replacement is empty");
