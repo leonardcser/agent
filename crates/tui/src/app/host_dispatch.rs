@@ -8,11 +8,11 @@ use protocol::Message;
 use smelt_core::lua::{HookRegistry, LuaShared};
 use smelt_core::working::TurnPhase;
 use std::cell::RefCell;
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 type MessageReply = oneshot::Sender<HostRequestDecision>;
-type MessageReplySlot = Arc<Mutex<Option<MessageReply>>>;
 const PREPARE_CONTEXT_HISTORY_DELTA_MAX_ITEMS: usize = 256;
 
 thread_local! {
@@ -21,15 +21,83 @@ thread_local! {
 
 enum DeferredRequestDecision {
     Continue,
+    Stop,
     ReplaceCanonical(Vec<Message>),
     ReplaceModelHistory,
     Abort(String),
 }
 
+#[derive(Default)]
+pub(super) struct HostWorkState {
+    pending: Option<Rc<RequestHook>>,
+    context_recalculation: Option<super::BusyToken>,
+    handoff_turn: Option<u64>,
+}
+
+struct RequestHook {
+    turn_id: u64,
+    cancel_generation: u64,
+    reply: RefCell<Option<MessageReply>>,
+    compaction: RefCell<Option<super::BusyToken>>,
+}
+
+impl RequestHook {
+    fn is_current(&self, app: &TuiApp) -> bool {
+        Some(self.turn_id) == app.active_agent_turn_id()
+            && self.cancel_generation == app.conversation.cancel_generation()
+    }
+
+    fn complete(self: &Rc<Self>, decision: DeferredRequestDecision) {
+        let Some(reply) = self.reply.borrow_mut().take() else {
+            return;
+        };
+        DEFERRED_HOST_REPLIES.with(|replies| {
+            replies.borrow_mut().push(DeferredHostReply {
+                reply,
+                decision,
+                owner: Rc::clone(self),
+            });
+        });
+    }
+
+    fn finish_compaction(&self) {
+        if let Some(token) = self.compaction.borrow_mut().take() {
+            token.release();
+        }
+    }
+}
+
+/// The Lua callback, unlike the pending request, owns the default reply.
+/// GC and reload complete through the same main-thread path as an explicit reply.
+struct RequestHookReply(Rc<RequestHook>);
+
+impl Drop for RequestHookReply {
+    fn drop(&mut self) {
+        self.0.complete(DeferredRequestDecision::Continue);
+    }
+}
+
+/// An actual context recalculation, independent of request-hook waiting.
+/// The hook may revoke the token even while Lua retains this handle.
+pub(crate) struct ContextRecalculation(super::BusyToken);
+
+impl Drop for ContextRecalculation {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+impl mlua::UserData for ContextRecalculation {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("remove", |_, this, ()| Ok(this.0.release()));
+        methods.add_method("alive", |_, this, ()| Ok(this.0.is_active()));
+    }
+}
+
 struct DeferredHostReply {
     reply: MessageReply,
     decision: DeferredRequestDecision,
-    restore_working_phase: bool,
+    owner: Rc<RequestHook>,
 }
 
 fn current_model_history_decision(app: &TuiApp) -> HostRequestDecision {
@@ -64,43 +132,30 @@ fn request_decision_from_lua(
 
 fn create_message_reply_fn(
     lua: &mlua::Lua,
-    reply_for_closure: MessageReplySlot,
-    compact_phase: bool,
+    owner: Rc<RequestHook>,
 ) -> mlua::Result<mlua::Function> {
+    let reply = RequestHookReply(owner);
     lua.create_function(move |inner_lua, value: mlua::Value| {
-        let Some(reply) = reply_for_closure.lock().ok().and_then(|mut g| g.take()) else {
-            // Already replied; subsequent calls are silent no-ops so
-            // hook authors aren't punished for defensive double-calls.
+        if reply.0.reply.borrow().is_none() {
+            // Defensive double replies are silent no-ops.
             return Ok(());
+        }
+        let (decision, result) = match request_decision_from_lua(inner_lua, value) {
+            Ok(decision) => (decision, Ok(())),
+            Err(error) => (DeferredRequestDecision::Continue, Err(error)),
         };
-        let decision = request_decision_from_lua(inner_lua, value)?;
-        DEFERRED_HOST_REPLIES.with(|replies| {
-            replies.borrow_mut().push(DeferredHostReply {
-                reply,
-                decision,
-                restore_working_phase: compact_phase,
-            });
-        });
-        Ok(())
+        reply.0.complete(decision);
+        result
     })
 }
 
 pub(crate) fn drain_deferred_host_replies(app: &mut TuiApp) {
     let replies = DEFERRED_HOST_REPLIES.with(|replies| std::mem::take(&mut *replies.borrow_mut()));
     for reply in replies {
-        if reply.restore_working_phase {
-            app.restore_working_phase();
-        }
-        let decision = match reply.decision {
-            DeferredRequestDecision::Continue => HostRequestDecision::Continue,
-            DeferredRequestDecision::ReplaceCanonical(messages) => {
-                HostRequestDecision::replace_canonical_history(messages)
-            }
-            DeferredRequestDecision::ReplaceModelHistory => current_model_history_decision(app),
-            DeferredRequestDecision::Abort(message) => HostRequestDecision::Abort(message),
-        };
+        let decision = app.resolve_request_hook(&reply.owner, reply.decision);
         let _ = reply.reply.send(decision);
     }
+    app.sync_compaction_phase();
 }
 
 fn prepare_request_to_lua(
@@ -136,22 +191,161 @@ fn prepare_request_to_lua(
 }
 
 impl TuiApp {
-    fn restore_working_phase(&mut self) {
+    fn begin_request_hook(&mut self, turn_id: u64, reply: MessageReply) -> Rc<RequestHook> {
+        self.cancel_request_hook();
+        let owner = Rc::new(RequestHook {
+            turn_id,
+            cancel_generation: self.conversation.cancel_generation(),
+            reply: RefCell::new(Some(reply)),
+            compaction: RefCell::new(None),
+        });
+        self.host_work.pending = Some(Rc::clone(&owner));
+        owner
+    }
+
+    pub(crate) fn begin_context_recalculation(&mut self, label: String) -> ContextRecalculation {
+        if let Some(previous) = self.host_work.context_recalculation.take() {
+            previous.release();
+            self.clear_compaction_preview();
+        }
+        let token = self.busy_stack.push_context_recalculation_token(label);
+        if let Some(owner) = self
+            .host_work
+            .pending
+            .as_ref()
+            .filter(|owner| owner.is_current(self))
+        {
+            owner.finish_compaction();
+            *owner.compaction.borrow_mut() = Some(token.clone());
+        }
+        self.host_work.context_recalculation = Some(token.clone());
+        self.sync_compaction_phase();
+        ContextRecalculation(token)
+    }
+
+    pub(super) fn cancel_request_hook(&mut self) {
+        if let Some(owner) = self.host_work.pending.clone() {
+            let decision = self.resolve_request_hook(&owner, DeferredRequestDecision::Stop);
+            if let Some(reply) = owner.reply.borrow_mut().take() {
+                let _ = reply.send(decision);
+            }
+        }
+        self.host_work.handoff_turn = None;
+    }
+
+    pub(super) fn defer_queued_compaction_handoff(&mut self) -> bool {
+        let Some(turn_id) = self.active_agent_turn_id() else {
+            return false;
+        };
+        if self.host_work.handoff_turn == Some(turn_id) {
+            return true;
+        }
+        if self.host_work.pending.as_ref().is_some_and(|owner| {
+            owner.is_current(self)
+                && owner
+                    .compaction
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(super::BusyToken::is_active)
+        }) {
+            self.host_work.handoff_turn = Some(turn_id);
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn take_queued_compaction_handoff(&mut self) -> bool {
+        self.host_work.handoff_turn.take().is_some_and(|turn_id| {
+            Some(turn_id) == self.active_agent_turn_id() && self.prompt.has_queued_request()
+        })
+    }
+
+    fn resolve_request_hook(
+        &mut self,
+        owner: &Rc<RequestHook>,
+        decision: DeferredRequestDecision,
+    ) -> HostRequestDecision {
+        owner.finish_compaction();
+        self.sync_compaction_phase();
+        let owns_pending = self
+            .host_work
+            .pending
+            .as_ref()
+            .is_some_and(|pending| Rc::ptr_eq(pending, owner));
+        if !owns_pending {
+            return HostRequestDecision::Stop;
+        }
+        self.host_work.pending = None;
+        if !owner.is_current(self) {
+            self.host_work.handoff_turn = None;
+            return HostRequestDecision::Stop;
+        }
+        if matches!(
+            decision,
+            DeferredRequestDecision::Abort(_) | DeferredRequestDecision::Stop
+        ) {
+            self.host_work.handoff_turn = None;
+        } else if self.host_work.handoff_turn.is_some() {
+            if self.prompt.has_queued_request() {
+                return HostRequestDecision::Stop;
+            }
+            self.host_work.handoff_turn = None;
+        }
+        match decision {
+            DeferredRequestDecision::Continue => HostRequestDecision::Continue,
+            DeferredRequestDecision::Stop => HostRequestDecision::Stop,
+            DeferredRequestDecision::ReplaceCanonical(messages) => {
+                HostRequestDecision::replace_canonical_history(messages)
+            }
+            DeferredRequestDecision::ReplaceModelHistory => current_model_history_decision(self),
+            DeferredRequestDecision::Abort(message) => HostRequestDecision::Abort(message),
+        }
+    }
+
+    fn sync_compaction_phase(&mut self) {
+        let compacting = self
+            .host_work
+            .context_recalculation
+            .as_ref()
+            .is_some_and(super::BusyToken::is_active);
+        if !compacting && self.host_work.context_recalculation.take().is_some() {
+            self.clear_compaction_preview();
+        }
         if self.agent_is_running() {
-            self.working.begin(TurnPhase::Working);
+            if compacting && !self.working.is_compacting() {
+                self.working.begin(TurnPhase::Compacting);
+            } else if !compacting && self.working.is_compacting() {
+                self.working.begin(TurnPhase::Working);
+            }
         }
     }
 
     pub(crate) fn dispatch_host_call(&mut self, call: HostCall) {
         match call {
-            HostCall::ProviderResponse { message, reply } => {
+            HostCall::ProviderResponse {
+                turn_id,
+                message,
+                reply,
+            } => {
+                if self.active_agent_turn_id() != Some(turn_id) {
+                    let _ = reply.send(None);
+                    return;
+                }
                 let mutated = self.run_middleware_chain::<Message>(message, "on_response", |s| {
                     &s.hooks.provider_response
                 });
                 let _ = reply.send(mutated);
             }
-            HostCall::RecoverFromContextLimit { messages, reply } => {
-                self.dispatch_recover_from_context_limit(messages, reply);
+            HostCall::RecoverFromContextLimit {
+                turn_id,
+                messages,
+                reply,
+            } => {
+                if self.active_agent_turn_id() != Some(turn_id) {
+                    let _ = reply.send(HostRequestDecision::Stop);
+                    return;
+                }
+                self.dispatch_recover_from_context_limit(turn_id, messages, reply);
             }
             HostCall::RequestAudit {
                 persistence,
@@ -166,11 +360,16 @@ impl TuiApp {
                 }
             }
             HostCall::PrepareRequest {
+                turn_id,
                 messages,
                 estimated_tokens,
                 reply,
             } => {
-                self.dispatch_prepare_request(messages, estimated_tokens, reply);
+                if self.active_agent_turn_id() != Some(turn_id) {
+                    let _ = reply.send(HostRequestDecision::Stop);
+                    return;
+                }
+                self.dispatch_prepare_request(turn_id, messages, estimated_tokens, reply);
             }
         }
     }
@@ -182,17 +381,26 @@ impl TuiApp {
     /// swaps and retries), `{ action = "abort", message = ... }` (engine
     /// aborts the turn), or `nil`/`{ action = "continue" }` (engine
     /// continues with the original request). If the hook vanishes without
-    /// calling `reply`, the wrapping closure is GC'd, the Sender drops,
-    /// and the engine's `.await` resolves to `None`.
-    fn dispatch_recover_from_context_limit(&mut self, messages: Vec<Message>, reply: MessageReply) {
-        self.call_message_reply_hook(
-            "on_context_limit",
-            |s| &s.hooks.context_limit,
-            messages,
-            reply,
-            true,
-            |_, func, messages_table, reply_fn| func.call::<()>((messages_table, reply_fn)),
-        );
+    /// calling `reply`, GC completes the hook with its default decision.
+    fn dispatch_recover_from_context_limit(
+        &mut self,
+        turn_id: u64,
+        messages: Vec<Message>,
+        reply: MessageReply,
+    ) {
+        let lua = self.lua.lua().clone();
+        let funcs = self
+            .lua
+            .core_shared()
+            .hooks
+            .context_limit
+            .snapshot_for(&lua, "");
+        let Some(func) = funcs.into_iter().next() else {
+            let _ = reply.send(HostRequestDecision::Continue);
+            return;
+        };
+        let payload = smelt_core::lua::serde_to_lua(&lua, &messages);
+        self.call_message_reply_hook(turn_id, "on_context_limit", func, payload, reply);
     }
 
     /// Hand the first registered `smelt.engine.on_prepare_request`
@@ -201,6 +409,7 @@ impl TuiApp {
     /// serialize large histories into Lua.
     fn dispatch_prepare_request(
         &mut self,
+        turn_id: u64,
         messages: PreparedRequestMessages,
         estimated_tokens: u32,
         reply: MessageReply,
@@ -266,111 +475,30 @@ impl TuiApp {
                 },
             )
         };
-        if self.agent_is_running() {
-            self.working.begin(TurnPhase::Compacting);
-        }
-        let reply_slot: MessageReplySlot = Arc::new(Mutex::new(Some(reply)));
-        let reply_for_closure = Arc::clone(&reply_slot);
-        let reply_fn = match create_message_reply_fn(&lua, reply_for_closure, true) {
-            Ok(f) => f,
-            Err(e) => {
-                self.record_lua_error(format!("on_prepare_request: build reply: {e}"));
-                self.restore_working_phase();
-                if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
-                    let _ = tx.send(HostRequestDecision::Continue);
-                }
-                return;
-            }
-        };
-        let request =
-            match prepare_request_to_lua(&lua, messages, estimated_tokens, context_estimate) {
-                Ok(request) => request,
-                Err(e) => {
-                    self.record_lua_error(format!("on_prepare_request: build request: {e}"));
-                    self.restore_working_phase();
-                    if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
-                        let _ = tx.send(HostRequestDecision::Continue);
-                    }
-                    return;
-                }
-            };
-        let call_result = crate::lua::scope_app(self, move || func.call::<()>((request, reply_fn)));
-        match call_result {
-            Ok(()) => {
-                let replied = reply_slot.lock().ok().is_some_and(|g| g.is_none());
-                if replied && self.agent_is_running() {
-                    self.working.begin(TurnPhase::Working);
-                }
-            }
-            Err(e) => {
-                self.record_lua_error(format!("on_prepare_request: {e}"));
-                self.restore_working_phase();
-                if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
-                    let _ = tx.send(HostRequestDecision::Continue);
-                }
-            }
-        }
+        let payload = prepare_request_to_lua(&lua, messages, estimated_tokens, context_estimate)
+            .map(mlua::Value::Table);
+        self.call_message_reply_hook(turn_id, "on_prepare_request", func, payload, reply);
     }
 
     fn call_message_reply_hook(
         &mut self,
+        turn_id: u64,
         label: &'static str,
-        registry: impl Fn(&LuaShared) -> &Arc<HookRegistry>,
-        messages: Vec<Message>,
+        func: mlua::Function,
+        payload: mlua::Result<mlua::Value>,
         reply: MessageReply,
-        compact_phase: bool,
-        call: impl FnOnce(&mlua::Lua, mlua::Function, mlua::Value, mlua::Function) -> mlua::Result<()>,
     ) {
         let lua = self.lua.lua().clone();
-        let funcs = registry(self.lua.core_shared()).snapshot_for(&lua, "");
-        let Some(func) = funcs.into_iter().next() else {
-            let _ = reply.send(HostRequestDecision::Continue);
-            return;
-        };
-        let messages_table = match smelt_core::lua::serde_to_lua(&lua, &messages) {
-            Ok(v) => v,
-            Err(e) => {
-                self.record_lua_error(format!("{label}: serialize messages: {e}"));
-                let _ = reply.send(HostRequestDecision::Continue);
-                return;
-            }
-        };
-        if compact_phase && self.agent_is_running() {
-            self.working.begin(TurnPhase::Compacting);
-        }
-        let reply_slot: MessageReplySlot = Arc::new(Mutex::new(Some(reply)));
-        let reply_for_closure = Arc::clone(&reply_slot);
-        let reply_fn = match create_message_reply_fn(&lua, reply_for_closure, compact_phase) {
-            Ok(f) => f,
-            Err(e) => {
-                self.record_lua_error(format!("{label}: build reply: {e}"));
-                if compact_phase {
-                    self.restore_working_phase();
-                }
-                if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
-                    let _ = tx.send(HostRequestDecision::Continue);
-                }
-                return;
-            }
-        };
-        let call_result =
-            crate::lua::scope_app(self, move || call(&lua, func, messages_table, reply_fn));
-        match call_result {
-            Ok(()) => {
-                let replied = reply_slot.lock().ok().is_some_and(|g| g.is_none());
-                if compact_phase && replied && self.agent_is_running() {
-                    self.working.begin(TurnPhase::Working);
-                }
-            }
-            Err(e) => {
-                self.record_lua_error(format!("{label}: {e}"));
-                if compact_phase {
-                    self.restore_working_phase();
-                }
-                if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
-                    let _ = tx.send(HostRequestDecision::Continue);
-                }
-            }
+        let owner = self.begin_request_hook(turn_id, reply);
+        let result = crate::lua::scope_app(self, || {
+            let payload = payload?;
+            let reply_fn = create_message_reply_fn(&lua, Rc::clone(&owner))?;
+            func.call::<()>((payload, reply_fn))
+        });
+        if let Err(error) = result {
+            self.record_lua_error(format!("{label}: {error}"));
+            owner.complete(DeferredRequestDecision::Continue);
+            drain_deferred_host_replies(self);
         }
     }
 
@@ -568,10 +696,11 @@ mod tests {
     #[test]
     fn retained_reply_callback_defers_without_scoped_host_access() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(42);
         let lua = app.app.lua.lua().clone();
         let (reply, mut response) = tokio::sync::oneshot::channel();
-        let reply_slot = Arc::new(Mutex::new(Some(reply)));
-        let callback = create_message_reply_fn(&lua, reply_slot, false).unwrap();
+        let owner = app.app.begin_request_hook(42, reply);
+        let callback = create_message_reply_fn(&lua, owner).unwrap();
         let value = lua.create_table().unwrap();
         value.set("action", "continue").unwrap();
 
@@ -586,6 +715,248 @@ mod tests {
             response.try_recv().expect("deferred reply"),
             HostRequestDecision::Continue
         ));
+    }
+
+    #[test]
+    fn malformed_request_reply_restores_owning_phase() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(42);
+        let lua = app.app.lua.lua().clone();
+        let (reply, mut response) = oneshot::channel();
+        let owner = app.app.begin_request_hook(42, reply);
+        let _compaction = app.app.begin_context_recalculation("compacting".into());
+        let callback = create_message_reply_fn(&lua, owner).unwrap();
+        let value = lua.create_table().unwrap();
+        value.set("action", "abort").unwrap();
+
+        assert!(callback.call::<()>(value).is_err());
+        crate::lua::scope_app(&mut app.app, || ());
+
+        assert_eq!(app.working_probe().phase_label(), Some("working"));
+        assert!(matches!(
+            response.try_recv().unwrap(),
+            HostRequestDecision::Continue
+        ));
+    }
+
+    #[test]
+    fn queued_compaction_handoff_preserves_overrides_and_honors_cancellation() {
+        use crossterm::event::KeyCode;
+        use protocol::{EngineEvent, UiCommand};
+
+        for cancel in [false, true] {
+            let mut app = crate::app::test_harness::TestApp::builder().build();
+            app.start_turn(42);
+            let lua = app.app.lua.lua().clone();
+            let (reply, mut response) = oneshot::channel();
+            let owner = app.app.begin_request_hook(42, reply);
+            let _compaction = app.app.begin_context_recalculation("compacting".into());
+            let callback = create_message_reply_fn(&lua, owner).unwrap();
+            assert!(app.run_lua(
+                r#"
+                smelt.engine.submit_command("queued", "override body",
+                    { reasoning_effort = "high" }, "queued")
+            "#
+            ));
+            app.press(KeyCode::Enter);
+            app.press(KeyCode::Enter);
+            assert_eq!(app.current_turn_id(), Some(42));
+            assert_eq!(app.working_probe().phase_label(), Some("compacting"));
+            assert!(!app
+                .drain_engine_sends()
+                .iter()
+                .any(|cmd| matches!(cmd, UiCommand::Cancel | UiCommand::StartTurn(_))));
+            if cancel {
+                app.discard_turn(crate::app::TurnEnd::Cancelled);
+            }
+            crate::lua::scope_app(&mut app.app, || callback.call::<()>(mlua::Value::Nil)).unwrap();
+            assert!(matches!(
+                response.try_recv().unwrap(),
+                HostRequestDecision::Stop
+            ));
+            if !cancel {
+                app.press(KeyCode::Enter);
+                assert_eq!(app.current_turn_id(), Some(42));
+            }
+            app.dispatch_engine_event(EngineEvent::TurnComplete {
+                turn_id: 42,
+                history: None,
+                meta: None,
+            });
+            let commands = app.drain_engine_sends();
+            if cancel {
+                assert!(!app.agent_running());
+                assert!(!commands
+                    .iter()
+                    .any(|cmd| matches!(cmd, UiCommand::StartTurn(_))));
+                assert!(app.prompt_source().contains("/queued"));
+            } else {
+                assert!(commands
+                    .iter()
+                    .any(|cmd| matches!(cmd, UiCommand::StartTurn(payload)
+                    if payload.input.provider_content().text_content() == "override body"
+                        && payload.reasoning_effort == protocol::ReasoningEffort::High)));
+                assert_eq!(app.queued_message_count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_request_hook_completes_all_exit_paths() {
+        use crossterm::event::KeyCode;
+        use protocol::{EngineEvent, UiCommand};
+
+        for handoff in [false, true] {
+            for finish in ["reply", "drop", "reload", "malformed", "abort", "cancel"] {
+                let mut app = crate::app::test_harness::TestApp::builder().build();
+                app.start_turn(42);
+                app.app.lua.core_shared().hooks.prepare_request.clear();
+                assert!(app.run_bundled_lua(
+                    r#"
+                    smelt.engine.on_prepare_request(function(_, reply)
+                        _G.pending_reply = reply
+                        _G.compaction = __smelt_internal.work._context_recalculation("compacting")
+                    __smelt_internal.transcript._set_compaction_preview("PENDING_SUMMARY")
+                    end)
+                "#
+                ));
+                let (reply, mut response) = oneshot::channel();
+                app.dispatch_host_call(HostCall::PrepareRequest {
+                    turn_id: 42,
+                    messages: PreparedRequestMessages::model_only(Vec::new()),
+                    estimated_tokens: 0,
+                    reply,
+                });
+                assert_eq!(app.working_probe().phase_label(), Some("compacting"));
+                if handoff {
+                    app.type_text("NEXT_TASK");
+                    app.press(KeyCode::Enter);
+                    app.press(KeyCode::Enter);
+                    app.press(KeyCode::Enter);
+                    assert_eq!(app.current_turn_id(), Some(42));
+                }
+                app.drain_engine_sends();
+                match finish {
+                    "reply" => assert!(app.run_lua("pending_reply(nil); pending_reply(nil)")),
+                    "drop" => {
+                        assert!(app.run_lua("pending_reply = nil; collectgarbage('collect')"))
+                    }
+                    "reload" => app.reload_lua(),
+                    "malformed" => {
+                        assert!(app.run_lua("assert(not pcall(pending_reply, {action = 'abort'}))"))
+                    }
+                    "abort" => assert!(app.run_lua(
+                        "pending_reply({action = 'abort', message = 'terminal failure'})"
+                    )),
+                    "cancel" => {
+                        app.app.finish_turn(crate::app::TurnEnd::Cancelled);
+                    }
+                    _ => unreachable!(),
+                }
+                app.drive_lua_tasks();
+                let decision = response
+                    .try_recv()
+                    .unwrap_or_else(|error| panic!("{finish}, handoff={handoff}: {error}"));
+                match finish {
+                    "abort" => assert!(
+                        matches!(decision, HostRequestDecision::Abort(message) if message == "terminal failure")
+                    ),
+                    "cancel" => assert!(matches!(decision, HostRequestDecision::Stop)),
+                    _ if handoff => assert!(matches!(decision, HostRequestDecision::Stop)),
+                    _ => assert!(matches!(decision, HostRequestDecision::Continue)),
+                }
+                assert!(
+                    app.app.host_work.pending.is_none(),
+                    "{finish}, handoff={handoff}"
+                );
+                assert!(!app.app.busy_stack.context_recalculating());
+                assert!(!app.working_probe().is_compacting());
+                assert!(
+                    app.conversation_probe()
+                        .transcript_compaction_preview_id()
+                        .is_none(),
+                    "{finish}, handoff={handoff}"
+                );
+                if finish != "reload" {
+                    assert!(app.run_lua(
+                        "assert(not compaction:alive()); assert(not compaction:remove())"
+                    ));
+                }
+                if matches!(finish, "abort" | "cancel") {
+                    assert!(app.app.host_work.handoff_turn.is_none());
+                    if finish == "abort" {
+                        app.dispatch_engine_event(EngineEvent::TurnError {
+                            message: "terminal failure".into(),
+                            kind: None,
+                            retry_at_ms: None,
+                        });
+                        assert_eq!(app.queued_message_count(), usize::from(handoff));
+                        assert!(!app
+                            .drain_engine_sends()
+                            .iter()
+                            .any(|command| matches!(command, UiCommand::StartTurn(_))));
+                    }
+                } else if handoff {
+                    app.press(KeyCode::Enter);
+                    assert_eq!(app.current_turn_id(), Some(42));
+                    app.dispatch_engine_event(EngineEvent::TurnComplete {
+                        turn_id: 42,
+                        history: None,
+                        meta: None,
+                    });
+                    assert!(app
+                        .drain_engine_sends()
+                        .iter()
+                        .any(|command| matches!(command, UiCommand::StartTurn(payload)
+                        if payload.input.provider_content().text_content() == "NEXT_TASK")));
+                    assert_eq!(app.queued_message_count(), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_handle_drop_and_hook_error_release_owned_work() {
+        for error in [false, true] {
+            let mut app = crate::app::test_harness::TestApp::builder().build();
+            app.start_turn(42);
+            app.app.lua.core_shared().hooks.prepare_request.clear();
+            assert!(app.run_bundled_lua(&format!(
+                r#"
+                smelt.engine.on_prepare_request(function(_, reply)
+                    _G.pending_reply = reply
+                    _G.compaction = __smelt_internal.work._context_recalculation("compacting")
+                    __smelt_internal.transcript._set_compaction_preview("PENDING_SUMMARY")
+                    if {error} then error("hook failed") end
+                end)
+            "#
+            )));
+            let (reply, mut response) = oneshot::channel();
+            app.dispatch_host_call(HostCall::PrepareRequest {
+                turn_id: 42,
+                messages: PreparedRequestMessages::model_only(Vec::new()),
+                estimated_tokens: 0,
+                reply,
+            });
+            if !error {
+                assert!(app.run_lua("compaction = nil; collectgarbage('collect')"));
+                assert!(app.app.host_work.pending.is_some());
+            } else {
+                assert!(app.run_lua("assert(not compaction:alive())"));
+            }
+            assert_eq!(app.working_probe().phase_label(), Some("working"));
+            assert!(!app.app.busy_stack.context_recalculating());
+            assert!(app
+                .conversation_probe()
+                .transcript_compaction_preview_id()
+                .is_none());
+            assert!(app.run_lua("pending_reply(nil)"));
+            assert!(matches!(
+                response.try_recv().unwrap(),
+                HostRequestDecision::Continue
+            ));
+            assert!(app.app.host_work.pending.is_none());
+        }
     }
 
     #[test]

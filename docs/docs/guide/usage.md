@@ -135,9 +135,15 @@ the selection.
 
 - `Enter` while busy: queue this message for later
 - `Ctrl+Enter` / `Ctrl+Q` while busy: steer the current response
-- `Enter` on an empty prompt: send the next queued message immediately
+- `Enter` on an empty prompt while responding: promote the next queued message to steering
+- Another empty `Enter`: interrupt and start the first steering message as a fresh turn
 - `Esc`: bring queued messages back into the prompt so you can edit them
 - `Esc Esc`: cancel active work, or rewind when idle
+
+During automatic compaction, that fresh turn waits for the in-flight compaction
+instead of cancelling and restarting it. The selected message and remaining
+queue are preserved. Explicit cancellation still stops compaction. Messages
+queued during manual `/compact` run after compaction finishes.
 
 ## Copying Conversation Messages
 

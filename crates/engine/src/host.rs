@@ -16,6 +16,9 @@ use tokio::sync::oneshot;
 #[derive(Debug)]
 pub enum HostRequestDecision {
     Continue,
+    /// End the turn without sending another request or acknowledging pending
+    /// steering inputs. The host retains those inputs for a subsequent turn.
+    Stop,
     Replace {
         messages: Vec<Message>,
         coordinates: protocol::ModelHistoryCoordinates,
@@ -71,12 +74,14 @@ impl PreparedRequestMessages {
 }
 
 /// One callback from the engine to the frontend host. Request/reply variants
-/// fall back to their default when the host drops `reply` without sending.
+/// carry their originating turn, which the host validates before running hooks.
+/// They fall back to their default when the host drops `reply` without sending.
 pub enum HostCall {
     /// Run `smelt.provider.middleware{on_response=...}` hooks against
     /// the assembled assistant message. `Some(msg)` replaces it before
     /// it's pushed to history; `None` keeps the original.
     ProviderResponse {
+        turn_id: u64,
         message: Message,
         reply: oneshot::Sender<Option<Message>>,
     },
@@ -90,6 +95,7 @@ pub enum HostCall {
     /// failed) aborts the turn with the existing `TurnError`; `Abort(message)`
     /// aborts with a host-provided terminal error.
     RecoverFromContextLimit {
+        turn_id: u64,
         messages: Vec<Message>,
         reply: oneshot::Sender<HostRequestDecision>,
     },
@@ -107,6 +113,7 @@ pub enum HostCall {
     /// excludes the system prompt, while `messages.wire()` is shared with
     /// the provider call when the hook leaves history unchanged.
     PrepareRequest {
+        turn_id: u64,
         messages: PreparedRequestMessages,
         estimated_tokens: u32,
         reply: oneshot::Sender<HostRequestDecision>,

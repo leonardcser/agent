@@ -1380,6 +1380,7 @@ impl TuiApp {
 
     /// Stop the engine turn without saving session or triggering auto-compact; used before rewind/clear.
     pub(crate) fn cancel_agent(&mut self) {
+        self.cancel_request_hook();
         let turn = self
             .conversation
             .active()
@@ -1427,6 +1428,7 @@ impl TuiApp {
     }
 
     pub(crate) fn discard_turn(&mut self, end: crate::app::TurnEnd) -> TerminalCommitStatus {
+        self.cancel_request_hook();
         let was_running = self.conversation.is_active();
         if was_running {
             let outcome = self.finish_turn_outcome(end);
@@ -1457,6 +1459,7 @@ impl TuiApp {
     }
 
     pub(crate) fn finish_turn(&mut self, end: crate::app::TurnEnd) -> bool {
+        self.cancel_request_hook();
         let outcome = self.finish_turn_outcome(end);
         outcome.start_queued && outcome.terminal_commit.is_durable()
     }

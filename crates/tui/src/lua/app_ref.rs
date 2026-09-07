@@ -854,9 +854,8 @@ impl AgentLuaHost<'_> {
     pub(crate) fn context_recalculation_registration(
         &mut self,
         label: String,
-    ) -> smelt_core::lua::reg::LuaReg {
-        let token = self.app.busy_stack.push_context_recalculation_token(label);
-        smelt_core::lua::reg::LuaReg::new(move || token.release())
+    ) -> crate::app::host_dispatch::ContextRecalculation {
+        self.app.begin_context_recalculation(label)
     }
 
     pub(crate) fn is_busy(&self) -> bool {

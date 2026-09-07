@@ -1592,10 +1592,12 @@ fn store_backed_resume_uses_provider_snapshot_for_pre_request_compaction() {
     settings.compact_keep_recent_groups = 1.0;
     resumed.set_settings_for_harness(settings);
     resumed.set_context_window(Some(1_000));
+    resumed.start_turn(42);
 
     let messages = protocol::history_to_messages(&resumed.model_history());
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     resumed.dispatch_host_call(engine::HostCall::PrepareRequest {
+        turn_id: resumed.current_turn_id().expect("active request turn"),
         messages: engine::PreparedRequestMessages::model_only(messages),
         estimated_tokens: 2_000,
         reply: tx,
@@ -1877,6 +1879,7 @@ fn resumed_rewind_restores_prior_turn_context_before_next_request() {
     resumed.set_settings_for_harness(settings);
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     resumed.dispatch_host_call(engine::HostCall::PrepareRequest {
+        turn_id: resumed.current_turn_id().expect("active request turn"),
         messages: engine::PreparedRequestMessages::model_only(protocol::history_to_messages(
             &resumed.model_history(),
         )),
@@ -2494,6 +2497,7 @@ async fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     {
         app.dispatch_host_call(engine::HostCall::PrepareRequest {
+            turn_id: app.current_turn_id().expect("active request turn"),
             messages: engine::PreparedRequestMessages::model_only(messages),
             estimated_tokens: 200,
             reply: tx,

@@ -312,6 +312,7 @@ pub struct TuiApp {
     pending_turn_dispatch: Option<crate::app::agent::PendingTurnDispatch>,
     pub(crate) paint_registry: crate::lua::paint::PaintRegistry,
     pub(crate) working: smelt_core::working::WorkingState,
+    host_work: host_dispatch::HostWorkState,
     /// Resolved viewport rectangles read by mouse hit-testing and scroll estimation.
     pub(crate) layout: crate::content::layout::LayoutState,
     /// Inputs that produced the retained root layout tree.
@@ -744,13 +745,24 @@ struct BusyStackEntry {
     context_recalculating: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct BusyToken {
     state: std::rc::Weak<std::cell::RefCell<BusyStackState>>,
     id: u64,
 }
 
 impl BusyToken {
-    pub(crate) fn release(self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
+        self.state.upgrade().is_some_and(|state| {
+            state
+                .borrow()
+                .entries
+                .iter()
+                .any(|entry| entry.id == self.id)
+        })
+    }
+
+    pub(crate) fn release(&self) -> bool {
         self.state
             .upgrade()
             .is_some_and(|state| release_busy_entry(&mut state.borrow_mut(), self.id))
@@ -2005,6 +2017,7 @@ impl TuiApp {
             pending_turn_dispatch: None,
             paint_registry: crate::lua::paint::PaintRegistry::default(),
             working: smelt_core::working::WorkingState::new(working_clock),
+            host_work: host_dispatch::HostWorkState::default(),
             layout: crate::content::layout::LayoutState::default(),
             main_layout_inputs: None,
             platform,

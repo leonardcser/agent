@@ -476,16 +476,16 @@ impl TestApp {
         }
 
         self.install_compaction_prepare_fixture();
-        if variant % 2 == 1 {
+        if !self.agent_running() || variant % 2 == 1 {
             self.start_turn(20_000 + u64::from(variant));
         }
-        let should_preserve_turn = self.agent_running();
 
         let full_history = protocol::history_to_messages(&self.app.model_history());
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         {
             self.app
                 .dispatch_host_call(engine::HostCall::PrepareRequest {
+                    turn_id: self.current_turn_id().expect("active request turn"),
                     messages: engine::PreparedRequestMessages::model_only(full_history),
                     estimated_tokens: 200,
                     reply: tx,
@@ -533,8 +533,6 @@ impl TestApp {
         };
         assert!(!replacement.is_empty(), "compaction replacement is empty");
         self.tick_signals();
-        if should_preserve_turn {
-            assert!(self.agent_running(), "compaction ended the active turn");
-        }
+        assert!(self.agent_running(), "compaction ended the active turn");
     }
 }

@@ -383,7 +383,11 @@ impl TuiApp {
         match end {
             SessionControl::Continue | SessionControl::NeedsConfirm(_) => true,
             SessionControl::Done => {
-                self.discard_turn(crate::app::TurnEnd::Complete);
+                if self.take_queued_compaction_handoff() {
+                    self.interrupt_with_next_queued();
+                } else {
+                    self.discard_turn(crate::app::TurnEnd::Complete);
+                }
                 false
             }
             SessionControl::Error { kind, retry_at_ms } => {

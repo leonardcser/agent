@@ -863,7 +863,10 @@ impl TuiApp {
         }
     }
 
-    fn interrupt_with_next_queued(&mut self) {
+    pub(super) fn interrupt_with_next_queued(&mut self) {
+        if self.defer_queued_compaction_handoff() {
+            return;
+        }
         let interrupted = self.prompt.suspend_for_interrupt();
         if interrupted.unsteer_count() > 0 {
             self.core.engine.send(protocol::UiCommand::Unsteer {

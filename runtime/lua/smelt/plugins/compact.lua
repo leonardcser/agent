@@ -224,7 +224,7 @@ end
 -- system prompt and tool list. `history` may be a strict prefix of the
 -- live model-visible conversation; when omitted the full live history is
 -- inherited.
-local function summarize_messages(history, instructions, done)
+local function summarize_messages(history, instructions, current, done)
 	if not history or #history == 0 then
 		done(nil)
 		return
@@ -237,13 +237,18 @@ local function summarize_messages(history, instructions, done)
 	table.insert(base_messages, { role = "user", content = task })
 
 	local function finish(summary, err)
-		if not summary then
+		if not summary and current() then
 			set_compaction_preview(nil)
 		end
 		done(summary, err)
 	end
 
 	local function send(messages, retrying_after_tool_denial)
+		if not current() then
+			finish(nil, { kind = "cancelled", message = "compaction superseded" })
+			return
+		end
+		local response_received = false
 		streamed_summary = ""
 		set_compaction_preview(streamed_summary)
 		smelt.engine.ask_inherited({
@@ -251,10 +256,21 @@ local function summarize_messages(history, instructions, done)
 			model = smelt.model.preferred("compact"),
 			visible_retries = true,
 			on_delta = function(delta)
+				if response_received or not current() then
+					return
+				end
 				streamed_summary = streamed_summary .. delta
 				set_compaction_preview(streamed_summary)
 			end,
 			on_response = function(response, err)
+				if response_received then
+					return
+				end
+				response_received = true
+				if not current() then
+					finish(nil, { kind = "cancelled", message = "compaction superseded" })
+					return
+				end
 				if err then
 					if smelt.task.is_cancelled(err) then
 						finish(nil, err)
@@ -400,28 +416,29 @@ local function checkpointed_messages_from_boundary(history, summary, first_live_
 	return out
 end
 
-local function summarize_by_group_boundary(history, instructions, handle, done)
-	local function finish_early()
-		if handle then
-			handle:remove()
-		end
-		done(nil)
-	end
+local function summarize_by_group_boundary(history, instructions, done)
 	if not history or #history == 0 then
-		finish_early()
+		done(nil)
 		return
 	end
 
 	local boundary = compaction_boundary(history)
 	if not boundary then
-		finish_early()
+		done(nil)
 		return
 	end
 
+	local handle = __smelt_internal.work._context_recalculation("compacting")
 	local groups = boundary.groups
 	local suffix_start_group = boundary.suffix_start_group
 	local summary_instructions = combine_instructions(instructions, recent_user_intent_instructions(history))
 	local finished = false
+	local work_guard = smelt.work.guard()
+	local lifecycle = smelt.lifecycle.guard({ "session", "history" }):latest("compaction")
+
+	local function current()
+		return not finished and handle:alive() and lifecycle:alive() and smelt.work.guard_current(work_guard)
+	end
 
 	local function finish(summary, err, first_live_message_index)
 		if finished then
@@ -429,9 +446,7 @@ local function summarize_by_group_boundary(history, instructions, handle, done)
 		end
 		finished = true
 		local ok, callback_err = pcall(done, summary, err, first_live_message_index)
-		if handle then
-			handle:remove()
-		end
+		handle:remove()
 		if not ok then
 			error(callback_err)
 		end
@@ -445,7 +460,7 @@ local function summarize_by_group_boundary(history, instructions, handle, done)
 		end
 
 		local prefix_messages = slice_group_prefix(history, groups, prefix_last_group)
-		summarize_messages(prefix_messages, summary_instructions, function(summary, err)
+		summarize_messages(prefix_messages, summary_instructions, current, function(summary, err)
 			if summary then
 				finish(summary, nil, suffix_first_live_message_index(history, groups, suffix_start_group))
 				return
@@ -467,16 +482,11 @@ local function summarize_by_group_boundary(history, instructions, handle, done)
 		end)
 	end
 
-	attempt()
-end
-
-local function summarize_by_group_boundary_with_busy(history, instructions, done)
-	local handle = __smelt_internal.work._context_recalculation("compacting")
-	summarize_by_group_boundary(history, instructions, handle, done)
-end
-
-local function summarize_by_group_boundary_quiet(history, instructions, done)
-	summarize_by_group_boundary(history, instructions, nil, done)
+	local ok, err = pcall(attempt)
+	if not ok then
+		handle:remove()
+		error(err)
+	end
 end
 
 local function emit_event(phase, before_tokens, after_tokens, extra)
@@ -519,7 +529,7 @@ local function run_compact(opts)
 	-- Summarise the original history. `ask_inherited` keeps the request
 	-- prefix byte-identical to the main turn for cache reuse.
 	local guard = smelt.work.guard()
-	summarize_by_group_boundary_with_busy(history, opts and opts.instructions, function(summary, err, first_live_message_index)
+	summarize_by_group_boundary(history, opts and opts.instructions, function(summary, err, first_live_message_index)
 		if smelt.task.is_cancelled(err) then
 			return
 		end
@@ -582,9 +592,8 @@ local function compact_live_session(before_tokens, phase, opts, done)
 		done(nil)
 		return
 	end
-	summarize_by_group_boundary_quiet(history, nil, function(summary, err, first_live_message_index)
+	summarize_by_group_boundary(history, nil, function(summary, err, first_live_message_index)
 		if opts and opts.guard and not smelt.work.guard_current(opts.guard) then
-			set_compaction_preview(nil)
 			done(nil, nil)
 			return
 		end
@@ -690,9 +699,8 @@ smelt.engine.on_context_limit(function(messages, reply)
 	end
 
 	local guard = smelt.work.guard()
-	summarize_by_group_boundary_quiet(messages, nil, function(summary, err, first_live_message_index)
+	summarize_by_group_boundary(messages, nil, function(summary, err, first_live_message_index)
 		if not smelt.work.guard_current(guard) then
-			set_compaction_preview(nil)
 			reply(nil)
 			return
 		end

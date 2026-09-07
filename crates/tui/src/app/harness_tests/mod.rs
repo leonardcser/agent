@@ -520,11 +520,13 @@ async fn compaction_prepare_request_preserves_session_prefix_and_appends_summary
     app.push_assistant_text("a1");
     app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u2")));
 
+    app.start_turn(42);
     let full_history = protocol::history_to_messages(&app.model_history());
     let expected_prefix = &full_history[..2];
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
         app.dispatch_host_call(engine::HostCall::PrepareRequest {
+            turn_id: app.current_turn_id().expect("active request turn"),
             messages: engine::PreparedRequestMessages::model_only(full_history.clone()),
             estimated_tokens: 200,
             reply: tx,
@@ -576,6 +578,7 @@ async fn compaction_prepare_request_keeps_active_turn_guard_current() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
         app.dispatch_host_call(engine::HostCall::PrepareRequest {
+            turn_id: app.current_turn_id().expect("active request turn"),
             messages: engine::PreparedRequestMessages::model_only(full_history),
             estimated_tokens: 200,
             reply: tx,
@@ -606,6 +609,7 @@ async fn compaction_prepare_request_keeps_active_turn_guard_current() {
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_context_limit_moves_boundary_earlier_on_context_window() {
     let mut app = TestApp::builder().build();
+    app.start_turn(42);
     let messages = vec![
         user_message("u1"),
         assistant_message("a1"),
@@ -616,6 +620,7 @@ async fn compaction_context_limit_moves_boundary_earlier_on_context_window() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
         app.dispatch_host_call(engine::HostCall::RecoverFromContextLimit {
+            turn_id: app.current_turn_id().expect("active request turn"),
             messages: messages.clone(),
             reply: tx,
         });
@@ -660,6 +665,7 @@ async fn compaction_context_limit_moves_boundary_earlier_on_context_window() {
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_context_limit_denies_tool_calls_without_moving_boundary() {
     let mut app = TestApp::builder().build();
+    app.start_turn(42);
     let messages = vec![
         user_message("u1"),
         assistant_message("a1"),
@@ -668,6 +674,7 @@ async fn compaction_context_limit_denies_tool_calls_without_moving_boundary() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
         app.dispatch_host_call(engine::HostCall::RecoverFromContextLimit {
+            turn_id: app.current_turn_id().expect("active request turn"),
             messages: messages.clone(),
             reply: tx,
         });
@@ -705,10 +712,12 @@ async fn compaction_context_limit_denies_tool_calls_without_moving_boundary() {
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_context_limit_returns_none_when_no_earlier_boundary_fits() {
     let mut app = TestApp::builder().build();
+    app.start_turn(42);
     let messages = vec![user_message("u1"), user_message("u2")];
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
         app.dispatch_host_call(engine::HostCall::RecoverFromContextLimit {
+            turn_id: app.current_turn_id().expect("active request turn"),
             messages,
             reply: tx,
         });

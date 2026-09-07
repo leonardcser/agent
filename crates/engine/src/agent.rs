@@ -966,9 +966,9 @@ struct Turn<'a> {
 }
 
 enum HostCallResult<T> {
-    Replied(T),
+    Replied(T, Vec<UiCommand>),
     Cancelled,
-    Dropped,
+    Dropped(Vec<UiCommand>),
 }
 
 struct PreparedRequest {
@@ -1023,34 +1023,25 @@ impl<'a> Turn<'a> {
     /// Fire a `HostCall` and await its `oneshot::Sender<Reply>`.
     ///
     /// Commands received while waiting are handled immediately except for
-    /// `Steer`/`Unsteer` injections, which are collected and applied only
-    /// if the host replies successfully. This keeps speculative user messages
-    /// from surviving an error or cancellation.
-    async fn host_call<Reply, F>(
-        &mut self,
-        build: F,
-        mut apply_on_success: impl FnMut(&mut Self, Vec<UiCommand>),
-    ) -> HostCallResult<Reply>
+    /// `Steer`/`Unsteer` injections. The caller applies those only after
+    /// installing any replacement history and deciding to continue the turn.
+    async fn host_call<Reply, F>(&mut self, build: F) -> HostCallResult<Reply>
     where
-        F: FnOnce(tokio::sync::oneshot::Sender<Reply>) -> crate::host::HostCall,
+        F: FnOnce(u64, tokio::sync::oneshot::Sender<Reply>) -> crate::host::HostCall,
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if self.host_tx.send(build(tx)).is_err() {
-            return HostCallResult::Dropped;
+        if self.host_tx.send(build(self.turn_id, tx)).is_err() {
+            return HostCallResult::Dropped(Vec::new());
         }
         tokio::pin!(rx);
         let mut deferred: Vec<UiCommand> = Vec::new();
         loop {
             tokio::select! {
                 res = &mut rx => {
-                    let result = match res {
-                        Ok(reply) => HostCallResult::Replied(reply),
-                        Err(_) => HostCallResult::Dropped,
+                    return match res {
+                        Ok(reply) => HostCallResult::Replied(reply, deferred),
+                        Err(_) => HostCallResult::Dropped(deferred),
                     };
-                    if matches!(result, HostCallResult::Replied(_)) {
-                        apply_on_success(self, deferred);
-                    }
-                    return result;
                 }
                 Some(cmd) = self.cmd_rx.recv() => {
                     match ActiveTurnCommand::classify(cmd) {
@@ -1063,7 +1054,7 @@ impl<'a> Turn<'a> {
                         return HostCallResult::Cancelled;
                     }
                 }
-                else => return HostCallResult::Dropped,
+                else => return HostCallResult::Dropped(deferred),
             }
         }
     }
@@ -1073,19 +1064,22 @@ impl<'a> Turn<'a> {
     /// any hook produced one; otherwise the original.
     async fn apply_response_hooks(&mut self, message: Message) -> Message {
         match self
-            .host_call(
-                |reply| crate::host::HostCall::ProviderResponse {
-                    message: message.clone(),
-                    reply,
-                },
-                |this, deferred| this.apply_deferred_turn_cmds(deferred),
-            )
+            .host_call(|turn_id, reply| crate::host::HostCall::ProviderResponse {
+                turn_id,
+                message: message.clone(),
+                reply,
+            })
             .await
         {
-            HostCallResult::Replied(Some(replacement)) => replacement,
-            HostCallResult::Replied(None) | HostCallResult::Dropped | HostCallResult::Cancelled => {
+            HostCallResult::Replied(replacement, deferred) => {
+                self.apply_deferred_turn_cmds(deferred);
+                replacement.unwrap_or(message)
+            }
+            HostCallResult::Dropped(deferred) => {
+                self.apply_deferred_turn_cmds(deferred);
                 message
             }
+            HostCallResult::Cancelled => message,
         }
     }
 
@@ -1368,19 +1362,14 @@ impl<'a> Turn<'a> {
         let history_revision = self.history_revision;
         let estimated_tokens =
             estimate_prompt_tokens(&self.system_prompt, messages.model(), tool_defs);
-        let apply_deferred = |this: &mut Self, deferred: Vec<UiCommand>| {
-            this.apply_deferred_turn_cmds(deferred);
-        };
         let host_messages = messages.clone();
         let decision = self
-            .host_call(
-                |reply| crate::host::HostCall::PrepareRequest {
-                    messages: host_messages,
-                    estimated_tokens,
-                    reply,
-                },
-                apply_deferred,
-            )
+            .host_call(|turn_id, reply| crate::host::HostCall::PrepareRequest {
+                turn_id,
+                messages: host_messages,
+                estimated_tokens,
+                reply,
+            })
             .await;
         let continue_request = || {
             PrepareRequestOutcome::Continue(PreparedRequest {
@@ -1388,17 +1377,26 @@ impl<'a> Turn<'a> {
                 history_revision,
             })
         };
-        let (replacement, coordinates) = match decision {
-            HostCallResult::Replied(crate::host::HostRequestDecision::Continue)
-            | HostCallResult::Dropped => return continue_request(),
-            HostCallResult::Cancelled => return PrepareRequestOutcome::Cancelled,
-            HostCallResult::Replied(crate::host::HostRequestDecision::Abort(message)) => {
+        let (replacement, coordinates, deferred) = match decision {
+            HostCallResult::Replied(crate::host::HostRequestDecision::Continue, deferred)
+            | HostCallResult::Dropped(deferred) => {
+                self.apply_deferred_turn_cmds(deferred);
+                return continue_request();
+            }
+            HostCallResult::Cancelled
+            | HostCallResult::Replied(crate::host::HostRequestDecision::Stop, _) => {
+                return PrepareRequestOutcome::Cancelled;
+            }
+            HostCallResult::Replied(crate::host::HostRequestDecision::Abort(message), _) => {
                 return PrepareRequestOutcome::Abort(message);
             }
-            HostCallResult::Replied(crate::host::HostRequestDecision::Replace {
-                messages,
-                coordinates,
-            }) => (messages, coordinates),
+            HostCallResult::Replied(
+                crate::host::HostRequestDecision::Replace {
+                    messages,
+                    coordinates,
+                },
+                deferred,
+            ) => (messages, coordinates, deferred),
         };
         if replacement.is_empty() {
             log::entry(
@@ -1406,6 +1404,7 @@ impl<'a> Turn<'a> {
                 "prepare_request_empty_replacement",
                 &serde_json::json!({}),
             );
+            self.apply_deferred_turn_cmds(deferred);
             return continue_request();
         }
         warn_if_replacement_has_orphans(&replacement, "prepare_request");
@@ -1419,6 +1418,7 @@ impl<'a> Turn<'a> {
             }),
         );
         self.replace_model_history(new, coordinates);
+        self.apply_deferred_turn_cmds(deferred);
         PrepareRequestOutcome::Restart
     }
 
@@ -1685,22 +1685,24 @@ impl<'a> Turn<'a> {
                             &self.history.iter().skip(1).cloned().collect::<Vec<_>>(),
                         );
                         let recovery_decision = self
-                            .host_call(
-                                |reply| crate::host::HostCall::RecoverFromContextLimit {
+                            .host_call(|turn_id, reply| {
+                                crate::host::HostCall::RecoverFromContextLimit {
+                                    turn_id,
                                     messages: recovery_view,
                                     reply,
-                                },
-                                |this, deferred| this.apply_deferred_turn_cmds(deferred),
-                            )
+                                }
+                            })
                             .await;
                         match recovery_decision {
-                            HostCallResult::Cancelled => {
+                            HostCallResult::Cancelled
+                            | HostCallResult::Replied(crate::host::HostRequestDecision::Stop, _) => {
                                 self.emit_turn_complete(true);
                                 return;
                             }
-                            HostCallResult::Replied(crate::host::HostRequestDecision::Abort(
-                                message,
-                            )) => {
+                            HostCallResult::Replied(
+                                crate::host::HostRequestDecision::Abort(message),
+                                _,
+                            ) => {
                                 self.emit(EngineEvent::TurnError {
                                     message,
                                     kind: None,
@@ -1714,6 +1716,7 @@ impl<'a> Turn<'a> {
                                     messages: shorter,
                                     coordinates,
                                 },
+                                deferred,
                             ) => {
                                 warn_if_replacement_has_orphans(&shorter, "context_limit_recovery");
                                 let new = protocol::history_from_messages(shorter);
@@ -1723,10 +1726,15 @@ impl<'a> Turn<'a> {
                                     &serde_json::json!({"new_message_count": new.len() + 1}),
                                 );
                                 self.replace_model_history(new, coordinates);
+                                provider_turn_cmds.extend(deferred);
+                                self.apply_deferred_turn_cmds(provider_turn_cmds);
                                 continue;
                             }
-                            HostCallResult::Replied(crate::host::HostRequestDecision::Continue)
-                            | HostCallResult::Dropped => {}
+                            HostCallResult::Replied(
+                                crate::host::HostRequestDecision::Continue,
+                                _,
+                            )
+                            | HostCallResult::Dropped(_) => {}
                         }
                     }
                     let message = if is_ctx {

@@ -36,10 +36,10 @@ concurrently; the most recently pushed label wins for display.",
     m.private_fn(
         "_context_recalculation",
         &["label"],
-        |_, label: String| -> LuaResult<LuaReg> {
-            Ok(crate::lua::with_agent_host(|host| {
-                host.context_recalculation_registration(label)
-            }))
+        |lua, label: String| -> LuaResult<mlua::Value> {
+            let handle =
+                crate::lua::with_agent_host(|host| host.context_recalculation_registration(label));
+            lua.create_userdata(handle).map(mlua::Value::UserData)
         },
     )?;
     m.fn_(
