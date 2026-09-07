@@ -2239,6 +2239,37 @@ fn repeated_store_backed_resume_cycles_preserve_all_history() {
 }
 
 #[test]
+fn resume_waits_for_pending_catalog_publication() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+    let root = smelt_core::session::sessions_dir();
+    let layout = smelt_store::SessionStoreLayout::from_sessions_root(&root);
+    let marker = smelt_store::CatalogMarkerLock::acquire(&root, &session_id).unwrap();
+    smelt_store::Catalog::open(layout.catalog_path())
+        .unwrap()
+        .remove(&session_id)
+        .unwrap();
+    std::fs::create_dir_all(layout.catalog_pending_dir()).unwrap();
+    std::fs::write(layout.catalog_pending_path(&session_id), [1; 16]).unwrap();
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(marker);
+        });
+        assert!(
+            resumed.load_session_by_id(&session_id),
+            "resume rejected a durable session while catalog publication was pending: {:?}",
+            resumed
+                .overlays_probe()
+                .notification()
+                .map(|notification| &notification.summary)
+        );
+    });
+    assert_eq!(resumed.session_message_count(), 1);
+}
+
+#[test]
 fn resuming_session_with_active_writer_is_read_only() {
     let guard = test_home_guard();
     let mut writer = TestApp::builder().build_with_test_home_guard(&guard);

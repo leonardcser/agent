@@ -1953,19 +1953,54 @@ impl SessionStorage {
         };
         let id_string = id.into_string();
         let catalog_path = self.layout().catalog_path();
-        let session = if let Some(catalog) = self.initialized_catalog() {
-            catalog.session(&id_string)
-        } else {
-            match smelt_store::CatalogReader::open_existing(&catalog_path) {
-                Ok(Some(catalog)) => catalog.session(&id_string),
-                Ok(None) => Ok(None),
-                Err(error) => Err(error),
+        let read_catalog = || {
+            let result = if let Some(catalog) = self.initialized_catalog() {
+                catalog.session(&id_string)
+            } else {
+                match smelt_store::CatalogReader::open_existing(&catalog_path) {
+                    Ok(Some(catalog)) => catalog.session(&id_string),
+                    Ok(None) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            };
+            result.map_err(|error| {
+                crate::session_store::store_error("read session catalog", &catalog_path, error)
+            })
+        };
+        let mut session = read_catalog()?;
+        if session.is_none() {
+            // A canonical commit can survive shutdown before its derived catalog
+            // row is published. Its durable marker distinguishes pending repair
+            // from a genuinely missing session, without scanning on normal reads.
+            if smelt_store::catalog_session_pending_token(self.sessions_dir(), &id_string)
+                .map_err(|error| {
+                    crate::session_store::store_error(
+                        "read pending session catalog marker",
+                        &catalog_path,
+                        error,
+                    )
+                })?
+                .is_some()
+            {
+                let catalog =
+                    self.catalog()
+                        .map_err(|error| SessionStoreError::CatalogUnavailable {
+                            kind: "catalog_unavailable".into(),
+                            summary: error.to_string(),
+                        })?;
+                catalog.request_repair(&id_string, 0);
+                if !catalog.wait_for_queued_work(std::time::Duration::from_secs(5)) {
+                    return Err(SessionStoreError::CatalogUnavailable {
+                        kind: "catalog_pending".into(),
+                        summary: format!("session {id_string} catalog publication is still pending; retry shortly"),
+                    });
+                }
             }
+            // Publication may have completed between the first read and the
+            // marker check, so reread even when the marker has disappeared.
+            session = read_catalog()?;
         }
-        .map_err(|error| {
-            crate::session_store::store_error("read session catalog", &catalog_path, error)
-        })?
-        .ok_or_else(|| SessionStoreError::SessionNotFound {
+        let session = session.ok_or_else(|| SessionStoreError::SessionNotFound {
             id: id_string.clone(),
         })?;
         if session.availability != smelt_store::CatalogAvailability::Available {
