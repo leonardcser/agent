@@ -142,20 +142,12 @@ pub enum ChromeAction {
     Resize(ResizeEdges),
 }
 
-/// Hit target inside an overlay: a concrete content leaf or its chrome.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OverlayHitTarget {
-    Window(super::WinId),
-    Paint(PaintId),
-    Scrollbar(super::WinId),
-    Chrome(ChromeAction),
-}
-
 /// Stable owner of interactive container chrome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChromeOwner {
     Overlay(OverlayId),
     Container(ContainerId),
+    Split(crate::layout::SplitId),
 }
 
 /// Global mouse hit-test result covering both overlays and splits.

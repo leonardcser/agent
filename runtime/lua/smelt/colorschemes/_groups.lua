@@ -33,7 +33,7 @@ return {
   { name = "SmeltScrollPillBg", role = "background", owner = "transcript", description = "Scroll position pill background." },
   { name = "SmeltCodeBlockBg", role = "background", owner = "transcript", description = "Fenced code block background." },
   { name = "SmeltSeparator", role = "foreground", owner = "chrome", description = "Prompt bars, borders, and inline separators." },
-  { name = "SmeltResizeHandle", role = "foreground", owner = "prompt", description = "Active prompt resize handle." },
+  { name = "SmeltResizeHandle", role = "foreground", owner = "chrome", description = "Active split, overlay, and docked-panel resize handle." },
   { name = "SmeltScrollbarTrack", role = "background", owner = "editor", description = "Scrollbar track." },
   { name = "SmeltScrollbarThumb", role = "background", owner = "editor", description = "Scrollbar thumb." },
 
@@ -53,6 +53,8 @@ return {
   { name = "SmeltModeDefault", role = "style", owner = "statusline", description = "Default and custom agent mode pill." },
   { name = "SmeltExecPrefix", role = "style", owner = "prompt", description = "Shell execution prefix." },
 
+  { name = "SmeltDiffAddCount", role = "foreground", owner = "diff", description = "Subdued added-line count." },
+  { name = "SmeltDiffDeleteCount", role = "foreground", owner = "diff", description = "Subdued deleted-line count." },
   { name = "SmeltDiffAddBg", role = "background", owner = "diff", description = "Added row background." },
   { name = "SmeltDiffDeleteBg", role = "background", owner = "diff", description = "Deleted row background." },
   { name = "SmeltDiffAddInlineBg", role = "background", owner = "diff", description = "Inline added-text background." },

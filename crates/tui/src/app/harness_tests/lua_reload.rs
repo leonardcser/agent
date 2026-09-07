@@ -3396,36 +3396,30 @@ fn named_overlay_open_refreshes_title_in_place() {
 }
 
 #[test]
-fn named_win_refresh_preserves_wrap_when_omitted() {
+fn named_win_refresh_preserves_boolean_options_when_omitted() {
     let mut app = TestApp::builder().build();
-
-    app.run_lua_result(
-        r#"
-            local buf = smelt.buf.new({ name = "w.buf" })
-            smelt.win.new(buf, { name = "w.win", wrap = false })
-            "#,
-    )
-    .expect("first open");
-
-    let wid = app.ui_probe().named_win("w.win").expect("named win");
-    assert!(
-        !app.ui_probe().win(wid).unwrap().wrap,
-        "wrap should be false after explicit open"
-    );
-
-    // Re-open with the same name but no `wrap` key → wrap should stay false.
-    app.run_lua_result(
-        r#"
-            local buf = smelt.buf.new({ name = "w.buf" })
-            smelt.win.new(buf, { name = "w.win" })
-            "#,
-    )
-    .expect("refresh");
-
-    assert!(
-        !app.ui_probe().win(wid).unwrap().wrap,
-        "wrap must be preserved across named refresh (regression)"
-    );
+    for enabled in [false, true] {
+        app.run_lua_result(&format!(r#"
+            local buf = smelt.buf.new({{ name = "w.buf" }})
+            smelt.win.new(buf, {{ name = "w.win", wrap = {enabled}, hide_cursor = {enabled}, vim_enabled = {enabled} }})
+        "#)).expect("open with explicit options");
+        let wid = app.ui_probe().named_win("w.win").expect("named win");
+        for refresh in [false, true] {
+            if refresh {
+                app.run_lua_result(
+                    r#"
+                    local buf = smelt.buf.new({ name = "w.buf" })
+                    smelt.win.new(buf, { name = "w.win" })
+                "#,
+                )
+                .expect("refresh without options");
+            }
+            let window = app.ui_probe().win(wid).unwrap();
+            assert_eq!(window.wrap, enabled);
+            assert_eq!(window.hide_cursor, enabled);
+            assert_eq!(window.vim_enabled(), enabled);
+        }
+    }
 }
 
 #[test]

@@ -77,6 +77,13 @@ impl TuiApp {
             }
         }
 
+        // A pending pane chord owns its follow-up before local shortcuts or Vim.
+        if self.timers.pending_pane_chord.is_some() {
+            if let Some(outcome) = self.handle_pane_chord(&ev) {
+                return self.apply_event_outcome(outcome);
+            }
+        }
+
         // Ctrl+C kills a focused shell-output command before modal dismiss sees it.
         if self.shell_panel_is_focused()
             && self
@@ -1314,6 +1321,11 @@ impl TuiApp {
         // don't participate in the chord-buffering path). Visual mode checked
         // this tier before Vim so explicit remaps can override viewer defaults.
         if !global_keymap_checked && self.dispatch_single_global_lua_keymap(k) {
+            return Status::Consumed;
+        }
+
+        // Shared pane chords remain below explicit leaf/container/global bindings.
+        if self.handle_pane_chord(&Event::Key(k)).is_some() {
             return Status::Consumed;
         }
 

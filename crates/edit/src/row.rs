@@ -473,6 +473,90 @@ impl DisplayDocument for StaticRowsDocument {
     }
 }
 
+pub struct RowSourceDocument<'a> {
+    pub source: &'a dyn smelt_buffer::document::RowSource,
+    pub width: u16,
+    pub theme: &'a smelt_buffer::theme::Theme,
+}
+
+impl DisplayDocument for RowSourceDocument<'_> {
+    fn snapshot(&mut self) -> DisplaySnapshot {
+        let snapshot = self.source.snapshot();
+        DisplaySnapshot {
+            generation: snapshot.generation,
+            total_rows: snapshot.total_rows,
+        }
+    }
+
+    fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows {
+        let rows = self
+            .source
+            .viewport_rows(
+                &smelt_buffer::document::DocumentViewport {
+                    rows: range,
+                    width: self.width,
+                    cursor: None,
+                },
+                self.theme,
+            )
+            .into_iter()
+            .map(|row| {
+                let selectable = crate::selectable_byte_ranges_for_line(&row.text, &row.spans);
+                DisplayRow::new(row.text, selectable).with_break_before(RowBreak::Hard)
+            })
+            .collect();
+        DisplayRows { rows }
+    }
+
+    fn copy_range(&mut self, range: TextRange) -> Option<CopyOutput> {
+        let range = range.rows()?;
+        if (range.start.row, range.start.byte_col) >= (range.end.row, range.end.byte_col) {
+            return None;
+        }
+        let total = self.source.snapshot().total_rows;
+        let mut text_out = String::new();
+        let mut first = true;
+        let end_row = range
+            .end
+            .row
+            .saturating_add(u64::from(range.end.byte_col > 0))
+            .min(total);
+        let mut base = range.start.row;
+        while base < end_row {
+            let end = base.saturating_add(256).min(end_row);
+            let rows = self.materialize(base..end).rows;
+            if rows.len() as u64 != end - base {
+                return None;
+            }
+            for (offset, row) in rows.into_iter().enumerate() {
+                let index = base + offset as u64;
+                let start = if index == range.start.row {
+                    range.start.byte_col
+                } else {
+                    0
+                };
+                let end = if index == range.end.row {
+                    range.end.byte_col
+                } else {
+                    row.text.len()
+                };
+                if !first {
+                    text_out.push('\n');
+                }
+                first = false;
+                for selectable in row.selectable_ranges {
+                    text_out.push_str(smelt_buffer::text::slice(
+                        &row.text,
+                        start.max(selectable.start)..end.min(selectable.end),
+                    ));
+                }
+            }
+            base = end;
+        }
+        Some(CopyOutput::same(text_out))
+    }
+}
+
 pub struct BufferDocument<'a> {
     buf: &'a Buffer,
 }

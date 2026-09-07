@@ -78,8 +78,8 @@ impl SnapshotFrame {
 
     /// Style sidecar. First line is `dim: W H`; remaining lines are
     /// one styled run each as `row col len fg=… bg=… attrs=…`. The
-    /// dim header makes [`parse`] losslessly recover cell dimensions
-    /// even when [`text`] has removed trailing wide-char continuations.
+    /// dim header makes [`parse`](Self::parse) losslessly recover cell dimensions
+    /// even when [`text`](Self::text) has removed trailing wide-char continuations.
     pub fn styles_text(&self) -> String {
         let mut out = format!("dim: {} {}\n", self.width, self.height);
         for (y, row) in self.styles.iter().enumerate() {

@@ -605,6 +605,37 @@ struct WindowRangeLayers {
 }
 
 #[derive(Clone)]
+struct BufferView {
+    buf: BufId,
+    host: Option<DocumentHandle>,
+    surface: WindowSurface,
+    wrap: bool,
+    scroll_top: RowIndex,
+    scroll_left: u16,
+    scroll_state: VerticalScroll,
+    scroll_anchor: Option<(u64, usize, usize)>,
+    pending_recenter: bool,
+    pending_scroll_to_cursor: bool,
+    range_layers: WindowRangeLayers,
+}
+
+#[derive(Clone)]
+struct NativeDocument {
+    view: smelt_buffer::document::RowView,
+    scratch: BufId,
+    backing: BufferView,
+    projection: Option<(u64, u64, RowIndex, u16, u16, u64)>,
+}
+
+#[derive(Clone, Default)]
+enum DocumentBinding {
+    #[default]
+    Buffer,
+    Host(DocumentHandle),
+    Native(Box<NativeDocument>),
+}
+
+#[derive(Clone)]
 pub struct Window {
     pub(crate) id: WinId,
     pub buf: BufId,
@@ -635,9 +666,9 @@ pub struct Window {
     /// focus. Live dashboard panes use this so periodic text refreshes don't
     /// make a stale byte-position cursor appear to jitter across changing rows.
     pub hide_cursor: bool,
-    /// Optional row-document backing. When present, semantic row operations resolve
-    /// through the host's document registry instead of treating the buffer as the source.
-    document_handle: Option<DocumentHandle>,
+    /// Exactly one backing: an editable buffer, a host document, or a native
+    /// document with window-owned projection storage and a viewport subscription.
+    document: DocumentBinding,
 
     range_layers: WindowRangeLayers,
 
@@ -695,7 +726,7 @@ impl Window {
             surface: WindowSurface::default(),
             row_highlights: Vec::new(),
             hide_cursor: false,
-            document_handle: None,
+            document: DocumentBinding::Buffer,
             range_layers: WindowRangeLayers::default(),
             viewport: None,
             prepared_viewport_height: None,
@@ -715,13 +746,200 @@ impl Window {
     }
 
     pub fn document_handle(&self) -> Option<DocumentHandle> {
-        self.document_handle
+        match self.document {
+            DocumentBinding::Host(handle) => Some(handle),
+            _ => None,
+        }
     }
 
-    pub fn set_document_handle(&mut self, handle: Option<DocumentHandle>) {
-        self.document_handle = handle;
-        if self.document_handle.is_none() {
+    pub(crate) fn set_document_handle(&mut self, handle: Option<DocumentHandle>) {
+        debug_assert!(self.native_scratch().is_none());
+        self.document = handle.map_or(DocumentBinding::Buffer, DocumentBinding::Host);
+        if handle.is_none() {
             self.clear_materialized_rows();
+        }
+    }
+
+    /// The caller-owned backing buffer, never native projection storage.
+    pub fn backing_buffer(&self) -> BufId {
+        match &self.document {
+            DocumentBinding::Native(native) => native.backing.buf,
+            _ => self.buf,
+        }
+    }
+
+    pub fn row_source(&self) -> Option<&Arc<dyn smelt_buffer::document::RowSource>> {
+        match &self.document {
+            DocumentBinding::Native(native) => Some(native.view.source()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn native_scratch(&self) -> Option<BufId> {
+        match &self.document {
+            DocumentBinding::Native(native) => Some(native.scratch),
+            _ => None,
+        }
+    }
+
+    /// Buffer resources retained by this window, including a temporarily hidden
+    /// backing buffer while a native document is attached.
+    pub(crate) fn retained_buffers(&self) -> impl Iterator<Item = BufId> {
+        let backing = match &self.document {
+            DocumentBinding::Native(native) => Some(native.backing.buf),
+            _ => None,
+        };
+        std::iter::once(self.buf).chain(backing)
+    }
+
+    pub(crate) fn attach_row_source(
+        &mut self,
+        source: Arc<dyn smelt_buffer::document::RowSource>,
+        scratch: BufId,
+    ) {
+        let backing = match &self.document {
+            DocumentBinding::Native(native) => native.backing.clone(),
+            _ => BufferView {
+                buf: self.buf,
+                host: self.document_handle(),
+                surface: self.surface,
+                wrap: self.wrap,
+                scroll_top: self.scroll_top,
+                scroll_left: self.scroll_left,
+                scroll_state: self.scroll_state,
+                scroll_anchor: self.scroll_anchor,
+                pending_recenter: self.pending_recenter,
+                pending_scroll_to_cursor: self.pending_scroll_to_cursor,
+                range_layers: self.range_layers.clone(),
+            },
+        };
+        let total_rows = source.snapshot().total_rows;
+        self.document = DocumentBinding::Native(Box::new(NativeDocument {
+            view: smelt_buffer::document::RowView::new(source),
+            scratch,
+            backing,
+            projection: None,
+        }));
+        self.buf = scratch;
+        self.surface.text = WindowTextState {
+            vim_enabled: self.surface.text.vim_enabled,
+            ..Default::default()
+        };
+        self.range_layers = WindowRangeLayers::default();
+        self.scroll_anchor = None;
+        self.pending_recenter = false;
+        self.pending_scroll_to_cursor = false;
+        self.layout_key = None;
+        if self.surface.has_caret() {
+            self.set_surface(WindowSurface::readonly_text());
+        }
+        self.pin_scroll(0);
+        self.scroll_left = 0;
+        self.wrap = false;
+        self.set_document_view_state(DocumentViewState {
+            active: true,
+            materialized: MaterializedRows {
+                total_rows,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn detach_row_source(&mut self) -> Option<BufId> {
+        self.native_scratch()?;
+        let DocumentBinding::Native(native) = std::mem::take(&mut self.document) else {
+            unreachable!()
+        };
+        let backing = native.backing;
+        self.buf = backing.buf;
+        self.surface = backing.surface;
+        self.wrap = backing.wrap;
+        self.scroll_top = backing.scroll_top;
+        self.scroll_left = backing.scroll_left;
+        self.scroll_state = backing.scroll_state;
+        self.scroll_anchor = backing.scroll_anchor;
+        self.pending_recenter = backing.pending_recenter;
+        self.pending_scroll_to_cursor = backing.pending_scroll_to_cursor;
+        self.range_layers = backing.range_layers;
+        self.document = backing
+            .host
+            .map_or(DocumentBinding::Buffer, DocumentBinding::Host);
+        self.layout_key = None;
+        self.viewport = None;
+        self.prepared_viewport_height = None;
+        Some(native.scratch)
+    }
+
+    pub(crate) fn suspend_row_source(&self) {
+        if let DocumentBinding::Native(native) = &self.document {
+            native.view.clear_demand();
+        }
+    }
+
+    pub(crate) fn prepare_row_source(
+        &mut self,
+        buf: &mut Buffer,
+        width: u16,
+        height: u16,
+        follow_tail: bool,
+        theme: &Theme,
+    ) {
+        let DocumentBinding::Native(native) = &self.document else {
+            return;
+        };
+        if width == 0 || height == 0 {
+            native.view.clear_demand();
+            return;
+        }
+        self.wrap = false;
+        let source = Arc::clone(native.view.source());
+        let snapshot = source.snapshot();
+        let max_top = snapshot.total_rows.saturating_sub(u64::from(height));
+        let top = if follow_tail {
+            max_top
+        } else {
+            self.scroll_top().min(max_top)
+        };
+        let viewport = smelt_buffer::document::DocumentViewport {
+            rows: top..top.saturating_add(u64::from(height)),
+            width,
+            cursor: Some(self.cursor_abs_row()),
+        };
+        native.view.prepare(&viewport);
+        let snapshot = source.snapshot();
+        let key = (
+            snapshot.generation,
+            theme.revision(),
+            top,
+            width,
+            height,
+            buf.lines_tick(),
+        );
+        if native.projection != Some(key) {
+            let rows = source.viewport_rows(&viewport, theme);
+            let count = rows.len() as u64;
+            smelt_buffer::document::install_rows(buf, rows, source.line_number_bounds());
+            self.apply_materialized_rows_at_tick(
+                MaterializedRows {
+                    row_base: top,
+                    clamped_scroll: top,
+                    total_rows: snapshot.total_rows,
+                    materialized_rows: count,
+                },
+                buf.lines_tick(),
+            );
+            self.set_resolved_scroll(top);
+            if let DocumentBinding::Native(native) = &mut self.document {
+                native.projection = Some((
+                    snapshot.generation,
+                    theme.revision(),
+                    top,
+                    width,
+                    height,
+                    buf.lines_tick(),
+                ));
+            }
         }
     }
 
@@ -1000,6 +1218,11 @@ impl Window {
 
     pub fn set_surface(&mut self, surface: WindowSurface) {
         let text = *self.surface.text();
+        let surface = if self.native_scratch().is_some() && surface.has_caret() {
+            WindowSurface::readonly_text()
+        } else {
+            surface
+        };
         self.surface = surface.with_text(text);
     }
 
@@ -2007,7 +2230,18 @@ impl Window {
     /// this leaf takes the cursor (e.g. when focus lands here, or when a drag
     /// ends here).
     pub fn jump_to_row(&mut self, buf: &Buffer, row: RowIndex, viewport_rows: u16) {
-        self.jump_to_line_col(buf, row_to_usize(row), 0, viewport_rows);
+        if let Some(source) = self.row_source() {
+            let mut state = self.document_view_state();
+            state.cursor = DocPosition {
+                row: row.min(source.snapshot().total_rows.saturating_sub(1)),
+                byte_col: 0,
+            };
+            state.preferred_cell_col = Some(0);
+            self.project_row_cursor_to_local(state, buf);
+            self.set_document_view_state(state);
+        } else {
+            self.jump_to_line_col(buf, row_to_usize(row), 0, viewport_rows);
+        }
     }
 
     /// Set `selection_anchor` to `cpos` if unset. Call before a shift-move.
@@ -3118,10 +3352,11 @@ impl Window {
         }
         let max_scroll = total_visual.saturating_sub(viewport_rows as RowIndex);
         let new_scroll = scroll_top.min(max_scroll);
-        // Pin scroll for shift+mouse drag selection, but preserve cursor screen
-        // row for vim visual/visual-line mode (the cursor should stay fixed
-        // relative to the viewport while wheel-scrolling).
-        if self.selection_anchor().is_some() {
+        // List selection belongs to the item, not its screen position. Text
+        // surfaces retain screen-relative Vim panning, except during mouse selection.
+        if matches!(self.surface.kind, WindowSurfaceKind::List { .. })
+            || self.selection_anchor().is_some()
+        {
             self.set_scroll(new_scroll, buf);
             self.pin_current_scroll();
             return;
@@ -3200,7 +3435,11 @@ impl Window {
         // Absolute visual row of the cursor (or drag endpoint mid-gesture). It
         // drives cursor-anchored row highlights and gates `on_cursor_row`
         // extmark painting so selection-aware spans always work.
-        let cursor_abs_row = self.absolute_row(self.effective_cursor_row(buf));
+        let cursor_abs_row = if self.text_state().drag_endpoint.is_some() {
+            self.absolute_row(self.effective_cursor_row(buf))
+        } else {
+            self.absolute_cursor_row()
+        };
         let cursor_screen_row =
             Self::screen_row_at(cursor_abs_row, self.scroll_top, viewport_height);
         let normal_style = ctx.theme.get("Normal");
@@ -3246,7 +3485,17 @@ impl Window {
                 0
             };
             let decoration = logical.map(|_| buf.decoration_at(logical_row));
-            let base_row_style = self
+            if decoration.is_some_and(|d| d.horizontal_rule) {
+                let style = Style {
+                    dim: true,
+                    ..normal_style
+                };
+                for col in 0..width {
+                    slice.set(col, row, '─', style);
+                }
+                continue;
+            }
+            let mut base_row_style = self
                 .row_highlight_style(
                     ctx,
                     absolute_visual_row,
@@ -3254,6 +3503,9 @@ impl Window {
                     RowHighlightWidth::FullWindow,
                 )
                 .unwrap_or(normal_style);
+            if let Some(bg) = decoration.and_then(|d| d.window_bg) {
+                base_row_style.bg = Some(bg);
+            }
             let content_row_base = self
                 .row_highlight_style(
                     ctx,

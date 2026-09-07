@@ -1,4 +1,4 @@
--- `/diff <filepath>` - side-by-side diff of <filepath> vs `git show HEAD:<filepath>`.
+-- `/diff-split <filepath>` - side-by-side diff of <filepath> vs `git show HEAD:<filepath>`.
 -- Demo of `smelt.render.diff_split` + `smelt.ui.layout.hbox`.
 -- Not autoloaded; add `require("smelt.examples.diff")` to init.lua.
 
@@ -7,7 +7,7 @@ local M = {}
 local STATE = nil
 
 local function notify_err(msg)
-	smelt.notify.error("/diff: " .. msg)
+	smelt.notify.error("/diff-split: " .. msg)
 end
 
 local function git_root()
@@ -47,7 +47,7 @@ local function open(filepath)
 	end
 	filepath = (filepath or ""):gsub("^%s+", ""):gsub("%s+$", "")
 	if filepath == "" then
-		notify_err("usage: /diff <filepath>")
+		notify_err("usage: /diff-split <filepath>")
 		return
 	end
 
@@ -135,7 +135,7 @@ local function open(filepath)
 	left_win:focus()
 end
 
-smelt.cmd.register("diff", function(value)
+smelt.cmd.register("diff-split", function(value)
 	smelt.spawn(function() open(value) end)
 end, { desc = "side-by-side diff of <filepath> vs HEAD (demo)", args = { "<filepath>" } })
 

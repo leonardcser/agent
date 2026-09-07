@@ -8,6 +8,14 @@
 
 Composable layout-tree primitives for the retained main TUI layout. `smelt.ui.layout.set(fn)` registers a composer; call `invalidate()` when closed-over state changes the resulting tree.
 
+## `smelt.ui.layout.frame`
+
+```lua
+fun(node: smelt.ui.layout, opts: table?): smelt.ui.layout
+```
+
+Wrap a subtree in optional border, title and padding. Natural size is the child's demand plus chrome; the child fills the inset area when the parent grows. Unlike a box slot, no fit/fill constraint is needed. Child chrome and shared split positions remain intact.
+
 ## `smelt.ui.layout.hbox`
 
 ```lua
@@ -15,6 +23,16 @@ fun(items: table, opts: table?): smelt.ui.layout
 ```
 
 Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`, `justify = "space-between"`, `padding` (uniform inner inset on all sides, inside any border).
+
+## `smelt.ui.layout.hsplit`
+
+```lua
+fun(first: smelt.ui.layout, second: smelt.ui.layout, opts: smelt.ui.layout.SplitOpts?): smelt.ui.layout
+```
+
+Types: [`smelt.ui.layout.SplitOpts`](types.md#smeltuilayoutsplitopts)
+
+Place two subtrees side by side with a draggable divider. Retain this node across composer calls to preserve sizing. For independently rebuilt children or direct size control, use layout.split("horizontal", opts) and handle:layout(first, second). win:resize("width", delta) targets the nearest enclosing horizontal split.
 
 ## `smelt.ui.layout.invalidate`
 
@@ -50,6 +68,16 @@ fun(composer: function?): nil
 
 Register the retained main layout composer. The callback receives a state table (`term_w`, `term_h`, `prompt_input_rows`, plus `dialog` while a root dialog is active) and returns a layout userdata built via `smelt.ui.layout.{vbox,hbox,leaf}`. `state.dialog` is an opaque transcript-dialog stage with host-owned sizing and expansion behavior. While a root dialog is active, the returned tree must include the current stage exactly once and no retained dialog stages from earlier calls; otherwise the host uses the safe transcript-dialog-statusline fallback. Passing `nil` clears the composer and reverts to the engine's hardcoded layout. The tree is retained until dimensions change or `smelt.ui.layout.invalidate()` is called.
 
+## `smelt.ui.layout.split`
+
+```lua
+fun(axis: string, opts: smelt.ui.layout.SplitOpts?): smelt.ui.layout.Split
+```
+
+Types: [`smelt.ui.layout.SplitOpts`](types.md#smeltuilayoutsplitopts), [`smelt.ui.layout.Split`](types.md#smeltuilayoutsplit)
+
+Create a retained split handle independent of its children. axis is horizontal (side by side) or vertical (stacked). Use handle:layout(first, second, chrome_opts) in composers; rebuilding children preserves sizing. Handle methods inspect, restore, reset, resize, or equalize this exact split.
+
 ## `smelt.ui.layout.vbox`
 
 ```lua
@@ -57,4 +85,24 @@ fun(items: table, opts: table?): smelt.ui.layout
 ```
 
 Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (minimum cells between children), `justify = "space-between"` (put surplus cells into gaps), `padding` (uniform inner inset on all sides, inside any border).
+
+## `smelt.ui.layout.vsplit`
+
+```lua
+fun(first: smelt.ui.layout, second: smelt.ui.layout, opts: smelt.ui.layout.SplitOpts?): smelt.ui.layout
+```
+
+Types: [`smelt.ui.layout.SplitOpts`](types.md#smeltuilayoutsplitopts)
+
+Stack two subtrees with a draggable divider. Retain this node across composer calls to preserve sizing. For independently rebuilt children or direct size control, use layout.split("vertical", opts) and handle:layout(first, second). win:resize("height", delta) targets the nearest enclosing vertical split.
+
+## `smelt.ui.layout.windows`
+
+```lua
+fun(node: smelt.ui.layout): smelt.win.Win[]
+```
+
+Types: [`smelt.win.Win`](types.md#smeltwinwin)
+
+Return a layout's live window leaves in declaration order, excluding paints and repeated windows. Useful for installing shared callbacks and composing dialog bodies from arbitrary layouts.
 

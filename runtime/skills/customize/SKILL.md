@@ -441,6 +441,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.banner` | Empty-state logo decoration + shutdown logo/resume-hint banner. |
 | `smelt.plugins.compact` | Compacts older history while preserving a live recent suffix. |
 | `smelt.plugins.debug_panel` | F3 debug panel. |
+| `smelt.plugins.diff` | /diff: continuous, virtualized Git diff viewer. |
 | `smelt.plugins.esc_chord` | Esc-Esc: cancel in-flight foreground/background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn when idle. |
 | `smelt.plugins.goal` | Goal lifecycle plugin. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
@@ -564,12 +565,15 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.cli` - Declare and read CLI flags from Lua.
 - `smelt.clipboard` - Read and write the system clipboard.
 - `smelt.defaults` - Startup fallbacks for new sessions.
+- `smelt.diff` - Compact unified-patch indexing, metadata and expandable context folds.
+- `smelt.document` - Indexed read-only documents shared by native data providers and Lua-created windows.
 - `smelt.events` - Occurrence-oriented subscriptions over event-shaped signals such as `turn_start`, `tool_start`, and `turn_complete`.
 - `smelt.files` - Workspace file search.
 - `smelt.frontend` - Query which frontend is active (TUI vs headless).
 - `smelt.fs` - Sync filesystem primitives.
 - `smelt.fs.file_state` - Cached file-state tracker used by tools to detect external modifications between reads and writes.
 - `smelt.fuzzy` - Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman).
+- `smelt.git` - Asynchronous Git snapshots and explicit file-level staging.
 - `smelt.grep` - Ripgrep wrapper for searching files.
 - `smelt.html` - HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results.
 - `smelt.http` - Asynchronous HTTP get/post.

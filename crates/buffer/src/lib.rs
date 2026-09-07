@@ -5,6 +5,7 @@ pub mod attachment;
 pub mod buffer;
 pub mod clipboard;
 pub mod coords;
+pub mod document;
 pub mod inline_line;
 pub mod kill_ring;
 pub mod text;

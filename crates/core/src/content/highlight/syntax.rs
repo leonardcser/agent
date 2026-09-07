@@ -3,8 +3,8 @@
 
 use std::path::Path;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::Style;
-use syntect::parsing::SyntaxReference;
+use syntect::highlighting::{Highlighter, Style};
+use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference};
 
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
 use crate::buffer::SpanMeta;
@@ -38,6 +38,73 @@ pub fn syntax_for_lang(lang: &str) -> &'static SyntaxReference {
         .find_syntax_by_extension(ext)
         .or_else(|| SYNTAX_SET.find_syntax_by_name(lang))
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text())
+}
+
+/// Stateful, theme-independent tokenization. The parser stays on its loading
+/// thread; emitted scope stacks and byte ranges can be indexed and shared.
+#[derive(Clone, Debug)]
+pub(crate) struct SyntaxParser {
+    parse: ParseState,
+    scopes: ScopeStack,
+}
+
+impl SyntaxParser {
+    pub(crate) fn for_path(path: &str) -> Self {
+        let path = Path::new(path);
+        let syntax = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| SYNTAX_SET.find_syntax_by_extension(name))
+            .or_else(|| {
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .and_then(|ext| SYNTAX_SET.find_syntax_by_extension(ext))
+            })
+            .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+        Self {
+            parse: ParseState::new(syntax),
+            scopes: ScopeStack::new(),
+        }
+    }
+
+    /// `line` includes its newline. Emitted ranges use source byte offsets.
+    pub(crate) fn line(
+        &mut self,
+        line: &str,
+        mut emit: impl FnMut(std::ops::Range<usize>, &[Scope]),
+    ) {
+        let mut start = 0;
+        if let Ok(ops) = self.parse.parse_line(line, &SYNTAX_SET) {
+            for (end, op) in ops {
+                if start < end {
+                    emit(start..end, self.scopes.as_slice());
+                }
+                let _ = self.scopes.apply(&op);
+                start = end;
+            }
+        }
+        if start < line.len() {
+            emit(start..line.len(), self.scopes.as_slice());
+        }
+    }
+}
+
+pub(crate) fn syntax_scope_colors(
+    scopes: &[Vec<Scope>],
+    theme: &crate::theme::Theme,
+) -> Vec<Color> {
+    let highlighter = Highlighter::new(syntax_theme(theme));
+    scopes
+        .iter()
+        .map(|stack| {
+            let fg = highlighter.style_for_stack(stack).foreground;
+            Color::Rgb {
+                r: fg.r,
+                g: fg.g,
+                b: fg.b,
+            }
+        })
+        .collect()
 }
 
 /// Render a code block. When `fence` is true, each line's `source_text` carries the fenced

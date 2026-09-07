@@ -1,5 +1,6 @@
 use similar::{ChangeTag, InlineChangeMode, InlineChangeOptions, TextDiff};
 use smelt_buffer::text;
+use std::time::{Duration, Instant};
 
 use super::{DiffByteRange, DiffLine};
 
@@ -12,10 +13,10 @@ const LINE_PAIR_MIN_SIMILARITY: f32 = 0.45;
 const INLINE_CHAR_GAP: usize = 3;
 const INLINE_NON_WORD_GAP_BYTES: usize = 5;
 const INLINE_FRAGMENT_RANGES: usize = 4;
-const MAX_LINE_ALIGNMENT_LINES: usize = 80;
+pub(crate) const MAX_LINE_ALIGNMENT_LINES: usize = 80;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LineAlignment {
+pub(crate) enum LineAlignment {
     Pair { old: usize, new: usize },
     OldOnly(usize),
     NewOnly(usize),
@@ -158,13 +159,23 @@ pub(super) fn inline_highlights_for_pair(
     old: &str,
     new: &str,
 ) -> (Vec<DiffByteRange>, Vec<DiffByteRange>) {
+    inline_highlights_for_pair_deadline(old, new, Instant::now() + Duration::from_millis(500))
+}
+
+pub(crate) fn inline_highlights_for_pair_deadline(
+    old: &str,
+    new: &str,
+    deadline: Instant,
+) -> (Vec<DiffByteRange>, Vec<DiffByteRange>) {
     let diff = TextDiff::from_lines(old, new);
     let mut old_pos = 0usize;
     let mut new_pos = 0usize;
     let mut old_ranges = Vec::new();
     let mut new_ranges = Vec::new();
 
-    for change in diff.iter_all_inline_changes_with_options(inline_options()) {
+    for change in
+        diff.iter_all_inline_changes_with_options_deadline(inline_options(), Some(deadline))
+    {
         for (emphasized, value) in change.iter_strings_lossy() {
             let len = value.len();
             match change.tag() {
@@ -210,7 +221,7 @@ pub(super) fn inline_highlights_for_pair(
     )
 }
 
-fn pairing_similarity(old: &str, new: &str) -> f32 {
+fn pairing_similarity(old: &str, new: &str, deadline: Option<Instant>) -> f32 {
     if old == new {
         return 1.0;
     }
@@ -223,7 +234,11 @@ fn pairing_similarity(old: &str, new: &str) -> f32 {
         return 0.0;
     }
 
-    let raw_ratio = TextDiff::from_chars(old, new).ratio();
+    let mut config = TextDiff::configure();
+    if let Some(deadline) = deadline {
+        config.deadline(deadline);
+    }
+    let raw_ratio = config.diff_chars(old, new).ratio();
     if raw_ratio >= LINE_PAIR_MIN_SIMILARITY {
         return raw_ratio;
     }
@@ -232,7 +247,7 @@ fn pairing_similarity(old: &str, new: &str) -> f32 {
     // the later inline diff still highlights the actual character changes.
     let old_lower = old.to_lowercase();
     let new_lower = new.to_lowercase();
-    raw_ratio.max(TextDiff::from_chars(&old_lower, &new_lower).ratio())
+    raw_ratio.max(config.diff_chars(&old_lower, &new_lower).ratio())
 }
 
 fn positional_alignment(old_len: usize, new_len: usize) -> Vec<LineAlignment> {
@@ -245,6 +260,14 @@ fn positional_alignment(old_len: usize, new_len: usize) -> Vec<LineAlignment> {
 }
 
 pub(super) fn align_changed_lines(old: &[&str], new: &[&str]) -> Vec<LineAlignment> {
+    align_changed_lines_deadline(old, new, None)
+}
+
+pub(crate) fn align_changed_lines_deadline(
+    old: &[&str],
+    new: &[&str],
+    deadline: Option<Instant>,
+) -> Vec<LineAlignment> {
     let m = old.len();
     let n = new.len();
     if m == 0 {
@@ -257,14 +280,17 @@ pub(super) fn align_changed_lines(old: &[&str], new: &[&str]) -> Vec<LineAlignme
         return positional_alignment(m, n);
     }
 
-    let scores: Vec<Vec<f32>> = old
-        .iter()
-        .map(|old_line| {
-            new.iter()
-                .map(|new_line| pairing_similarity(old_line, new_line))
-                .collect()
-        })
-        .collect();
+    let mut scores = Vec::with_capacity(m);
+    for old_line in old {
+        let mut row = Vec::with_capacity(n);
+        for new_line in new {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return positional_alignment(m, n);
+            }
+            row.push(pairing_similarity(old_line, new_line, deadline));
+        }
+        scores.push(row);
+    }
 
     let mut dp = vec![vec![0.0f32; n + 1]; m + 1];
     for i in (0..m).rev() {

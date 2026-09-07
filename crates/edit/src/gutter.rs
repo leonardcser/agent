@@ -119,7 +119,17 @@ impl LineNumberGutter {
     }
 
     fn compute_widths(&self, buf: &Buffer) -> Widths {
-        let mut w = Widths::default();
+        let mut w = match buf.source_line_bounds() {
+            Some(SourceLine::Diff { old, new }) => Widths {
+                old_digits: digits_of(old.unwrap_or(0)),
+                new_digits: digits_of(new.unwrap_or(0)),
+            },
+            Some(SourceLine::Linear { lineno }) => Widths {
+                old_digits: 0,
+                new_digits: digits_of(lineno),
+            },
+            Some(SourceLine::Synthetic) | None => Widths::default(),
+        };
         for row in 0..buf.line_count() {
             match buf.source_line_at(row) {
                 Some(SourceLine::Linear { lineno }) => {

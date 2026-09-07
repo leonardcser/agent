@@ -9,8 +9,7 @@ use smelt_style::theme::Theme;
 
 use crate::compositor::Compositor;
 use crate::grid::{Grid, GridSlice};
-use crate::layout::{resolve_layout, LayoutTree, PaintId, Rect};
-use crate::paint_layout_tree;
+use crate::layout::{LayoutStyle, LayoutTree, NoopSizer, PaintId, Rect, ResolvedLayout};
 
 #[derive(Clone)]
 pub struct Surface {
@@ -18,6 +17,7 @@ pub struct Surface {
     layout: LayoutTree,
     theme: Arc<Theme>,
     size: (u16, u16),
+    layout_style: LayoutStyle,
 }
 
 impl Surface {
@@ -31,6 +31,7 @@ impl Surface {
             layout: LayoutTree::vbox(Vec::new()),
             theme: Arc::new(theme),
             size: (width, height),
+            layout_style: LayoutStyle::default(),
         }
     }
 
@@ -71,7 +72,17 @@ impl Surface {
 
     /// Resolved screen rect for a `PaintId` leaf, or `None` if not present.
     pub fn paint_rect(&self, id: PaintId) -> Option<Rect> {
-        resolve_layout(&self.layout, self.area()).get(&id).copied()
+        self.resolve_layout().leaf_rect(id)
+    }
+
+    /// Resolve current geometry for hit-testing and programmatic resizing.
+    pub fn resolve_layout(&self) -> ResolvedLayout {
+        self.layout.resolve(self.area(), &NoopSizer)
+    }
+
+    /// Configure divider appearance and the active split without replacing layout.
+    pub fn set_layout_style(&mut self, style: LayoutStyle) {
+        self.layout_style = style;
     }
 
     pub fn compositor(&self) -> &Compositor {
@@ -88,9 +99,24 @@ impl Surface {
         W: Write,
         F: FnMut(PaintId, &mut GridSlice<'_>, &Arc<Theme>),
     {
-        let layout = self.layout.clone();
-        let area = self.area();
+        let layout = self.resolve_layout();
+        self.render_resolved(w, &layout, &mut paint)
+    }
+
+    /// Paint a geometry snapshot already used for viewport setup or hit-testing.
+    /// The caller must resolve it again after layout or terminal-size changes.
+    pub fn render_resolved<W, F>(
+        &mut self,
+        w: &mut W,
+        layout: &ResolvedLayout,
+        mut paint: F,
+    ) -> std::io::Result<()>
+    where
+        W: Write,
+        F: FnMut(PaintId, &mut GridSlice<'_>, &Arc<Theme>),
+    {
         let size = self.size;
+        let style = self.layout_style;
         let theme_arc = Arc::clone(&self.theme);
         self.compositor
             .render_with(&self.theme, w, move |grid, _theme| {
@@ -103,7 +129,7 @@ impl Surface {
                     let mut slice = grid.slice_mut(leaf);
                     paint(id, &mut slice, theme);
                 };
-                paint_layout_tree(grid, theme, &layout, area, size, &mut dispatch);
+                layout.paint(grid, theme, size, style, &mut dispatch);
             })
     }
 

@@ -10,6 +10,8 @@ pub(crate) mod modal;
 pub(crate) mod motions;
 pub mod named;
 pub(crate) mod overlay;
+mod resize;
+use resize::{ResolvedDecoration, ResolvedUiLayout};
 pub mod row;
 pub mod text;
 pub(crate) mod text_objects;
@@ -64,7 +66,6 @@ pub use callback::{
 use callback::{Callbacks, KeymapScope};
 pub use event::{Event, Status};
 pub use modal::{ModalId, ModalOwner};
-use overlay::OverlayHitTarget;
 pub use overlay::{
     BodyDrag, ChromeAction, ChromeOwner, Decoration, DecorationId, DragConfig, HitTarget, Overlay,
     OverlayId, ResizeConfig, ResizeEdges,
@@ -195,6 +196,10 @@ impl PreparedFrame {
 
 enum PreparedFrameCommand {
     Clear(Rect),
+    Divider {
+        divider: layout::SplitDivider,
+        active: bool,
+    },
     Chrome {
         area: Rect,
         chrome: layout::Chrome,
@@ -241,6 +246,7 @@ pub struct Ui {
     /// `set_focus` pushes the outgoing focus here; overlay-close walks it back.
     focus_history: Vec<WinId>,
     focus: Option<WinId>,
+    last_emitted_focus: Option<WinId>,
     /// Gesture target that bypasses hit-testing for the duration of a drag.
     /// Auto-clears when the owning split or overlay disappears.
     capture: Option<HitTarget>,
@@ -256,6 +262,7 @@ pub struct Ui {
     drag_autoscroll: Option<DragAutoscroll>,
     /// In-flight chrome drag/resize gesture; `None` when idle.
     chrome_drag: Option<ChromeDrag>,
+    split_interaction: layout::SplitInteraction,
     /// Frozen scrollbar geometry for the active pointer gesture.
     scrollbar_drag: Option<ScrollbarDrag>,
     /// Groups of windows whose `scroll_top` is mirrored. Each group tracks the
@@ -381,12 +388,14 @@ impl Ui {
             lua_generation_names: None,
             focus_history: Vec::new(),
             focus: None,
+            last_emitted_focus: None,
             capture: None,
             last_click: None,
             cursor_shape: CursorShape::Hidden,
             drag_autoscroll_since: None,
             drag_autoscroll: None,
             chrome_drag: None,
+            split_interaction: layout::SplitInteraction::default(),
             scrollbar_drag: None,
             scroll_groups: Vec::new(),
         }
@@ -418,12 +427,14 @@ impl Ui {
             lua_generation_names: Some(LuaGenerationNames::default()),
             focus_history: self.focus_history.clone(),
             focus: self.focus,
+            last_emitted_focus: None,
             capture: self.capture,
             last_click: self.last_click,
             cursor_shape: self.cursor_shape,
             drag_autoscroll_since: self.drag_autoscroll_since,
             drag_autoscroll: self.drag_autoscroll,
             chrome_drag: self.chrome_drag,
+            split_interaction: self.split_interaction,
             scrollbar_drag: self.scrollbar_drag,
             scroll_groups: self.scroll_groups.clone(),
         }
@@ -659,10 +670,7 @@ impl Ui {
         }
         if let Some(cap) = self.capture {
             if !self.capture_target_alive(cap) {
-                self.capture = None;
-                self.drag_autoscroll_since = None;
-                self.drag_autoscroll = None;
-                self.scrollbar_drag = None;
+                self.clear_capture();
             }
         }
     }
@@ -671,13 +679,23 @@ impl Ui {
         self.surface.layout()
     }
 
+    /// Registered presentation trees: root first, then decorations and overlays.
+    /// Docked surfaces appear through their mounted subtree in the root layout.
+    /// Unlike resolved geometry, this includes zero-sized and hidden decorations.
+    pub fn layout_trees(&self) -> impl Iterator<Item = &LayoutTree> {
+        std::iter::once(self.splits())
+            .chain(self.decorations.iter().map(|(_, value)| &value.layout))
+            .chain(self.overlays.iter().map(|(_, value)| &value.layout))
+    }
+
     fn resolve_splits(&self) -> HashMap<WinId, Rect> {
         let sizer = UiLeafSizer {
             wins: &self.wins,
             bufs: &self.bufs,
         };
-        layout::resolve_layout_with(self.splits(), self.surface.area(), &sizer)
-            .into_iter()
+        self.splits()
+            .resolve(self.surface.area(), &sizer)
+            .leaves()
             .map(|(p, r)| (WinId(p.0), r))
             .collect()
     }
@@ -687,7 +705,10 @@ impl Ui {
             wins: &self.wins,
             bufs: &self.bufs,
         };
-        layout::resolve_containers_with(self.splits(), self.surface.area(), &sizer)
+        self.splits()
+            .resolve(self.surface.area(), &sizer)
+            .containers()
+            .collect()
     }
 
     fn refresh_docked_surface_rects(&mut self) {
@@ -757,8 +778,62 @@ impl Ui {
     }
 
     pub fn buf_destroy(&mut self, id: BufId) -> Option<Buffer> {
+        // Native views own their projection and retain their original backing
+        // until detachment. Neither resource can be destroyed out from under one.
+        if self.wins.values().any(|win| {
+            win.native_scratch().is_some() && win.retained_buffers().any(|buf| buf == id)
+        }) {
+            return None;
+        }
         self.named_bufs.unbind_by_id(id);
         self.bufs.remove(&id)
+    }
+
+    /// Attach a native document using projection storage owned solely by this
+    /// window. Detaching restores the backing buffer and its prior view state.
+    pub fn set_window_document(
+        &mut self,
+        id: WinId,
+        source: Option<std::sync::Arc<dyn smelt_buffer::document::RowSource>>,
+    ) -> bool {
+        let Some(win) = self.wins.get(&id) else {
+            return false;
+        };
+        if let Some(source) = source {
+            let scratch = win
+                .native_scratch()
+                .unwrap_or_else(|| self.buf_create(BufCreateOpts::default()));
+            self.bufs.get_mut(&scratch).unwrap().readonly = true;
+            self.wins
+                .get_mut(&id)
+                .unwrap()
+                .attach_row_source(source, scratch);
+        } else if let Some(scratch) = self.wins.get_mut(&id).unwrap().detach_row_source() {
+            self.buf_destroy(scratch);
+        }
+        true
+    }
+
+    pub fn set_window_host_document(&mut self, id: WinId, handle: Option<DocumentHandle>) {
+        self.set_window_document(id, None);
+        if let Some(win) = self.wins.get_mut(&id) {
+            win.set_document_handle(handle);
+        }
+    }
+
+    fn is_native_scratch(&self, id: BufId) -> bool {
+        self.wins
+            .values()
+            .any(|win| win.native_scratch() == Some(id))
+    }
+
+    fn remove_window(&mut self, id: WinId) {
+        self.named_wins.unbind_by_id(id);
+        if let Some(win) = self.wins.remove(&id) {
+            if let Some(scratch) = win.native_scratch() {
+                self.buf_destroy(scratch);
+            }
+        }
     }
 
     // ── Named resources (hot-reload-survivable handles) ──────────────
@@ -879,8 +954,11 @@ impl Ui {
             callback_ids.extend(self.win_close(id));
         }
 
-        let referenced: std::collections::HashSet<_> =
-            self.wins.values().map(|window| window.buf).collect();
+        let referenced: std::collections::HashSet<_> = self
+            .wins
+            .values()
+            .flat_map(Window::retained_buffers)
+            .collect();
         for id in stale_bufs {
             if id.0 >= lua_buf_threshold && !referenced.contains(&id) {
                 self.buf_destroy(id);
@@ -916,8 +994,11 @@ impl Ui {
         for decoration in doomed_decorations {
             ids.extend(self.decoration_close_tree(decoration));
         }
-        let referenced: std::collections::HashSet<BufId> =
-            self.wins.values().map(|w| w.buf).collect();
+        let referenced: std::collections::HashSet<BufId> = self
+            .wins
+            .values()
+            .flat_map(Window::retained_buffers)
+            .collect();
         let named_bufs = self.named_bufs.ids_set();
         let drop_bufs: Vec<BufId> = self
             .bufs
@@ -1207,7 +1288,15 @@ impl Ui {
             }
             (false, None) => {}
         }
-        self.focus_active_modal();
+        // Recomposition preserves a still-mounted focus, including a list that
+        // was explicitly focused despite being excluded from automatic focus.
+        let retained = self
+            .active_modal()
+            .and_then(|id| self.modal(id))
+            .is_some_and(|modal| self.focus.is_some_and(|win| modal.leaves.contains(&win)));
+        if !retained {
+            self.focus_active_modal();
+        }
     }
 
     pub fn focus_active_modal(&mut self) -> bool {
@@ -1256,6 +1345,10 @@ impl Ui {
         }
         if let Some(cap) = self.capture {
             let owned = match cap {
+                HitTarget::Chrome {
+                    owner: ChromeOwner::Split(_),
+                    ..
+                } => !self.capture_target_alive(cap),
                 HitTarget::Chrome { owner, .. } => owner == overlay::ChromeOwner::Overlay(id),
                 HitTarget::Window(w) | HitTarget::Scrollbar { owner: w } => {
                     removed.layout.contains_leaf(w)
@@ -1263,11 +1356,7 @@ impl Ui {
                 HitTarget::Paint(p) => removed.layout.contains_leaf(p),
             };
             if owned {
-                self.capture = None;
-                self.drag_autoscroll_since = None;
-                self.drag_autoscroll = None;
-                self.scrollbar_drag = None;
-                self.chrome_drag = None;
+                self.clear_capture();
             }
         }
 
@@ -1338,11 +1427,7 @@ impl Ui {
                 HitTarget::Paint(p) => removed.layout.contains_leaf(p),
             };
             if owned {
-                self.capture = None;
-                self.drag_autoscroll_since = None;
-                self.drag_autoscroll = None;
-                self.scrollbar_drag = None;
-                self.chrome_drag = None;
+                self.clear_capture();
             }
         }
         if let Some(focused) = self.focus {
@@ -1367,8 +1452,7 @@ impl Ui {
         let mut all_ids = Vec::new();
         for leaf in removed.layout.leaves_in_order() {
             let win = WinId(leaf.0);
-            self.named_wins.unbind_by_id(win);
-            self.wins.remove(&win);
+            self.remove_window(win);
             all_ids.extend(self.close_decorations_owned_by(win));
             all_ids.extend(self.callbacks.clear_all(win));
         }
@@ -1520,167 +1604,104 @@ impl Ui {
     /// Hit-test a screen position. Checks overlays (topmost-z first, modal-aware)
     /// then splits leaves. Scrollbar column returns `HitTarget::Scrollbar`.
     pub fn hit_test(&self, row: u16, col: u16, cursor: Option<(u16, u16)>) -> Option<HitTarget> {
-        if let Some((id, target)) = self.overlay_hit_test(row, col, cursor) {
-            return Some(match target {
-                OverlayHitTarget::Window(w) => HitTarget::Window(w),
-                OverlayHitTarget::Paint(p) => HitTarget::Paint(p),
-                OverlayHitTarget::Scrollbar(w) => HitTarget::Scrollbar { owner: w },
-                OverlayHitTarget::Chrome(action) => HitTarget::Chrome {
-                    owner: overlay::ChromeOwner::Overlay(id),
-                    action,
-                },
-            });
-        }
-        if let Some(target) = self.decoration_hit_test(row, col) {
-            return Some(target);
-        }
-        if let Some(target) = self.docked_surface_chrome_hit_test(row, col) {
-            return Some(target);
-        }
-        let split_rects = self.resolve_splits();
-        for paint_id in self.splits().leaves_in_order() {
-            let win = WinId(paint_id.0);
-            if let Some(rect) = split_rects.get(&win) {
-                if !rect.contains(row, col) {
-                    continue;
-                }
-                if let Some(bar_owner) = self
-                    .wins
-                    .get(&win)
-                    .and_then(|w| w.viewport)
-                    .and_then(|vp| vp.scrollbar.map(|bar| (vp, bar)))
-                    .filter(|(vp, bar)| bar.contains(vp.rect, row, col))
-                    .map(|_| win)
-                {
-                    return Some(HitTarget::Scrollbar { owner: bar_owner });
-                }
-                if self.wins.contains_key(&win) {
-                    return Some(HitTarget::Window(win));
-                }
-                return Some(HitTarget::Paint(paint_id));
-            }
-        }
-        None
+        self.hit_test_in(&self.resolve_scene(cursor), row, col)
     }
 
-    fn docked_surface_chrome_hit_test(&self, row: u16, col: u16) -> Option<HitTarget> {
-        self.docked_surfaces.iter().rev().find_map(|(id, surface)| {
-            let rect = surface.resolved_rect?;
+    fn hit_test_in(&self, scene: &ResolvedUiLayout, row: u16, col: u16) -> Option<HitTarget> {
+        if let Some((_, target)) = self.overlay_hit_test_in(scene, row, col) {
+            return Some(target);
+        }
+        for decoration in scene.decorations.iter().rev() {
+            if let Some(target) = self.layout_hit_test(&decoration.layout, row, col) {
+                return Some(target);
+            }
+        }
+        self.docked_surface_chrome_hit_test(&scene.root, row, col)
+            .or_else(|| self.layout_hit_test(&scene.root, row, col))
+    }
+
+    fn docked_surface_chrome_hit_test(
+        &self,
+        layout: &layout::ResolvedLayout,
+        row: u16,
+        col: u16,
+    ) -> Option<HitTarget> {
+        layout.containers().rev().find_map(|(id, rect)| {
+            let surface = self.docked_surface(id)?;
             if !rect.contains(row, col) {
                 return None;
             }
             let action = resize_chrome_action(rect, surface.resize, row, col);
             (action != overlay::ChromeAction::None).then_some(HitTarget::Chrome {
-                owner: overlay::ChromeOwner::Container(*id),
+                owner: overlay::ChromeOwner::Container(id),
                 action,
             })
         })
     }
 
-    fn decoration_hit_test(&self, row: u16, col: u16) -> Option<HitTarget> {
-        let mut resolved = self.resolve_decorations();
-        resolved.reverse(); // owner-local topmost first
-        let sizer = UiLeafSizer {
-            wins: &self.wins,
-            bufs: &self.bufs,
-        };
-        for (_id, _owner, rect, decoration) in resolved {
-            if !rect.contains(row, col) {
-                continue;
-            }
-            let leaf_rects = layout::resolve_layout_with(&decoration.layout, rect, &sizer);
-            for (paint_id, leaf_rect) in &leaf_rects {
-                if leaf_rect.contains(row, col) {
-                    let win = WinId(paint_id.0);
-                    if self
-                        .wins
-                        .get(&win)
-                        .and_then(|w| w.viewport)
-                        .and_then(|vp| vp.scrollbar.map(|bar| (vp, bar)))
-                        .is_some_and(|(vp, bar)| bar.contains(vp.rect, row, col))
-                    {
-                        return Some(HitTarget::Scrollbar { owner: win });
-                    }
-                    if self.wins.contains_key(&win) {
-                        return Some(HitTarget::Window(win));
-                    }
-                    return Some(HitTarget::Paint(*paint_id));
-                }
-            }
-        }
-        None
-    }
-
     /// Hit-test against overlays only. The active modal is opaque at its rect for
     /// lower-z overlays; higher-z overlays still receive clicks on the parts that
     /// cover the modal.
-    fn overlay_hit_test(
+    fn overlay_hit_test_in(
         &self,
+        scene: &ResolvedUiLayout,
         row: u16,
         col: u16,
-        cursor: Option<(u16, u16)>,
-    ) -> Option<(OverlayId, OverlayHitTarget)> {
-        let modal_id = self.active_modal_overlay();
-        let resolved = self.resolve_overlays(cursor);
-        let modal_info: Option<(Rect, u16)> = modal_id.and_then(|mid| {
-            resolved
-                .iter()
-                .find_map(|(oid, rect, ov)| (*oid == mid).then_some((*rect, ov.z)))
-        });
-        let mut resolved = resolved;
-        resolved.reverse(); // topmost first
-        for (id, rect, ov) in resolved {
+    ) -> Option<(OverlayId, HitTarget)> {
+        let modal = self
+            .active_modal_overlay()
+            .and_then(|id| scene.overlays.iter().find(|overlay| overlay.id == id));
+        for resolved in scene.overlays.iter().rev() {
+            let (id, rect) = (resolved.id, resolved.rect);
             if !rect.contains(row, col) {
                 continue;
             }
-            // Overlays at or above the modal's z paint on top and receive clicks;
-            // overlays below are blocked at the modal's rect.
-            if let Some((mr, mz)) = modal_info {
-                if ov.z < mz && mr.contains(row, col) {
-                    continue;
-                }
+            // The active modal blocks lower-z overlays at its rectangle.
+            if modal.is_some_and(|modal| resolved.z < modal.z && modal.rect.contains(row, col)) {
+                continue;
             }
-            let sizer = UiLeafSizer {
-                wins: &self.wins,
-                bufs: &self.bufs,
-            };
-            let leaf_rects = layout::resolve_layout_with(&ov.layout, rect, &sizer);
-            for (paint_id, leaf_rect) in &leaf_rects {
-                if leaf_rect.contains(row, col) {
-                    let win = WinId(paint_id.0);
-                    if self
-                        .wins
-                        .get(&win)
-                        .and_then(|w| w.viewport)
-                        .and_then(|vp| vp.scrollbar.map(|bar| (vp, bar)))
-                        .is_some_and(|(vp, bar)| bar.contains(vp.rect, row, col))
-                    {
-                        return Some((id, OverlayHitTarget::Scrollbar(win)));
-                    }
-                    if self.wins.contains_key(&win) {
-                        return Some((id, OverlayHitTarget::Window(win)));
-                    }
-                    return Some((id, OverlayHitTarget::Paint(*paint_id)));
-                }
+            if let Some(target) = self.layout_hit_test(&resolved.layout, row, col) {
+                return Some((id, target));
             }
+            let overlay = self.overlay(id)?;
             return Some((
                 id,
-                OverlayHitTarget::Chrome(chrome_action(rect, ov, row, col)),
+                HitTarget::Chrome {
+                    owner: ChromeOwner::Overlay(id),
+                    action: chrome_action(rect, overlay, row, col),
+                },
             ));
         }
         None
     }
 
+    #[cfg(test)]
+    fn overlay_hit_test(
+        &self,
+        row: u16,
+        col: u16,
+        cursor: Option<(u16, u16)>,
+    ) -> Option<(OverlayId, HitTarget)> {
+        self.overlay_hit_test_in(&self.resolve_scene(cursor), row, col)
+    }
+
     /// Returns z-ordered (lowest first) overlay rects. Overlays whose anchor
     /// cannot resolve (missing cursor / missing Win target) are silently skipped.
     fn resolve_overlays(&self, cursor: Option<(u16, u16)>) -> Vec<(OverlayId, Rect, &Overlay)> {
+        self.resolve_overlays_with_rects(cursor, &self.resolve_splits())
+    }
+
+    fn resolve_overlays_with_rects(
+        &self,
+        cursor: Option<(u16, u16)>,
+        split_rects: &HashMap<WinId, Rect>,
+    ) -> Vec<(OverlayId, Rect, &Overlay)> {
         let (term_w, term_h) = self.surface.terminal_size();
-        let split_rects = self.resolve_splits();
         let ctx = overlay::AnchorContext {
             term_width: term_w,
             term_height: term_h,
             cursor,
-            win_rects: &split_rects,
+            win_rects: split_rects,
         };
         let mut out = Vec::with_capacity(self.overlays.len());
         for (id, ov) in self.overlays_in_z_order() {
@@ -1697,7 +1718,13 @@ impl Ui {
     /// Returns owner-local z-ordered decoration rects. Decorations are skipped
     /// when their owner is not present in the main split layout.
     fn resolve_decorations(&self) -> Vec<(DecorationId, WinId, Rect, &Decoration)> {
-        let split_rects = self.resolve_splits();
+        self.resolve_decorations_with_rects(&self.resolve_splits())
+    }
+
+    fn resolve_decorations_with_rects(
+        &self,
+        split_rects: &HashMap<WinId, Rect>,
+    ) -> Vec<(DecorationId, WinId, Rect, &Decoration)> {
         let sizer = UiLeafSizer {
             wins: &self.wins,
             bufs: &self.bufs,
@@ -1721,7 +1748,7 @@ impl Ui {
     }
 
     pub fn win_open_split(&mut self, buf: BufId, config: SplitConfig) -> Option<WinId> {
-        if !self.bufs.contains_key(&buf) {
+        if !self.bufs.contains_key(&buf) || self.is_native_scratch(buf) {
             return None;
         }
         while self.wins.contains_key(&WinId(self.next_win_id)) {
@@ -1737,7 +1764,10 @@ impl Ui {
     /// Open a window at an explicit `WinId`. Returns `false` if the id is occupied
     /// or the buffer doesn't exist. Use when callers need a stable id for Lua callbacks.
     pub fn win_open_split_at(&mut self, id: WinId, buf: BufId, config: SplitConfig) -> bool {
-        if self.wins.contains_key(&id) || !self.bufs.contains_key(&buf) {
+        if self.wins.contains_key(&id)
+            || !self.bufs.contains_key(&buf)
+            || self.is_native_scratch(buf)
+        {
             return false;
         }
         let win = Window::new(id, buf, config);
@@ -1753,8 +1783,7 @@ impl Ui {
         if let Some(removed) = self.overlay_close(id) {
             for leaf in removed.layout.leaves_in_order() {
                 let win = WinId(leaf.0);
-                self.named_wins.unbind_by_id(win);
-                self.wins.remove(&win);
+                self.remove_window(win);
                 all_ids.extend(self.close_decorations_owned_by(win));
                 all_ids.extend(self.callbacks.clear_all(win));
             }
@@ -1773,8 +1802,7 @@ impl Ui {
         if let Some(decoration_id) = self.decoration_for_leaf(id) {
             return self.decoration_close_tree(decoration_id);
         }
-        self.named_wins.unbind_by_id(id);
-        self.wins.remove(&id);
+        self.remove_window(id);
         if self.focus == Some(id) {
             self.focus = None;
         }
@@ -2153,6 +2181,8 @@ impl Ui {
 
     fn clear_capture(&mut self) {
         self.capture = None;
+        self.chrome_drag = None;
+        self.split_interaction.cancel();
         self.drag_autoscroll_since = None;
         self.drag_autoscroll = None;
         self.scrollbar_drag = None;
@@ -2295,6 +2325,7 @@ impl Ui {
                     self.overlays.iter().any(|(id, _)| *id == owner)
                 }
                 overlay::ChromeOwner::Container(owner) => self.docked_surface(owner).is_some(),
+                overlay::ChromeOwner::Split(id) => self.resolved_split(id).is_some(),
             },
         }
     }
@@ -2312,77 +2343,29 @@ impl Ui {
     /// here lets Lua resize callbacks and tail-follow calculations see the real
     /// overlay rect before anything is drawn.
     pub fn prime_overlay_viewports(&mut self) {
-        let resolved: Vec<(OverlayId, Rect, Overlay)> = self
-            .resolve_overlays(None)
-            .into_iter()
-            .map(|(id, rect, ov)| (id, rect, ov.clone()))
-            .collect();
-        self.refresh_overlay_viewports(&resolved);
+        for overlay in &self.resolve_scene(None).overlays {
+            self.prepare_layout_windows(&overlay.layout, &mut |_, _| {});
+        }
     }
 
     pub fn prime_decoration_viewports(&mut self) {
-        let resolved: Vec<(DecorationId, WinId, Rect, Decoration)> = self
-            .resolve_decorations()
-            .into_iter()
-            .map(|(id, owner, rect, dec)| (id, owner, rect, dec.clone()))
-            .collect();
-        self.refresh_decoration_viewports_with_prepare(&resolved, &mut |_, _| {});
+        for decoration in &self.resolve_scene(None).decorations {
+            self.prepare_layout_windows(&decoration.layout, &mut |_, _| {});
+        }
     }
 
-    fn refresh_overlay_viewports(&mut self, resolved: &[(OverlayId, Rect, Overlay)]) {
-        self.refresh_overlay_viewports_with_prepare(resolved, &mut |_, _| {});
-    }
-
-    fn refresh_overlay_viewports_with_prepare<P>(
+    fn prepare_layout_windows<P>(
         &mut self,
-        resolved: &[(OverlayId, Rect, Overlay)],
+        layout: &layout::ResolvedLayout,
         prepare: &mut P,
     ) -> Vec<PreparedWindowRequest>
     where
         P: FnMut(&mut Ui, MaterializeRequest),
     {
-        let mut requests = Vec::new();
-        for (_id, rect, overlay) in resolved {
-            let sizer = UiLeafSizer {
-                wins: &self.wins,
-                bufs: &self.bufs,
-            };
-            let leaf_rects = layout::resolve_layout_with(&overlay.layout, *rect, &sizer);
-            for (paint_id, leaf_rect) in leaf_rects {
-                if let Some(request) =
-                    self.prepare_window_for_render(WinId(paint_id.0), leaf_rect, prepare)
-                {
-                    requests.push(request);
-                }
-            }
-        }
-        requests
-    }
-
-    fn refresh_decoration_viewports_with_prepare<P>(
-        &mut self,
-        resolved: &[(DecorationId, WinId, Rect, Decoration)],
-        prepare: &mut P,
-    ) -> Vec<PreparedWindowRequest>
-    where
-        P: FnMut(&mut Ui, MaterializeRequest),
-    {
-        let mut requests = Vec::new();
-        for (_id, _owner, rect, decoration) in resolved {
-            let sizer = UiLeafSizer {
-                wins: &self.wins,
-                bufs: &self.bufs,
-            };
-            let leaf_rects = layout::resolve_layout_with(&decoration.layout, *rect, &sizer);
-            for (paint_id, leaf_rect) in leaf_rects {
-                if let Some(request) =
-                    self.prepare_window_for_render(WinId(paint_id.0), leaf_rect, prepare)
-                {
-                    requests.push(request);
-                }
-            }
-        }
-        requests
+        layout
+            .leaves()
+            .filter_map(|(id, rect)| self.prepare_window_for_render(WinId(id.0), rect, prepare))
+            .collect()
     }
 
     fn prepare_window_for_render<P>(
@@ -2420,7 +2403,12 @@ impl Ui {
             follow_tail,
         };
         prepare(self, request);
+        let theme = self.theme().clone();
+        if let (Some(win), Some(buf)) = (self.wins.get_mut(&win_id), self.bufs.get_mut(&buf_id)) {
+            win.prepare_row_source(buf, content_width, rect.height, follow_tail, &theme);
+        }
 
+        let prepared_width = content_width;
         let win = self.wins.get(&win_id)?;
         let buf_id = win.buf;
         let document_handle = win.document_handle();
@@ -2434,6 +2422,14 @@ impl Ui {
             .config
             .gutters
             .content_width_with_gutter(rect.width, gutter_width);
+        // Materialized metadata can establish or change the gutter. Format native
+        // rows at the resulting content width before exposing this viewport.
+        if content_width != prepared_width {
+            if let (Some(win), Some(buf)) = (self.wins.get_mut(&win_id), self.bufs.get_mut(&buf_id))
+            {
+                win.prepare_row_source(buf, content_width, rect.height, follow_tail, &theme);
+            }
+        }
         if let Some(buf) = self.bufs.get_mut(&buf_id) {
             buf.ensure_rendered_at(content_width);
         }
@@ -2660,38 +2656,31 @@ impl Ui {
             .into_iter()
             .map(|request| (request.win, request))
             .collect();
-        let resolved: Vec<(OverlayId, Rect, Overlay)> = self
-            .resolve_overlays(None)
-            .into_iter()
-            .map(|(id, rect, overlay)| (id, rect, overlay.clone()))
-            .collect();
-        let resolved_decorations: Vec<(DecorationId, WinId, Rect, Decoration)> = self
-            .resolve_decorations()
-            .into_iter()
-            .map(|(id, owner, rect, decoration)| (id, owner, rect, decoration.clone()))
-            .collect();
-        let split_rects = self.resolve_splits();
-        let painted_splits: Vec<(WinId, Rect)> = self
-            .splits()
-            .leaves_in_order()
-            .into_iter()
-            .filter_map(|paint| {
-                let win = WinId(paint.0);
-                split_rects.get(&win).map(|rect| (win, *rect))
-            })
-            .collect();
+        let scene = self.resolve_scene(None);
+        for window in self.wins.values().filter(|win| win.row_source().is_some()) {
+            if !scene
+                .layouts()
+                .any(|layout| layout.leaf_rect(window.id().into()).is_some())
+            {
+                window.suspend_row_source();
+            }
+        }
         let mut prepared_windows = Vec::new();
-        prepared_windows
-            .extend(self.refresh_overlay_viewports_with_prepare(&resolved, &mut prepare));
-        prepared_windows.extend(
-            self.refresh_decoration_viewports_with_prepare(&resolved_decorations, &mut prepare),
-        );
-        for (win_id, rect) in &painted_splits {
+        for layout in scene.overlays.iter().map(|overlay| &overlay.layout).chain(
+            scene
+                .decorations
+                .iter()
+                .map(|decoration| &decoration.layout),
+        ) {
+            prepared_windows.extend(self.prepare_layout_windows(layout, &mut prepare));
+        }
+        for (paint_id, rect) in scene.root.leaves() {
+            let win_id = WinId(paint_id.0);
             let prepared = prepared_splits
-                .remove(win_id)
-                .filter(|request| self.prepared_window_matches_split(*request, *win_id, *rect));
+                .remove(&win_id)
+                .filter(|request| self.prepared_window_matches_split(*request, win_id, rect));
             if let Some(request) =
-                prepared.or_else(|| self.prepare_window_for_render(*win_id, *rect, &mut prepare))
+                prepared.or_else(|| self.prepare_window_for_render(win_id, rect, &mut prepare))
             {
                 prepared_windows.push(request);
             }
@@ -2700,7 +2689,10 @@ impl Ui {
         for request in prepared_windows {
             after_layout(self, request);
         }
-        self.refresh_docked_surface_rects();
+        let containers: HashMap<_, _> = scene.root.containers().collect();
+        for (id, surface) in &mut self.docked_surfaces {
+            surface.resolved_rect = containers.get(id).copied();
+        }
 
         let term_size = self.surface.terminal_size();
         let theme = std::sync::Arc::clone(self.surface.theme());
@@ -2708,10 +2700,6 @@ impl Ui {
             overlay::ChromeAction::Resize(edges) => Some((drag.owner, resize_chrome_ctx(edges))),
             overlay::ChromeAction::None | overlay::ChromeAction::Move => None,
         });
-        let sizer = UiLeafSizer {
-            wins: &self.wins,
-            bufs: &self.bufs,
-        };
         let mut builder = PreparedFrameBuilder {
             commands: Vec::new(),
             paint_leaves: Vec::new(),
@@ -2719,32 +2707,22 @@ impl Ui {
             bufs: &self.bufs,
             focus: self.focus,
             active_cursor: self.active_cursor_leaf(),
+            active_split: self.split_interaction.active_id(),
             cursor_shape: self.cursor_shape,
             term_size,
             theme: &theme,
         };
-        collect_root_frame_commands(
-            self.splits(),
-            Rect::new(0, 0, term_size.0, term_size.1),
-            &sizer,
-            &resolved_decorations,
-            active_resize,
-            &mut builder,
-        );
-        for (id, rect, overlay) in &resolved {
-            builder.commands.push(PreparedFrameCommand::Clear(*rect));
+        collect_root_frame_commands(&scene.root, &scene.decorations, active_resize, &mut builder);
+        for overlay in &scene.overlays {
+            builder
+                .commands
+                .push(PreparedFrameCommand::Clear(overlay.rect));
             let root_chrome = active_resize
                 .and_then(|(owner, context)| {
-                    (owner == overlay::ChromeOwner::Overlay(*id)).then_some(context)
+                    (owner == overlay::ChromeOwner::Overlay(overlay.id)).then_some(context)
                 })
                 .unwrap_or_default();
-            collect_layout_frame_commands(
-                &overlay.layout,
-                *rect,
-                &sizer,
-                root_chrome,
-                &mut builder,
-            );
+            collect_layout_frame_commands(&overlay.layout, root_chrome, &mut builder);
         }
         PreparedFrame {
             commands: builder.commands,
@@ -2776,6 +2754,17 @@ impl Ui {
                 for command in commands {
                     match command {
                         PreparedFrameCommand::Clear(area) => grid.clear(area),
+                        PreparedFrameCommand::Divider { divider, active } => {
+                            let mut normal = theme.get("Comment");
+                            let mut dragging = theme.get("SmeltResizeHandle");
+                            normal.bg = None;
+                            dragging.bg = None;
+                            let styles = layout::DividerStyles {
+                                normal,
+                                active: dragging,
+                            };
+                            divider.paint(grid, divider.style(styles, active));
+                        }
                         PreparedFrameCommand::Chrome {
                             area,
                             chrome,
@@ -2928,20 +2917,25 @@ impl Ui {
             Event::Mouse(me) => {
                 match me.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        if let Some(HitTarget::Scrollbar { owner }) =
-                            self.hit_test(me.row, me.column, None)
-                        {
+                        let scene = self.resolve_scene(None);
+                        let hit = self.hit_test_in(&scene, me.row, me.column);
+                        if let Some(HitTarget::Scrollbar { owner }) = hit {
                             self.set_capture(HitTarget::Scrollbar { owner });
                             self.start_scrollbar_drag(owner, me.row);
                             self.apply_scrollbar_drag(owner, me.row);
                             return Status::Consumed;
                         }
-                        let hit = self.hit_test(me.row, me.column, None);
                         let raise = match hit {
                             Some(HitTarget::Chrome {
                                 owner: overlay::ChromeOwner::Overlay(owner),
                                 ..
                             }) => Some(owner),
+                            Some(HitTarget::Chrome {
+                                owner: ChromeOwner::Split(_),
+                                ..
+                            }) => self
+                                .overlay_hit_test_in(&scene, me.row, me.column)
+                                .map(|(id, _)| id),
                             Some(HitTarget::Window(w)) => self.overlay_for_leaf(w),
                             Some(HitTarget::Paint(p)) => self.overlay_for_paint(p),
                             _ => None,
@@ -2998,6 +2992,18 @@ impl Ui {
                                 _ => None,
                             };
                         if let Some((owner, action)) = drag_target {
+                            if let ChromeOwner::Split(id) = owner {
+                                if let Some(resolved) = scene.split(id) {
+                                    if self
+                                        .split_interaction
+                                        .begin(resolved, me.row, me.column)
+                                        .is_some()
+                                    {
+                                        self.set_capture(HitTarget::Chrome { owner, action });
+                                    }
+                                }
+                                return Status::Consumed;
+                            }
                             if action != overlay::ChromeAction::None {
                                 if let Some(rect) = self.chrome_owner_rect(owner) {
                                     self.set_capture(HitTarget::Chrome { owner, action });
@@ -3022,6 +3028,15 @@ impl Ui {
                             self.apply_scrollbar_drag(owner, me.row);
                             return Status::Consumed;
                         }
+                        if let Some(id) = self.split_interaction.active_id() {
+                            let resolved = self.resolved_split(id);
+                            self.split_interaction
+                                .update(resolved.as_ref(), me.row, me.column);
+                            if self.split_interaction.active_id().is_none() {
+                                self.clear_capture();
+                            }
+                            return Status::Consumed;
+                        }
                         if let Some(drag) = self.chrome_drag {
                             self.apply_chrome_drag(drag, me.row, me.column);
                             return Status::Consumed;
@@ -3032,8 +3047,14 @@ impl Ui {
                             self.clear_capture();
                             return Status::Consumed;
                         }
+                        if let Some(id) = self.split_interaction.active_id() {
+                            let resolved = self.resolved_split(id);
+                            self.split_interaction
+                                .release(resolved.as_ref(), me.row, me.column);
+                            self.clear_capture();
+                            return Status::Consumed;
+                        }
                         if self.chrome_drag.is_some() {
-                            self.chrome_drag = None;
                             self.clear_capture();
                             return Status::Consumed;
                         }
@@ -3088,7 +3109,7 @@ impl Ui {
         if let Some((_, overlay)) = self.overlays.iter_mut().find(|(oid, _)| *oid == id) {
             overlay.z = max_z.saturating_add(1);
         }
-        if self.modal_for_overlay(id).is_some() {
+        if self.modal_for_overlay(id).is_some() && self.focused_modal() != self.active_modal() {
             self.focus_active_modal();
         }
     }
@@ -3105,6 +3126,9 @@ impl Ui {
             overlay::ChromeOwner::Container(id) => self
                 .docked_surface(id)
                 .and_then(DockedSurface::resolved_rect),
+            overlay::ChromeOwner::Split(id) => self
+                .resolved_split(id)
+                .map(|resolved| resolved.geometry.panes[0]),
         }
     }
 
@@ -3112,52 +3136,23 @@ impl Ui {
     fn apply_chrome_drag(&mut self, drag: ChromeDrag, row: u16, col: u16) {
         let dy = row as i32 - drag.origin_row as i32;
         let dx = col as i32 - drag.origin_col as i32;
-        match drag.owner {
-            overlay::ChromeOwner::Overlay(id) => {
-                let Some(index) = self.overlays.iter().position(|(oid, _)| *oid == id) else {
-                    return;
-                };
-                match drag.action {
-                    overlay::ChromeAction::None => {}
-                    overlay::ChromeAction::Move => {
-                        let new_top = drag.start_rect.top as i32 + dy;
-                        let new_left = drag.start_rect.left as i32 + dx;
-                        self.overlays[index].1.anchor = layout::Anchor::ScreenAt {
-                            row: new_top,
-                            col: new_left,
+        match drag.action {
+            ChromeAction::Resize(edges) => {
+                self.resize_chrome(drag.owner, drag.start_rect, edges, dx, dy)
+            }
+            ChromeAction::Move => {
+                if let ChromeOwner::Overlay(id) = drag.owner {
+                    if let Some((_, overlay)) = self.overlays.iter_mut().find(|(oid, _)| *oid == id)
+                    {
+                        overlay.anchor = layout::Anchor::ScreenAt {
+                            row: i32::from(drag.start_rect.top) + dy,
+                            col: i32::from(drag.start_rect.left) + dx,
                             corner: Corner::NW,
                         };
                     }
-                    overlay::ChromeAction::Resize(edges) => {
-                        let term = self.surface.terminal_size();
-                        let sizer = UiLeafSizer {
-                            wins: &self.wins,
-                            bufs: &self.bufs,
-                        };
-                        let bounds = overlay_resize_bounds(&self.overlays[index].1, term, &sizer);
-                        let (top, left, new_w, new_h) =
-                            resize_chrome_geometry(drag.start_rect, edges, dx, dy, bounds);
-
-                        let ov = &mut self.overlays[index].1;
-                        ov.size_override = Some((new_w, new_h));
-                        ov.anchor = anchor_after_resize(ov.anchor.clone(), edges, top, left);
-                    }
                 }
             }
-            overlay::ChromeOwner::Container(id) => {
-                let overlay::ChromeAction::Resize(edges) = drag.action else {
-                    return;
-                };
-                let Some(bounds) = self.docked_surface_resize_bounds(id) else {
-                    return;
-                };
-                let (_, _, _, new_height) =
-                    resize_chrome_geometry(drag.start_rect, edges, dx, dy, bounds);
-                if let Some(surface) = self.docked_surface_mut(id) {
-                    surface.height_override = Some(new_height);
-                    surface.expanded = false;
-                }
-            }
+            ChromeAction::None => {}
         }
     }
 
@@ -3548,6 +3543,23 @@ impl Ui {
         }
     }
 
+    /// Publish the committed focus transition before other viewport observers.
+    /// Covers keyboard, mouse, overlay closure and reload without requiring
+    /// each caller of `set_focus` to dispatch callbacks itself.
+    pub fn dispatch_focus_events(&mut self, lua_invoke: &mut LuaInvoke) {
+        let focus = self.focus();
+        if self.last_emitted_focus == focus {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.last_emitted_focus, focus);
+        if let Some(win) = previous {
+            self.fire_win_event(win, WinEvent::FocusLost, Payload::None, lua_invoke);
+        }
+        if let Some(win) = focus {
+            self.fire_win_event(win, WinEvent::FocusGained, Payload::None, lua_invoke);
+        }
+    }
+
     /// Fire `WinEvent::Scrolled` on every subscribed window whose
     /// `(scroll_top, tail-follow)` changed since the last emission.
     pub fn dispatch_scroll_events(&mut self, lua_invoke: &mut LuaInvoke) {
@@ -3696,10 +3708,26 @@ impl<'a> BufferDisplayDocument<'a> {
     pub fn new(ui: &'a mut Ui, win: WinId) -> Self {
         Self { ui, win }
     }
+
+    fn native(&self) -> Option<crate::row::RowSourceDocument<'_>> {
+        let window = self.ui.win(self.win)?;
+        Some(crate::row::RowSourceDocument {
+            source: window.row_source()?.as_ref(),
+            theme: self.ui.theme(),
+            width: window
+                .viewport
+                .map(|viewport| viewport.content_width)
+                .or_else(|| self.ui.win_content_width(self.win))
+                .unwrap_or(0),
+        })
+    }
 }
 
 impl DisplayDocument for BufferDisplayDocument<'_> {
     fn snapshot(&mut self) -> DisplaySnapshot {
+        if let Some(mut document) = self.native() {
+            return document.snapshot();
+        }
         let total_rows = self
             .ui
             .win(self.win)
@@ -3716,12 +3744,18 @@ impl DisplayDocument for BufferDisplayDocument<'_> {
     }
 
     fn materialize(&mut self, range: std::ops::Range<RowIndex>) -> DisplayRows {
+        if let Some(mut document) = self.native() {
+            return document.materialize(range);
+        }
         let count = range.end.saturating_sub(range.start);
         display_rows_for_ui_range(self.ui, self.win, range.start, count)
             .unwrap_or_else(DisplayRows::empty)
     }
 
     fn copy_range(&mut self, range: TextRange) -> Option<CopyOutput> {
+        if let Some(mut document) = self.native() {
+            return document.copy_range(range);
+        }
         let range = match range {
             TextRange::Rows(range) => range,
             TextRange::Bytes(_) => return None,
@@ -4067,12 +4101,20 @@ struct PreparedFrameBuilder<'a> {
     bufs: &'a HashMap<BufId, Buffer>,
     focus: Option<WinId>,
     active_cursor: Option<WinId>,
+    active_split: Option<layout::SplitId>,
     cursor_shape: CursorShape,
     term_size: (u16, u16),
     theme: &'a std::sync::Arc<Theme>,
 }
 
 impl PreparedFrameBuilder<'_> {
+    fn push_divider(&mut self, divider: layout::SplitDivider) {
+        self.commands.push(PreparedFrameCommand::Divider {
+            active: self.active_split == Some(divider.id),
+            divider,
+        });
+    }
+
     fn push_leaf(&mut self, id: PaintId, rect: Rect) {
         let win_id = WinId(id.0);
         if let Some(win) = self
@@ -4118,72 +4160,71 @@ impl PreparedFrameBuilder<'_> {
 }
 
 fn collect_layout_frame_commands(
-    tree: &LayoutTree,
-    area: Rect,
-    sizer: &dyn layout::LeafSizer,
+    layout: &layout::ResolvedLayout,
     root_chrome: layout::ChromePaintCtx,
     builder: &mut PreparedFrameBuilder<'_>,
 ) {
-    smelt_term::walk_layout_tree_with(tree, area, sizer, |operation| match operation {
-        smelt_term::LayoutPaintOp::Chrome { area, chrome, root } => {
-            builder.commands.push(PreparedFrameCommand::Chrome {
-                area,
-                chrome: chrome.clone(),
-                context: if root {
-                    root_chrome
-                } else {
-                    layout::ChromePaintCtx::empty()
-                },
-            })
+    for operation in layout.operations().iter().cloned() {
+        match operation {
+            smelt_term::LayoutPaintOp::Chrome { area, chrome, root } => {
+                builder.commands.push(PreparedFrameCommand::Chrome {
+                    area,
+                    chrome,
+                    context: if root {
+                        root_chrome
+                    } else {
+                        layout::ChromePaintCtx::empty()
+                    },
+                });
+            }
+            smelt_term::LayoutPaintOp::Leaf { id, rect } => builder.push_leaf(id, rect),
+            smelt_term::LayoutPaintOp::Divider(divider) => builder.push_divider(divider),
         }
-        smelt_term::LayoutPaintOp::Leaf { id, rect } => builder.push_leaf(id, rect),
-    });
+    }
 }
 
 fn collect_root_frame_commands(
-    tree: &LayoutTree,
-    area: Rect,
-    sizer: &dyn layout::LeafSizer,
-    decorations: &[(DecorationId, WinId, Rect, Decoration)],
+    layout: &layout::ResolvedLayout,
+    decorations: &[ResolvedDecoration],
     active_resize: Option<(overlay::ChromeOwner, layout::ChromePaintCtx)>,
     builder: &mut PreparedFrameBuilder<'_>,
 ) {
-    smelt_term::walk_layout_tree_with(tree, area, sizer, |operation| match operation {
-        smelt_term::LayoutPaintOp::Chrome { area, chrome, .. } => {
-            let context = active_resize
-                .and_then(|(owner, context)| {
-                    chrome
-                        .container
-                        .is_some_and(|id| owner == overlay::ChromeOwner::Container(id))
-                        .then_some(context)
-                })
-                .unwrap_or_default();
-            builder.commands.push(PreparedFrameCommand::Chrome {
-                area,
-                chrome: chrome.clone(),
-                context,
-            });
-        }
-        smelt_term::LayoutPaintOp::Leaf { id, rect } => {
-            builder.push_leaf(id, rect);
-            let owner = WinId(id.0);
-            for (_decoration_id, decoration_owner, decoration_rect, decoration) in decorations {
-                if *decoration_owner != owner {
-                    continue;
+    for operation in layout.operations().iter().cloned() {
+        match operation {
+            smelt_term::LayoutPaintOp::Divider(divider) => builder.push_divider(divider),
+            smelt_term::LayoutPaintOp::Chrome { area, chrome, .. } => {
+                let context = active_resize
+                    .and_then(|(owner, context)| {
+                        chrome
+                            .container
+                            .is_some_and(|id| owner == overlay::ChromeOwner::Container(id))
+                            .then_some(context)
+                    })
+                    .unwrap_or_default();
+                builder.commands.push(PreparedFrameCommand::Chrome {
+                    area,
+                    chrome,
+                    context,
+                });
+            }
+            smelt_term::LayoutPaintOp::Leaf { id, rect } => {
+                builder.push_leaf(id, rect);
+                for decoration in decorations
+                    .iter()
+                    .filter(|decoration| decoration.owner == WinId(id.0))
+                {
+                    builder
+                        .commands
+                        .push(PreparedFrameCommand::Clear(decoration.rect));
+                    collect_layout_frame_commands(
+                        &decoration.layout,
+                        layout::ChromePaintCtx::empty(),
+                        builder,
+                    );
                 }
-                builder
-                    .commands
-                    .push(PreparedFrameCommand::Clear(*decoration_rect));
-                collect_layout_frame_commands(
-                    &decoration.layout,
-                    *decoration_rect,
-                    sizer,
-                    layout::ChromePaintCtx::empty(),
-                    builder,
-                );
             }
         }
-    });
+    }
 }
 
 /// Looks up each window leaf's natural size from its buffer's current
@@ -4958,6 +4999,33 @@ mod tests {
     }
 
     #[test]
+    fn raising_active_modal_overlay_preserves_its_focused_leaf() {
+        for focusable in [false, true] {
+            let mut ui = make_ui();
+            let [first, second, third] = [WinId(100), WinId(101), WinId(102)];
+            for win in [first, second, third] {
+                register_window(&mut ui, win);
+            }
+            ui.win_mut(second)
+                .unwrap()
+                .set_surface(WindowSurface::list(focusable));
+            let overlay = ui.overlay_open(modal_overlay_with_leaves(first, second, third));
+            assert_eq!(ui.focus(), Some(first));
+            assert!(ui.set_focus(second));
+            let history = ui.focus_history().to_vec();
+            for _ in 0..3 {
+                ui.raise_overlay_to_front(overlay);
+                assert_eq!(ui.active_modal_overlay(), Some(overlay));
+                assert_eq!(ui.focus(), Some(second));
+                assert_eq!(ui.focus_history(), history);
+            }
+            ui.focus = None;
+            ui.raise_overlay_to_front(overlay);
+            assert_eq!(ui.focus(), Some(first));
+        }
+    }
+
+    #[test]
     fn docked_modal_focuses_its_leaf_and_contains_programmatic_focus() {
         let mut ui = make_ui();
         let background = WinId(7);
@@ -5164,7 +5232,7 @@ mod tests {
         let id = ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
         let hit = ui.overlay_hit_test(10, 30, None).unwrap();
         assert_eq!(hit.0, id);
-        assert!(matches!(hit.1, OverlayHitTarget::Window(WinId(99))));
+        assert!(matches!(hit.1, HitTarget::Window(WinId(99))));
     }
 
     #[test]
@@ -5179,10 +5247,16 @@ mod tests {
         // Inside overlay rect (row 7 = top border), outside the leaf.
         let hit = ui.overlay_hit_test(7, 30, None).unwrap();
         assert_eq!(hit.0, id);
-        assert_eq!(hit.1, OverlayHitTarget::Chrome(overlay::ChromeAction::None));
+        assert_eq!(
+            hit.1,
+            HitTarget::Chrome {
+                owner: ChromeOwner::Overlay(id),
+                action: ChromeAction::None
+            }
+        );
         // Inside the leaf → Window.
         let hit = ui.overlay_hit_test(10, 30, None).unwrap();
-        assert!(matches!(hit.1, OverlayHitTarget::Window(WinId(99))));
+        assert!(matches!(hit.1, HitTarget::Window(WinId(99))));
     }
 
     #[test]

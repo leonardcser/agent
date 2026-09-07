@@ -638,6 +638,36 @@ function smelt.process.run(cmd, args, opts)
   return external_or_err(function(id) internal.process.__start_run(id, cmd, args, opts) end)
 end
 
+--- Load separate unstaged (index to worktree) and staged (HEAD to index) changes
+--- without passing patch bodies through Lua. Yields inside `smelt.spawn`; cancellation terminates Git. `cwd`
+--- defaults to the runtime workspace and `context` to 3. The snapshot is stable
+--- until explicitly refreshed; a clean repository returns an empty diff.
+---@type fun(opts: { cwd: string?, context: integer? }?): { root: string, branch: string, diff: smelt.diff.Diff }?, string?
+function smelt.git.diff(opts)
+  require_yieldable("smelt.git.diff")
+  local id = smelt.task.alloc()
+  local job = internal.git.__start_diff(id, opts)
+  smelt.task.wait(id)
+  return job:take()
+end
+
+--- Stage, unstage, or toggle one file from a Git snapshot. File indices are
+--- one-based. Toggle stages an unstaged entry and unstages a staged entry.
+--- Updates the real index, never worktree contents, then acquires and indexes
+--- both sections off the UI thread. Yields inside `smelt.spawn`. A successful
+--- index operation returns index_updated=true even if refresh fails: diff is then
+--- nil and refresh_error explains why. Retain the old snapshot as stale and
+--- refresh before another mutation. nil, error means the mutation did not report
+--- success; cancellation/timeouts may require refreshing to verify repository state.
+---@type fun(diff: smelt.diff.Diff, file: integer, action: "stage"|"unstage"|"toggle"): { root: string, index_updated: boolean, branch: string?, diff: smelt.diff.Diff?, refresh_error: string? }?, string?
+function smelt.git.index(diff, file, action)
+  require_yieldable("smelt.git.index")
+  local id = smelt.task.alloc()
+  local job = internal.git.__start_index(id, diff, file, action)
+  smelt.task.wait(id)
+  return job:take()
+end
+
 -- Stop the supervised shell job `id` and return its bounded output. Yields until
 -- containment termination and removes the completed job. Returns `({ text },
 -- nil)` on success or `(nil, err)` when the job does not exist or cannot stop.

@@ -22,7 +22,7 @@ use crate::transcript_content::{
 };
 use smelt_buffer::buffer::SpanMeta;
 
-mod diff_inline;
+pub(crate) mod diff_inline;
 
 use diff_inline::{
     align_changed_lines, annotate_inline_highlights, full_line_highlight,

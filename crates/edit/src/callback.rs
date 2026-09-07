@@ -14,11 +14,13 @@ pub struct KeyBind {
 
 impl KeyBind {
     pub fn new(code: KeyCode, mods: KeyModifiers) -> Self {
-        let mods = if code == KeyCode::BackTab {
-            mods - KeyModifiers::SHIFT
-        } else {
-            mods
-        };
+        // Uppercase text already encodes Shift; terminals may also report it.
+        let mods =
+            if code == KeyCode::BackTab || matches!(code, KeyCode::Char(c) if c.is_uppercase()) {
+                mods - KeyModifiers::SHIFT
+            } else {
+                mods
+            };
         Self { code, mods }
     }
 
@@ -497,6 +499,24 @@ mod tests {
             KeyBind::new(KeyCode::BackTab, KeyModifiers::SHIFT | KeyModifiers::ALT),
             KeyBind::new(KeyCode::BackTab, KeyModifiers::ALT)
         );
+    }
+
+    #[test]
+    fn uppercase_keybinds_ignore_redundant_shift() {
+        for ch in ['G', 'H', 'L', 'É', 'Ω'] {
+            for mods in [KeyModifiers::NONE, KeyModifiers::CONTROL, KeyModifiers::ALT] {
+                assert_eq!(
+                    KeyBind::new(KeyCode::Char(ch), mods | KeyModifiers::SHIFT),
+                    KeyBind::new(KeyCode::Char(ch), mods)
+                );
+            }
+        }
+        for code in [KeyCode::Left, KeyCode::Char('g'), KeyCode::Char(' ')] {
+            assert_ne!(
+                KeyBind::new(code, KeyModifiers::SHIFT),
+                KeyBind::new(code, KeyModifiers::NONE)
+            );
+        }
     }
 
     #[test]

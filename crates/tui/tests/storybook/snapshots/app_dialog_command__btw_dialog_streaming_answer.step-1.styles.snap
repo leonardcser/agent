@@ -14,7 +14,6 @@ dim: 70 22
  15   2  27 fg=AnsiValue(208) attrs=dim
  15  29  41 fg=AnsiValue(208)
  16   1   1 fg=Black bg=White
- 16   2   2 attrs=dim|italic
  16   9   6 fg=AnsiValue(208)
  18   1   2 fg=Rgb { r: 102, g: 217, b: 239 } bg=AnsiValue(233)
  18   3   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)

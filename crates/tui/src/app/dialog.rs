@@ -14,6 +14,7 @@ impl TuiApp {
     ) -> Result<(crate::smelt_edit::ContainerId, crate::smelt_edit::ModalId), String> {
         let mut leaves = Vec::new();
         let (_, tree) = crate::lua::ui_ops::build_layout_tree(self, &layout, &mut leaves)?;
+        crate::lua::ui_ops::validate_split_mounts(&tree, self.ui.layout_trees())?;
         if leaves.is_empty() {
             return Err("dialog requires at least one window leaf".into());
         }

@@ -121,7 +121,8 @@ local GUTTER = 1
 --- setting both raises.
 ---@class smelt.dialog.Opts
 ---@field title? string Title rendered in the chrome row.
----@field panels smelt.dialog.Panel[] Ordered list of body panels.
+---@field panels? smelt.dialog.Panel[] Ordered list of body panels. Mutually exclusive with `layout`.
+---@field layout? smelt.ui.layout Composable body layout, including nested resizable splits. Window leaves are discovered automatically. Mutually exclusive with `panels` and `bottom_panels`.
 ---@field bottom_panels? smelt.dialog.Panel[] Panels pinned to the bottom when the dialog has surplus height; extra height is placed between them and `panels`.
 ---@field bottom_gap? integer Minimum blank rows between `panels` and `bottom_panels` (default 0).
 ---@field focus? smelt.win.Win Leaf that should receive initial focus.
@@ -734,6 +735,22 @@ local function build_dialog(opts)
 
   local top_panels = opts.panels or {}
   local bottom_panels = opts.bottom_panels or {}
+  local chrome = {
+    border = opts.border or { top = "SmeltAccent" },
+    title = smelt.dialog.title(opts.title, { pad = true }),
+  }
+  -- Numeric heights describe the body, excluding the top chrome row.
+  local height = opts.height or "fit"
+  if type(height) == "number" then height = height + 1 end
+  if opts.layout ~= nil then
+    if opts.panels ~= nil or opts.bottom_panels ~= nil then
+      error("smelt.dialog: use `layout` or `panels`, not both", 3)
+    end
+    local leaves = smelt.ui.layout.windows(opts.layout)
+    if #leaves == 0 then error("smelt.dialog: layout must contain a window", 3) end
+    local layout = smelt.ui.layout.frame(opts.layout, chrome)
+    return leaves[1], leaves, layout, height
+  end
   if #top_panels == 0 and #bottom_panels == 0 then
     error("smelt.dialog: panels or bottom_panels must be non-empty", 3)
   end
@@ -758,10 +775,6 @@ local function build_dialog(opts)
 
   local top_items = build_layout_items(top_panels, 1)
   local bottom_items = build_layout_items(bottom_panels, #top_panels + 1)
-  local chrome = {
-    border = opts.border or { top = "SmeltAccent" },
-    title = smelt.dialog.title(opts.title, { pad = true }),
-  }
 
   local layout
   if #top_items > 0 and #bottom_items > 0 then
@@ -775,10 +788,6 @@ local function build_dialog(opts)
     layout = smelt.ui.layout.vbox(#top_items > 0 and top_items or bottom_items, chrome)
   end
 
-  -- Root-docked dialogs fit their content by default. An explicit numeric
-  -- height remains body-relative, so include the top chrome row.
-  local height = opts.height or "fit"
-  if type(height) == "number" then height = height + 1 end
   return leaves[1], leaves, layout, height
 end
 

@@ -1330,8 +1330,13 @@ impl TuiApp {
         }
 
         let mut window_leaves: Vec<crate::smelt_edit::WinId> = Vec::new();
-        match crate::lua::ui_ops::build_layout_tree(self, &node, &mut window_leaves) {
-            Ok((_constraint, tree)) => Some(tree),
+        let layout = crate::lua::ui_ops::build_layout_tree(self, &node, &mut window_leaves)
+            .and_then(|(_, tree)| {
+                crate::lua::ui_ops::validate_split_mounts(&tree, self.ui.layout_trees().skip(1))?;
+                Ok(tree)
+            });
+        match layout {
+            Ok(tree) => Some(tree),
             Err(e) => {
                 self.record_lua_error(format!("smelt.ui.layout composer tree: {e}"));
                 None

@@ -124,6 +124,8 @@ local function build(p)
     SmeltModeDefault    = { fg = color(p.muted), bg = surface },
     SmeltExecPrefix     = fg(color(p.error), { bold = true }),
 
+    SmeltDiffAddCount       = fg(mix(p.success, p.muted, 0.2)),
+    SmeltDiffDeleteCount    = fg(mix(p.error, p.muted, 0.2)),
     SmeltDiffAddBg          = bg(add),
     SmeltDiffDeleteBg       = bg(del),
     SmeltDiffAddInlineBg    = bg(add_inline),

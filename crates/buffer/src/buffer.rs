@@ -218,7 +218,11 @@ pub enum LineCursorPolicy {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LineDecoration {
-    /// Row-level bg fill, painted across the entire slice width by `Window::render`.
+    /// A dim horizontal rule across the window, independent of horizontal pan.
+    pub horizontal_rule: bool,
+    /// Background across the entire window row, including gutters and padding.
+    pub window_bg: Option<Color>,
+    /// Background fill across the content region, excluding gutters and padding.
     /// Set via `Buffer::set_decoration` for buffers that aren't built through
     /// `LineBuilder` (e.g. the cmdline status bar). Transcript content blocks
     /// pad with inline styled spaces via `LineBuilder::pad_row_to_layout_width`
@@ -293,6 +297,7 @@ struct RenderedHighlight {
 pub struct RenderedRowMetadata {
     highlights: Vec<RenderedHighlight>,
     decorations: Vec<LineDecoration>,
+    pub(crate) source_line_bounds: Option<SourceLine>,
 }
 
 impl RenderedRowMetadata {
@@ -317,7 +322,7 @@ impl RenderedRowMetadata {
         });
     }
 
-    fn push_span(&mut self, row: usize, span: Span) {
+    pub(crate) fn push_span(&mut self, row: usize, span: Span) {
         self.highlights.push(RenderedHighlight { row, span });
     }
 
@@ -349,6 +354,7 @@ impl RenderedRowMetadata {
     fn clear(&mut self) {
         self.highlights.clear();
         self.decorations.clear();
+        self.source_line_bounds = None;
     }
 }
 
@@ -1498,6 +1504,11 @@ impl Buffer {
         self.decoration_at(row).source_line
     }
 
+    /// Document-wide line-number bounds for a viewport-sized projection.
+    pub fn source_line_bounds(&self) -> Option<SourceLine> {
+        self.rendered_rows.source_line_bounds
+    }
+
     pub fn set_decoration(&mut self, line: usize, decoration: LineDecoration) {
         if line < self.rendered_rows.decorations.len() {
             Arc::make_mut(&mut self.rendered_rows).decorations[line] = decoration;
@@ -1537,6 +1548,8 @@ impl Buffer {
             return decoration;
         }
         static DEFAULT: LineDecoration = LineDecoration {
+            horizontal_rule: false,
+            window_bg: None,
             fill_bg: None,
             soft_wrapped: false,
             cell_selectable: false,

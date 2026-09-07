@@ -74,6 +74,16 @@ pub(crate) fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
     Some(format!("<{prefix}{base}>"))
 }
 
+fn key_modifier(name: &str) -> Option<crossterm::event::KeyModifiers> {
+    use crossterm::event::KeyModifiers;
+    match name.to_ascii_lowercase().as_str() {
+        "ctrl" | "c" => Some(KeyModifiers::CONTROL),
+        "alt" | "a" | "meta" | "m" => Some(KeyModifiers::ALT),
+        "shift" | "s" => Some(KeyModifiers::SHIFT),
+        _ => None,
+    }
+}
+
 /// Parse a plugin key spec into a [`crate::smelt_edit::KeyBind`].
 /// Accepts shorthand (`"c-j"`, `"s-tab"`, `"enter"`) and canonical bracket form
 /// (`"<C-r>"`, `"<S-Tab>"`). Modifiers separate with `-`; case-insensitive.
@@ -88,16 +98,18 @@ pub(crate) fn parse_keybind(spec: &str) -> Option<crate::smelt_edit::KeyBind> {
         .strip_prefix('<')
         .and_then(|s| s.strip_suffix('>'))
         .unwrap_or(raw);
-    let (mods, name) = match raw.rsplit_once('-') {
+    let parts = if raw == "-" {
+        None
+    } else if let Some(prefix) = raw.strip_suffix("--") {
+        Some((prefix, "-"))
+    } else {
+        raw.rsplit_once('-')
+    };
+    let (mods, name) = match parts {
         Some((prefix, name)) => {
             let mut mods = KeyModifiers::NONE;
             for part in prefix.split('-') {
-                match part.to_ascii_lowercase().as_str() {
-                    "ctrl" | "c" => mods |= KeyModifiers::CONTROL,
-                    "alt" | "a" | "meta" | "m" => mods |= KeyModifiers::ALT,
-                    "shift" | "s" => mods |= KeyModifiers::SHIFT,
-                    _ => return None,
-                }
+                mods |= key_modifier(part)?;
             }
             (mods, name)
         }
@@ -126,7 +138,7 @@ pub(crate) fn parse_keybind(spec: &str) -> Option<crate::smelt_edit::KeyBind> {
         "end" => KeyCode::End,
         "pageup" | "pgup" => KeyCode::PageUp,
         "pagedown" | "pgdn" => KeyCode::PageDown,
-        s if s.starts_with('f') && s[1..].chars().all(|c| c.is_ascii_digit()) => {
+        s if s.len() > 1 && s.starts_with('f') && s[1..].chars().all(|c| c.is_ascii_digit()) => {
             let n: u8 = s[1..].parse().ok()?;
             if !(1..=12).contains(&n) {
                 return None;
@@ -172,6 +184,14 @@ pub(crate) fn canonicalize_chord_sequence_with_leader(
     if !input.contains('<') {
         if let Some(single) = canonicalize_chord(input) {
             return Some(single);
+        }
+        // Malformed modifier shorthand is not a sequence of literal characters.
+        if input
+            .trim()
+            .split_once('-')
+            .is_some_and(|(prefix, _)| key_modifier(prefix).is_some())
+        {
+            return None;
         }
     }
     let tokens = tokenize_chord_spec(input)?;
@@ -1218,6 +1238,23 @@ mod tests {
     use smelt_core::lua::api::lua_table_to_json;
     use smelt_core::transcript_content::ContentId;
     use smelt_core::transcript_model::{Block, BlockId, ToolOutput, ToolState, ToolStatus};
+
+    #[test]
+    fn keybind_f_is_a_character_unless_followed_by_function_number() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        for (spec, code, mods) in [
+            ("f", KeyCode::Char('f'), KeyModifiers::NONE),
+            ("F", KeyCode::Char('F'), KeyModifiers::NONE),
+            ("ctrl-f", KeyCode::Char('f'), KeyModifiers::CONTROL),
+            ("<C-f>", KeyCode::Char('f'), KeyModifiers::CONTROL),
+            ("F12", KeyCode::F(12), KeyModifiers::NONE),
+            ("<S-Left>", KeyCode::Left, KeyModifiers::SHIFT),
+        ] {
+            let binding = parse_keybind(spec).expect(spec);
+            assert_eq!((binding.code, binding.mods), (code, mods), "{spec}");
+        }
+        assert!(parse_keybind("F13").is_none());
+    }
 
     /// Stub `smelt.notify.info` / `smelt.notify.error` to push into `_G.test_log` / `_G.test_err`.
     fn install_test_notify(rt: &LuaRuntime) {
@@ -3750,6 +3787,32 @@ mod tests {
     }
 
     #[test]
+    fn hyphen_bindings_round_trip_with_modifiers() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as M};
+        for (spec, mods) in [
+            ("-", M::NONE),
+            ("<->", M::NONE),
+            ("ctrl--", M::CONTROL),
+            ("<C-->", M::CONTROL),
+            ("alt--", M::ALT),
+            ("<C-M-->", M::CONTROL | M::ALT),
+        ] {
+            assert_eq!(
+                parse_keybind(spec),
+                Some(crate::smelt_edit::KeyBind::new(KeyCode::Char('-'), mods)),
+                "{spec}"
+            );
+            assert_eq!(
+                canonicalize_chord(spec),
+                chord_string(KeyEvent::new(KeyCode::Char('-'), mods))
+            );
+        }
+        for invalid in ["ctrl-", "--", "bogus--", "---"] {
+            assert_eq!(parse_keybind(invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
     fn normalize_mode_accepts_long_and_short_names() {
         assert_eq!(normalize_mode("n").as_deref(), Some("n"));
         assert_eq!(normalize_mode("normal").as_deref(), Some("n"));
@@ -4067,12 +4130,24 @@ mod tests {
             .exec()
             .expect_err("should error on unknown mode");
         assert!(format!("{err}").contains("unknown mode"), "err: {err}");
-        let err = rt
-            .lua
-            .load(r#"smelt.keymap.set("n", "c-wtf", function() end)"#)
-            .exec()
-            .expect_err("should error on unknown chord");
-        assert!(format!("{err}").contains("unknown chord"), "err: {err}");
+        for chord in ["c-wtf", "ctrl-", "ctrl-bogus-x", "<C-wtf>"] {
+            let err = rt
+                .lua
+                .load(format!(
+                    r#"smelt.keymap.set("n", "{chord}", function() end)"#
+                ))
+                .exec()
+                .expect_err("should error on unknown chord");
+            assert!(format!("{err}").contains("unknown chord"), "err: {err}");
+        }
+        for chord in ["-", "g-", "<C-->", "<c><->wtf"] {
+            rt.lua
+                .load(format!(
+                    r#"smelt.keymap.set("n", "{chord}", function() end)"#
+                ))
+                .exec()
+                .unwrap();
+        }
     }
 
     #[test]

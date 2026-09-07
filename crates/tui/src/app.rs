@@ -1892,8 +1892,11 @@ impl TuiApp {
                     },
                 },
             ));
+            ui.set_window_host_document(
+                crate::app::TRANSCRIPT_WIN,
+                Some(crate::app::TRANSCRIPT_DOCUMENT),
+            );
             if let Some(w) = ui.win_mut(crate::app::TRANSCRIPT_WIN) {
-                w.set_document_handle(Some(crate::app::TRANSCRIPT_DOCUMENT));
                 w.set_surface(crate::smelt_edit::WindowSurface::readonly_text());
                 w.set_vim_enabled(vim_enabled);
                 // Transcript blocks (code, diff) stamp `SourceLine` per row;
@@ -3344,6 +3347,7 @@ impl TuiApp {
             if include_tick {
                 self.ui.dispatch_tick(&mut lua_invoke);
             }
+            self.ui.dispatch_focus_events(&mut lua_invoke);
             self.ui.dispatch_resize_events(&mut lua_invoke);
             self.ui.dispatch_scroll_events(&mut lua_invoke);
         }

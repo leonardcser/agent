@@ -54,6 +54,142 @@ For a real walkthrough, the bundled plugins under
 [`runtime/lua/smelt/plugins/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/plugins)
 are the canonical examples. Every pattern below comes straight from them.
 
+## Virtual read-only views
+
+The bundled `/diff` plugin composes side-by-side panes, a collapsible file tree
+and a native indexed row source entirely from Lua. Use this pattern for large
+read-only views instead of filling `buf:lines` with every line:
+
+```lua
+smelt.spawn(function()
+  local snapshot, err = smelt.git.diff()
+  if not snapshot then smelt.notify.error(err); return end
+  local buf = smelt.buf.new()
+  local win = smelt.win.new(buf, { surface = "readonly_text", vim_enabled = true })
+  win:document(snapshot.diff:document())
+  smelt.overlay.new({
+    anchor = "center", width = "90%", height = "80%", modal = true,
+    layout = smelt.ui.layout.leaf(win),
+  })
+  win:focus()
+end)
+```
+
+`smelt.document.text(text)` builds a generic indexed plain-text source;
+`smelt.diff.parse(patch)` indexes an existing Git unified patch. These constructors
+are synchronous. `smelt.git.diff()` performs both Git acquisition and indexing
+off the UI thread and supports cancellation via the parent spawn handle. Neither
+constructor waits for whole-patch highlighting: visible rows request background
+syntax and inline-diff chunks, and completed work wakes the renderer. Inline
+ranges publish before distant syntax seeks. Text and navigation are available
+while highlighting catches up; caches and parser checkpoints are bounded.
+
+A source can back multiple windows, each with its own scroll/cursor state,
+private scratch storage, and highlighting subscription. The host allocates and
+protects that scratch storage; `win:buf()` still returns the original backing
+buffer, which is retained unchanged and may be shared. Windows materialize only
+the visible row range. Vim movement and selection can cross that range; copy
+resolves against the full document in bounded batches without requesting syntax.
+`win:document(nil)` restores the original buffer and view state. Sharing a document
+shares its folds; `diff:view()` creates independent folds over the same patch and
+syntax cache. Visible work takes priority over background syntax prefetch for the
+first 128-256 rows of the selected file's previous and next neighbors.
+
+Diff metadata and navigation stay separate from presentation: `:file_count()`
+and `:file(index)` provide lazy metadata without copying all entries through Lua.
+`:file_at(row)` maps a display position to a file, `:file_row(index)` resolves a
+file jump after folding, and `:toggle_fold(row)` expands or collapses context
+without reparsing. Both the preview and `diff:tree()` use `unstaged` then `staged`
+sections, directory-first within each. Partial files have distinct entries,
+patches and counts in both sections. The tree renders only viewport rows,
+including section totals, colored status letters and muted nonzero line counts.
+Each `diff:tree()` has independent directory folds; attached windows supply their
+content width automatically, including for copying. Use `tree:node(row)` for
+selection metadata and `tree:file_row(index, true)` to reveal collapsed ancestors.
+
+`smelt.git.index(diff, index, action)` accepts `"stage"`, `"unstage"`, or `"toggle"`
+and yields while updating only that file's index entries. It never edits the
+worktree. Mutation success returns `index_updated=true` along with a fresh
+`{root, branch, diff}` snapshot acquired and indexed off-thread. If the mutation
+succeeds but loading the new snapshot fails, the result instead contains
+`refresh_error` and no `diff`. Keep the old snapshot visible as stale, and refresh
+before another mutation. Toggle stages an unstaged entry or unstages a staged
+entry. `fresh:restore(previous, cursor, top)` preserves expanded context and maps
+cursor/scroll anchors by file identity and source line numbers. Use
+`diff:find_file(section, key)` to restore a raw path's selection,
+`diff:section_range(section)` to advance within a section, and
+`tree:section_row(section)` for an empty section. All display rows are zero-based;
+file indices are one-based. `win:pan(delta)` scrolls horizontally in terminal cells
+and `win:scroll().left` reports the current pan.
+
+See [`smelt.plugins.diff`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/plugins/diff.lua)
+for cancellation, sidebar synchronization, refresh and keyboard handling.
+
+## Resizable layouts
+
+`smelt.ui.layout.hsplit(first, second, opts)` puts two subtrees side by side;
+`vsplit` stacks them top to bottom. Both provide a draggable divider and compose
+with ordinary `hbox`, `vbox`, and `leaf` nodes. Resizing is owned by the layout,
+not by the buffers: focus, selection, and document position remain intact.
+
+```lua
+local layout = smelt.ui.layout
+local files = smelt.win.new(smelt.buf.new(), { surface = "list_inert" })
+local changes = smelt.win.new(smelt.buf.new(), { surface = "readonly_text" })
+local body = layout.hsplit(layout.leaf(files), layout.leaf(changes), {
+  size = 34, min_first = 26, min_second = 32,
+})
+smelt.dialog.new({ layout = body, height = 20, focus = files })
+```
+
+The same `body` can be supplied to `smelt.overlay.new({ layout = body, ... })`
+or returned from a root layout composer. Retain the node outside the composer
+callback so rebuilding the layout keeps the user's preferred split. `size` is
+the initial first-pane extent in cells, a percentage, or `ratio:N/M`; it defaults
+to `"50%"`. Minima include child borders/padding. User resizing defaults to
+`resize = "proportional"`, which keeps the chosen ratio across terminal changes.
+Use `resize = "cells"` to retain a fixed first-pane width or height instead.
+Temporary small-terminal clamping does not discard either preference.
+Fit-sized parents account for declared cell sizes and minima; unwrapped windows
+(`wrap = false`) also contribute their actual content width.
+
+For composers that replace children, retain the split separately:
+
+```lua
+local split = layout.split("horizontal", {
+  size = 34, min_first = 26, min_second = 32, resize = "cells",
+})
+smelt.ui.layout.set(function()
+  return split:layout(layout.leaf(files), layout.leaf(changes), { title = "changes" })
+end)
+-- Save split:size(); restore with split:set_size(saved).
+-- split:resize(delta), split:equalize(), and split:reset() target this handle.
+```
+
+Identity and configuration are immutable; only preferred sizing changes. Mount
+one handle once at a time. Constructor options control sizing and divider styles;
+outer border/title/padding belong to `split:layout(...)`.
+
+Use `layout.frame(body, { border = "single", padding = 1, title = "details" })`
+to add chrome around any subtree. It preserves the child's natural size and
+existing chrome, while letting the child fill the available inset space when
+resized. Composed dialogs use a frame for their outer chrome.
+
+`win:resize("width", 4)` grows the nearest horizontal split pane by four cells;
+`win:resize("height", -1)` shrinks the nearest vertical pane by one row. Without
+a matching split, these resize the containing overlay or docked dialog, using
+the same bounds as its mouse handles. `win:equalize()` balances enclosing splits.
+These methods return false when no corresponding resizable owner exists.
+
+Built-in keyboard equivalents are `Ctrl-W >` / `Ctrl-W <` for width,
+`Ctrl-W +` / `Ctrl-W -` for height, and `Ctrl-W =` to equalize. Explicit window,
+container, and global bindings for `Ctrl-W` take precedence.
+
+`smelt.dialog.new` and `smelt.dialog.open` accept either a composed `layout` or
+the convenient `panels`/`bottom_panels` recipe, not both. They discover window
+leaves automatically for focus and lifecycle callbacks. For other compositions,
+`layout.windows(node)` returns unique window handles in declaration order.
+
 ## Editor setup
 
 On every launch, smelt mirrors its embedded Lua runtime to `builtins/lua/smelt/`
@@ -232,6 +368,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.banner` | Empty-state logo decoration + shutdown logo/resume-hint banner. |
 | `smelt.plugins.compact` | Compacts older history while preserving a live recent suffix. |
 | `smelt.plugins.debug_panel` | F3 debug panel. |
+| `smelt.plugins.diff` | /diff: continuous, virtualized Git diff viewer. |
 | `smelt.plugins.esc_chord` | Esc-Esc: cancel in-flight foreground/background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn when idle. |
 | `smelt.plugins.goal` | Goal lifecycle plugin. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |

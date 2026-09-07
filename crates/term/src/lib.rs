@@ -33,8 +33,11 @@ pub use grid::{
 pub use hit::HitRegistry;
 pub use layout::{
     resolve_containers_with, resolve_layout, resolve_layout_ordered, resolve_layout_ordered_with,
-    resolve_layout_with, Align, Border, Constraint, ContainerId, Corner, Gutters, LayoutRect,
-    LayoutTree, LeafSizer, Natural, NaturalRef, NoopSizer, PaintId, Rect, StaticNatural,
+    resolve_layout_with, Align, Axis, Border, Constraint, ContainerId, Corner, DividerStyles,
+    Gutters, LayoutPaintOp, LayoutRect, LayoutStyle, LayoutTree, LeafSizer, Natural, NaturalRef,
+    NoopSizer, PaintId, Rect, ResolvedLayout, ResolvedSplit, Split, SplitId, SplitInteraction,
+    SplitOptions, SplitPane, SplitPhase, SplitRatio, SplitResizeMode, SplitResponse, SplitSize,
+    StaticNatural,
 };
 pub use line::{Line, Span};
 pub use session::{SuspendScreen, TerminalSession, TerminalSessionBuilder};
@@ -50,57 +53,18 @@ pub type PaintDispatch<'a> =
 
 pub struct PaintLayoutOptions<'a> {
     pub sizer: &'a dyn layout::LeafSizer,
-    pub root_chrome: layout::ChromePaintCtx,
-}
-
-/// One resolved operation from a [`LayoutTree`] walk.
-#[derive(Clone, Copy)]
-pub enum LayoutPaintOp<'a> {
-    Chrome {
-        area: Rect,
-        chrome: &'a layout::Chrome,
-        root: bool,
-    },
-    Leaf {
-        id: PaintId,
-        rect: Rect,
-    },
+    pub style: LayoutStyle,
 }
 
 /// Resolve `node` once and visit chrome and leaves in painter order.
-pub fn walk_layout_tree_with<'a>(
-    node: &'a LayoutTree,
+pub fn walk_layout_tree_with(
+    node: &LayoutTree,
     area: Rect,
     sizer: &dyn layout::LeafSizer,
-    mut visit: impl FnMut(LayoutPaintOp<'a>),
+    mut visit: impl FnMut(LayoutPaintOp),
 ) {
-    walk_layout_tree_inner(node, area, sizer, 0, &mut visit);
-}
-
-fn walk_layout_tree_inner<'a>(
-    node: &'a LayoutTree,
-    area: Rect,
-    sizer: &dyn layout::LeafSizer,
-    depth: usize,
-    visit: &mut impl FnMut(LayoutPaintOp<'a>),
-) {
-    let root = depth == 0;
-    match node {
-        LayoutTree::Leaf { id, chrome, .. } => {
-            visit(LayoutPaintOp::Chrome { area, chrome, root });
-            visit(LayoutPaintOp::Leaf {
-                id: *id,
-                rect: layout::inset_for_chrome(area, chrome),
-            });
-        }
-        LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
-            visit(LayoutPaintOp::Chrome { area, chrome, root });
-            let vertical = matches!(node, LayoutTree::Vbox { .. });
-            let (_, rects) = layout::layout_box_children(items, chrome, area, vertical, sizer);
-            for ((_, child), &rect) in items.iter().zip(rects.iter()) {
-                walk_layout_tree_inner(child, rect, sizer, depth + 1, visit);
-            }
-        }
+    for operation in node.resolve(area, sizer).into_operations() {
+        visit(operation);
     }
 }
 
@@ -148,7 +112,7 @@ pub fn paint_layout_tree_with(
         term_size,
         PaintLayoutOptions {
             sizer,
-            root_chrome: layout::ChromePaintCtx::empty(),
+            style: LayoutStyle::default(),
         },
         paint,
     );
@@ -163,15 +127,6 @@ pub fn paint_layout_tree_with_options(
     options: PaintLayoutOptions<'_>,
     paint: &mut PaintDispatch,
 ) {
-    walk_layout_tree_with(node, area, options.sizer, |op| match op {
-        LayoutPaintOp::Chrome { area, chrome, root } => {
-            let ctx = if root {
-                options.root_chrome
-            } else {
-                layout::ChromePaintCtx::empty()
-            };
-            layout::paint_chrome_with(grid, area, chrome, theme, ctx);
-        }
-        LayoutPaintOp::Leaf { id, rect } => paint(id, rect, grid, theme, term_size),
-    });
+    node.resolve(area, options.sizer)
+        .paint(grid, theme, term_size, options.style, paint);
 }

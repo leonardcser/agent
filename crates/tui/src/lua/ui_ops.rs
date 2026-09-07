@@ -6,8 +6,8 @@
 //! comes from `LayoutTree::natural_size_with` evaluated against the current
 //! terminal extent every frame; resize tracks automatically. To pin a width or
 //! height, wrap the inner tree in a one-slot vbox/hbox with a `Length(N)` /
-//! `Percentage(N)` constraint. The manual resize-drag gesture is the only
-//! writer of `Overlay::size_override`.
+//! `Percentage(N)` constraint. Shared pointer and window resize operations
+//! write `Overlay::size_override`.
 
 use crate::app::TuiApp;
 use crate::smelt_edit::layout::{Align, Anchor, Corner, PaintId};
@@ -26,7 +26,7 @@ pub(crate) fn build_layout_tree(
 ) -> Result<(Constraint, LayoutTree), String> {
     use crate::lua::api::overlay_layout::{ContainerKind, LayoutNode};
 
-    match node {
+    let (constraint, mut tree, chrome) = match node {
         LayoutNode::DialogStage { id } => {
             let modal = app
                 .ui
@@ -39,7 +39,7 @@ pub(crate) fn build_layout_tree(
             if let Some(leaves) = app.ui.modal_leaves(modal) {
                 window_leaves.extend_from_slice(leaves);
             }
-            Ok((Constraint::Fill, tree))
+            return Ok((Constraint::Fill, tree));
         }
         LayoutNode::Leaf {
             raw_id,
@@ -60,15 +60,6 @@ pub(crate) fn build_layout_tree(
             if let Some(natural) = natural.clone() {
                 tree = tree.with_natural(natural);
             }
-            if let Some(border) = chrome.border {
-                tree = tree.with_border(border);
-            }
-            if let Some(title) = chrome.title.clone() {
-                tree = tree.with_title(title);
-            }
-            if chrome.padding > 0 {
-                tree = tree.with_padding(chrome.padding);
-            }
             let constraint = if let crate::lua::paint::LeafKind::Window(window) = leaf {
                 if *collapse_when_empty && window_buffer_empty_pub(app, window) {
                     Constraint::Length(0)
@@ -78,7 +69,24 @@ pub(crate) fn build_layout_tree(
             } else {
                 Constraint::Fill
             };
-            Ok((constraint, tree))
+            (constraint, tree, chrome)
+        }
+        LayoutNode::Frame { child, chrome } => {
+            let (_, child) = build_layout_tree(app, child, window_leaves)?;
+            (Constraint::Fill, LayoutTree::frame(child), chrome)
+        }
+        LayoutNode::Split {
+            split,
+            children,
+            chrome,
+        } => {
+            let (_, first) = build_layout_tree(app, &children[0], window_leaves)?;
+            let (_, second) = build_layout_tree(app, &children[1], window_leaves)?;
+            (
+                Constraint::Fill,
+                LayoutTree::split(split.clone(), first, second),
+                chrome,
+            )
         }
         LayoutNode::Container {
             kind,
@@ -91,26 +99,38 @@ pub(crate) fn build_layout_tree(
                 let (_, child_tree) = build_layout_tree(app, &item.node, window_leaves)?;
                 tree_items.push((item.constraint, child_tree));
             }
-            let mut tree = match kind {
+            let tree = match kind {
                 ContainerKind::Vbox => LayoutTree::vbox(tree_items),
                 ContainerKind::Hbox => LayoutTree::hbox(tree_items),
             };
-            if let Some(border) = chrome.border {
-                tree = tree.with_border(border);
-            }
-            if let Some(title) = chrome.title.clone() {
-                tree = tree.with_title(title);
-            }
-            if *gap > 0 {
-                tree = tree.with_gap(*gap);
-            }
-            tree = tree.with_justify(chrome.justify);
-            if chrome.padding > 0 {
-                tree = tree.with_padding(chrome.padding);
-            }
-            Ok((Constraint::Fill, tree))
+            (Constraint::Fill, tree.with_gap(*gap), chrome)
         }
+    };
+    let target = tree.chrome_mut();
+    target.border = chrome.border;
+    target.title = chrome.title.clone();
+    target.padding = chrome.padding;
+    target.justify = chrome.justify;
+    Ok((constraint, tree))
+}
+
+/// Validate the lowered tree, including opaque dialog stages, against the other
+/// registered presentation trees. Callers exclude the tree they are replacing.
+pub(crate) fn validate_split_mounts<'a>(
+    tree: &LayoutTree,
+    existing: impl Iterator<Item = &'a LayoutTree>,
+) -> Result<(), String> {
+    let mut ids = std::collections::HashSet::new();
+    let duplicate = tree.splits().any(|split| !ids.insert(split.id()));
+    if duplicate
+        || (!ids.is_empty()
+            && existing
+                .flat_map(LayoutTree::splits)
+                .any(|split| ids.contains(&split.id())))
+    {
+        return Err("a split handle can be mounted only once at a time".into());
     }
+    Ok(())
 }
 
 pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, String> {
@@ -164,6 +184,17 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     if let Some(t) = title {
         layout = layout.with_title(t);
     }
+
+    let replaced = name
+        .as_deref()
+        .and_then(|name| app.ui.named_overlay(name))
+        .and_then(|id| app.ui.overlay(id));
+    validate_split_mounts(
+        &layout,
+        app.ui
+            .layout_trees()
+            .filter(|tree| !replaced.is_some_and(|overlay| std::ptr::eq(*tree, &overlay.layout))),
+    )?;
 
     if let Some(ref n) = name {
         if let Some((id, ov)) = app.ui.lookup_named_overlay_mut(n) {
@@ -247,6 +278,7 @@ pub(crate) fn open_decoration(
 
     let mut window_leaves = Vec::new();
     let (_root_constraint, layout) = build_layout_tree(app, &layout_node, &mut window_leaves)?;
+    validate_split_mounts(&layout, app.ui.layout_trees())?;
     let (term_w, _) = app.ui.terminal_size();
     for &win_id in &window_leaves {
         let content_w = app.ui.win_content_width(win_id).unwrap_or(term_w);
@@ -579,7 +611,7 @@ fn scroll_to_show(scroll: RowIndex, target: RowIndex, height: Option<u16>) -> Ro
     }
 }
 
-/// Place `leaf`'s cursor at `target` (clamped to the buffer's line count), keep the
+/// Place `leaf`'s cursor at `target` (clamped to its document or buffer), keep the
 /// row on-screen by nudging `scroll_top`, and emit `SelectionChanged` if the position
 /// actually moved. Used by both the absolute (`set_cursor_row`) and relative
 /// (`move_cursor`) entry points.
@@ -588,11 +620,20 @@ fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: RowIndex) {
         Some(w) => w.buf,
         None => return,
     };
-    let line_count = app.ui.buf(buf_id).map(|b| b.line_count()).unwrap_or(0);
+    let line_count = app
+        .ui
+        .win(leaf)
+        .and_then(|win| win.row_source())
+        .map(|source| source.snapshot().total_rows)
+        .unwrap_or_else(|| {
+            app.ui
+                .buf(buf_id)
+                .map_or(0, |buf| buf.line_count() as RowIndex)
+        });
     if line_count == 0 {
         return;
     }
-    let max = line_count.saturating_sub(1) as RowIndex;
+    let max = line_count.saturating_sub(1);
     let target = target.min(max);
     let viewport = app.ui.paint_rect(PaintId::from(leaf)).map(|r| r.height);
     let (win, buf) = app.ui.win_and_buf_mut(leaf, buf_id);
@@ -600,11 +641,11 @@ fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: RowIndex) {
         return;
     };
     let abs = win.cursor_abs_row();
+    let scroll_top = scroll_to_show(win.scroll_top(), target, viewport);
+    win.pin_scroll(scroll_top);
     if abs == target {
         return;
     }
-    let scroll_top = scroll_to_show(win.scroll_top(), target, viewport);
-    win.pin_scroll(scroll_top);
     win.jump_to_row(buf, target, viewport.unwrap_or(0));
     let lua = &app.lua;
     let mut lua_invoke =
@@ -621,12 +662,12 @@ fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: RowIndex) {
     );
 }
 
-/// Move `leaf`'s cursor by `delta` rows (clamped to the buffer's line count) and emit
+/// Move `leaf`'s cursor by `delta` rows (clamped to its document or buffer) and emit
 /// `SelectionChanged`. Used by external panels (e.g. an input docked next to a list)
 /// to drive selection without holding focus on the list itself.
 pub(crate) fn move_cursor(app: &mut TuiApp, leaf: WinId, delta: isize) {
     let abs = match app.ui.win(leaf) {
-        Some(w) => w.cursor_row(),
+        Some(w) => w.cursor_abs_row(),
         None => return,
     };
     let target = add_signed_row(abs, delta);

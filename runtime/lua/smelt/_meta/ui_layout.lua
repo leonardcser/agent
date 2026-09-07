@@ -8,9 +8,17 @@
 ---@class smelt.ui.layout
 local ui_layout = {}
 
+--- Wrap a subtree in optional border, title and padding. Natural size is the child's demand plus chrome; the child fills the inset area when the parent grows. Unlike a box slot, no fit/fill constraint is needed. Child chrome and shared split positions remain intact.
+---@type fun(node: smelt.ui.layout, opts: table?): smelt.ui.layout
+ui_layout.frame = nil
+
 --- Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`, `justify = "space-between"`, `padding` (uniform inner inset on all sides, inside any border).
 ---@type fun(items: table, opts: table?): smelt.ui.layout
 ui_layout.hbox = nil
+
+--- Place two subtrees side by side with a draggable divider. Retain this node across composer calls to preserve sizing. For independently rebuilt children or direct size control, use layout.split("horizontal", opts) and handle:layout(first, second). win:resize("width", delta) targets the nearest enclosing horizontal split.
+---@type fun(first: smelt.ui.layout, second: smelt.ui.layout, opts: smelt.ui.layout.SplitOpts?): smelt.ui.layout
+ui_layout.hsplit = nil
 
 --- Invalidate the retained main layout so its composer runs during the next frame. Use this after changing closed-over state that affects layout structure or constraints.
 ---@type fun(): nil
@@ -30,8 +38,20 @@ ui_layout.measure = nil
 ---@type fun(composer: function?): nil
 ui_layout.set = nil
 
+--- Create a retained split handle independent of its children. axis is horizontal (side by side) or vertical (stacked). Use handle:layout(first, second, chrome_opts) in composers; rebuilding children preserves sizing. Handle methods inspect, restore, reset, resize, or equalize this exact split.
+---@type fun(axis: string, opts: smelt.ui.layout.SplitOpts?): smelt.ui.layout.Split
+ui_layout.split = nil
+
 --- Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (minimum cells between children), `justify = "space-between"` (put surplus cells into gaps), `padding` (uniform inner inset on all sides, inside any border).
 ---@type fun(items: table, opts: table?): smelt.ui.layout
 ui_layout.vbox = nil
+
+--- Stack two subtrees with a draggable divider. Retain this node across composer calls to preserve sizing. For independently rebuilt children or direct size control, use layout.split("vertical", opts) and handle:layout(first, second). win:resize("height", delta) targets the nearest enclosing vertical split.
+---@type fun(first: smelt.ui.layout, second: smelt.ui.layout, opts: smelt.ui.layout.SplitOpts?): smelt.ui.layout
+ui_layout.vsplit = nil
+
+--- Return a layout's live window leaves in declaration order, excluding paints and repeated windows. Useful for installing shared callbacks and composing dialog bodies from arbitrary layouts.
+---@type fun(node: smelt.ui.layout): smelt.win.Win[]
+ui_layout.windows = nil
 
 return ui_layout

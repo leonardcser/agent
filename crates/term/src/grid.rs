@@ -410,7 +410,7 @@ impl Grid {
         })
     }
 
-    /// Paint a [`Line`] of styled spans at `(x, y)`, clipping at the right edge.
+    /// Paint a [`Line`](crate::line::Line) of styled spans at `(x, y)`, clipping at the right edge.
     /// Graphemes that cross span boundaries use the style of their first scalar.
     pub fn put_line(&mut self, x: u16, y: u16, line: &crate::line::Line<'_>) -> u16 {
         if y >= self.height {

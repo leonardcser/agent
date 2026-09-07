@@ -728,6 +728,11 @@ pub fn handle_viewer_key(
             state.sub = SubState::WaitingZ;
             DocumentKeyResult::Consumed
         }
+        _ if !state.is_idle() => {
+            // An invalid counted motion cancels the sequence, not the viewer.
+            state.reset_pending();
+            DocumentKeyResult::Consumed
+        }
         _ => DocumentKeyResult::Passthrough,
     }
 }

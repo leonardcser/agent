@@ -25,6 +25,34 @@ impl TestApp {
         }
     }
 
+    /// Wait for background enrichment of a named native document's current viewport.
+    /// Tests call this only when asserting final styles, never to time usable content.
+    pub fn wait_for_document(&mut self, name: &str, timeout: Duration) {
+        self.render_silent();
+        let win = self
+            .ui_probe()
+            .named_win(name)
+            .expect("native document window");
+        let source = self
+            .ui_probe()
+            .win(win)
+            .unwrap()
+            .row_source()
+            .expect("native source")
+            .clone();
+        let deadline = std::time::Instant::now() + timeout;
+        while source.is_pending() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{name}: background document work stalled"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+            self.feed_one(SourceEvent::LuaWakeup);
+            self.render_silent();
+        }
+        self.render_silent();
+    }
+
     pub fn pending_lua_reload(&self) -> bool {
         self.app.lua_reload_pending()
     }

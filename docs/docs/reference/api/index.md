@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Rust-registered signatures come from the closure's argument and return types; bundled Lua signatures come from LuaCATS annotations beside the implementation.
 
-**Coverage:** 85 namespace(s), 434 function(s), 101 class(es), 13 alias(es).
+**Coverage:** 88 namespace(s), 443 function(s), 108 class(es), 13 alias(es).
 
 `Supported` identifies the primary alpha plugin facade. `Advanced` identifies lower-level composition primitives that may evolve more freely. These labels guide API design and documentation; the alpha surface is not compatibility-frozen. Internal runtime machinery is excluded from this reference and IDE completion.
 
@@ -23,12 +23,15 @@ Available in every runtime, including headless mode.
 - [`smelt.cli`](cli.md) - 3 function(s)
 - [`smelt.clipboard`](clipboard.md) - 2 function(s)
 - [`smelt.defaults`](defaults.md) - 1 function(s)
+- [`smelt.diff`](diff.md) - 1 function(s) - Advanced namespace
+- [`smelt.document`](document.md) - 1 function(s) - Advanced namespace
 - [`smelt.events`](events.md) - 3 function(s)
 - [`smelt.files`](files.md) - 4 function(s)
 - [`smelt.frontend`](frontend.md) - 2 function(s)
 - [`smelt.fs`](fs.md) - 23 function(s)
 - [`smelt.fs.file_state`](fs_file_state.md) - 7 function(s) - Advanced namespace
 - [`smelt.fuzzy`](fuzzy.md) - 2 function(s)
+- [`smelt.git`](git.md) - 2 function(s) - Advanced namespace
 - [`smelt.grep`](grep.md) - 1 function(s)
 - [`smelt.html`](html.md) - 5 function(s)
 - [`smelt.http`](http.md) - 2 function(s)
@@ -91,7 +94,7 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.settings`](settings.md) - 1 function(s)
 - [`smelt.terminal`](terminal.md) - 7 function(s)
 - [`smelt.ui`](ui.md) - 1 function(s)
-- [`smelt.ui.layout`](ui_layout.md) - 6 function(s) - Advanced namespace
+- [`smelt.ui.layout`](ui_layout.md) - 11 function(s) - Advanced namespace
 - [`smelt.vim`](vim.md) - 2 function(s)
 - [`smelt.win`](win.md) - 2 function(s) - Advanced namespace
 - [`smelt.work`](work.md) - 4 function(s)

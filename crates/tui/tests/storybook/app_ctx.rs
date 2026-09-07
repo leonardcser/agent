@@ -55,6 +55,11 @@ impl AppStoryCtx {
         self.app.set_terminal_size(w, h);
     }
 
+    pub fn wait_for_document(&mut self, name: &str) {
+        self.app
+            .wait_for_document(name, std::time::Duration::from_secs(5));
+    }
+
     pub fn advance_time(&mut self, ms: u64) {
         self.app.feed_one(SourceEvent::Tick(ms));
     }
@@ -479,7 +484,18 @@ impl AppStoryCtx {
 
     /// Press a plain character key.
     pub fn press_char(&mut self, ch: char) {
-        self.app.press(crossterm::event::KeyCode::Char(ch));
+        self.press_key(
+            crossterm::event::KeyCode::Char(ch),
+            crossterm::event::KeyModifiers::NONE,
+        );
+    }
+
+    pub fn press_key(
+        &mut self,
+        key: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) {
+        self.app.press_mod(key, modifiers);
         self.app.settle_lua();
     }
 

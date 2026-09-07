@@ -1059,6 +1059,60 @@ impl UiLuaHost<'_> {
         }
     }
 
+    pub(crate) fn resize_window(
+        &mut self,
+        id: crate::smelt_edit::WinId,
+        axis: crate::smelt_edit::layout::Axis,
+        delta: i32,
+    ) -> bool {
+        let resized = self.app.ui.resize_window(id, axis, delta);
+        if resized {
+            self.app.refresh_main_layout();
+        }
+        resized
+    }
+
+    pub(crate) fn layout_windows(
+        &mut self,
+        node: &crate::lua::api::overlay_layout::LayoutNode,
+    ) -> Result<Vec<crate::smelt_edit::WinId>, String> {
+        use crate::lua::api::overlay_layout::LayoutNode;
+        let mut windows = Vec::new();
+        let mut stack = vec![node];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(node) = stack.pop() {
+            match node {
+                LayoutNode::Leaf { raw_id, .. } => {
+                    match self.app.resolve_leaf_id(*raw_id).ok_or_else(|| {
+                        format!("layout leaf references missing window/paint id {raw_id}")
+                    })? {
+                        crate::lua::paint::LeafKind::Window(win) if seen.insert(win) => {
+                            windows.push(win)
+                        }
+                        _ => {}
+                    }
+                }
+                LayoutNode::DialogStage { id } => {
+                    let modal = self
+                        .app
+                        .ui
+                        .docked_surface(*id)
+                        .ok_or_else(|| format!("layout references missing docked dialog {}", id.0))?
+                        .modal();
+                    if let Some(leaves) = self.app.ui.modal_leaves(modal) {
+                        windows.extend(leaves.iter().copied().filter(|win| seen.insert(*win)));
+                    }
+                }
+                LayoutNode::Frame { child, .. } => stack.push(child),
+                LayoutNode::Split { children, .. } => stack.extend(children.iter().rev()),
+                LayoutNode::Container { items, .. } => {
+                    stack.extend(items.iter().rev().map(|item| &item.node))
+                }
+            }
+        }
+        Ok(windows)
+    }
+
     pub(crate) fn open_decoration(
         &mut self,
         owner: crate::smelt_edit::WinId,

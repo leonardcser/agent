@@ -1,6 +1,14 @@
 pub use super::geometry::Rect;
 use std::collections::HashMap;
 
+mod resolved;
+mod split;
+pub use resolved::{LayoutPaintOp, LayoutStyle, ResolvedLayout, ResolvedSplit, SplitPane};
+pub use split::{
+    Axis, DividerStyles, Split, SplitDivider, SplitGeometry, SplitId, SplitInteraction,
+    SplitOptions, SplitPhase, SplitRatio, SplitResizeMode, SplitResponse, SplitSize,
+};
+
 /// Opaque leaf identifier. Hosts mint and dispatch on these; the renderer
 /// treats them as opaque. Wide enough for common host-side id types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -67,8 +75,7 @@ pub enum Justify {
     SpaceBetween,
 }
 
-/// Container chrome (gap, border, title, padding) shared by `Vbox`, `Hbox`,
-/// and `Leaf`.
+/// Chrome (gap, border, title, padding) shared by all layout nodes.
 #[derive(Clone, Debug, Default)]
 pub struct Chrome {
     /// Cells between adjacent children; `0` packs flush.
@@ -77,7 +84,8 @@ pub struct Chrome {
     pub justify: Justify,
     /// Frame around the container; each enabled side reserves one row/col. `None` = no inset.
     pub border: Option<Border>,
-    /// Title in the top border row. Requires `border = Some(_)`; renders as a styled [`Line`].
+    /// Title in the top border row. Requires `border = Some(_)`; renders as a styled
+    /// [`Line`](crate::line::Line).
     pub title: Option<crate::line::Line<'static>>,
     /// Uniform inner padding (cells) on all four sides, *inside* any
     /// border. Increases the container's natural size by `2 * padding` on
@@ -129,6 +137,17 @@ pub enum LayoutTree {
     Vbox { items: Vec<Item>, chrome: Chrome },
     /// Horizontal container; children pack left-to-right.
     Hbox { items: Vec<Item>, chrome: Chrome },
+    /// Chrome around one subtree, preserving its natural size and filling the inset area.
+    Frame {
+        child: Box<LayoutTree>,
+        chrome: Chrome,
+    },
+    /// Two resizable subtrees separated by a shared pointer handle.
+    Split {
+        split: Split,
+        children: Box<[LayoutTree; 2]>,
+        chrome: Chrome,
+    },
 }
 
 impl std::fmt::Debug for LayoutTree {
@@ -154,6 +173,21 @@ impl std::fmt::Debug for LayoutTree {
                 .field("items", items)
                 .field("chrome", chrome)
                 .finish(),
+            LayoutTree::Frame { child, chrome } => f
+                .debug_struct("Frame")
+                .field("child", child)
+                .field("chrome", chrome)
+                .finish(),
+            LayoutTree::Split {
+                split,
+                children,
+                chrome,
+            } => f
+                .debug_struct("Split")
+                .field("split", split)
+                .field("children", children)
+                .field("chrome", chrome)
+                .finish(),
         }
     }
 }
@@ -171,6 +205,21 @@ impl LayoutTree {
     pub fn hbox(items: Vec<Item>) -> Self {
         Self::Hbox {
             items,
+            chrome: Chrome::default(),
+        }
+    }
+
+    pub fn frame(child: Self) -> Self {
+        Self::Frame {
+            child: Box::new(child),
+            chrome: Chrome::default(),
+        }
+    }
+
+    pub fn split(split: Split, first: Self, second: Self) -> Self {
+        Self::Split {
+            split,
+            children: Box::new([first, second]),
             chrome: Chrome::default(),
         }
     }
@@ -195,17 +244,21 @@ impl LayoutTree {
 
     pub fn chrome_mut(&mut self) -> &mut Chrome {
         match self {
-            Self::Leaf { chrome, .. } | Self::Vbox { chrome, .. } | Self::Hbox { chrome, .. } => {
-                chrome
-            }
+            Self::Leaf { chrome, .. }
+            | Self::Vbox { chrome, .. }
+            | Self::Hbox { chrome, .. }
+            | Self::Frame { chrome, .. }
+            | Self::Split { chrome, .. } => chrome,
         }
     }
 
     pub fn chrome(&self) -> &Chrome {
         match self {
-            Self::Leaf { chrome, .. } | Self::Vbox { chrome, .. } | Self::Hbox { chrome, .. } => {
-                chrome
-            }
+            Self::Leaf { chrome, .. }
+            | Self::Vbox { chrome, .. }
+            | Self::Hbox { chrome, .. }
+            | Self::Frame { chrome, .. }
+            | Self::Split { chrome, .. } => chrome,
         }
     }
 
@@ -259,10 +312,39 @@ impl LayoutTree {
     fn contains_leaf_id(&self, id: PaintId) -> bool {
         match self {
             LayoutTree::Leaf { id: p, .. } => *p == id,
+            LayoutTree::Frame { child, .. } => child.contains_leaf_id(id),
+            LayoutTree::Split { children, .. } => {
+                children.iter().any(|child| child.contains_leaf_id(id))
+            }
             LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
                 items.iter().any(|(_, child)| child.contains_leaf_id(id))
             }
         }
+    }
+
+    /// Split handles in depth-first declaration order, without resolving geometry
+    /// or invoking natural-size providers. Repeated handles remain visible so
+    /// hosts can validate mount identity across composed trees.
+    pub fn splits(&self) -> impl Iterator<Item = &Split> {
+        let mut pending = vec![self];
+        std::iter::from_fn(move || {
+            while let Some(node) = pending.pop() {
+                match node {
+                    Self::Leaf { .. } => {}
+                    Self::Frame { child, .. } => pending.push(child),
+                    Self::Vbox { items, .. } | Self::Hbox { items, .. } => {
+                        pending.extend(items.iter().rev().map(|(_, child)| child));
+                    }
+                    Self::Split {
+                        split, children, ..
+                    } => {
+                        pending.extend(children.iter().rev());
+                        return Some(split);
+                    }
+                }
+            }
+            None
+        })
     }
 
     /// All leaf `PaintId`s in depth-first declaration order.
@@ -275,6 +357,12 @@ impl LayoutTree {
     fn collect_leaves(&self, out: &mut Vec<PaintId>) {
         match self {
             LayoutTree::Leaf { id, .. } => out.push(*id),
+            LayoutTree::Frame { child, .. } => child.collect_leaves(out),
+            LayoutTree::Split { children, .. } => {
+                for child in children.iter() {
+                    child.collect_leaves(out);
+                }
+            }
             LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
                 for (_, child) in items {
                     child.collect_leaves(out);
@@ -312,6 +400,94 @@ impl LayoutTree {
             }
             LayoutTree::Vbox { items, chrome } => natural_box(items, chrome, cap, true, sizer),
             LayoutTree::Hbox { items, chrome } => natural_box(items, chrome, cap, false, sizer),
+            LayoutTree::Frame { child, chrome } => {
+                let (cw, ch) = chrome_overhead(chrome);
+                let inner = (cap.0.saturating_sub(cw), cap.1.saturating_sub(ch));
+                let (w, h) = child.natural_size_with(inner, sizer);
+                (
+                    w.saturating_add(cw).min(cap.0),
+                    h.saturating_add(ch).min(cap.1),
+                )
+            }
+            LayoutTree::Split {
+                split,
+                children,
+                chrome,
+            } => {
+                let (cw, ch) = chrome_overhead(chrome);
+                let inner = (cap.0.saturating_sub(cw), cap.1.saturating_sub(ch));
+                let sizes = [0, 1].map(|i| children[i].natural_size_with(inner, sizer));
+                let (w, h) = match split.axis() {
+                    Axis::Horizontal => {
+                        let [a, b] = split.natural_extents(sizes[0].0, sizes[1].0);
+                        (
+                            a.saturating_add(b).saturating_add(1),
+                            sizes[0].1.max(sizes[1].1),
+                        )
+                    }
+                    Axis::Vertical => {
+                        let [a, b] = split.natural_extents(sizes[0].1, sizes[1].1);
+                        (
+                            sizes[0].0.max(sizes[1].0),
+                            a.saturating_add(b).saturating_add(1),
+                        )
+                    }
+                };
+                (
+                    w.saturating_add(cw).min(cap.0),
+                    h.saturating_add(ch).min(cap.1),
+                )
+            }
+        }
+    }
+
+    /// Visit resolved nodes in painter order. All consumers share this geometry.
+    pub fn visit<'a>(
+        &'a self,
+        area: Rect,
+        sizer: &dyn LeafSizer,
+        visit: &mut impl FnMut(&'a Self, Rect),
+    ) {
+        self.visit_with_geometry(area, sizer, &mut |node, area, _| visit(node, area));
+    }
+
+    pub fn resolve(&self, area: Rect, sizer: &dyn LeafSizer) -> ResolvedLayout {
+        ResolvedLayout::new(self, area, sizer)
+    }
+
+    fn visit_with_geometry<'a>(
+        &'a self,
+        area: Rect,
+        sizer: &dyn LeafSizer,
+        visit: &mut impl FnMut(&'a Self, Rect, Option<SplitGeometry>),
+    ) {
+        let geometry = match self {
+            Self::Split { split, chrome, .. } => Some(split.layout(area, chrome)),
+            _ => None,
+        };
+        visit(self, area, geometry);
+        match self {
+            Self::Leaf { .. } => {}
+            Self::Frame { child, chrome } => {
+                child.visit_with_geometry(inset_for_chrome(area, chrome), sizer, visit)
+            }
+            Self::Split { children, .. } => {
+                for (child, rect) in children.iter().zip(geometry.unwrap().panes) {
+                    child.visit_with_geometry(rect, sizer, visit);
+                }
+            }
+            Self::Vbox { items, chrome } | Self::Hbox { items, chrome } => {
+                let (_, rects) = layout_box_children(
+                    items,
+                    chrome,
+                    area,
+                    matches!(self, Self::Vbox { .. }),
+                    sizer,
+                );
+                for ((_, child), rect) in items.iter().zip(rects) {
+                    child.visit_with_geometry(rect, sizer, visit);
+                }
+            }
         }
     }
 }
@@ -966,19 +1142,11 @@ fn resolve_container_nodes(
     sizer: &dyn LeafSizer,
     out: &mut HashMap<ContainerId, Rect>,
 ) {
-    if let Some(id) = node.chrome().container {
-        out.insert(id, area);
-    }
-    match node {
-        LayoutTree::Leaf { .. } => {}
-        LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
-            let vertical = matches!(node, LayoutTree::Vbox { .. });
-            let (_, rects) = layout_box_children(items, chrome, area, vertical, sizer);
-            for ((_, child), rect) in items.iter().zip(rects) {
-                resolve_container_nodes(child, rect, sizer, out);
-            }
+    node.visit(area, sizer, &mut |node, area| {
+        if let Some(id) = node.chrome().container {
+            out.insert(id, area);
         }
-    }
+    });
 }
 
 fn resolve_node_ordered(
@@ -987,20 +1155,14 @@ fn resolve_node_ordered(
     sizer: &dyn LeafSizer,
     out: &mut Vec<LayoutRect>,
 ) {
-    match node {
-        LayoutTree::Leaf { id, chrome, .. } => {
+    node.visit(area, sizer, &mut |node, area| {
+        if let LayoutTree::Leaf { id, chrome, .. } = node {
             out.push(LayoutRect {
                 id: *id,
                 rect: inset_for_chrome(area, chrome),
             });
         }
-        LayoutTree::Vbox { items, chrome } => {
-            resolve_box_ordered(items, chrome, area, true, sizer, out);
-        }
-        LayoutTree::Hbox { items, chrome } => {
-            resolve_box_ordered(items, chrome, area, false, sizer, out);
-        }
-    }
+    });
 }
 
 /// Lay out a container's children. Returns `(inner_area, child_rects)`. Both
@@ -1072,20 +1234,6 @@ pub fn layout_box_children(
         }
     }
     (inner, rects)
-}
-
-fn resolve_box_ordered(
-    items: &[Item],
-    chrome: &Chrome,
-    area: Rect,
-    vertical: bool,
-    sizer: &dyn LeafSizer,
-    out: &mut Vec<LayoutRect>,
-) {
-    let (_, rects) = layout_box_children(items, chrome, area, vertical, sizer);
-    for ((_, child), &rect) in items.iter().zip(rects.iter()) {
-        resolve_node_ordered(child, rect, sizer, out);
-    }
 }
 
 pub fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {

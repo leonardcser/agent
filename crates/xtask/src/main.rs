@@ -26,6 +26,23 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let cmd = args.next();
     match cmd.as_deref() {
+        Some("bench-diff") => {
+            for (package, test_filter, features) in [
+                ("smelt-core", "diff_index_benchmark", &[][..]),
+                ("smelt-tui", "diff_viewer_benchmark", &["harness"][..]),
+                ("smelt-tui", "diff_loading_benchmark", &["harness"][..]),
+            ] {
+                bench_support::run_cargo_test_benchmark(bench_support::CargoTestBenchmark {
+                    package,
+                    test_filter,
+                    features,
+                    release: true,
+                    env: Vec::new(),
+                    bench_name: test_filter,
+                    ignored: true,
+                });
+            }
+        }
         Some("bench-file-search") => bench_file_search::run(args.collect()),
         Some("bench-lineage-search") => bench_lineage_search::run(args.collect()),
         Some("bench-store-compression") => bench_store_compression::run(args.collect()),
@@ -51,6 +68,7 @@ fn print_usage() {
     eprintln!("usage: cargo xtask <command> [args]");
     eprintln!();
     eprintln!("commands:");
+    eprintln!("  bench-diff                            benchmark indexed diffs and million-line overlay frames");
     eprintln!(
         "  bench-file-search [--runs N] [--entries N] [--queries CSV] benchmark file fuzzy search"
     );

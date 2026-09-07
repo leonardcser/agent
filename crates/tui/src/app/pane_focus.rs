@@ -1,4 +1,4 @@
-//! Pane focus chord (`Ctrl-W` + nav) toggling focus between prompt and transcript.
+//! Shared `Ctrl-W` pane navigation and resizing chords.
 
 use crate::app::{EventOutcome, TuiApp};
 use crossterm::event::{Event, KeyCode};
@@ -29,11 +29,32 @@ impl TuiApp {
         let now = self.core.clock.instant_now();
         if let Some(started) = self.timers.pending_pane_chord {
             if now.duration_since(started) < PANE_CHORD_WINDOW {
+                self.timers.pending_pane_chord = None;
+                if matches!(k.modifiers, M::NONE | M::SHIFT) {
+                    use crate::smelt_edit::layout::Axis;
+                    let resize = match k.code {
+                        KeyCode::Char('<') => Some((Axis::Horizontal, -4)),
+                        KeyCode::Char('>') => Some((Axis::Horizontal, 4)),
+                        KeyCode::Char('-') => Some((Axis::Vertical, -1)),
+                        KeyCode::Char('+') => Some((Axis::Vertical, 1)),
+                        _ => None,
+                    };
+                    if let Some(win) = self.ui.focus() {
+                        if let Some((axis, delta)) = resize {
+                            self.ui.resize_window(win, axis, delta);
+                            self.refresh_main_layout();
+                            return Some(EventOutcome::Redraw);
+                        }
+                        if k.code == KeyCode::Char('=') {
+                            self.ui.equalize_window(win);
+                            return Some(EventOutcome::Redraw);
+                        }
+                    }
+                }
                 let navigated = matches!(
                     (k.code, k.modifiers),
                     (KeyCode::Char('w'), _) | (KeyCode::Char('j' | 'k' | 'h' | 'l' | 'p'), M::NONE)
                 );
-                self.timers.pending_pane_chord = None;
                 if navigated {
                     self.toggle_pane_focus();
                     return Some(EventOutcome::Redraw);

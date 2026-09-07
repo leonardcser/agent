@@ -50,6 +50,110 @@ app_story!(help_overlay, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(diff_overlay, |ctx| {
+    ctx.set_viewport(110, 28);
+    ctx.run_lua(r#"
+        local patch = 'diff --git a/src/parser.rs b/src/parser.rs\n@@ -1,22 +1,22 @@\n'
+          .. string.rep(' unchanged context\n', 20)
+          .. '-let value = parse(input);\n+let value = parse_checked(input)?;\n value\n'
+          .. 'diff --git a/tests/parser.rs b/tests/parser.rs\nnew file mode 100644\n@@ -0,0 +1,3 @@\n+#[test]\n+fn rejects_invalid_input() {\n+    assert!(parse_checked("bad").is_err());\n'
+        smelt.git.diff = function() return { branch = 'feature/parser', diff = smelt.diff.parse(patch) } end
+    "#);
+    ctx.run_command("diff");
+    ctx.wait_for_document("smelt.diff.preview");
+    ctx.assert_snapshot();
+});
+
+app_story!(diff_overlay_grouped, |ctx| {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "test"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    std::fs::write(dir.path().join("parser.rs"), "let strict = false;\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    std::fs::write(dir.path().join("parser.rs"), "let strict = true;\n").unwrap();
+    git(&["add", "."]);
+    std::fs::write(dir.path().join("parser.rs"), "let strict = configured();\n").unwrap();
+    std::fs::write(dir.path().join("test.rs"), "assert!(strict);\n").unwrap();
+    ctx.set_viewport(110, 34);
+    ctx.run_lua(&format!(
+        "local load = smelt.git.diff; smelt.git.diff = function() return load({{cwd = {}}}) end",
+        serde_json::to_string(&dir.path().to_str().unwrap()).unwrap()
+    ));
+    ctx.run_command("diff");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !ctx.frame_text().contains("configured()") {
+        assert!(std::time::Instant::now() < deadline, "{}", ctx.frame_text());
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        ctx.pump_lua();
+    }
+    ctx.wait_for_document("smelt.diff.preview");
+    ctx.assert_snapshot();
+    ctx.press_tab();
+    for _ in 0..3 {
+        ctx.press_key(
+            crossterm::event::KeyCode::Char('w'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        ctx.press_char('>');
+    }
+    ctx.wait_for_document("smelt.diff.preview");
+    ctx.assert_snapshot_named("resized");
+});
+
+app_story!(diff_overlay_refresh, |ctx| {
+    ctx.set_viewport(100, 24);
+    ctx.run_lua(r#"
+        local patch = 'diff --git a/parser.rs b/parser.rs\n@@ -1 +1 @@\n-let strict = false;\n+let strict = true;\n'
+        smelt.git.diff = function()
+            while refresh_blocked do smelt.sleep(1) end
+            if refresh_error then return nil, refresh_error end
+            return {diff = smelt.diff.parse(patch)}
+        end
+    "#);
+    ctx.run_command("diff");
+    ctx.wait_for_document("smelt.diff.preview");
+    ctx.press_tab();
+    ctx.run_lua("refresh_blocked = true");
+    ctx.press_char('r');
+    ctx.assert_snapshot_named("refreshing");
+    ctx.run_lua("refresh_error = 'repository temporarily unavailable'; refresh_blocked = false");
+    ctx.advance_time(2);
+    ctx.pump_lua();
+    assert!(ctx.frame_text().contains("stale"));
+    ctx.assert_snapshot_named("stale");
+});
+
+app_story!(diff_overlay_empty, |ctx| {
+    ctx.set_viewport(80, 20);
+    ctx.run_lua("smelt.git.diff = function() return {diff = smelt.diff.parse('')} end");
+    ctx.run_command("diff");
+    ctx.assert_snapshot();
+});
+
+app_story!(diff_overlay_narrow, |ctx| {
+    ctx.set_viewport(60, 18);
+    ctx.run_lua(r#"
+        smelt.git.diff = function() return { branch = 'main', diff = smelt.diff.parse('diff --git a/界.lua b/界.lua\n@@ -1 +1 @@\n-old\n+new\n') } end
+    "#);
+    ctx.run_command("diff");
+    ctx.wait_for_document("smelt.diff.preview");
+    ctx.assert_snapshot();
+});
+
 app_story!(stats_dialog, |ctx| {
     // `/stats` opens a docked-bottom dialog with
     // `smelt.metrics.stats_text()` as the body. Pin the rendered

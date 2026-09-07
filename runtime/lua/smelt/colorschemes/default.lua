@@ -91,6 +91,8 @@ local groups = {
   SmeltExecPrefix     = fg({ ansi = 197 }, { bold = true }),
 
   -- Diff renderer row fills and inline change fills. Override these like any other group.
+  SmeltDiffAddCount       = fg({ dark = { rgb = { 113, 192, 117 } }, light = { rgb = { 50, 123, 61 } } }),
+  SmeltDiffDeleteCount    = fg({ dark = { rgb = { 219, 104, 104 } }, light = { rgb = { 173, 57, 57 } } }),
   SmeltDiffAddBg          = bg({ dark = { rgb = { 20, 50, 20 } }, light = { rgb = { 218, 242, 218 } } }),
   SmeltDiffDeleteBg       = bg({ dark = { rgb = { 60, 20, 20 } }, light = { rgb = { 248, 218, 218 } } }),
   SmeltDiffAddInlineBg    = bg({ dark = { rgb = { 35, 95, 35 } }, light = { rgb = { 180, 230, 180 } } }),

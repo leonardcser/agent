@@ -10,6 +10,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/clear`, `/new`                         | Start a new conversation |
 | `/rewind`                                | Rewind to a previous turn (same as `Esc Esc`) |
 | `/resume`                                | Resume a saved session |
+| `/diff`                                  | View staged, unstaged, and untracked local Git changes |
 | `/session`                               | Show session, worktree, model, usage, and history metadata |
 | `/compact [instructions]`                | Summarize older history to free context |
 | `/fork`, `/branch`                       | Fork the current session |
@@ -82,6 +83,118 @@ latest N messages in chronological order, or filter first with `--role user` or
 `--role assistant` (`-r` also works). Multiple messages include `User:` and
 `Assistant:` headers automatically; `--headers` also adds a header to a single
 message. `/yank` accepts the same arguments.
+
+### Local diff viewer
+
+`/diff` opens two centered side-by-side panes: a collapsible changed-file tree and
+one continuous, syntax-highlighted unified diff. Click a file to jump to its
+changes, or click a folder to expand/collapse it. Pressing selects a folder;
+releasing over the same row toggles it without changing the preview or its position.
+Folders and unchanged-context folds use `▶` / `▼` triangles. Both panes share
+directory-first file order. Scrolling the preview, changing focus, and refreshing
+the current file leave deliberately collapsed folders closed; explicit
+next/previous-file navigation reveals the destination's parents.
+Drag the shared pane divider to trade file-tree width for preview width. The
+split survives refreshes and staging operations, keeps both panes usable, and
+does not move focus, selection, or the current preview position.
+There is no enclosing frame, branch header, or command footer.
+
+The tree has two fixed, non-collapsible lowercase sections separated by a blank row,
+each with its own file count and line totals:
+
+- `unstaged`: index to worktree changes, including untracked files marked `?`.
+- `staged`: `HEAD` to index changes, using the empty tree before the first commit.
+
+Partially staged files appear in both sections with distinct patches and counts.
+Even changes that cancel out against HEAD remain visible in their respective
+sections. Ignored files are excluded. The read-only preview follows section and
+directory order, with a blank row and dim full-width divider between files.
+
+Fugitive-style shortcuts stage or unstage one file without editing the worktree.
+An asynchronous refresh moves it between sections and updates patches and totals.
+Selection advances within the source section, falling back to the previous file.
+Clearing a section shows an empty state rather than following the file into the
+other section, so repeated staging cannot immediately undo the final operation.
+Empty sidebar sections show only their heading and `(0)` count. The preview shows
+`all staged` or `nothing staged` when the active section is cleared; a repository
+with no local changes shows `clean`. Status labels are lowercase and omit sentence
+punctuation.
+Sidebar wheel and scrollbar scrolling move only the viewport: the selected file
+and preview stay unchanged, even when selection scrolls offscreen. Keyboard
+navigation reveals the selection; clicking selects the indicated file. Staging or
+unstaging also reveals an offscreen selection immediately, while an already-visible
+selection keeps its screen position.
+
+Filenames stay neutral. Status letters are colored: added/untracked green,
+modified yellow, deleted/conflicted red, and renamed blue. Unresolved paths are
+marked `U`; their worktree patch compares against the ours merge stage, with a
+metadata row when Git has no patch. Nonzero line counts follow each filename or
+section label with single spaces, using softer green/red theme colors. Zero
+counts are hidden and binary files show `binary`.
+Preview `+` / `-` markers retain the bright green/red foregrounds of `edit_file`.
+Added/deleted backgrounds fill the preview width, including line numbers and
+trailing space. Stronger inline backgrounds identify changed text without
+replacing syntax colors. Narrow panes abbreviate large counts and prioritize
+filenames over indentation.
+
+| Key | Action |
+| --- | ------ |
+| `Tab` / `Shift-Tab` | Switch between files and diff |
+| `Ctrl-W >` / `Ctrl-W <` | Grow/shrink the focused pane by four columns |
+| `Ctrl-W =` | Give both panes equal width, subject to minimum sizes |
+| `j` / `k`, arrows | Navigate rows; counts such as `12j` / `10k` work in either pane |
+| `gg` / `G`, `Ctrl-U` / `Ctrl-D`, `Ctrl-B` / `Ctrl-F` | Start/end, half-page, full-page navigation |
+| `h` / `l`, `w` / `b` / `e`, `0` / `$` | Vim text motions in the diff |
+| `H` / `L`, `Shift-Left` / `Shift-Right`, `zh` / `zl` | Pan horizontally without wrapping |
+| `Ctrl-J` / `Ctrl-K` | Next/previous file from either pane, skipping folders and keeping focus |
+| `[` / `]` | Previous/next file |
+| `s` / `u` | Stage/unstage the selected file |
+| `-` | Stage an entry in `unstaged`; unstage an entry in `staged` |
+| `{` / `}` | Previous/next hunk |
+| `Enter` | Expand/collapse unchanged context; toggle a folder or open a file from the tree |
+| `h` / `l`, Left / Right (tree) | Collapse/go to parent; expand/enter a folder |
+| Click (tree) | Jump to a file, or expand/collapse a folder |
+| `v` / `V`, `y` | Visual selection and copy |
+| `r` | Refresh local changes |
+| `q`, `Esc`, `Ctrl-C` | Close; Esc leaves a Vim selection or pending motion first |
+
+Git acquisition and compact patch indexing run off the UI thread. Untracked
+files are batched through a private temporary index and object directory, keeping
+Git's own ignore rules, filters, encodings, and attributes. One root pathspec avoids
+all-pairs matching in large file sets, without a subprocess per file or writes to
+the repository's index or object store.
+
+Text and navigation become available without waiting for whole-file syntax.
+A background worker prioritizes visible rows, caches bounded syntax and inline
+chunks, and repaints as colors arrive. Inline comparisons use the same character
+and grapheme policy as `edit_file`. Large replacement blocks use viewport-only
+positional pairing; comparisons over 8 KiB retain plain row emphasis, and time
+budgets bound difficult comparisons. Inline results publish before distant syntax
+seeks. Syntax follows each file's language and
+tracks old/new source independently, including multiline comments and strings
+inside collapsed context. A distant jump into a huge file may show plain diff
+colors while the worker reconstructs syntax state; it never blocks scrolling
+or file selection. Parser checkpoints accelerate revisits. After visible work,
+the worker prefetches the first 128-256 rows of the previous and next files so
+Ctrl-J/Ctrl-K navigation can display cached syntax on its first frame.
+
+Both panes retain only visible rows, even for million-line patches and trees with
+tens of thousands of files. Folder toggles update compact node indices, not
+rendered file tables. Binary, rename, mode-only, and no-newline changes have
+explicit metadata rows. Reading and indexing the patch remain linear in input
+size; expanding context needs no further Git commands. Closing cancels pending
+Git work and releases the syntax worker. Staging shortcuts apply in idle Normal
+mode or the sidebar, not inside a Vim selection or pending motion.
+
+Refresh preserves expanded context, source-relative cursor/scroll anchors and
+horizontal pan. The title identifies loading, refreshing, staging and unstaging.
+If refresh fails, the previous snapshot stays visible and navigable, marked
+`stale - r refresh`. A successful index update followed by a failed refresh is
+reported as partial success, not as a failed stage/unstage. Stale snapshots cannot
+perform another index operation until a successful refresh.
+
+The viewer is the bundled `smelt.plugins.diff` Lua plugin. Opt out through
+`smelt.builtins.disable({ plugins = { "diff" } })` in `early.lua`.
 
 ### Managed worktrees
 

@@ -42,6 +42,7 @@ fn splash_paint_stays_below_global_overlays() {
         local win = smelt.win.new(buf, {
           name = "test.paint_order.win",
           scrollbar = false,
+          wrap = false,
         })
         smelt.overlay.new({
           name = "test.paint_order.overlay",
@@ -3205,7 +3206,21 @@ fn btw_dialog_paints_a_selected_delta_before_a_coalesced_final_response() {
         "the final callback ran before the streamed frame: {streamed_frame}"
     );
 
-    let final_frame = app.render_to_frame().text();
+    let final_frame = app.render_to_frame();
+    let text = "coalesced final answer";
+    let row = final_frame
+        .rows
+        .iter()
+        .position(|row| row.contains(text))
+        .unwrap();
+    let col = final_frame.rows[row].find(text).unwrap();
+    assert!(
+        final_frame.styles[row][col..col + text.len()]
+            .iter()
+            .all(|style| !style.dim && !style.italic),
+        "waiting indicator styles leaked into the answer"
+    );
+    let final_frame = final_frame.text();
     assert!(
         final_frame.contains("coalesced final answer"),
         "frame: {final_frame}"

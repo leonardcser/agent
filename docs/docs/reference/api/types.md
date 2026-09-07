@@ -202,7 +202,8 @@ setting both raises.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `title` | `string` |  | Title rendered in the chrome row. |
-| `panels` | [smelt.dialog.Panel[]](types.md#smeltdialogpanel) | yes | Ordered list of body panels. |
+| `panels` | [smelt.dialog.Panel[]](types.md#smeltdialogpanel) |  | Ordered list of body panels. Mutually exclusive with `layout`. |
+| `layout` | `smelt.ui.layout` |  | Composable body layout, including nested resizable splits. Window leaves are discovered automatically. Mutually exclusive with `panels` and `bottom_panels`. |
 | `bottom_panels` | [smelt.dialog.Panel[]](types.md#smeltdialogpanel) |  | Panels pinned to the bottom when the dialog has surplus height; extra height is placed between them and `panels`. |
 | `bottom_gap` | `integer` |  | Minimum blank rows between `panels` and `bottom_panels` (default 0). |
 | `focus` | [smelt.win.Win](types.md#smeltwinwin) |  | Leaf that should receive initial focus. |
@@ -255,6 +256,88 @@ Options accepted by `smelt.dialog.picker`. Layered on top of
 | `max_height` | `any` |  | Forwarded to `smelt.dialog.open`. |
 | `min_height` | `any` |  | Forwarded to `smelt.dialog.open`. |
 | `blocks_agent` | `boolean` |  | Forwarded to `smelt.dialog.open`. |
+
+### `smelt.diff.Diff`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Indexed unified patch with a continuous foldable row projection. File indices are one-based; display rows are zero-based. No patch line tables cross into Lua.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `document` | `fun(self: smelt.diff.Diff): smelt.document.Document` | yes | Row source for `win:document`. Native storage is shared, not copied. |
+| `view` | `fun(self: smelt.diff.Diff): smelt.diff.Diff` | yes | Create an independent view, initially preserving the current folds. Shares immutable patch storage, metadata and syntax caches, not subsequent fold changes. Each attached window submits independent syntax demand. |
+| `tree` | `fun(self: smelt.diff.Diff, collapsed: string[]?): smelt.diff.Tree` | yes | Create an independent virtual file tree. Optionally restore opaque collapsed keys from an earlier tree. Section headers include file counts and section-local line totals; attached windows provide their own width. |
+| `restore` | `fun(self: smelt.diff.Diff, previous: smelt.diff.Diff, cursor: integer, top: integer): integer?, integer?` | yes | Restore expanded context and return cursor/top rows for a refreshed snapshot, matching section, raw path and source line numbers rather than display offsets. A missing file returns nil for its anchor. Does not change the previous view. |
+| `files` | `fun(self: smelt.diff.Diff): smelt.diff.File[]` | yes | All file metadata, grouped by section and directory-first within each section. Prefer file(index) for bounded UI-thread allocation. |
+| `file_count` | `fun(self: smelt.diff.Diff): integer` | yes | Number of section-local file entries. A partial file counts twice. |
+| `file` | `fun(self: smelt.diff.Diff, index: integer): smelt.diff.File?` | yes | Metadata for one file entry. Constant-time lookup. |
+| `find_file` | `fun(self: smelt.diff.Diff, section: 'unstaged'\|'staged', key: string): integer?` | yes | Find a file by section and raw path bytes when restoring selection in a new snapshot. |
+| `section_range` | `fun(self: smelt.diff.Diff, section: 'unstaged'\|'staged'): integer, integer` | yes | Inclusive first and last file indices for a section. First exceeds last when the section is empty. |
+| `file_row` | `fun(self: smelt.diff.Diff, index: integer): integer?` | yes | Current display row of a file header. Accounts for expanded folds. |
+| `file_at` | `fun(self: smelt.diff.Diff, row: integer): integer?` | yes | File containing a display row. Logarithmic lookup. |
+| `hunk` | `fun(self: smelt.diff.Diff, row: integer, forward: boolean): integer?` | yes | Next/previous change group, strictly after/before row. Full-context Git patches retain navigation between edits separated by unchanged lines. |
+| `toggle_fold` | `fun(self: smelt.diff.Diff, row: integer): integer?` | yes | Toggle the context fold containing row. Returns the fold marker's row, or nil. Does not reparse the patch. |
+
+### `smelt.diff.File`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+One section's changed file metadata. Paths are repository-relative; partially staged files have a separate entry in each section. Status is ?, A, D, M, R, T, or U (unmerged).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | `string` | yes | New path (old path for a deletion). |
+| `old_path` | `string` | yes | Original path, including for a rename. |
+| `status` | `string` | yes | Git change status. |
+| `additions` | `integer` | yes | Added lines. |
+| `deletions` | `integer` | yes | Removed lines. |
+| `hl_group` | `string` | yes | Theme foreground group for the file's change kind. |
+| `key` | `string` | yes | Raw path bytes, for stable section-local identity across snapshots. Use path for display. |
+| `section` | `'unstaged'\|'staged'` | yes | Patch section. Untracked files belong to unstaged with status ?. |
+| `binary` | `boolean` | yes | Whether Git reports a binary patch instead of line changes. |
+
+### `smelt.diff.Tree`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Independent virtual file sidebar sharing immutable file metadata and ordering. Each tree owns its collapsed directories; each attached window supplies its own width. Only requested rows are formatted; folder toggles rebuild compact visible-node indices, not offscreen strings or spans.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `document` | `fun(self: smelt.diff.Tree): smelt.document.Document` | yes | Row source for a window. Includes neutral filenames, colored status letters, folder triangles, and green/red counts immediately after file and section labels, separated by single spaces. |
+| `width` | `fun(self: smelt.diff.Tree, width: integer)` | yes | Set fallback content width for row access outside a window. Attached windows use their own content width automatically. |
+| `node` | `fun(self: smelt.diff.Tree, row: integer): smelt.diff.TreeNode?` | yes | Metadata for one visible row, or nil for the blank section separator or an invalid row. Constant-time lookup. |
+| `file_row` | `fun(self: smelt.diff.Tree, index: integer, reveal: boolean?): integer?` | yes | Visible row of a file, or nil when hidden. With reveal=true, expand its ancestors first. Logarithmic lookup when no folders change. |
+| `toggle` | `fun(self: smelt.diff.Tree, row: integer): integer?` | yes | Toggle a directory and return its row. Files, section headings, the blank separator and invalid rows return nil. |
+| `collapsed` | `fun(self: smelt.diff.Tree): string[]` | yes | Opaque collapsed directory keys for restoring a new snapshot. |
+| `section_row` | `fun(self: smelt.diff.Tree, section: 'unstaged'\|'staged'): integer` | yes | Visible row of a section header, including an empty section. |
+
+### `smelt.diff.TreeNode`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Metadata for one visible file-tree row. File indices are one-based and tree rows are zero-based.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `index` | `integer` |  | File index, or nil for a directory. |
+| `first` | `integer` | yes | First descendant file index. |
+| `parent` | `integer` |  | Visible parent directory row. |
+| `children` | `boolean` | yes | Whether this row is an expandable directory. Section headings are fixed. |
+| `section` | `'unstaged'\|'staged'` | yes | Section containing this row. |
+| `group` | `boolean` | yes | Whether this is a section header. |
+| `expanded` | `boolean` | yes | Whether the directory is expanded. Always true for section headings. |
+
+### `smelt.document.Document`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Native random-access row source. Attach with `win:document(source)`; each window owns its viewport, scratch storage and highlighting subscription. Sharing a document shares its row projection, including folds; use `diff:view()` for independent diff folds. Only requested rows are materialized. Copy/search access does not request background highlighting. Row coordinates are zero-based.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `row_count` | `fun(self: smelt.document.Document): integer` | yes | Current visible row count, including fold markers. |
 
 ### `smelt.engine.AskError`
 
@@ -1481,6 +1564,38 @@ Shareable natural-size handle returned by `smelt.ui.layout.measure`.
 | `set` | `fun(w: integer, h: integer): nil` | yes | Update the measured natural size. |
 | `get` | `fun(): integer, integer` | yes | Return the current measured width and height. |
 
+### `smelt.ui.layout.Split`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Retained split handle. Compose new children with layout() without resetting user sizing. Identity, axis, minima, resize policy, and divider styles are immutable. Mount a handle only once at a time; persist size(), not the handle.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `layout` | `fun(self: smelt.ui.layout.Split, first: smelt.ui.layout, second: smelt.ui.layout, opts?: table): smelt.ui.layout` | yes | Compose children with this handle. opts accepts outer border, title, and padding, independently of retained sizing. |
+| `size` | `fun(self: smelt.ui.layout.Split): integer \| string` | yes | Unclamped preferred size: integer cells or ratio:N/M. Can be persisted and passed to set_size or the constructor. |
+| `set_size` | `fun(self: smelt.ui.layout.Split, size: integer \| string): boolean` | yes | Set or restore preferred sizing, without applying temporary screen bounds. Returns whether the preference changed. |
+| `reset` | `fun(self: smelt.ui.layout.Split): boolean` | yes | Restore the initial preference. Returns whether it changed. |
+| `resize` | `fun(self: smelt.ui.layout.Split, delta: integer): boolean` | yes | Grow the first pane by signed cells using current mounted geometry and resize policy. Returns whether the preference changed; false when unmounted or at its bounds. |
+| `equalize` | `fun(self: smelt.ui.layout.Split): boolean` | yes | Balance mounted panes using the configured resize policy. Returns whether the preference changed; false when unmounted. |
+
+### `smelt.ui.layout.SplitOpts`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Options for a two-pane resizable layout. Sizes include each child's border and padding. If the terminal cannot fit both minima, they shrink proportionally without discarding the preferred split.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `size` | `integer \| string` |  | Initial first-pane size in cells, a percentage such as 30%, or ratio:N/M. Defaults to 50%. The resize option controls how user sizing is retained across terminal resizes. |
+| `resize` | `'cells' \| 'proportional'` |  | How user resizing is retained across terminal-size changes. Defaults to proportional; cells keeps a fixed first-pane width or height. |
+| `min_first` | `integer` |  | Minimum first-pane size in cells; defaults to 1. |
+| `min_second` | `integer` |  | Minimum second-pane size in cells; defaults to 1. |
+| `divider` | `{normal: table, active?: table}` |  | Explicit divider styles, using fg, bg, bold, dim, italic, underline, crossedout, and reverse. normal is required; active defaults to normal. Omit to follow the renderer's theme. |
+| `border` | `string \| table` |  | Outer border for hsplit/vsplit. With a retained split, pass chrome to handle:layout instead. |
+| `title` | `string \| table` |  | Outer-border title for hsplit/vsplit; pass to handle:layout when using a retained split. |
+| `padding` | `integer` |  | Outer padding for hsplit/vsplit; pass to handle:layout when using a retained split. |
+
 ### `smelt.win.Decoration`
 
 **Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
@@ -1530,13 +1645,17 @@ Window-owned row background highlight. Ranges use absolute visual rows and an ex
 
 **Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
-Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the same handle for chaining.
+Window handle returned by `smelt.win.new(buf, opts?)`. Most setters return the same handle for chaining; resize operations report whether a resizable owner exists.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `close` | `fun(): nil` | yes | Close the overlay leaf. No-op if the window is already closed. |
 | `focus` | `fun(): nil` | yes | Move keyboard focus to this window. No-op if the window is not focusable. |
-| `buf` | `fun(): smelt.buf.Buf?` | yes | Return the backing Buf handle, or `nil` if the window is gone. |
+| `resize` | `fun(axis: string, delta: integer): boolean` | yes | Grow this window along width or height by signed terminal cells; negative shrinks. Resizes the nearest matching hsplit/vsplit, or the containing overlay/docked dialog when no split applies. Shares mouse bounds and preserves focus and document state. Returns false if no resizable owner exists. |
+| `equalize` | `fun(): boolean` | yes | Balance all enclosing hsplit/vsplit panes, respecting their minimum sizes. Does not change focus or document state. Returns false if the window is not in a resizable split. |
+| `buf` | `fun(): smelt.buf.Buf?` | yes | Return the original backing Buf handle, including while a native document is attached, or `nil` if the window is gone. |
+| `document` | `fun(source: smelt.document.Document?): smelt.win.Win` | yes | Attach a native indexed row source to a plugin window, or detach with nil. Each window owns private viewport-sized scratch storage and an independent highlighting subscription; the original backing buffer is retained unchanged and may be shared. Attachment resets view position, disables wrapping and makes text windows read-only, preserving list interaction. Detachment restores the original buffer, input state, surface, wrapping and scroll position. Navigation, selection and copy resolve against the entire source in bounded row batches; copying does not request highlighting. Built-in windows reject this call. |
+| `pan` | `fun(delta: integer): smelt.win.Win` | yes | Pan an unwrapped window horizontally by delta terminal cells. Negative pans left; clamps to the supported column range. Returns the handle. |
 | `rect` | `fun(): any` | yes | Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out. |
 | `content_width` | `fun(): any` | yes | Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays it out. Use this instead of `rect().width` when fitting text into the window's actual content budget. |
 | `decorate` | `fun(opts: table): smelt.win.Decoration` | yes | Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays. |
@@ -1550,7 +1669,7 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the
 | `placeholder_text` | `fun(): string?` | yes | Return the current placeholder text, or `nil` if none is set. |
 | `row_highlights` | `fun(specs: table?): smelt.win.Win` | yes | Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text. |
 | `link_scroll` | `fun(others: smelt.win.Win): smelt.win.Win` | yes | Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining. |
-| `scroll` | `fun(arg: any): any` | yes | Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `"tail"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow. |
+| `scroll` | `fun(arg: any): any` | yes | Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `"tail"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow. |
 | `set_renderer` | `fun(renderer: fun(value: smelt.win.Win)?): smelt.win.Win` | yes | Register a retained renderer for this window, or clear it with nil. While the window is mounted, the renderer runs once after registration and again only after `invalidate_renderer`; its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it. |
 | `invalidate_renderer` | `fun(): smelt.win.Win` | yes | Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining. |
 

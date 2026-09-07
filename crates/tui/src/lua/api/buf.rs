@@ -594,7 +594,7 @@ pub(super) fn create_or_open(
 /// `buf:styled(spans)` - set a styled line list. Same semantics as the
 /// old `set_styled_lines`; lifted out so `Buf` methods stay tidy.
 fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResult<()> {
-    use crate::content::to_buffer::render_into_buffer;
+    use smelt_core::content::builder::LineBuilder;
     use smelt_core::content::highlight::InlineSyntax;
     use smelt_core::style::Style;
     use smelt_core::theme::intern;
@@ -674,40 +674,39 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
             let Some(buf) = ui.buf_mut(id) else {
                 return;
             };
-            buf.set_all_lines(Vec::new());
-            render_into_buffer(buf, width, &theme_snap, |sink| {
-                for spans in &decoded {
-                    for span in spans {
-                        let group = span.style.hl.as_deref().map(intern);
-                        let mut style = Style::new();
-                        style.dim = span.style.dim;
-                        style.bold = span.style.bold;
-                        style.italic = span.style.italic;
-                        style.reverse = span.style.reverse;
-                        if let Some(c) = &span.style.fg {
-                            style.fg = match c {
-                                LuaColor::Group(name) => sink.theme().get(name).fg,
-                                LuaColor::Direct(color) => Some(*color),
-                            };
-                        }
-                        if let Some(c) = &span.style.bg {
-                            style.bg = match c {
-                                LuaColor::Group(name) => sink.theme().get(name).bg,
-                                LuaColor::Direct(color) => Some(*color),
-                            };
-                        }
-                        sink.push(group, style);
-                        if let Some(lang) = &span.syntax {
-                            let mut hi = InlineSyntax::new(lang, sink.theme());
-                            hi.print_line(sink, &span.text);
-                        } else {
-                            sink.print(&span.text);
-                        }
-                        sink.pop_style();
+            let mut sink = LineBuilder::replacing(buf, &theme_snap, width);
+            for spans in &decoded {
+                for span in spans {
+                    let group = span.style.hl.as_deref().map(intern);
+                    let mut style = Style::new();
+                    style.dim = span.style.dim;
+                    style.bold = span.style.bold;
+                    style.italic = span.style.italic;
+                    style.reverse = span.style.reverse;
+                    if let Some(c) = &span.style.fg {
+                        style.fg = match c {
+                            LuaColor::Group(name) => sink.theme().get(name).fg,
+                            LuaColor::Direct(color) => Some(*color),
+                        };
                     }
-                    sink.newline();
+                    if let Some(c) = &span.style.bg {
+                        style.bg = match c {
+                            LuaColor::Group(name) => sink.theme().get(name).bg,
+                            LuaColor::Direct(color) => Some(*color),
+                        };
+                    }
+                    sink.push(group, style);
+                    if let Some(lang) = &span.syntax {
+                        let mut hi = InlineSyntax::new(lang, sink.theme());
+                        hi.print_line(&mut sink, &span.text);
+                    } else {
+                        sink.print(&span.text);
+                    }
+                    sink.pop_style();
                 }
-            });
+                sink.newline();
+            }
+            sink.finish();
         })
     });
     Ok(())

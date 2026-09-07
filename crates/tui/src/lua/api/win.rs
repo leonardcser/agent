@@ -170,15 +170,74 @@ impl mlua::UserData for LuaWin {
             Ok(())
         });
 
+        methods.add_method(
+            "resize",
+            |_, this, (axis, delta): (String, i32)| -> LuaResult<bool> {
+                let axis = match axis.as_str() {
+                    "width" => crate::smelt_edit::layout::Axis::Horizontal,
+                    "height" => crate::smelt_edit::layout::Axis::Vertical,
+                    _ => return Err(LuaError::external("resize axis must be width or height")),
+                };
+                Ok(crate::lua::with_ui_host(|host| {
+                    host.resize_window(this.id, axis, delta)
+                }))
+            },
+        );
+        methods.add_method("equalize", |_, this, ()| -> LuaResult<bool> {
+            Ok(crate::lua::with_ui_host(|host| {
+                host.with_ui(|ui| ui.equalize_window(this.id))
+            }))
+        });
+
         // ── buf - return the backing Buf handle ────────────────────
         methods.add_method(
             "buf",
             |_, this, ()| -> LuaResult<Option<super::buf::LuaBuf>> {
                 let bid = crate::lua::try_with_ui_host(|host| {
-                    host.with_ui(|ui| ui.win(this.id).map(|window| window.buf))
+                    host.with_ui(|ui| ui.win(this.id).map(|window| window.backing_buffer()))
                 })
                 .flatten();
                 Ok(bid.map(|id| super::buf::LuaBuf { id }))
+            },
+        );
+
+        methods.add_function(
+            "document",
+            |_,
+             (this_ud, source): (
+                mlua::AnyUserData,
+                Option<smelt_core::lua::api::document::LuaDocument>,
+            )|
+             -> LuaResult<mlua::AnyUserData> {
+                let this = *this_ud.borrow::<LuaWin>()?;
+                if is_builtin_win(this.id) {
+                    return Err(LuaError::external(
+                        "cannot replace a built-in window's document",
+                    ));
+                }
+                crate::lua::with_ui_host(|host| {
+                    host.with_ui(|ui| {
+                        ui.set_window_document(this.id, source.map(|source| source.0));
+                    })
+                });
+                Ok(this_ud)
+            },
+        );
+
+        methods.add_function(
+            "pan",
+            |_, (this_ud, delta): (mlua::AnyUserData, i16)| -> LuaResult<mlua::AnyUserData> {
+                let this = *this_ud.borrow::<LuaWin>()?;
+                crate::lua::with_ui_host(|host| {
+                    host.with_ui(|ui| {
+                        if let Some(win) = ui.win_mut(this.id) {
+                            if !win.wrap {
+                                win.scroll_left = win.scroll_left.saturating_add_signed(delta);
+                            }
+                        }
+                    })
+                });
+                Ok(this_ud)
             },
         );
 
@@ -446,7 +505,7 @@ impl mlua::UserData for LuaWin {
         );
 
         // ── scroll: get / set / jump-to-tail ───────────────────────
-        // `win:scroll()` returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }`.
+        // `win:scroll()` returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }`.
         // `needs_tail_repin` is true whenever content overflows and the viewport
         // is not positioned at the current bottom, regardless of follow state.
         // `win:scroll(integer)` pins the viewport at that `scroll_top`.
@@ -466,6 +525,12 @@ impl mlua::UserData for LuaWin {
                             Some(info) => {
                                 let t = lua.create_table()?;
                                 t.set("top", info.top)?;
+                                let left = crate::lua::try_with_ui_host(|host| {
+                                    host.with_ui(|ui| ui.win(this.id).map(|win| win.scroll_left))
+                                })
+                                .flatten()
+                                .unwrap_or(0);
+                                t.set("left", left)?;
                                 t.set("follow", info.follow)?;
                                 t.set("total", info.total)?;
                                 t.set("viewport", info.viewport)?;
@@ -741,11 +806,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     record_class(LuaClassDecl {
         name: "smelt.win.Win",
         classification: smelt_core::lua::doc::classification_for_type("smelt.win.Win"),
-        doc: "Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the same handle for chaining.",
+        doc: "Window handle returned by `smelt.win.new(buf, opts?)`. Most setters return the same handle for chaining; resize operations report whether a resizable owner exists.",
         fields: smelt_core::class_methods! {
             "close" => fn() -> (), "Close the overlay leaf. No-op if the window is already closed.",
             "focus" => fn() -> (), "Move keyboard focus to this window. No-op if the window is not focusable.",
-            "buf" => fn() -> Option<super::buf::LuaBuf>, "Return the backing Buf handle, or `nil` if the window is gone.",
+            "resize" => fn(axis: String, delta: i32) -> bool, "Grow this window along width or height by signed terminal cells; negative shrinks. Resizes the nearest matching hsplit/vsplit, or the containing overlay/docked dialog when no split applies. Shares mouse bounds and preserves focus and document state. Returns false if no resizable owner exists.",
+            "equalize" => fn() -> bool, "Balance all enclosing hsplit/vsplit panes, respecting their minimum sizes. Does not change focus or document state. Returns false if the window is not in a resizable split.",
+            "buf" => fn() -> Option<super::buf::LuaBuf>, "Return the original backing Buf handle, including while a native document is attached, or `nil` if the window is gone.",
+            "document" => fn(source: Option<smelt_core::lua::api::document::LuaDocument>) -> LuaWin, "Attach a native indexed row source to a plugin window, or detach with nil. Each window owns private viewport-sized scratch storage and an independent highlighting subscription; the original backing buffer is retained unchanged and may be shared. Attachment resets view position, disables wrapping and makes text windows read-only, preserving list interaction. Detachment restores the original buffer, input state, surface, wrapping and scroll position. Navigation, selection and copy resolve against the entire source in bounded row batches; copying does not request highlighting. Built-in windows reject this call.",
+            "pan" => fn(delta: i16) -> LuaWin, "Pan an unwrapped window horizontally by delta terminal cells. Negative pans left; clamps to the supported column range. Returns the handle.",
             "rect" => fn() -> mlua::Value, "Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.",
             "content_width" => fn() -> mlua::Value, "Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays it out. Use this instead of `rect().width` when fitting text into the window's actual content budget.",
             "decorate" => fn(opts: mlua::Table) -> LuaDecoration, "Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays.",
@@ -759,7 +828,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "placeholder_text" => fn() -> Option<String>, "Return the current placeholder text, or `nil` if none is set.",
             "row_highlights" => fn(specs: Option<mlua::Table>) -> LuaWin, "Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
-            "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.",
+            "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.",
             "set_renderer" => fn(renderer: Option<LuaCallback<(LuaWin,), ()>>) -> LuaWin, "Register a retained renderer for this window, or clear it with nil. While the window is mounted, the renderer runs once after registration and again only after `invalidate_renderer`; its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it.",
             "invalidate_renderer" => fn() -> LuaWin, "Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining.",
         },
@@ -977,22 +1046,22 @@ fn apply_window_opts(
     let Some(w) = ui.win_mut(win_id) else {
         return;
     };
-    if let Ok(wrap) = opts.get::<bool>("wrap") {
+    if let Ok(Some(wrap)) = opts.get::<Option<bool>>("wrap") {
         w.wrap = wrap;
     }
     if let Some(surface) = surface_from_opts(opts) {
         w.set_surface(surface);
     }
-    if let Ok(cursor_line) = opts.get::<bool>("cursor_line") {
+    if let Ok(Some(cursor_line)) = opts.get::<Option<bool>>("cursor_line") {
         w.set_cursor_line_highlight(cursor_line);
     }
-    if let Ok(selection_highlight) = opts.get::<bool>("selection_highlight") {
+    if let Ok(Some(selection_highlight)) = opts.get::<Option<bool>>("selection_highlight") {
         w.set_list_selection_highlight(selection_highlight);
     }
-    if let Ok(hide_cursor) = opts.get::<bool>("hide_cursor") {
+    if let Ok(Some(hide_cursor)) = opts.get::<Option<bool>>("hide_cursor") {
         w.hide_cursor = hide_cursor;
     }
-    if let Ok(vim_enabled) = opts.get::<bool>("vim_enabled") {
+    if let Ok(Some(vim_enabled)) = opts.get::<Option<bool>>("vim_enabled") {
         w.set_vim_enabled(vim_enabled);
     }
     if let Ok(Some(gutter)) = opts.get::<Option<String>>("gutter") {
