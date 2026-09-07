@@ -214,6 +214,7 @@ fn auto_compaction_requests_frame_before_coalesced_response_clears_preview() {
     let (tx, _rx) = tokio::sync::oneshot::channel();
     {
         app.dispatch_host_call(engine::HostCall::PrepareRequest {
+            turn_id: app.current_turn_id().expect("active request turn"),
             messages: engine::PreparedRequestMessages::model_only(messages),
             estimated_tokens: 200,
             reply: tx,
@@ -274,6 +275,7 @@ fn auto_compaction_requests_frame_before_coalesced_response_clears_preview() {
 #[test]
 fn ordered_prepare_request_paints_transient_streaming_state() {
     let mut app = TestApp::builder().build();
+    app.start_turn(42);
     app.set_terminal_size(80, 24);
     assert!(app.run_bundled_lua(
         r#"
@@ -310,6 +312,7 @@ fn ordered_prepare_request_paints_transient_streaming_state() {
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     assert!(
         app.inject_host_call(engine::HostCall::PrepareRequest {
+            turn_id: app.current_turn_id().expect("active request turn"),
             messages: engine::PreparedRequestMessages::new(Vec::new(), 0),
             estimated_tokens: 0,
             reply: tx,
@@ -349,6 +352,7 @@ fn ordered_prepare_request_paints_transient_streaming_state() {
 #[test]
 fn auto_compaction_does_not_recompact_checkpoint_summary_without_new_old_groups() {
     let mut app = TestApp::builder().build();
+    app.start_turn(42);
     let mut settings = app.core_probe().config.settings.clone();
     settings.auto_compact = true;
     settings.compact_threshold = 0.8;
@@ -364,6 +368,7 @@ fn auto_compaction_does_not_recompact_checkpoint_summary_without_new_old_groups(
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     {
         app.dispatch_host_call(engine::HostCall::PrepareRequest {
+            turn_id: app.current_turn_id().expect("active request turn"),
             messages: engine::PreparedRequestMessages::model_only(messages),
             estimated_tokens: 200,
             reply: tx,
@@ -410,6 +415,7 @@ fn auto_compaction_does_not_recompact_checkpoint_summary_without_new_old_groups(
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     {
         app.dispatch_host_call(engine::HostCall::PrepareRequest {
+            turn_id: app.current_turn_id().expect("active request turn"),
             messages: engine::PreparedRequestMessages::model_only(messages),
             estimated_tokens: 200,
             reply: tx,
@@ -771,93 +777,93 @@ async fn real_engine_responses_compaction_streams_preview_before_response() {
     server.await.expect("mock provider server");
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
-    use std::sync::Arc;
-    use tokio::io::AsyncWriteExt;
-    use tokio::net::TcpListener;
-
-    fn one_shot_response(id: &str, text: &str, input_tokens: u32) -> String {
-        let message_id = format!("{id}_message");
-        let events = [
-            serde_json::json!({
-                "type": "response.created",
-                "response": { "id": id, "status": "in_progress", "output": [] }
-            }),
-            serde_json::json!({
-                "type": "response.output_item.added",
-                "output_index": 0,
-                "item": {
-                    "id": message_id,
-                    "type": "message",
-                    "status": "in_progress",
-                    "role": "assistant",
-                    "content": []
-                }
-            }),
-            serde_json::json!({
-                "type": "response.output_text.delta",
-                "item_id": message_id,
-                "output_index": 0,
-                "content_index": 0,
-                "delta": text
-            }),
-            serde_json::json!({
-                "type": "response.output_text.done",
-                "item_id": message_id,
-                "output_index": 0,
-                "content_index": 0,
-                "text": text
-            }),
-            serde_json::json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": {
+fn one_shot_response(id: &str, text: &str, input_tokens: u32) -> String {
+    let message_id = format!("{id}_message");
+    let events = [
+        serde_json::json!({
+            "type": "response.created",
+            "response": { "id": id, "status": "in_progress", "output": [] }
+        }),
+        serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": message_id,
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": []
+            }
+        }),
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "item_id": message_id,
+            "output_index": 0,
+            "content_index": 0,
+            "delta": text
+        }),
+        serde_json::json!({
+            "type": "response.output_text.done",
+            "item_id": message_id,
+            "output_index": 0,
+            "content_index": 0,
+            "text": text
+        }),
+        serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "id": message_id,
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": text, "annotations": [] }]
+            }
+        }),
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": id,
+                "status": "completed",
+                "output": [{
                     "id": message_id,
                     "type": "message",
                     "status": "completed",
                     "role": "assistant",
                     "content": [{ "type": "output_text", "text": text, "annotations": [] }]
+                }],
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": 3,
+                    "total_tokens": input_tokens + 3
                 }
-            }),
-            serde_json::json!({
-                "type": "response.completed",
-                "response": {
-                    "id": id,
-                    "status": "completed",
-                    "output": [{
-                        "id": message_id,
-                        "type": "message",
-                        "status": "completed",
-                        "role": "assistant",
-                        "content": [{ "type": "output_text", "text": text, "annotations": [] }]
-                    }],
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "output_tokens": 3,
-                        "total_tokens": input_tokens + 3
-                    }
-                }
-            }),
-        ];
-        events
-            .iter()
-            .map(|event| format!("data: {event}\n\n"))
-            .collect()
-    }
+            }
+        }),
+    ];
+    events
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect()
+}
 
-    async fn write_response(stream: &mut tokio::net::TcpStream, body: &str) {
-        let response = format!(
+async fn write_response(stream: &mut tokio::net::TcpStream, body: &str) {
+    use tokio::io::AsyncWriteExt;
+    let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         );
-        stream
-            .write_all(response.as_bytes())
-            .await
-            .expect("write one-shot response");
-        stream.shutdown().await.expect("shutdown response");
-    }
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write one-shot response");
+    stream.shutdown().await.expect("shutdown response");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
 
     fn compacted_block_count(app: &TestApp) -> usize {
         let history = app.conversation_probe().transcript().history();
@@ -1083,6 +1089,153 @@ async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
 }
 
 #[test]
+fn delayed_host_calls_cannot_claim_a_replacement_turn() {
+    for replace_turn in [false, true] {
+        for kind in ["prepare", "recover", "response"] {
+            let mut app = TestApp::builder().build();
+            app.start_turn(42);
+            app.app.lua.core_shared().hooks.prepare_request.clear();
+            app.app.lua.core_shared().hooks.context_limit.clear();
+            app.app.lua.core_shared().hooks.provider_response.clear();
+            assert!(app.run_bundled_lua(
+                r#"
+                _G.hook_calls = 0
+                local function pending(_, reply)
+                    _G.hook_calls = _G.hook_calls + 1
+                    _G.pending_reply = reply
+                    _G.compaction = __smelt_internal.work._context_recalculation("compacting")
+                    __smelt_internal.transcript._set_compaction_preview("CURRENT_PREVIEW")
+                end
+                smelt.engine.on_prepare_request(pending)
+                smelt.engine.on_context_limit(pending)
+                smelt.provider.middleware({ on_response = function(message)
+                    _G.hook_calls = _G.hook_calls + 1
+                    __smelt_internal.transcript._set_compaction_preview("STALE_PREVIEW")
+                    return message
+                end })
+            "#
+            ));
+            let (reply, mut response) = tokio::sync::oneshot::channel();
+            let (provider_reply, mut provider_response) = tokio::sync::oneshot::channel();
+            let delayed = match kind {
+                "prepare" => engine::HostCall::PrepareRequest {
+                    turn_id: 42,
+                    messages: engine::PreparedRequestMessages::model_only(Vec::new()),
+                    estimated_tokens: 200,
+                    reply,
+                },
+                "recover" => engine::HostCall::RecoverFromContextLimit {
+                    turn_id: 42,
+                    messages: Vec::new(),
+                    reply,
+                },
+                "response" => engine::HostCall::ProviderResponse {
+                    turn_id: 42,
+                    message: assistant_message("STALE_RESPONSE"),
+                    reply: provider_reply,
+                },
+                _ => unreachable!(),
+            };
+            let mut current_response = None;
+            if replace_turn {
+                app.type_text("NEXT_TASK");
+                app.press(KeyCode::Enter);
+                app.press(KeyCode::Enter);
+                app.press(KeyCode::Enter);
+                assert_ne!(app.current_turn_id(), Some(42));
+                let (reply, response) = tokio::sync::oneshot::channel();
+                current_response = Some(response);
+                app.dispatch_host_call(engine::HostCall::PrepareRequest {
+                    turn_id: app.current_turn_id().expect("replacement turn"),
+                    messages: engine::PreparedRequestMessages::model_only(Vec::new()),
+                    estimated_tokens: 0,
+                    reply,
+                });
+            } else {
+                app.press(KeyCode::Esc);
+                app.press(KeyCode::Esc);
+                assert!(!app.agent_running());
+            }
+            let turn_id = app.current_turn_id();
+            let history = app.model_history();
+            app.app.dispatch_selected_engine_output_in_render_loop_to(
+                engine::EngineOutput::HostCall(delayed),
+                &mut std::io::sink(),
+            );
+            assert!(app.run_lua(&format!(
+                "assert(hook_calls == {})",
+                usize::from(replace_turn)
+            )));
+            assert_eq!(app.current_turn_id(), turn_id);
+            assert_eq!(app.model_history(), history);
+            if kind == "response" {
+                assert!(provider_response.try_recv().unwrap().is_none());
+            } else {
+                assert!(matches!(
+                    response.try_recv().unwrap(),
+                    engine::HostRequestDecision::Stop
+                ));
+            }
+            if let Some(mut current_response) = current_response {
+                assert!(matches!(
+                    current_response.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ));
+                assert_eq!(app.working_probe().phase_label(), Some("compacting"));
+                assert!(app.render_to_frame().text().contains("CURRENT_PREVIEW"));
+            }
+        }
+    }
+}
+
+#[test]
+fn request_hook_drop_clears_pending_work() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(42);
+    app.app.lua.core_shared().hooks.prepare_request.clear();
+    assert!(app.run_lua(
+        r#"smelt.engine.on_prepare_request(function(_, reply) _G.pending_reply = reply end)"#
+    ));
+    let (reply, mut response) = tokio::sync::oneshot::channel();
+    app.dispatch_host_call(engine::HostCall::PrepareRequest {
+        turn_id: app.current_turn_id().expect("active request turn"),
+        messages: engine::PreparedRequestMessages::model_only(Vec::new()),
+        estimated_tokens: 0,
+        reply,
+    });
+    assert!(app.run_lua("pending_reply = nil; collectgarbage('collect')"));
+    assert!(matches!(
+        response.try_recv(),
+        Ok(engine::HostRequestDecision::Continue)
+    ));
+    assert_eq!(app.working_probe().phase_label(), Some("working"));
+}
+
+#[test]
+fn non_compaction_request_hook_does_not_defer_force_pop() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(42);
+    app.app.lua.core_shared().hooks.prepare_request.clear();
+    assert!(app.run_lua(
+        r#"smelt.engine.on_prepare_request(function(_, reply) _G.pending_reply = reply end)"#
+    ));
+    let (reply, _response) = tokio::sync::oneshot::channel();
+    app.dispatch_host_call(engine::HostCall::PrepareRequest {
+        turn_id: app.current_turn_id().expect("active request turn"),
+        messages: engine::PreparedRequestMessages::model_only(Vec::new()),
+        estimated_tokens: 0,
+        reply,
+    });
+    app.type_text("NEXT_TASK");
+    app.press(KeyCode::Enter);
+    app.press(KeyCode::Enter);
+    app.press(KeyCode::Enter);
+    assert_ne!(app.current_turn_id(), Some(42));
+    assert_eq!(app.queued_message_count(), 0);
+    assert_eq!(app.working_probe().phase_label(), Some("working"));
+}
+
+#[test]
 fn cancelled_turn_without_usage_preserves_context_token_baseline() {
     let mut app = TestApp::builder().build();
     app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
@@ -1094,4 +1247,337 @@ fn cancelled_turn_without_usage_preserves_context_token_baseline() {
 
     assert_eq!(app.session_snapshot().context_tokens, Some(500));
     assert_eq!(app.session_snapshot().context_tokens_history_len, Some(2));
+}
+
+#[test]
+fn late_compaction_callbacks_preserve_new_preview() {
+    fn prepare(app: &mut TestApp) -> u64 {
+        let messages = protocol::history_to_messages(&app.model_history());
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        app.dispatch_host_call(engine::HostCall::PrepareRequest {
+            turn_id: app.current_turn_id().expect("active request turn"),
+            messages: engine::PreparedRequestMessages::model_only(messages),
+            estimated_tokens: 200,
+            reply: tx,
+        });
+        app.drain_engine_sends()
+            .into_iter()
+            .filter_map(|command| match command {
+                protocol::UiCommand::EngineAsk { id, messages, .. }
+                    if messages.last().is_some_and(|message| {
+                        message.content.as_ref().is_some_and(|content| {
+                            content
+                                .text_content()
+                                .contains("CONTEXT CHECKPOINT COMPACTION")
+                        })
+                    }) =>
+                {
+                    Some(id)
+                }
+                _ => None,
+            })
+            .next_back()
+            .expect("compaction asks for a summary")
+    }
+
+    let mut failures = Vec::new();
+    for (replace_turn, late_response) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let mut app = TestApp::builder().build();
+        app.set_terminal_size(80, 24);
+        app.set_context_window(Some(100));
+        app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
+        app.push_assistant_text("a1");
+        app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u2")));
+        app.start_turn(42);
+        let old_ask = prepare(&mut app);
+        app.dispatch_engine_event(protocol::EngineEvent::EngineAskDelta {
+            id: old_ask,
+            delta: "OLD_SUMMARY".into(),
+        });
+        if replace_turn {
+            app.discard_turn(crate::app::TurnEnd::Cancelled);
+            app.start_turn(43);
+        }
+
+        let new_ask = prepare(&mut app);
+        assert_ne!(old_ask, new_ask);
+        app.dispatch_engine_event(protocol::EngineEvent::EngineAskDelta {
+            id: new_ask,
+            delta: "NEW_SUMMARY".into(),
+        });
+        assert!(app.render_to_frame().text().contains("NEW_SUMMARY"));
+        assert_eq!(app.working_probe().phase_label(), Some("compacting"));
+
+        if late_response {
+            app.dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+                id: old_ask,
+                message: None,
+                error: Some(protocol::EngineAskError {
+                    kind: protocol::EngineAskErrorKind::Cancelled,
+                    message: "cancelled".into(),
+                }),
+            });
+        } else {
+            app.dispatch_engine_event(protocol::EngineEvent::EngineAskDelta {
+                id: old_ask,
+                delta: "_LATE_DELTA".into(),
+            });
+        }
+        app.drive_lua_tasks();
+        let frame = app.render_to_frame().text();
+        let phase = app.working_probe().phase_label();
+        if !frame.contains("NEW_SUMMARY") || phase != Some("compacting") {
+            failures.push(format!(
+                "late_response={late_response}, phase={phase:?}, frame:\n{frame}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_engine_compaction_preserves_queued_inputs() {
+    use std::sync::Arc;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    for recovery in [false, true] {
+        for action in ["promote", "steer", "pop", "multi", "withdraw"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let foreground_count = if action == "multi" { 3 } else { 1 };
+            let server = tokio::spawn(async move {
+                if recovery {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let request = read_json_request(&mut stream).await;
+                    assert!(!request
+                        .to_string()
+                        .contains("CONTEXT CHECKPOINT COMPACTION"));
+                    let body = r#"{"error":{"message":"maximum context length exceeded","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+                    stream.write_all(format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+                    ).as_bytes()).await.unwrap();
+                    stream.shutdown().await.unwrap();
+                }
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_json_request(&mut stream).await;
+                assert!(request
+                    .to_string()
+                    .contains("CONTEXT CHECKPOINT COMPACTION"));
+                let body = one_shot_response("summary", "CHECKPOINT_READY", 40);
+                let prefix_len: usize = body.split_inclusive("\n\n").take(3).map(str::len).sum();
+                stream.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()
+                ).as_bytes()).await.unwrap();
+                stream
+                    .write_all(&body.as_bytes()[..prefix_len])
+                    .await
+                    .unwrap();
+                release_rx.await.unwrap();
+                stream
+                    .write_all(&body.as_bytes()[prefix_len..])
+                    .await
+                    .unwrap();
+                stream.shutdown().await.unwrap();
+
+                let mut requests = Vec::new();
+                for index in 0..foreground_count {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let request = read_json_request(&mut stream).await;
+                    assert!(
+                        request.to_string().contains("CHECKPOINT_READY"),
+                        "{request}"
+                    );
+                    assert!(
+                        !request
+                            .to_string()
+                            .contains("CONTEXT CHECKPOINT COMPACTION"),
+                        "compaction restarted: {request}"
+                    );
+                    requests.push(request);
+                    write_response(
+                        &mut stream,
+                        &one_shot_response(
+                            &format!("answer_{index}"),
+                            &format!("ANSWER_{index}"),
+                            55,
+                        ),
+                    )
+                    .await;
+                }
+                requests
+            });
+
+            let cwd = tempfile::tempdir().unwrap();
+            let config_dir = cwd.path().join("config");
+            std::fs::create_dir_all(&config_dir).unwrap();
+            std::fs::write(
+                config_dir.join("early.lua"),
+                r#"smelt.builtins.disable({ plugins = { "title", "predict" } })"#,
+            )
+            .unwrap();
+            let engine = engine::start(
+                engine::EngineConfig::new(
+                    cwd.path().to_path_buf(),
+                    Arc::new(engine::clock::RealClock),
+                ),
+                Box::new(engine::tools::EmptyDispatcher),
+            );
+            let mut app = TestApp::builder()
+                .with_cwd(cwd.path())
+                .with_lua_load_paths(&config_dir, None)
+                .with_engine(engine)
+                .build();
+            app.set_terminal_size(80, 24);
+            app.use_model(smelt_core::config::ResolvedModel {
+                key: "mock/compact".into(),
+                provider_name: "mock".into(),
+                model_name: "compact".into(),
+                display_name: None,
+                api_base: format!("http://{address}"),
+                api_key_env: String::new(),
+                provider_type: "openai".into(),
+                config: protocol::ModelConfig::default(),
+                catalog: protocol::ModelCatalogMetadata::default(),
+            });
+            app.set_context_window(Some(1_000_000));
+            let mut settings = app.core_probe().config.settings.clone();
+            settings.auto_compact = true;
+            settings.compact_threshold = 0.8;
+            settings.compact_keep_recent_groups = 1.0;
+            app.set_settings_for_harness(settings);
+            app.commit_request_history_item(
+                protocol::HistoryItem::user(protocol::Content::text("OLD_USER")),
+                None,
+            );
+            app.commit_request_history_item(
+                protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                    Some(protocol::Content::text("OLD_ANSWER")),
+                    None,
+                    Vec::new(),
+                )),
+                None,
+            );
+            app.set_context_token_baseline_for_harness(Some(if recovery { 20 } else { 900_000 }));
+            app.start_submitted_turn("CURRENT_TASK");
+            let original_turn = app.current_turn_id();
+            let mut release = Some(release_tx);
+            let mut completed = 0;
+            let expected_turns = foreground_count + usize::from(matches!(action, "pop" | "multi"));
+            let mut terminal_output = Vec::new();
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                while completed < expected_turns {
+                    let output = app
+                        .app
+                        .core
+                        .engine
+                        .recv_output()
+                        .await
+                        .expect("engine output");
+                    let summary_delta = matches!(&output, engine::EngineOutput::Event(
+                        protocol::EngineEvent::EngineAskDelta { delta, .. }
+                    ) if delta.contains("CHECKPOINT_READY"));
+                    if matches!(
+                        &output,
+                        engine::EngineOutput::Event(protocol::EngineEvent::TurnComplete { .. })
+                    ) {
+                        completed += 1;
+                    }
+                    app.app.dispatch_selected_engine_output_in_render_loop_to(
+                        output,
+                        &mut terminal_output,
+                    );
+                    if summary_delta {
+                        assert_eq!(app.working_probe().phase_label(), Some("compacting"));
+                        app.type_text("QUEUED_FIRST");
+                        if action == "steer" {
+                            app.press_mod(KeyCode::Char('q'), KeyModifiers::CONTROL);
+                        } else {
+                            app.press(KeyCode::Enter);
+                            if action == "multi" {
+                                for text in ["QUEUED_SECOND", "QUEUED_THIRD"] {
+                                    app.type_text(text);
+                                    app.press(KeyCode::Enter);
+                                }
+                            }
+                            app.press(KeyCode::Enter);
+                        }
+                        if matches!(action, "pop" | "multi") {
+                            app.press(KeyCode::Enter);
+                            app.press(KeyCode::Enter);
+                        } else if action == "withdraw" {
+                            app.press(KeyCode::Esc);
+                            app.press(KeyCode::Esc);
+                            assert_eq!(app.queued_message_count(), 0);
+                        }
+                        assert_eq!(
+                            app.current_turn_id(),
+                            original_turn,
+                            "recovery={recovery}, action={action}"
+                        );
+                        assert_eq!(app.working_probe().phase_label(), Some("compacting"));
+                        release.take().expect("one compaction").send(()).unwrap();
+                    }
+                    app.render_to_frame();
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "compaction timed out: recovery={recovery}, action={action}, frame:\n{}",
+                    app.render_to_frame().text()
+                )
+            });
+            let requests = server.await.unwrap();
+            for (index, request) in requests.iter().enumerate() {
+                let text = request["input"].to_string();
+                assert_eq!(
+                    text.matches("QUEUED_FIRST").count(),
+                    usize::from(action != "withdraw"),
+                    "recovery={recovery}, action={action}: {text}"
+                );
+                assert!(text.contains("CURRENT_TASK"), "{text}");
+                assert!(!text.contains("OLD_USER"), "{text}");
+                if action == "multi" {
+                    assert_eq!(
+                        text.matches("QUEUED_SECOND").count(),
+                        usize::from(index >= 1)
+                    );
+                    assert_eq!(
+                        text.matches("QUEUED_THIRD").count(),
+                        usize::from(index >= 2)
+                    );
+                }
+            }
+            assert!(!app.agent_running());
+            assert_eq!(app.queued_message_count(), 0);
+            app.save_session_and_flush();
+            let session_id = app.session_snapshot().id;
+            let history = crate::app::history::materialize_full_session(
+                &app.core_probe().sessions,
+                &session_id,
+                crate::app::history::FullSessionMaterializationReason::TestSavedSessionAssertion,
+            )
+            .expect("saved canonical history")
+            .history;
+            let text = serde_json::to_string(&history).unwrap();
+            assert_eq!(
+                text.matches("QUEUED_FIRST").count(),
+                usize::from(action != "withdraw"),
+                "persisted history, recovery={recovery}, action={action}: {text}"
+            );
+            assert!(text.contains("CURRENT_TASK"), "{text}");
+            assert!(
+                text.contains("OLD_USER"),
+                "canonical prefix was lost: {text}"
+            );
+            if action == "multi" {
+                assert_eq!(text.matches("QUEUED_SECOND").count(), 1);
+                assert_eq!(text.matches("QUEUED_THIRD").count(), 1);
+            }
+        }
+    }
 }
