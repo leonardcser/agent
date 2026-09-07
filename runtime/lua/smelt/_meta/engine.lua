@@ -12,7 +12,7 @@ local engine = {}
 ---@type fun(spec: smelt.engine.AskSpec): integer
 engine.ask = nil
 
---- Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. Explicit reasoning effort must be supported by the selected model; omitted effort starts at `"off"` and reconciles to advertised levels. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.
+--- Run an auxiliary LLM request that inherits the current session's assembled system prompt, active tool list, and reasoning effort. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. Explicit reasoning effort must be supported by the selected model; omitted effort inherits the session's effort and reconciles it to the selected model's advertised levels. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.
 ---@type fun(spec: smelt.engine.InheritedAskSpec): integer
 engine.ask_inherited = nil
 

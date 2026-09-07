@@ -741,6 +741,7 @@ impl AgentLuaHost<'_> {
     fn resolve_ask_reasoning_effort(
         catalog: &protocol::ModelCatalogMetadata,
         requested: Option<protocol::ReasoningEffort>,
+        default_effort: protocol::ReasoningEffort,
         model: &str,
     ) -> Result<protocol::ReasoningEffort, String> {
         match requested {
@@ -750,7 +751,7 @@ impl AgentLuaHost<'_> {
                 effort.label(),
                 model
             )),
-            None => Ok(catalog.reconcile_reasoning_effort(protocol::ReasoningEffort::Off)),
+            None => Ok(catalog.reconcile_reasoning_effort(default_effort)),
         }
     }
 
@@ -773,8 +774,12 @@ impl AgentLuaHost<'_> {
         let Some((target, catalog)) = self.resolve_ask_target(model_reference.as_deref()) else {
             return Err("no usable model is available".into());
         };
-        let reasoning_effort =
-            Self::resolve_ask_reasoning_effort(&catalog, reasoning_effort, &target.model)?;
+        let reasoning_effort = Self::resolve_ask_reasoning_effort(
+            &catalog,
+            reasoning_effort,
+            protocol::ReasoningEffort::Off,
+            &target.model,
+        )?;
         let request_config = self.app.core.config.request_runtime_config();
         let session_id = self.app.conversation.session().id.clone();
         let persistence = self.app.conversation.persistence_scope();
@@ -818,8 +823,12 @@ impl AgentLuaHost<'_> {
         let Some((target, catalog)) = self.resolve_ask_target(model_reference.as_deref()) else {
             return Err("no usable model is available".into());
         };
-        let reasoning_effort =
-            Self::resolve_ask_reasoning_effort(&catalog, reasoning_effort, &target.model)?;
+        let reasoning_effort = Self::resolve_ask_reasoning_effort(
+            &catalog,
+            reasoning_effort,
+            self.app.core.config.reasoning_effort.clone(),
+            &target.model,
+        )?;
         let request_config = self.app.core.config.request_runtime_config();
         let session_id = self.app.conversation.session().id.clone();
         let persistence = self.app.conversation.persistence_scope();

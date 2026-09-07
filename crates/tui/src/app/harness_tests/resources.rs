@@ -1496,6 +1496,60 @@ fn engine_asks_validate_and_reconcile_reasoning_for_selected_model() {
 }
 
 #[test]
+fn engine_asks_inherit_reasoning_only_for_inherited_requests() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    let mut primary = app.core_probe().config.available_models[0].clone();
+    primary.catalog.default_reasoning_effort = Some(protocol::ReasoningEffort::Medium);
+    primary.catalog.supported_reasoning_efforts = vec![
+        protocol::ReasoningEffort::Medium,
+        protocol::ReasoningEffort::High,
+        protocol::ReasoningEffort::Max,
+    ];
+    let primary_model = primary.model_name.clone();
+    let primary_key = primary.key.clone();
+    app.use_model(primary);
+    add_restricted_reasoning_model(&mut app);
+    assert!(app.run_lua(r#"smelt.reasoning.set("max")"#));
+    let _ = app.drain_engine_sends();
+
+    assert!(app.run_lua(&format!(
+        r#"
+        smelt.engine.ask_inherited({{}})
+        smelt.engine.ask_inherited({{ model = {primary_key:?} }})
+        smelt.engine.ask_inherited({{ reasoning_effort = "medium" }})
+        smelt.engine.ask_inherited({{ model = "codex/restricted-model" }})
+        smelt.engine.ask_inherited({{
+            model = "codex/restricted-model",
+            reasoning_effort = "high",
+        }})
+        smelt.engine.ask({{ system = "standalone" }})
+        "#,
+    )));
+    assert_eq!(
+        engine_ask_models_and_efforts(app.drain_engine_sends()),
+        vec![
+            (primary_model.clone(), protocol::ReasoningEffort::Max),
+            (primary_model.clone(), protocol::ReasoningEffort::Max),
+            (primary_model.clone(), protocol::ReasoningEffort::Medium),
+            ("restricted-model".into(), protocol::ReasoningEffort::Low),
+            ("restricted-model".into(), protocol::ReasoningEffort::High),
+            (primary_model, protocol::ReasoningEffort::Medium),
+        ]
+    );
+
+    assert!(app.run_lua(
+        r#"
+        smelt.reasoning.set("high")
+        smelt.engine.ask_inherited({ model = "codex/restricted-model" })
+        "#,
+    ));
+    assert_eq!(
+        engine_ask_models_and_efforts(app.drain_engine_sends()),
+        vec![("restricted-model".into(), protocol::ReasoningEffort::High)]
+    );
+}
+
+#[test]
 fn engine_ask_probe_dispatches_complete_target_and_request_config() {
     let mut app = TestApp::builder().with_vim(false).build();
     let mut active = app

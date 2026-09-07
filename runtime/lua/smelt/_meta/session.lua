@@ -86,7 +86,7 @@ session.list = nil
 session.load = nil
 
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
---- Return the model-visible message list for the next request. If the session has a context checkpoint, this is the checkpoint summary plus retained live tail; otherwise it is the persisted transcript. Read-only.
+--- Return the model-visible message list for the next request as full `protocol::Message` rows, preserving multipart content, provider reasoning blocks, and tool metadata. If the session has a context checkpoint, this is the checkpoint summary plus retained live tail; otherwise it is the persisted transcript. Read-only.
 ---@type fun(): table
 session.model_messages = nil
 

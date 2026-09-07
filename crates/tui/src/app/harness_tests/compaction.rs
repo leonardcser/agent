@@ -1,5 +1,157 @@
 use super::*;
 
+fn cache_sensitive_history() -> Vec<protocol::HistoryItem> {
+    protocol::history_from_messages(vec![
+        protocol::Message::user(protocol::Content::with_images(
+            "inspect this image".into(),
+            vec![(
+                "diagram.png".into(),
+                "data:image/png;base64,dGVzdA==".into(),
+            )],
+        )),
+        protocol::Message::assistant_with_reasoning(
+            None,
+            Some("inspect the file".into()),
+            Some(vec![protocol::ReasoningBlock {
+                provider: protocol::ReasoningBlock::OPENAI_RESPONSES.into(),
+                data: serde_json::json!({
+                    "type": "reasoning",
+                    "encrypted_content": "synthetic-encrypted-reasoning",
+                    "content": null,
+                    "summary": [],
+                }),
+            }]),
+            Some(vec![protocol::ToolCall::new(
+                "call_read".into(),
+                protocol::FunctionCall {
+                    name: "read_file".into(),
+                    arguments: r#"{ "file_path": "diagram.png" }"#.into(),
+                },
+            )]),
+        ),
+        protocol::Message::tool_with_metadata(
+            "call_read".into(),
+            "image attachment",
+            false,
+            Some(serde_json::json!({
+                "kind": "file_attachment",
+                "modality": "image",
+                "mime": "image/png",
+                "data_url": "data:image/png;base64,dGVzdA==",
+                "label": "diagram.png",
+            })),
+        ),
+        assistant_message("a1"),
+        user_message("u2"),
+    ])
+}
+
+#[test]
+fn identity_provider_middleware_preserves_model_message() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(42);
+    assert!(app.run_lua(
+        r#"
+        smelt.provider.middleware({
+            on_response = function(message)
+                return message
+            end,
+        })
+        "#,
+    ));
+    let original = protocol::history_to_messages(&cache_sensitive_history())
+        .into_iter()
+        .find(|message| message.reasoning_details.is_some())
+        .expect("assistant message with provider reasoning");
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    app.dispatch_host_call(engine::HostCall::ProviderResponse {
+        turn_id: app.current_turn_id().expect("active response turn"),
+        message: original.clone(),
+        reply: tx,
+    });
+
+    assert_eq!(rx.try_recv().expect("middleware reply"), Some(original));
+}
+
+#[test]
+fn compaction_preserves_full_model_message_prefix() {
+    for trigger in ["auto", "manual", "context_limit"] {
+        let mut app = TestApp::builder().build();
+        app.set_context_window(Some(100));
+        for item in cache_sensitive_history() {
+            app.session_append_history(item);
+        }
+        assert!(app.run_lua(
+            r#"
+            local transcript = smelt.session.messages.list({ roles = { "user" } })
+            assert(transcript[1].content == "inspect this image")
+            "#,
+        ));
+        if trigger != "manual" {
+            app.start_turn(42);
+        }
+        let full_history = protocol::history_to_messages(&app.model_history());
+        let expected_prefix = &full_history[..full_history.len() - 1];
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        match trigger {
+            "auto" => app.dispatch_host_call(engine::HostCall::PrepareRequest {
+                turn_id: app.current_turn_id().expect("active request turn"),
+                messages: engine::PreparedRequestMessages::model_only(full_history.clone()),
+                estimated_tokens: 200,
+                reply: tx,
+            }),
+            "manual" => {
+                app.set_context_token_baseline_for_harness(Some(200));
+                assert!(app.run_lua(r#"smelt.cmd.run("compact")"#));
+            }
+            "context_limit" => app.dispatch_host_call(engine::HostCall::RecoverFromContextLimit {
+                turn_id: app.current_turn_id().expect("active request turn"),
+                messages: full_history.clone(),
+                reply: tx,
+            }),
+            _ => unreachable!(),
+        }
+
+        let asks = ask_messages(app.drain_engine_sends());
+        assert_eq!(
+            asks.len(),
+            1,
+            "{trigger} compaction should issue one EngineAsk"
+        );
+        let (system, messages) = &asks[0];
+        assert_eq!(system, &app.assemble_system_prompt());
+        assert_eq!(messages.len(), expected_prefix.len() + 1);
+        assert_eq!(&messages[..expected_prefix.len()], expected_prefix);
+        assert!(messages
+            .last()
+            .unwrap()
+            .content
+            .as_ref()
+            .unwrap()
+            .as_text()
+            .contains("CONTEXT CHECKPOINT COMPACTION"));
+
+        let mut response = expected_prefix[1].clone();
+        response.tool_calls.as_mut().unwrap()[0].id = "call_denied".into();
+        app.dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+            id: app.pending_ask_id().expect("pending compaction ask"),
+            message: Some(response.clone()),
+            error: None,
+        });
+        app.drive_lua_tasks();
+        let retries = ask_messages(app.drain_engine_sends());
+        assert_eq!(retries.len(), 1, "tool denial should retry compaction");
+        let (retry_system, retry_messages) = &retries[0];
+        assert_eq!(retry_system, system);
+        assert_eq!(retry_messages.len(), messages.len() + 2);
+        assert_eq!(&retry_messages[..messages.len()], messages);
+        assert_eq!(retry_messages[messages.len()], response);
+        let denial = retry_messages.last().unwrap();
+        assert_eq!(denial.tool_call_id.as_deref(), Some("call_denied"));
+        assert!(denial.is_error);
+    }
+}
+
 async fn read_json_request(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
     use tokio::io::AsyncReadExt;
 
@@ -680,7 +832,7 @@ async fn real_engine_responses_compaction_streams_preview_before_response() {
             .await
             .expect("write first stream chunk");
         stream.flush().await.expect("flush first stream chunk");
-        let _ = first_chunk_tx.send(());
+        let _ = first_chunk_tx.send(request);
         let _ = release_rx.await;
         stream
             .write_all(remaining_events.as_bytes())
@@ -711,10 +863,19 @@ async fn real_engine_responses_compaction_streams_preview_before_response() {
         api_key_env: String::new(),
         provider_type: "openai".into(),
         config: protocol::ModelConfig::default(),
-        catalog: protocol::ModelCatalogMetadata::default(),
+        catalog: protocol::ModelCatalogMetadata {
+            default_reasoning_effort: Some(protocol::ReasoningEffort::Medium),
+            supported_reasoning_efforts: vec![
+                protocol::ReasoningEffort::Medium,
+                protocol::ReasoningEffort::Max,
+            ],
+            ..Default::default()
+        },
     });
-    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
-    app.push_assistant_text("a1");
+    assert!(app.run_lua(r#"smelt.reasoning.set("max")"#));
+    for item in cache_sensitive_history() {
+        app.session_append_history(item);
+    }
     app.set_context_token_baseline_for_harness(Some(500));
     app.follow_transcript_tail();
     app.render_to_frame();
@@ -730,10 +891,22 @@ async fn real_engine_responses_compaction_streams_preview_before_response() {
         "provider delta arrived before the waiting frame: {waiting_frame}"
     );
 
-    tokio::time::timeout(std::time::Duration::from_secs(5), first_chunk_rx)
+    let request = tokio::time::timeout(std::time::Duration::from_secs(5), first_chunk_rx)
         .await
         .expect("provider did not receive compaction request")
         .expect("mock provider stopped before first chunk");
+    assert_eq!(request["reasoning"]["effort"], "max");
+    assert_eq!(
+        request["input"][1],
+        serde_json::json!({
+            "type": "reasoning",
+            "encrypted_content": "synthetic-encrypted-reasoning",
+            "content": null,
+            "summary": [],
+        })
+    );
+    assert_eq!(request["input"][2]["type"], "function_call");
+    assert_eq!(request["input"][3]["type"], "function_call_output");
 
     let mut terminal_output = Vec::new();
     let mut streamed_frame = None;

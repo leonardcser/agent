@@ -200,7 +200,7 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.AskSpec
 ---@field system string System prompt sent before the conversation.
----@field messages? table Prior turns. When present, this must be a sequence of full `protocol::Message`-shaped rows such as `{ role, content?, reasoning_content?, tool_calls?, tool_call_id?, is_error? }`.
+---@field messages? table Prior turns. When present, this must be a sequence of full `protocol::Message`-shaped rows such as `{ role, content?, reasoning_content?, reasoning_details?, tool_calls?, tool_call_id?, is_error?, tool_metadata? }`. Content may be text or multipart content.
 ---@field question? string Single-shot question appended as a final user message after `messages`.
 ---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
@@ -236,11 +236,11 @@
 --- Spec for `smelt.engine.ask_inherited`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.InheritedAskSpec
----@field messages? table Prior turns. When present, this must be a sequence of full `protocol::Message`-shaped rows such as `{ role, content?, reasoning_content?, tool_calls?, tool_call_id?, is_error? }`. When omitted or empty, the live model-visible history is inherited.
+---@field messages? table Prior turns. When present, this must be a sequence of full `protocol::Message`-shaped rows such as `{ role, content?, reasoning_content?, reasoning_details?, tool_calls?, tool_call_id?, is_error?, tool_metadata? }`. Content may be text or multipart content. When omitted or empty, the live model-visible history is inherited.
 ---@field question? string Single-shot question appended as a final user message after `messages`.
 ---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
----@field reasoning_effort? string Reasoning effort for the request. Provider-defined labels are accepted. When omitted, starts at `"off"` and reconciles to the selected model's advertised levels.
+---@field reasoning_effort? string Reasoning effort override for the request. Provider-defined labels are accepted. When omitted, inherits the current session's effort and reconciles it to the selected model's advertised levels.
 ---@field guard? table Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires.
 ---@field visible_retries? boolean Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction.
 ---@field on_delta? fun(value: string) Fires for each streamed assistant text delta when provided. The final `on_response` still fires once with the full assistant message.

@@ -178,7 +178,8 @@ fn prepare_request_to_lua(
         lua.create_function(move |lua, (table, key): (mlua::Table, mlua::Value)| {
             if let mlua::Value::String(s) = key {
                 if s.to_str()?.as_ref() == "messages" {
-                    let value = smelt_core::lua::serde_to_lua(lua, &messages.model())?;
+                    let value =
+                        smelt_core::lua::serde_to_lua_preserving_nulls(lua, &messages.model())?;
                     table.raw_set("messages", value.clone())?;
                     return Ok(value);
                 }
@@ -399,7 +400,7 @@ impl TuiApp {
             let _ = reply.send(HostRequestDecision::Continue);
             return;
         };
-        let payload = smelt_core::lua::serde_to_lua(&lua, &messages);
+        let payload = smelt_core::lua::serde_to_lua_preserving_nulls(&lua, &messages);
         self.call_message_reply_hook(turn_id, "on_context_limit", func, payload, reply);
     }
 
@@ -523,7 +524,7 @@ impl TuiApp {
             return None;
         }
         let shared = Arc::clone(self.lua.core_shared());
-        let current = smelt_core::lua::serde_to_lua(&lua, &payload).ok()?;
+        let current = smelt_core::lua::serde_to_lua_preserving_nulls(&lua, &payload).ok()?;
         crate::lua::scope_app(self, move || {
             let mut current = current;
             let mut mutated = false;

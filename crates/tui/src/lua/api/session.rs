@@ -5,8 +5,7 @@ use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
-/// Convert a Lua sequence of `{ role, content?, reasoning_content?, tool_calls?, tool_call_id?, is_error? }`
-/// rows into `Vec<protocol::Message>` via serde. Rows that fail to
+/// Convert full `protocol::Message`-shaped Lua rows via serde. Rows that fail to
 /// deserialize (unknown role, malformed shape) are silently dropped so a
 /// single bad entry doesn't poison the whole replacement list.
 pub(crate) fn lua_messages_to_protocol(lua: &Lua, table: &mlua::Table) -> Vec<protocol::Message> {
@@ -731,12 +730,15 @@ pub(super) fn register(
     )?;
     m.advanced_fn(
         "model_messages",
-        "Return the model-visible message list for the next request. If the session has a context checkpoint, this is the checkpoint summary plus retained live tail; otherwise it is the persisted transcript. Read-only.",
+        "Return the model-visible message list for the next request as full `protocol::Message` rows, preserving multipart content, provider reasoning blocks, and tool metadata. If the session has a context checkpoint, this is the checkpoint summary plus retained live tail; otherwise it is the persisted transcript. Read-only.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let messages = crate::lua::try_with_session_host(|host| host.model_history_messages())
                 .unwrap_or_default();
-            messages_to_lua(lua, &messages)
+            mlua::Table::from_lua(
+                smelt_core::lua::serde_to_lua_preserving_nulls(lua, &messages)?,
+                lua,
+            )
         },
     )?;
     m.fn_(

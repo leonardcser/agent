@@ -249,7 +249,8 @@ pub struct LuaAskSpec {
     pub system: String,
     /// Prior turns. When present, this must be a sequence of full
     /// `protocol::Message`-shaped rows such as `{ role, content?,
-    /// reasoning_content?, tool_calls?, tool_call_id?, is_error? }`.
+    /// reasoning_content?, reasoning_details?, tool_calls?, tool_call_id?,
+    /// is_error?, tool_metadata? }`. Content may be text or multipart content.
     #[lua(default)]
     pub messages: Option<mlua::Table>,
     /// Single-shot question appended as a final user message after `messages`.
@@ -283,7 +284,8 @@ pub struct LuaAskSpec {
 pub struct LuaInheritedAskSpec {
     /// Prior turns. When present, this must be a sequence of full
     /// `protocol::Message`-shaped rows such as `{ role, content?,
-    /// reasoning_content?, tool_calls?, tool_call_id?, is_error? }`.
+    /// reasoning_content?, reasoning_details?, tool_calls?, tool_call_id?,
+    /// is_error?, tool_metadata? }`. Content may be text or multipart content.
     /// When omitted or empty, the live model-visible history is inherited.
     #[lua(default)]
     pub messages: Option<mlua::Table>,
@@ -294,7 +296,7 @@ pub struct LuaInheritedAskSpec {
     pub model: Option<String>,
     /// JSON-schema response constraint.
     pub response_format: Option<LuaAskResponseFormat>,
-    /// Reasoning effort for the request. Provider-defined labels are accepted. When omitted, starts at `"off"` and reconciles to the selected model's advertised levels.
+    /// Reasoning effort override for the request. Provider-defined labels are accepted. When omitted, inherits the current session's effort and reconciles it to the selected model's advertised levels.
     pub reasoning_effort: Option<String>,
     /// Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided,
     /// the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires.
@@ -555,7 +557,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.live_only_fn(
             "ask_inherited",
-            "Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. Explicit reasoning effort must be supported by the selected model; omitted effort starts at `\"off\"` and reconciles to advertised levels. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.",
+            "Run an auxiliary LLM request that inherits the current session's assembled system prompt, active tool list, and reasoning effort. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. Explicit reasoning effort must be supported by the selected model; omitted effort inherits the session's effort and reconciles it to the selected model's advertised levels. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.",
             &["spec"],
             move |lua, spec: LuaInheritedAskSpec| -> LuaResult<u64> {
                 let messages: Vec<protocol::Message> = spec

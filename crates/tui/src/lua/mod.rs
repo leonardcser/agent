@@ -1155,9 +1155,8 @@ fn invoke_ask_callback(
         return;
     };
     let response_value = match message {
-        Some(message) => {
-            smelt_core::lua::serde_to_lua(&core.lua, message).unwrap_or(mlua::Value::Nil)
-        }
+        Some(message) => smelt_core::lua::serde_to_lua_preserving_nulls(&core.lua, message)
+            .unwrap_or(mlua::Value::Nil),
         None => mlua::Value::Nil,
     };
     let error_value = match error {
