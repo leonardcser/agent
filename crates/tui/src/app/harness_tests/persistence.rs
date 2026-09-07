@@ -48,6 +48,15 @@ fn save_and_close_record_backed_session(mut app: TestApp) -> String {
             .wait_for_session_catalog(std::time::Duration::from_secs(120)),
         "saved fixture catalog entry was not published"
     );
+    let catalog = smelt_store::CatalogReader::open_existing(
+        app.core_probe().sessions.layout().catalog_path(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        catalog.session(&session_id).unwrap().is_some(),
+        "closed fixture must be catalog-visible before another app can resume it"
+    );
     session_id
 }
 
@@ -1127,12 +1136,21 @@ fn sparse_fork_publishes_a_complete_destination() {
         save_and_close_record_backed_session(app)
     };
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.load_session_by_id(&session_id);
+    assert!(
+        resumed.load_session_by_id(&session_id),
+        "source branch should load: {:?}",
+        resumed.overlays_probe().notification()
+    );
 
     resumed.fork_session();
 
     let fork_id = resumed.session_snapshot().id.clone();
-    assert_ne!(fork_id, session_id);
+    assert_ne!(
+        fork_id,
+        session_id,
+        "fork should become active: {:?}",
+        resumed.overlays_probe().notification()
+    );
     let reader = lineage_reader(&fork_id);
     let stored = reader.snapshot().unwrap();
     assert_eq!(stored.identity.id, fork_id);
@@ -1152,9 +1170,19 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
         save_and_close_record_backed_session(app)
     };
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.load_session_by_id(&source_id);
+    assert!(
+        resumed.load_session_by_id(&source_id),
+        "source branch should load: {:?}",
+        resumed.overlays_probe().notification()
+    );
     resumed.fork_session();
     let fork_id = resumed.session_snapshot().id.clone();
+    assert_ne!(
+        fork_id,
+        source_id,
+        "fork should become active: {:?}",
+        resumed.overlays_probe().notification()
+    );
     let source_revision = lineage_reader(&source_id).snapshot().unwrap().revision_id;
     resumed.session_append_history(HistoryItem::user(Content::text("fork only")));
     resumed.save_session_and_flush();
@@ -1173,7 +1201,8 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
 
     assert!(
         resumed.load_session_by_id(&fork_id),
-        "fork branch should load"
+        "fork branch should load: {:?}",
+        resumed.overlays_probe().notification()
     );
     assert_eq!(resumed.session_snapshot().id, fork_id);
     assert_eq!(resumed.app.session_history_len(), 2);
@@ -1192,9 +1221,19 @@ fn deleting_source_branch_leaves_active_fork_intact() {
         save_and_close_record_backed_session(app)
     };
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.load_session_by_id(&source_id);
+    assert!(
+        resumed.load_session_by_id(&source_id),
+        "source branch should load: {:?}",
+        resumed.overlays_probe().notification()
+    );
     resumed.fork_session();
     let fork_id = resumed.session_snapshot().id.clone();
+    assert_ne!(
+        fork_id,
+        source_id,
+        "fork should become active: {:?}",
+        resumed.overlays_probe().notification()
+    );
     resumed
         .set_lua_string_global("SOURCE_SESSION_ID", source_id.clone())
         .unwrap();
