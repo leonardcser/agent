@@ -2,7 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
-                                  14:37:03
+                                   14:37:03
  Preserve wrapping for Unicode 語 界  and a
  long user message.
  Keep this second line intact.

@@ -221,7 +221,11 @@ app_story!(user_message_timestamp_submission, |ctx| {
 
     let visible = ctx.frame_text();
     assert!(visible.contains("Keep the parser API stable."), "{visible}");
-    assert!(visible.contains("14:37:03"), "{visible}");
+    assert_eq!(
+        visible.lines().next().unwrap(),
+        format!("{:>59}", "14:37:03"),
+        "timestamp should reach the panel's right edge"
+    );
     ctx.assert_snapshot_named("visible");
 
     ctx.run_lua("smelt.settings.transcript.show_timestamps = false");
@@ -232,13 +236,25 @@ app_story!(user_message_timestamp_submission, |ctx| {
 
     ctx.run_lua("smelt.settings.transcript.show_timestamps = true");
     assert_eq!(ctx.frame_text(), visible);
+
+    for width in [9, 10, 18, 44, 60, 100] {
+        ctx.set_viewport(width, 20);
+        assert_eq!(
+            ctx.frame_text().lines().next().unwrap(),
+            format!("{:>width$}", "14:37:03", width = usize::from(width - 1)),
+            "timestamp should reach the panel's right edge at terminal width {width}"
+        );
+    }
 });
 
 app_story!(user_message_timestamp_wrapping_and_themes, |ctx| {
     ctx.set_viewport(44, 16);
     ctx.push_user_turn("Preserve wrapping for Unicode 語界 and a long user message.\nKeep this second line intact.");
     let visible = ctx.frame_text();
-    assert!(visible.lines().next().unwrap().ends_with("14:37:03"));
+    assert_eq!(
+        visible.lines().next().unwrap(),
+        format!("{:>43}", "14:37:03")
+    );
     ctx.assert_snapshot_named("dark");
 
     ctx.run_lua("smelt.settings.transcript.show_timestamps = false");

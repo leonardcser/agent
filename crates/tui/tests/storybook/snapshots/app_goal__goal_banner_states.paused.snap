@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
  PAUSED Parser migration · Step 2/5, wiring parser state
-                                                      14:37:03
+                                                       14:37:03
  Please keep working toward the parser migration.
 
 

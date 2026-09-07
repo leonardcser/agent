@@ -565,11 +565,12 @@ function M.render_user(block, ctx)
       copy_owner = true,
     },
   })
-  local panel = layout.panel(layout.hbox({
+  local body = layout.hbox({
     { empty, cols = 1 },
-    { layout.vbox({ header, text, empty }), weight = 1, copy_owner = true },
+    { text, weight = 1, copy_owner = true },
     { empty, cols = 1 },
-  }), { hl = "SmeltUserBg", padding = 0 })
+  })
+  local panel = layout.panel(layout.vbox({ header, body, empty }), { hl = "SmeltUserBg", padding = 0 })
   if refresh_after then panel = layout.refresh(panel, { after_ms = refresh_after }) end
   return panel
 end

@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
  GOAL Step 123/456, valid… auto
-                      14:37:03
+                       14:37:03
  Please keep working toward
  the parser migration.
 
