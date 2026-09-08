@@ -186,7 +186,7 @@ Options accepted by `smelt.dialog.menu`.
 | `shortcuts` | `"submit"\|"select"\|false` |  | Digit-key behavior. Default `"submit"`. |
 | `numbered` | `boolean` |  | Show the dim ` N. ` prefix (default true). |
 | `wrap` | `boolean` |  | Hard-wrap long labels/descriptions to the menu width so fit-height dialogs grow vertically instead of clipping or panning. |
-| `wrap_width` | `integer` |  | Initial wrap width used before the first resize event. |
+| `wrap_width` | `integer` |  | Optional pre-layout width hint. Mounted menus use their resolved content width. |
 | `on_submit` | `fun(ctx: any): any` |  | Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`. |
 
 ### `smelt.dialog.Opts`

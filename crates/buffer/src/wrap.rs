@@ -1,3 +1,58 @@
+/// Wrap text with a first-row prefix and a continuation prefix.
+/// Prefer spaces as break points, omitting the separating space at a wrap.
+/// Oversized words break at grapheme boundaries; a prefix and its first text
+/// grapheme stay together even when they exceed the available width.
+/// A zero width disables wrapping.
+pub fn wrap_prefixed(prefix: &str, text: &str, cont_prefix: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![format!("{prefix}{text}")];
+    }
+    let mut rows = Vec::new();
+    let mut current_prefix = prefix;
+    for line in text.split('\n') {
+        let mut remaining = line;
+        loop {
+            let (row, consumed) = prefixed_row(current_prefix, remaining, width);
+            rows.push(row);
+            current_prefix = cont_prefix;
+            if consumed >= remaining.len() {
+                break;
+            }
+            debug_assert!(consumed > 0, "a wrapped row must consume text");
+            remaining = crate::text::slice(remaining, consumed..remaining.len());
+        }
+    }
+    rows
+}
+
+fn prefixed_row(prefix: &str, text: &str, width: usize) -> (String, usize) {
+    let joined = format!("{prefix}{text}");
+    let mut row = prefix.to_string();
+    let mut consumed = 0;
+    let mut word_break = None;
+    for (start, grapheme) in crate::cell_width::grapheme_indices(&joined) {
+        let end = start + grapheme.len();
+        if end <= prefix.len() {
+            continue;
+        }
+        let consumed_end = end - prefix.len();
+        if grapheme == " " && consumed > 0 {
+            word_break = Some((row.len(), consumed_end));
+        }
+        let piece = crate::text::slice(text, consumed..consumed_end);
+        if consumed > 0 && crate::cell_width::joined_text_width([row.as_str(), piece]) > width {
+            if let Some((row_end, next)) = word_break {
+                row.truncate(row_end);
+                return (row, next);
+            }
+            break;
+        }
+        row.push_str(piece);
+        consumed = consumed_end;
+    }
+    (row, consumed)
+}
+
 /// Wrap `line` to `width` display columns, breaking at word boundaries.
 /// Words wider than `width` are broken grapheme-by-grapheme.
 ///
@@ -151,6 +206,57 @@ pub fn wrap_line_borrowed(line: &str, width: usize) -> Vec<&str> {
 #[cfg(test)]
 mod wrap_tests {
     use super::*;
+
+    #[test]
+    fn prefixed_wrap_prefers_words_and_omits_break_spaces() {
+        assert_eq!(
+            wrap_prefixed(" 1. ", "hello world", "    ", 12),
+            [" 1. hello", "    world"]
+        );
+        assert_eq!(
+            wrap_prefixed(" 1. ", "hello world", "    ", 9),
+            [" 1. hello", "    world"]
+        );
+        assert_eq!(
+            wrap_prefixed("=> ", "one two three", "> ", 8),
+            ["=> one", "> two", "> three"]
+        );
+    }
+
+    #[test]
+    fn prefixed_wrap_preserves_explicit_and_empty_lines() {
+        assert_eq!(wrap_prefixed(" 1. ", "", "    ", 10), [" 1. "]);
+        assert_eq!(
+            wrap_prefixed(" 1. ", "first\n\nlast\n", "    ", 10),
+            [" 1. first", "    ", "    last", "    "]
+        );
+        assert_eq!(
+            wrap_prefixed(" 1. ", "hello\nworld", "    ", 0),
+            [" 1. hello\nworld"]
+        );
+    }
+
+    #[test]
+    fn prefixed_wrap_keeps_graphemes_atomic_even_in_narrow_rows() {
+        let text = "e\u{301}界👩\u{200d}💻";
+        assert_eq!(
+            wrap_prefixed(" 1. ", text, "    ", 6),
+            [" 1. e\u{301}", "    界", "    👩\u{200d}💻"]
+        );
+        assert_eq!(
+            wrap_prefixed(" 1. ", "界界", "    ", 1),
+            [" 1. 界", "    界"]
+        );
+        assert_eq!(
+            wrap_prefixed("", "ab\u{fe0f}x", "9", 2),
+            ["ab\u{fe0f}", "9x"]
+        );
+        assert_eq!(
+            wrap_prefixed("", "ab\n\u{fe0f}x", "9", 2),
+            ["ab", "9\u{fe0f}", "9x"]
+        );
+        assert_eq!(wrap_prefixed("", "\u{600} x", "", 1), ["\u{600} ", "x"]);
+    }
 
     #[test]
     fn empty_line_returns_single_empty_chunk() {

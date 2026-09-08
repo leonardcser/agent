@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * bash cat /var/log/smelt/projects/alpha/beta/gamma/delta/e  14:37:03
        psilon/very-long-permission-target.log
@@ -14,13 +14,13 @@ expression: text
        ng-permission-target.log
 
  Allow?
-  4. allow cat /var/log/smelt/projects/alpha/beta/gamma/delta/eps
-     ilon/very-long-permission-target.log, /var/log/smelt/project
-     s/alpha/beta/gamma/delta/epsilon in workspace ~/cwd
-
-
+  4. allow cat
+     /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon/very-long
+     -permission-target.log,
+     /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon in
+     workspace ~/cwd
 
 
 
   press tab to add a reason…
- ○ normal                                                      6:1 71%
+ ○ normal                                                     4:1 100%

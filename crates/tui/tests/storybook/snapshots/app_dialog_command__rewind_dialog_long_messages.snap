@@ -1,0 +1,24 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+ write the parser and handle invalid input with helpful e…
+
+                                                   14:37:03
+ add the renderer and keep every wrapped continuation
+ aligned with its message
+
+
+                                                   14:37:03
+ wire up the CLI flag and document the expected behavior
+ for new users
+
+─ rewind ───────────────────────────────────────────────────
+  1. write the parser and handle invalid input with helpful
+     error messages
+  2. add the renderer and keep every wrapped continuation
+     aligned with its message
+  3. wire up the CLI flag and document the expected
+     behavior for new users
+  4. (current)
+ ○ normal                                           7:1 100%

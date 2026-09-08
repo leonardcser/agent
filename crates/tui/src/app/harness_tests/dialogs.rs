@@ -29,6 +29,131 @@ fn assert_safe_dialog_fallback(app: &TestApp) {
 }
 
 #[test]
+fn wrapped_menu_uses_its_layout_width_before_first_paint() {
+    for overlay in [false, true] {
+        let mut app = TestApp::builder().build();
+        app.set_terminal_size(100, 24);
+        app.run_lua_result(&format!("use_overlay = {overlay}"))
+            .unwrap();
+        app.run_lua_result(
+            r#"
+            local layout = smelt.ui.layout
+            menu, menu_ctrl = smelt.dialog.menu({
+                "write the parser and handle invalid input with helpful error messages",
+                "(current)",
+            }, { wrap = true, selected = 2 })
+            if use_overlay then
+                smelt.overlay.new({layout = layout.leaf(menu), width = "50%", height = 12})
+                menu:focus()
+            else
+                local side = smelt.win.new(smelt.buf.new())
+                smelt.dialog.new({title = "menu", panels = {{leaf = menu}}})
+                smelt.ui.layout.set(function(state)
+                    return layout.hsplit(layout.leaf(side), state.dialog,
+                        {size = "50%", min_first = 0, min_second = 0})
+                end)
+            end
+        "#,
+        )
+        .unwrap();
+
+        for width in [100, 60, 120] {
+            app.set_terminal_size(width, 24);
+            let frame = app.render_to_frame().text();
+            let win = app.ui_probe().win(app.ui_probe().focus().unwrap()).unwrap();
+            let buf = app.ui_probe().buf(win.buf).unwrap();
+            let content_width = usize::from(win.viewport.unwrap().content_width);
+            assert!(content_width < usize::from(width) / 2);
+            assert!(buf.line_count() > 2, "{frame}");
+            for row in 0..buf.line_count() {
+                assert!(
+                    smelt_buffer::cell_width::text_width(buf.get_line(row).unwrap())
+                        <= content_width,
+                    "{frame}"
+                );
+            }
+            assert_eq!(
+                buf.get_line(win.cursor_row() as usize),
+                Some(" 2. (current)")
+            );
+            assert!(frame.contains("2. (current)"), "{frame}");
+        }
+    }
+}
+
+#[test]
+fn rewind_wrapped_messages_keep_selection_visible_across_navigation_and_resize() {
+    fn assert_selection(app: &mut TestApp, index: usize) {
+        for _ in 0..3 {
+            app.render_silent();
+            app.dispatch_ui_window_events(false);
+        }
+        let frame = app.render_to_frame().text();
+        let dialog = frame.split("─ rewind ").nth(1).expect("rewind dialog");
+        let win = app.ui_probe().win(app.ui_probe().focus().unwrap()).unwrap();
+        let buf = app.ui_probe().buf(win.buf).unwrap();
+        let prefix = format!(" {index}. ");
+        assert!(buf
+            .get_line(win.cursor_row() as usize)
+            .unwrap()
+            .starts_with(&prefix));
+        assert!(dialog.contains(&prefix), "{frame}");
+        let width = usize::from(win.viewport.unwrap().content_width);
+        for row in 0..buf.line_count() {
+            let line = buf.get_line(row).unwrap();
+            assert!(
+                smelt_buffer::cell_width::text_width(line) <= width,
+                "{line:?}"
+            );
+        }
+    }
+
+    for vim in [false, true] {
+        let mut app = TestApp::builder().with_vim(vim).build();
+        app.set_terminal_size(60, 14);
+        let messages: Vec<_> = (1..=12)
+            .map(|index| {
+                format!(
+                    "message {index}: {}end-{index}\nkeep the full original input",
+                    "界 e\u{301} 👩\u{200d}💻 render this message correctly ".repeat(4)
+                )
+            })
+            .collect();
+        for message in &messages {
+            app.push_user_block(message);
+        }
+        app.press(KeyCode::Esc);
+        app.press(KeyCode::Esc);
+        drive_lua_tasks(&mut app);
+        assert_selection(&mut app, 13);
+
+        app.press(KeyCode::Up);
+        assert_selection(&mut app, 12);
+        app.press(KeyCode::Up);
+        assert_selection(&mut app, 11);
+        app.press(KeyCode::Down);
+        assert_selection(&mut app, 12);
+
+        // At the narrowest size a single message is taller than the viewport.
+        for (width, height) in [(24, 8), (96, 24), (40, 12)] {
+            app.set_terminal_size(width, height);
+            assert_selection(&mut app, 12);
+        }
+
+        app.type_char('2');
+        assert_selection(&mut app, 2);
+        assert_eq!(app.session_history().len(), messages.len());
+        app.press(KeyCode::Down);
+        assert_selection(&mut app, 3);
+        app.press(KeyCode::Enter);
+        drive_lua_tasks(&mut app);
+        assert!(app.state().active_modal.is_none());
+        assert_eq!(app.state().prompt_text, messages[2]);
+        assert_eq!(app.session_history().len(), 2);
+    }
+}
+
+#[test]
 fn splash_paint_stays_below_global_overlays() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);

@@ -724,7 +724,7 @@ impl Ui {
 
     pub fn win_content_width(&self, win: WinId) -> Option<u16> {
         let window = self.wins.get(&win)?;
-        if let Some(rect) = self.split_rect(win) {
+        if let Some(rect) = self.paint_rect(PaintId::from(win)) {
             let gutter_width = self
                 .bufs
                 .get(&window.buf)

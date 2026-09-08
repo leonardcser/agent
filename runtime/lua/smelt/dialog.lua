@@ -331,7 +331,7 @@ end
 ---@field shortcuts? "submit"|"select"|false Digit-key behavior. Default `"submit"`.
 ---@field numbered? boolean Show the dim ` N. ` prefix (default true).
 ---@field wrap? boolean Hard-wrap long labels/descriptions to the menu width so fit-height dialogs grow vertically instead of clipping or panning.
----@field wrap_width? integer Initial wrap width used before the first resize event.
+---@field wrap_width? integer Optional pre-layout width hint. Mounted menus use their resolved content width.
 ---@field on_submit? fun(ctx: any): any Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`.
 
 -- Build a selectable menu and return `(leaf, controller)`. The controller uses
@@ -390,8 +390,10 @@ function smelt.dialog.menu(items, opts)
   local selected = selectable_index(tonumber(opts.selected or 1) or 1, 1)
 
   local buf = smelt.buf.new()
+  local rendered_width
   local function render_current(width)
     menu_meta = render_menu(buf, normalized, has_descriptions, numbered, wrap and width or nil)
+    rendered_width = width
   end
   render_current(initial_wrap_width)
 
@@ -439,11 +441,17 @@ function smelt.dialog.menu(items, opts)
   sync_highlight()
 
   if wrap then
-    leaf:on("resized", function(ctx)
-      render_current((ctx and ctx.content_width) or leaf:content_width())
+    local function reflow()
+      local width = leaf:content_width()
+      if width == nil then return end
+      if width ~= rendered_width then
+        render_current(width)
+        sync_highlight()
+      end
       place_cursor(selected)
-      sync_highlight()
-    end)
+    end
+    leaf:set_renderer(reflow)
+    leaf:on("resized", reflow)
   end
 
   local function sync_menu(next_items)

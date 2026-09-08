@@ -220,6 +220,44 @@ app_story!(rewind_dialog, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(rewind_dialog_long_messages, |ctx| {
+    ctx.set_viewport(60, 20);
+    ctx.push_user_turn("write the parser and handle invalid input with helpful error messages");
+    ctx.push_user_turn(
+        "add the renderer and keep every wrapped continuation aligned with its message",
+    );
+    ctx.push_user_turn("wire up the CLI flag and document the expected behavior for new users");
+    ctx.run_command("rewind");
+
+    let frame = ctx.frame_text();
+    let dialog = frame.split("─ rewind ").nth(1).expect("rewind dialog");
+    assert!(dialog.contains("1. write the parser"), "{frame}");
+    assert!(dialog.contains("4. (current)"), "{frame}");
+    assert!(dialog.contains("aligned with its message"), "{frame}");
+    assert!(dialog.contains("behavior for new users"), "{frame}");
+    assert!(
+        dialog
+            .lines()
+            .any(|line| line.starts_with("     ") && line.ends_with("messages")),
+        "{frame}"
+    );
+    ctx.assert_snapshot();
+    ctx.press_key(
+        crossterm::event::KeyCode::Up,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    ctx.assert_snapshot_named("selected");
+});
+
+app_story!(rewind_dialog_unicode_narrow, |ctx| {
+    ctx.set_viewport(32, 12);
+    ctx.push_user_turn("render 界界界 and e\u{301} without splitting characters");
+    ctx.push_user_turn("preserve the full input\nincluding the second line");
+    ctx.run_command("rewind");
+    ctx.press_char('1');
+    ctx.assert_snapshot();
+});
+
 app_story!(btw_dialog_with_answer, |ctx| {
     ctx.set_viewport(70, 16);
     ctx.use_test_model();

@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+ render 界 界 界  and é without …
+                       14:37:03
+ preserve the full input
+ including the second line
+
+─ rewind ───────────────────────
+  1. render 界 界 界  and é
+     without splitting
+     characters
+  2. preserve the full input
+  3. (current)
+ ○ normal                 1:1 0%

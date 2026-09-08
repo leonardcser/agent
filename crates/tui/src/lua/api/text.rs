@@ -113,53 +113,6 @@ fn truncate_bytes(bytes: &[u8], max_bytes: usize, opts: &TruncateOptions) -> Str
     }
 }
 
-fn wrap_prefixed_text(prefix: &str, text: &str, cont_prefix: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![format!("{prefix}{text}")];
-    }
-    if text.is_empty() {
-        return vec![prefix.to_string()];
-    }
-
-    let mut rows = Vec::new();
-    let mut remaining = text;
-    let mut current_prefix = prefix;
-    loop {
-        let (row, consumed) = prefixed_row(current_prefix, remaining, width);
-        rows.push(row);
-        if consumed >= remaining.len() {
-            break;
-        }
-        debug_assert!(consumed > 0, "a wrapped row must consume text");
-        remaining = text::slice(remaining, consumed..remaining.len());
-        current_prefix = cont_prefix;
-    }
-    rows
-}
-
-fn prefixed_row(prefix: &str, text: &str, width: usize) -> (String, usize) {
-    let mut joined = String::with_capacity(prefix.len() + text.len());
-    joined.push_str(prefix);
-    joined.push_str(text);
-
-    let mut row = prefix.to_string();
-    let mut consumed = 0usize;
-    for (start, grapheme) in cell_width::grapheme_indices(&joined) {
-        let end = start + grapheme.len();
-        if end <= prefix.len() {
-            continue;
-        }
-        let consumed_end = end - prefix.len();
-        let piece = text::slice(text, consumed..consumed_end);
-        if consumed > 0 && cell_width::joined_text_width([row.as_str(), piece]) > width {
-            break;
-        }
-        row.push_str(piece);
-        consumed = consumed_end;
-    }
-    (row, consumed)
-}
-
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::advanced(
         lua,
@@ -226,7 +179,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "wrap_prefixed",
-        "Hard-wrap `text` into rows with `opts.prefix` on the first row and `opts.cont_prefix` on continuation rows. Wrapping uses terminal-cell width, preserves every character, and returns an array of strings. `width = 0` disables wrapping.",
+        "Wrap `text` into rows with `opts.prefix` on the first row and `opts.cont_prefix` on continuation rows. Prefer word boundaries, omitting the separating space at a wrap; oversized words split only between graphemes. Explicit newlines start continuation rows. Uses terminal-cell width and returns an array of strings. `width = 0` disables wrapping.",
         &["text", "width", "opts"],
         |_,
          (text, width, opts): (String, usize, Option<mlua::Table>)|
@@ -239,7 +192,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .as_ref()
                 .and_then(|t| t.get::<Option<String>>("cont_prefix").ok().flatten())
                 .unwrap_or_else(|| " ".repeat(cell_width::text_width(&prefix)));
-            Ok(wrap_prefixed_text(&prefix, &text, &cont_prefix, width))
+            Ok(smelt_buffer::wrap::wrap_prefixed(&prefix, &text, &cont_prefix, width))
         },
     )?;
     m.fn_(
@@ -405,7 +358,7 @@ mod tests {
             ("👩", "\u{200d}💻x", 2, "👩\u{200d}💻"),
             ("🇨", "🇦x", 2, "🇨🇦"),
         ] {
-            let rows = wrap_prefixed_text(prefix, text, "", width);
+            let rows = smelt_buffer::wrap::wrap_prefixed(prefix, text, "", width);
             assert_eq!(rows, vec![first, "x"], "{prefix:?} + {text:?}");
             assert!(
                 rows.iter().all(|row| cell_width::text_width(row) <= width),

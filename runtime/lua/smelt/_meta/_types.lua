@@ -123,7 +123,7 @@
 ---@field shortcuts? "submit"|"select"|false Digit-key behavior. Default `"submit"`.
 ---@field numbered? boolean Show the dim ` N. ` prefix (default true).
 ---@field wrap? boolean Hard-wrap long labels/descriptions to the menu width so fit-height dialogs grow vertically instead of clipping or panning.
----@field wrap_width? integer Initial wrap width used before the first resize event.
+---@field wrap_width? integer Optional pre-layout width hint. Mounted menus use their resolved content width.
 ---@field on_submit? fun(ctx: any): any Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`.
 
 --- Options accepted by `smelt.dialog.open` / `smelt.dialog.new`.

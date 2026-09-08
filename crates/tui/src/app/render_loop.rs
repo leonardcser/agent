@@ -1014,8 +1014,9 @@ impl TuiApp {
         self.ui
             .set_cursor_shape(crate::smelt_edit::CursorShape::Hidden);
 
-        // ── Layout ──
-        let (prompt_rect, _viewport_rows) = {
+        // Resolve widths before retained renderers run, then measure their
+        // updated content before preparing the transcript or painting a frame.
+        let (mut prompt_rect, _) = {
             let _p = smelt_perf::perf::begin("compositor:layout");
             self.ensure_main_layout()
         };
@@ -1027,6 +1028,16 @@ impl TuiApp {
         let now = self.core.clock.instant_now();
         self.conversation.sync_active_tool_elapsed(now);
         self.sync_transcript_renderer_generation();
+
+        let dialog_windows = self.active_docked_dialog().and_then(|id| {
+            let modal = self.ui.docked_surface(id)?.modal();
+            self.ui.modal_leaves(modal).map(<[_]>::to_vec)
+        });
+        if let Some(windows) = dialog_windows {
+            let _p = smelt_perf::perf::begin("compositor:lua_renderers");
+            self.dispatch_lua_renderers(Some(&windows));
+            (prompt_rect, _) = self.ensure_main_layout();
+        }
 
         // Commit the retained transcript view before Lua observers run. Stale
         // content or viewport inputs project here; unchanged frames reuse the
@@ -1042,7 +1053,7 @@ impl TuiApp {
 
         {
             let _p = smelt_perf::perf::begin("compositor:lua_renderers");
-            self.dispatch_lua_renderers();
+            self.dispatch_lua_renderers(None);
         }
         // Suppress unused-variable warning when queued is only forwarded into Lua state.
         let _ = queued;
@@ -1348,7 +1359,7 @@ impl TuiApp {
     /// Each callback owns retained backing-buffer content and runs once after
     /// registration or `Win:invalidate_renderer()`. Closed windows stay dirty so
     /// reopening them repaints before their retained content is shown.
-    fn dispatch_lua_renderers(&mut self) {
+    fn dispatch_lua_renderers(&mut self, windows: Option<&[crate::smelt_edit::WinId]>) {
         let lua = self.lua.lua();
         let shared = self.lua.shared();
         // Snapshot dirty callbacks so the registry mutex is not held across Lua
@@ -1364,6 +1375,7 @@ impl TuiApp {
                 .filter_map(|(raw_id, renderer)| {
                     let win_id = crate::smelt_edit::WinId(*raw_id);
                     if !renderer.dirty
+                        || windows.is_some_and(|windows| !windows.contains(&win_id))
                         || self
                             .ui
                             .paint_rect(crate::smelt_edit::PaintId::from(win_id))
