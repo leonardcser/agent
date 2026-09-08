@@ -84,9 +84,8 @@ local function plain_spans(text)
   return { { text = text } }
 end
 
--- Read the leaf's inner-content width in cells (gutter and pad already
--- subtracted). Returns nil before the first paint - the leaf has no
--- viewport until then.
+-- Read the leaf's resolved inner-content width in cells (gutter and pad
+-- already subtracted). Returns nil until the leaf has been laid out.
 local function content_width(self)
   return self.leaf:content_width()
 end
@@ -115,7 +114,6 @@ local function render_visible(self)
     self.buf:lines(lines)
     self.buf:mark(NS, pad + 1, 0, { end_col = #self.empty_text, dim = true })
     self.row_offset = pad
-    self.last_rendered_width = width
     return
   end
   local pad = top_padding(self, #visible)
@@ -160,7 +158,6 @@ local function render_visible(self)
     end
   end
   self.row_offset = pad
-  self.last_rendered_width = width
 end
 
 local function rederive_visible(self)
@@ -328,17 +325,15 @@ function smelt.list.new(opts)
     empty_text    = opts.empty_text or "  (no items)",
     anchor        = opts.anchor or "top",
     row_offset    = 0,
-    last_rendered_width = nil,
   }, List)
   self:refresh()
-  -- Re-render when the leaf's content width changes. `content_width()` is
-  -- nil at construction (no viewport until first paint), so the first
-  -- `resized` event fires the real-width render and any later terminal
-  -- resize re-triggers it.
-  self.resize_reg = self.leaf:on("resized", function()
+  -- Fit rows at the resolved width before painting, preserving the selected
+  -- item across width changes and bottom-anchor padding changes.
+  local function reflow()
     local idx = self:selected_index()
     render_visible(self)
     if idx then self:set_cursor(idx) end
-  end)
+  end
+  self.leaf:set_renderer(reflow)
   return self
 end

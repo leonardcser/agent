@@ -1,0 +1,30 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+
+
+
+
+─ Auth method ────────────────────────────────
+ Which authentication method should we use
+ for browser sign-in and automated clients?
+  1. Browser sign-in
+     Redirect to the provider and preserve
+     the original destination when the user
+     returns to the application.
+  2. API key automation fallback
+     Use a token for automated clients and
+     support scripts, including 界  and é in
+     account names.
+  3. Anonymous
+     Skip authentication entirely.
+ press tab to add your own answer…
+ ○ normal                              5:1 44%

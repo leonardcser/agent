@@ -82,6 +82,315 @@ fn wrapped_menu_uses_its_layout_width_before_first_paint() {
 }
 
 #[test]
+fn permissions_wrapped_rules_delete_the_highlighted_item() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(32, 18);
+    app.run_lua_result(
+        r#"
+        smelt.permissions.sync({session = {
+            {tool = "bash", pattern = "cat /very/long/path/to/a/project/configuration/file.json"},
+            {tool = "web_fetch", pattern = "https://example.com/very/long/documentation/path/*"},
+            {tool = "write_file", pattern = "src/**/*.rs"},
+        }})
+        original_rules = smelt.permissions.list().session
+        smelt.cmd.run("permissions")
+    "#,
+    )
+    .unwrap();
+    drive_lua_tasks(&mut app);
+    app.render_silent();
+    app.type_char('2');
+    let frame = app.render_to_frame();
+    let row = frame
+        .rows
+        .iter()
+        .position(|row| row.contains(" 2. "))
+        .unwrap_or_else(|| panic!("{}", frame.text()));
+    assert_eq!(
+        frame.styles[row][0].bg,
+        app.ui_probe().theme().get("CursorLine").bg,
+        "{}",
+        frame.text()
+    );
+    app.press(KeyCode::Backspace);
+    drive_lua_tasks(&mut app);
+    app.run_lua_result(
+        r#"
+        local remaining = smelt.permissions.list().session
+        assert(#remaining == 2)
+        for _, rule in ipairs(remaining) do
+            assert(rule.tool ~= original_rules[2].tool or rule.pattern ~= original_rules[2].pattern)
+        end
+    "#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn menu_row_mapping_handles_newlines_clipping_and_narrow_widths() {
+    for wrap in ["nil", "true", "false"] {
+        let mut app = TestApp::builder().build();
+        app.set_terminal_size(40, 20);
+        app.run_lua_result(&format!(r#"
+            menu, ctrl = smelt.dialog.menu({{
+                {{label = "First long label that wraps\n\nLast line", description = "First description\n\nLast description line"}},
+                {{label = "Second 界 é 👩‍💻", description = "A long description that needs continuation rows"}},
+                {{label = "Disabled", disabled = true}},
+                {{label = "Fourth"}},
+            }}, {{wrap = {wrap}, selected = 2, shortcuts = "select"}})
+            smelt.dialog.new({{panels = {{{{leaf = menu}}}}}})
+        "#)).unwrap();
+        for width in [40, 6, 52] {
+            app.set_terminal_size(width, 20);
+            let frame = app.render_to_frame();
+            let row = frame
+                .rows
+                .iter()
+                .position(|row| row.contains("2."))
+                .unwrap_or_else(|| panic!("{}", frame.text()));
+            assert_eq!(
+                frame.styles[row][0].bg,
+                app.ui_probe().theme().get("CursorLine").bg,
+                "wrap={wrap}: {}",
+                frame.text()
+            );
+            app.run_lua_result("assert(ctrl:cursor() == 2)").unwrap();
+        }
+        app.press(KeyCode::Down);
+        app.run_lua_result("assert(ctrl:cursor() == 4)").unwrap();
+        app.press(KeyCode::Up);
+        app.run_lua_result("assert(ctrl:cursor() == 2)").unwrap();
+        for (key, index) in [(KeyCode::End, 4), (KeyCode::Home, 1)] {
+            app.press(key);
+            let frame = app.render_to_frame();
+            let prefix = format!(" {index}. ");
+            let row = frame
+                .rows
+                .iter()
+                .position(|row| row.contains(&prefix))
+                .unwrap();
+            assert_eq!(
+                frame.styles[row][0].bg,
+                app.ui_probe().theme().get("CursorLine").bg,
+                "{}",
+                frame.text()
+            );
+        }
+    }
+}
+
+#[test]
+fn menu_external_cursor_changes_keep_highlight_and_submission_in_sync() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 20);
+    app.run_lua_result(r#"
+        menu, ctrl = smelt.dialog.menu({
+            {label = "First", description = "A description long enough to wrap across several rows"},
+            {label = "Second", description = "Select this item from its description row"},
+            {label = "Third"},
+        }, {on_submit = function(ctx) picked = ctx.index end})
+        menu:key("x", function()
+            ctrl:cursor(3)
+            ctrl:cursor(1)
+            for row, line in ipairs(menu:buf():lines()) do
+                if line:match("^ 2%. ") then menu:cursor(row); break end
+            end
+        end)
+        smelt.dialog.new({panels = {{leaf = menu}}})
+    "#).unwrap();
+    app.render_silent();
+    app.press(KeyCode::Char('x'));
+    for width in [40, 24, 60] {
+        app.set_terminal_size(width, 20);
+        let frame = app.render_to_frame();
+        let row = frame
+            .rows
+            .iter()
+            .position(|row| row.contains(" 2. "))
+            .unwrap();
+        assert_eq!(
+            frame.styles[row][0].bg,
+            app.ui_probe().theme().get("CursorLine").bg,
+            "{}",
+            frame.text()
+        );
+        app.run_lua_result("assert(ctrl:cursor() == 2)").unwrap();
+    }
+    app.press(KeyCode::Enter);
+    app.run_lua_result("assert(picked == 2)").unwrap();
+}
+
+#[test]
+fn retained_renderer_tracks_layout_size_without_resize_callbacks() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(50, 24);
+    app.run_lua_result(
+        r#"
+        local header, header_buf = smelt.dialog.content({text = "Header"})
+        local buf = smelt.buf.new()
+        local leaf = smelt.dialog.list(buf)
+        render_calls = 0
+        leaf:set_renderer(function()
+            render_calls = render_calls + 1
+            buf:lines({"available " .. leaf:rect().height .. " rows"})
+        end)
+        leaf:key("x", function() header_buf:lines({"Header", "More", "Context", "Here"}) end)
+        smelt.dialog.new({height = 12, panels = {
+            {leaf = header, height = "fit"}, {leaf = leaf, height = "fill"},
+        }})
+    "#,
+    )
+    .unwrap();
+    for resized in [false, true] {
+        if resized {
+            app.press(KeyCode::Char('x'));
+        }
+        let frame = app.render_to_frame();
+        let win = app.ui_probe().win(app.ui_probe().focus().unwrap()).unwrap();
+        let expected = format!("available {} rows", win.viewport.unwrap().rect.height);
+        assert!(frame.text().contains(&expected), "{}", frame.text());
+        let calls = app.lua_int_global("render_calls").unwrap();
+        assert_eq!(calls, if resized { 2 } else { 1 });
+        app.dispatch_ui_window_events(false);
+        app.render_silent();
+        assert_eq!(app.lua_int_global("render_calls"), Some(calls));
+    }
+}
+
+#[test]
+fn retained_overlay_renderer_sees_resolved_size_before_paint() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 24);
+    app.run_lua_result(
+        r#"
+        local buf = smelt.buf.new()
+        local leaf = smelt.dialog.list(buf)
+        render_calls = 0
+        leaf:set_renderer(function()
+            render_calls = render_calls + 1
+            local rect = leaf:rect()
+            buf:lines({rect.width .. " x " .. rect.height .. " : " .. leaf:content_width()})
+        end)
+        smelt.overlay.new({layout = smelt.ui.layout.leaf(leaf), width = "50%", height = "50%"})
+        leaf:focus()
+    "#,
+    )
+    .unwrap();
+    for (step, (width, height)) in [(100, 24), (80, 20), (60, 28)].into_iter().enumerate() {
+        app.set_terminal_size(width, height);
+        let frame = app.render_to_frame();
+        let win = app.ui_probe().win(app.ui_probe().focus().unwrap()).unwrap();
+        let viewport = win.viewport.unwrap();
+        let expected = format!(
+            "{} x {} : {}",
+            viewport.rect.width, viewport.rect.height, viewport.content_width
+        );
+        assert!(frame.text().contains(&expected), "{}", frame.text());
+        assert_eq!(app.lua_int_global("render_calls"), Some(step as i64 + 1));
+        app.dispatch_ui_window_events(false);
+        app.render_silent();
+        assert_eq!(app.lua_int_global("render_calls"), Some(step as i64 + 1));
+    }
+}
+
+#[test]
+fn structured_list_does_not_rebuild_after_painting_a_resize() {
+    let mut app = TestApp::builder().build();
+    app.run_lua_result(
+        r#"
+        local buf = smelt.buf.new()
+        local leaf = smelt.dialog.list(buf)
+        render_calls = 0
+        smelt.list.new({leaf = leaf, buf = buf, items = {"One", "Two"},
+            render = function(item)
+                render_calls = render_calls + 1
+                return {text = item}
+            end,
+        })
+        smelt.dialog.new({height = 10, panels = {{leaf = leaf}}})
+    "#,
+    )
+    .unwrap();
+    for width in [40, 24, 60] {
+        app.set_terminal_size(width, 20);
+        app.render_silent();
+        let calls = app.lua_int_global("render_calls").unwrap();
+        app.dispatch_ui_window_events(false);
+        app.render_silent();
+        assert_eq!(app.lua_int_global("render_calls"), Some(calls));
+    }
+}
+
+#[test]
+fn wrapped_menu_preserves_item_index_when_replacing_rows() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 20);
+    app.run_lua_result(
+        r#"
+        menu, ctrl = smelt.dialog.menu({"First", "Second", "Third"}, {
+            wrap = true, selected = 2, shortcuts = "select",
+        })
+        smelt.dialog.new({panels = {{leaf = menu}}})
+    "#,
+    )
+    .unwrap();
+    app.render_silent();
+    app.run_lua_result(r#"
+        ctrl:set_items({
+            {label = "First label with enough text to wrap across several rows", description = "Description"},
+            {label = "Second", description = "Still selected"},
+            {label = "Third", description = "Not selected"},
+        })
+        assert(ctrl:cursor() == 2, "replacing rows must preserve the selected item")
+    "#).unwrap();
+}
+
+#[test]
+fn structured_list_fits_rows_before_first_paint_and_resize() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 20);
+    app.run_lua_result(r#"
+        local buf = smelt.buf.new()
+        local leaf = smelt.dialog.list(buf)
+        local list = smelt.list.new({
+            leaf = leaf, buf = buf,
+            items = {"A long item that must fit without wrapping onto the next option", "Selected item", "Last item"},
+            render = function(item) return {text = item} end,
+        })
+        list:set_cursor(1)
+        smelt.dialog.new({panels = {{leaf = leaf}}})
+    "#).unwrap();
+    for width in [40, 24, 60] {
+        app.set_terminal_size(width, 20);
+        let frame = app.render_to_frame();
+        let row = frame
+            .rows
+            .iter()
+            .position(|row| row.contains("Selected item"))
+            .unwrap_or_else(|| panic!("{}", frame.text()));
+        let col = frame.rows[row].find("Selected item").unwrap();
+        assert_eq!(
+            frame.styles[row][col + 3].bg,
+            app.ui_probe().theme().get("CursorLine").bg,
+            "{}",
+            frame.text()
+        );
+        let win = app.ui_probe().win(app.ui_probe().focus().unwrap()).unwrap();
+        assert_eq!(win.cursor_row(), 1);
+        assert_eq!(
+            win.cursor_col(),
+            0,
+            "refitting must re-anchor the cursor byte position"
+        );
+        let buf = app.ui_probe().buf(win.buf).unwrap();
+        let width = usize::from(win.viewport.unwrap().content_width);
+        for row in 0..buf.line_count() {
+            assert!(smelt_buffer::cell_width::text_width(buf.get_line(row).unwrap()) <= width);
+        }
+    }
+}
+
+#[test]
 fn rewind_wrapped_messages_keep_selection_visible_across_navigation_and_resize() {
     fn assert_selection(app: &mut TestApp, index: usize) {
         for _ in 0..3 {
@@ -2993,6 +3302,113 @@ fn public_status_open_question_needs_attention() {
         reason,
         Some(smelt_core::public_status::PublicReason::Question)
     );
+}
+
+#[test]
+fn ask_user_question_wrapped_options_keep_selection_aligned() {
+    fn assert_selection(app: &mut TestApp, index: usize) {
+        let frame = app.render_to_frame();
+        let prefix = format!(" {index}. ");
+        let row = frame
+            .rows
+            .iter()
+            .position(|row| row.contains(&prefix))
+            .unwrap_or_else(|| panic!("selected option must be visible: {}", frame.text()));
+        let col = frame.rows[row].find(&prefix).unwrap() + prefix.len();
+        let theme = app.ui_probe().theme();
+        assert_eq!(
+            frame.styles[row][col].bg,
+            theme.get("CursorLine").bg,
+            "selection must highlight the option, not a wrapped description: {}",
+            frame.text()
+        );
+        assert_eq!(frame.styles[row][col].fg, theme.get("SmeltAccent").fg);
+        let win = app.ui_probe().win(app.ui_probe().focus().unwrap()).unwrap();
+        let buf = app.ui_probe().buf(win.buf).unwrap();
+        assert!(buf
+            .get_line(win.cursor_row() as usize)
+            .unwrap()
+            .starts_with(&prefix));
+        assert!(
+            !win.wrap,
+            "menu rows must not be soft-wrapped a second time"
+        );
+        let next_prefix = format!(" {}. ", index + 1);
+        let end = (win.cursor_row() as usize + 1..buf.line_count())
+            .find(|&row| buf.get_line(row).unwrap().starts_with(&next_prefix))
+            .unwrap_or(buf.line_count());
+        let rect = win.viewport.unwrap().rect;
+        let visible_rows = (end - win.cursor_row() as usize).min(usize::from(rect.height));
+        assert!(
+            row + visible_rows <= usize::from(rect.top + rect.height),
+            "show as much of the selected description as fits: {}",
+            frame.text()
+        );
+    }
+
+    for vim in [false, true] {
+        let mut app = TestApp::builder().with_vim(vim).build();
+        app.set_terminal_size(46, 26);
+        app.start_turn(1);
+        let question =
+            "Which authentication method should we use for browser sign-in and automated clients?";
+        let labels = [
+            "Browser sign-in",
+            "API key automation fallback",
+            "Anonymous",
+        ];
+        let mut args = std::collections::HashMap::new();
+        args.insert(
+            "questions".into(),
+            serde_json::json!([{
+                "header": "Auth method",
+                "question": question,
+                "options": [
+                    { "label": labels[0], "description": "Redirect to the provider and preserve the original destination when the user returns to the application." },
+                    { "label": labels[1], "description": "Use a token for automated clients and support scripts, including 界 and e\u{301} in account names." },
+                    { "label": labels[2], "description": "Skip authentication entirely." }
+                ],
+                "multiSelect": false
+            }]),
+        );
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+            invocation_id: protocol::InvocationId::new(77),
+            request_id: 77,
+            call_id: "aq-wrapped-options".into(),
+            tool_name: "ask_user_question".into(),
+            args,
+        }));
+        assert_selection(&mut app, 1);
+        app.press(KeyCode::Down);
+        assert_selection(&mut app, 2);
+        app.press(KeyCode::Down);
+        assert_selection(&mut app, 3);
+        app.press(KeyCode::Up);
+        assert_selection(&mut app, 2);
+        for (width, height) in [(24, 14), (80, 26), (32, 18)] {
+            app.set_terminal_size(width, height);
+            assert_selection(&mut app, 2);
+            app.dispatch_ui_window_events(false);
+            assert_selection(&mut app, 2);
+        }
+        app.press_mod(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert_selection(&mut app, 2);
+        app.press(KeyCode::Tab);
+        app.press(KeyCode::Esc);
+        assert_selection(&mut app, 2);
+        app.type_char('2');
+        drive_lua_tasks(&mut app);
+        assert!(app.state().active_modal.is_none());
+        let expected = format!("q: {question}\na: {}", labels[1]);
+        assert!(
+            app.actions().iter().any(|action| matches!(action,
+                Action::EngineSend(cmd) if matches!(cmd.as_ref(),
+                    protocol::UiCommand::ToolResult { call_id, content, is_error: false, .. }
+                        if call_id == "aq-wrapped-options" && content == &expected)
+            )),
+            "the submitted answer must match the highlighted option"
+        );
+    }
 }
 
 #[test]

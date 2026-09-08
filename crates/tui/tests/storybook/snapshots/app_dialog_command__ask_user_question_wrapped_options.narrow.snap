@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+─ Auth method ──────────────────
+ Which authentication method
+ should we use for browser
+ sign-in and automated
+ clients?
+  2. API key automation
+     fallback
+     Use a token for automated
+     clients and support
+     scripts, including 界  and
+     é in account names.
+ press tab to add your own answ
+ ○ normal                5:1 44%

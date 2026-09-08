@@ -51,10 +51,16 @@ impl TuiApp {
     ) {
         let Some((buf_id, viewport_rows, viewport_width, is_row_backed)) =
             self.ui.win(leaf).map(|w| {
+                // Retained renderers reveal rows before paint commits the new
+                // viewport, so prefer the geometry already resolved by layout.
+                let rect = self
+                    .ui
+                    .paint_rect(leaf.into())
+                    .or_else(|| w.viewport.map(|v| v.rect));
                 (
                     w.buf,
-                    w.viewport.map(|v| v.rect.height).unwrap_or(1).max(1),
-                    w.viewport.map(|v| v.content_width).unwrap_or(1).max(1),
+                    rect.map(|r| r.height).unwrap_or(1).max(1),
+                    self.ui.win_content_width(leaf).unwrap_or(1).max(1),
                     w.has_materialized_rows(),
                 )
             })

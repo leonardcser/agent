@@ -2,11 +2,9 @@
 /// Prefer spaces as break points, omitting the separating space at a wrap.
 /// Oversized words break at grapheme boundaries; a prefix and its first text
 /// grapheme stay together even when they exceed the available width.
-/// A zero width disables wrapping.
+/// Explicit newlines always start continuation rows. A zero width disables
+/// width-based breaks while preserving explicit and empty lines.
 pub fn wrap_prefixed(prefix: &str, text: &str, cont_prefix: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![format!("{prefix}{text}")];
-    }
     let mut rows = Vec::new();
     let mut current_prefix = prefix;
     for line in text.split('\n') {
@@ -26,6 +24,9 @@ pub fn wrap_prefixed(prefix: &str, text: &str, cont_prefix: &str, width: usize) 
 }
 
 fn prefixed_row(prefix: &str, text: &str, width: usize) -> (String, usize) {
+    if width == 0 {
+        return (format!("{prefix}{text}"), text.len());
+    }
     let joined = format!("{prefix}{text}");
     let mut row = prefix.to_string();
     let mut consumed = 0;
@@ -225,14 +226,16 @@ mod wrap_tests {
 
     #[test]
     fn prefixed_wrap_preserves_explicit_and_empty_lines() {
-        assert_eq!(wrap_prefixed(" 1. ", "", "    ", 10), [" 1. "]);
+        for width in [0, 10] {
+            assert_eq!(wrap_prefixed(" 1. ", "", "    ", width), [" 1. "]);
+            assert_eq!(
+                wrap_prefixed(" 1. ", "first\n\nlast\n", "    ", width),
+                [" 1. first", "    ", "    last", "    "]
+            );
+        }
         assert_eq!(
-            wrap_prefixed(" 1. ", "first\n\nlast\n", "    ", 10),
-            [" 1. first", "    ", "    last", "    "]
-        );
-        assert_eq!(
-            wrap_prefixed(" 1. ", "hello\nworld", "    ", 0),
-            [" 1. hello\nworld"]
+            wrap_prefixed(" 1. ", "hello world\n界 e\u{301}", "    ", 0),
+            [" 1. hello world", "    界 e\u{301}"]
         );
     }
 

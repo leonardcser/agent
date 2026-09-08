@@ -723,22 +723,43 @@ impl Ui {
     }
 
     pub fn win_content_width(&self, win: WinId) -> Option<u16> {
-        let window = self.wins.get(&win)?;
         if let Some(rect) = self.paint_rect(PaintId::from(win)) {
-            let gutter_width = self
-                .bufs
-                .get(&window.buf)
-                .map(|buf| window.gutter_width(buf))
-                .unwrap_or(0)
-                .min(rect.width);
-            return Some(
-                window
-                    .config
-                    .gutters
-                    .content_width_with_gutter(rect.width, gutter_width),
-            );
+            return self.win_content_width_at(win, rect.width);
         }
-        window.viewport.map(|viewport| viewport.content_width)
+        self.wins
+            .get(&win)?
+            .viewport
+            .map(|viewport| viewport.content_width)
+    }
+
+    fn win_content_width_at(&self, win: WinId, width: u16) -> Option<u16> {
+        let window = self.wins.get(&win)?;
+        let gutter_width = self
+            .bufs
+            .get(&window.buf)
+            .map(|buf| window.gutter_width(buf))
+            .unwrap_or(0)
+            .min(width);
+        Some(
+            window
+                .config
+                .gutters
+                .content_width_with_gutter(width, gutter_width),
+        )
+    }
+
+    /// Resolve mounted windows' content widths and heights in one layout pass.
+    /// The snapshot is valid until layout, content measurements, or gutters change.
+    pub fn resolved_win_sizes(&self) -> HashMap<WinId, (u16, u16)> {
+        self.resolve_scene(None)
+            .layouts()
+            .flat_map(|layout| layout.leaves())
+            .filter_map(|(id, rect)| {
+                let win = WinId(id.0);
+                self.win_content_width_at(win, rect.width)
+                    .map(|width| (win, (width, rect.height)))
+            })
+            .collect()
     }
 
     pub fn buf_create(&mut self, opts: BufCreateOpts) -> BufId {
@@ -4790,6 +4811,42 @@ mod tests {
             ui.win(win).and_then(|win| win.viewport).map(|vp| vp.rect),
             Some(expected)
         );
+    }
+
+    #[test]
+    fn resolved_win_sizes_match_painted_content_across_surfaces() {
+        let mut ui = make_ui();
+        let root = WinId(10);
+        let overlay = WinId(99);
+        let decoration = WinId(12);
+        let hidden = WinId(13);
+        make_split(&mut ui, root);
+        for win in [overlay, decoration, hidden] {
+            register_window(&mut ui, win);
+        }
+        ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
+        ui.decoration_open(Decoration::new(root, LayoutTree::leaf(decoration)));
+        for win in [root, overlay, decoration] {
+            let window = ui.win_mut(win).unwrap();
+            window.config.gutters.pad_left = 2;
+            window.config.gutters.pad_right = 1;
+        }
+
+        for (width, height) in [(80, 24), (30, 12), (2, 4)] {
+            ui.set_terminal_size(width, height);
+            let sizes = ui.resolved_win_sizes();
+            assert!(!sizes.contains_key(&hidden));
+            ui.render(&mut std::io::sink()).unwrap();
+            for win in [root, overlay, decoration] {
+                let viewport = ui.win(win).unwrap().viewport.unwrap();
+                assert_eq!(
+                    sizes.get(&win),
+                    Some(&(viewport.content_width, viewport.rect.height)),
+                    "{win:?} at {width}x{height}"
+                );
+                assert_eq!(ui.win_content_width(win), Some(viewport.content_width));
+            }
+        }
     }
 
     #[test]

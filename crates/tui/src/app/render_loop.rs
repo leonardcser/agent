@@ -905,7 +905,6 @@ impl TuiApp {
 
     pub(crate) fn refresh_main_layout(&mut self) -> (layout::Rect, u16) {
         self.lua.shared().request_layout_refresh();
-        self.lua.shared().invalidate_win_renderers();
         self.ensure_main_layout()
     }
 
@@ -1356,9 +1355,9 @@ impl TuiApp {
     }
 
     /// Invoke dirty Lua renderers registered via `Win:set_renderer(fn)`.
-    /// Each callback owns retained backing-buffer content and runs once after
-    /// registration or `Win:invalidate_renderer()`. Closed windows stay dirty so
-    /// reopening them repaints before their retained content is shown.
+    /// Each callback owns retained backing-buffer content and runs after
+    /// registration, invalidation, or a change in resolved content size. Closed
+    /// windows stay dirty so reopening them repaints before content is shown.
     fn dispatch_lua_renderers(&mut self, windows: Option<&[crate::smelt_edit::WinId]>) {
         let lua = self.lua.lua();
         let shared = self.lua.shared();
@@ -1370,20 +1369,27 @@ impl TuiApp {
                 Ok(guard) => guard,
                 Err(_) => return,
             };
+            if guard.is_empty() {
+                return;
+            }
+            let sizes = self.ui.resolved_win_sizes();
             guard
                 .iter_mut()
                 .filter_map(|(raw_id, renderer)| {
                     let win_id = crate::smelt_edit::WinId(*raw_id);
-                    if !renderer.dirty
-                        || windows.is_some_and(|windows| !windows.contains(&win_id))
-                        || self
-                            .ui
-                            .paint_rect(crate::smelt_edit::PaintId::from(win_id))
-                            .is_none()
-                    {
+                    if windows.is_some_and(|windows| !windows.contains(&win_id)) {
+                        return None;
+                    }
+                    let Some(&size) = sizes.get(&win_id) else {
+                        renderer.dirty = true;
+                        renderer.rendered_size = None;
+                        return None;
+                    };
+                    if !renderer.dirty && renderer.rendered_size == Some(size) {
                         return None;
                     }
                     renderer.dirty = false;
+                    renderer.rendered_size = Some(size);
                     lua.registry_value::<mlua::Function>(&renderer.handle.key)
                         .ok()
                         .map(|function| (win_id, function))
@@ -1851,7 +1857,7 @@ mod tests {
     }
 
     #[test]
-    fn lua_window_renderers_run_only_after_invalidation() {
+    fn lua_window_renderers_retain_content_until_invalidated_or_resized() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.run_lua_result(
             r#"
@@ -1903,6 +1909,32 @@ mod tests {
             .expect("invalidate retained window renderer");
         app.render_silent();
         assert_eq!(app.lua_int_global("retained_renderer_calls"), Some(2));
+
+        let (width, height) = app.ui_probe().terminal_size();
+        app.set_terminal_size(width + 10, height);
+        app.render_silent();
+        assert_eq!(app.lua_int_global("retained_renderer_calls"), Some(3));
+        app.run_lua_result("smelt.ui.layout.invalidate()").unwrap();
+        app.render_silent();
+        assert_eq!(
+            app.lua_int_global("retained_renderer_calls"),
+            Some(3),
+            "recomputing an unchanged layout must retain the rendered content"
+        );
+
+        app.run_lua_result("smelt.ui.layout.set(nil)").unwrap();
+        app.render_silent();
+        assert_eq!(app.lua_int_global("retained_renderer_calls"), Some(3));
+        app.run_lua_result(
+            r#"
+            smelt.ui.layout.set(function()
+                return smelt.ui.layout.leaf(retained_renderer_win)
+            end)
+        "#,
+        )
+        .unwrap();
+        app.render_silent();
+        assert_eq!(app.lua_int_global("retained_renderer_calls"), Some(4));
     }
 
     #[test]

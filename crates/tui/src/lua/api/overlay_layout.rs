@@ -232,7 +232,6 @@ fn split_changed(lua: &Lua, changed: bool) -> LuaResult<bool> {
     if changed {
         let shared = super::win::current_shared(lua)?;
         shared.request_layout_refresh();
-        shared.invalidate_win_renderers();
     }
     Ok(changed)
 }

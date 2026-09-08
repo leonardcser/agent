@@ -365,6 +365,7 @@ fn dialog_menu_disabled_items_are_not_selectable_or_submittable() {
                 return self
               end
               function leaf:on() end
+              function leaf:set_renderer(fn) self.renderer = fn end
               function leaf:content_width() return 80 end
               function leaf:row_highlights(specs) self.highlights = specs; return self end
               function leaf:focus() end

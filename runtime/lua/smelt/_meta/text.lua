@@ -50,7 +50,7 @@ text.truncate_cells = nil
 ---@type fun(s: string): integer
 text.width = nil
 
---- Wrap `text` into rows with `opts.prefix` on the first row and `opts.cont_prefix` on continuation rows. Prefer word boundaries, omitting the separating space at a wrap; oversized words split only between graphemes. Explicit newlines start continuation rows. Uses terminal-cell width and returns an array of strings. `width = 0` disables wrapping.
+--- Wrap `text` into rows with `opts.prefix` on the first row and `opts.cont_prefix` on continuation rows. Prefer word boundaries, omitting the separating space at a wrap; oversized words split only between graphemes. Explicit newlines start continuation rows. Uses terminal-cell width and returns an array of strings. `width = 0` disables width-based breaks, but still splits explicit newlines and preserves empty lines.
 ---@type fun(text: string, width: integer, opts: table?): string[]
 text.wrap_prefixed = nil
 

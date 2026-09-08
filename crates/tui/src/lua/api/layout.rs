@@ -109,7 +109,6 @@ until dimensions change or `smelt.ui.layout.invalidate()` is called.",
                     *slot = handle;
                 }
                 s.request_layout_refresh();
-                s.invalidate_win_renderers();
                 Ok(())
             },
         )?;
@@ -123,7 +122,6 @@ until dimensions change or `smelt.ui.layout.invalidate()` is called.",
             &[],
             move |_, ()| -> LuaResult<()> {
                 shared.request_layout_refresh();
-                shared.invalidate_win_renderers();
                 Ok(())
             },
         )?;

@@ -14,13 +14,13 @@ expression: frame.text()
        ng-permission-target.log
 
  Allow?
+     /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon for this
+     session
   4. allow cat
      /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon/very-long
      -permission-target.log,
      /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon in
      workspace ~/cwd
-
-
 
   press tab to add a reason…
  ○ normal                                                     4:1 100%

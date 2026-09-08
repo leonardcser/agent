@@ -186,9 +186,9 @@ end
 -- indices** so callers never have to compute a row stride.
 --
 -- Items may be strings (label-only) or `{ label, description?, key? }`
--- tables. If any item has a non-empty description the menu renders two
--- rows per item and cursor navigation steps by two so the cursor only
--- rests on label rows.
+-- tables. If any item has a non-empty description every item includes
+-- description rows beneath its label. Labels and descriptions wrap to the
+-- menu width; navigation always rests on the first label row.
 --
 -- Shortcuts (`opts.shortcuts`, default `"submit"`):
 --   * `"submit"` - pressing the item's digit moves the cursor to it AND
@@ -226,7 +226,7 @@ local function wrap_prefixed_text(prefix, text, cont_prefix, width)
 end
 
 -- Render `items` into `buf`, applying dim numbering and item metadata for
--- selected-row styling. `has_descriptions` toggles the two-row layout. When
+-- selected-row styling. `has_descriptions` reserves description rows. When
 -- `width` is supplied, label and description rows are hard-wrapped into buffer
 -- lines so fit-height dialogs grow instead of relying on horizontal panning.
 local function render_menu(buf, items, has_descriptions, numbered, width)
@@ -330,7 +330,7 @@ end
 ---@field selected? integer 1-based starting cursor (default 1).
 ---@field shortcuts? "submit"|"select"|false Digit-key behavior. Default `"submit"`.
 ---@field numbered? boolean Show the dim ` N. ` prefix (default true).
----@field wrap? boolean Hard-wrap long labels/descriptions to the menu width so fit-height dialogs grow vertically instead of clipping or panning.
+---@field wrap? boolean Wrap long labels/descriptions to the menu width (default true). Set false to clip long rows.
 ---@field wrap_width? integer Optional pre-layout width hint. Mounted menus use their resolved content width.
 ---@field on_submit? fun(ctx: any): any Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`.
 
@@ -349,7 +349,7 @@ function smelt.dialog.menu(items, opts)
   local shortcuts = opts.shortcuts
   if shortcuts == nil then shortcuts = "submit" end
 
-  local wrap = opts.wrap == true
+  local wrap = opts.wrap ~= false
   local initial_wrap_width = tonumber(opts.wrap_width or 0)
   if not initial_wrap_width or initial_wrap_width <= 0 then initial_wrap_width = nil end
   local menu_meta = {}
@@ -404,6 +404,9 @@ function smelt.dialog.menu(items, opts)
     pad_right      = GUTTER,
     scrollbar      = false,
     kind           = "list",
+    -- Menu metadata already accounts for every rendered row. Soft wrapping
+    -- would introduce visual rows that selection and highlights cannot track.
+    wrap           = false,
     initial_cursor = row_of(selected),
   })
 
@@ -440,40 +443,51 @@ function smelt.dialog.menu(items, opts)
   end
   sync_highlight()
 
-  if wrap then
-    local function reflow()
-      local width = leaf:content_width()
-      if width == nil then return end
-      if width ~= rendered_width then
-        render_current(width)
-        sync_highlight()
-      end
-      place_cursor(selected)
-    end
-    leaf:set_renderer(reflow)
-    leaf:on("resized", reflow)
+  local function select(index, dir)
+    selected = selectable_index(index, dir or 1)
+    place_cursor(selected)
+    sync_highlight()
   end
 
+  -- Window cursor writes can come from plugins as well as menu bindings.
+  -- Read the current row, not the event payload: queued events may precede
+  -- a reflow or a newer selection change.
+  local function sync_selection()
+    local row = leaf:cursor() or 0
+    local index = index_of_row(row)
+    if index ~= selected or row ~= row_of(selected) then select(index) end
+  end
+  leaf:on("selection_changed", sync_selection)
+
+  leaf:set_renderer(function()
+    local width = leaf:content_width()
+    if width == nil then return end
+    sync_selection()
+    if wrap and width ~= rendered_width then
+      render_current(width)
+      sync_highlight()
+    end
+    place_cursor(selected)
+  end)
+
   local function sync_menu(next_items)
+    sync_selection()
     local next_has_descriptions
     normalized, next_has_descriptions = normalize_items(next_items)
     if #normalized == 0 then normalized = { { label = "" } } end
     has_descriptions = next_has_descriptions
     item_count = #normalized
     render_current(wrap and leaf:content_width() or nil)
-    selected = selectable_index(index_of_row(leaf:cursor() or 0), 1)
-    place_cursor(selected)
-    sync_highlight()
+    select(selected)
   end
 
   local ctrl = {}
   function ctrl:cursor(i)
     if i == nil then
-      return selectable_index(index_of_row(leaf:cursor() or 0), 1)
+      sync_selection()
+      return selected
     end
-    selected = selectable_index(i, 1)
-    place_cursor(selected)
-    sync_highlight()
+    select(i)
     return self
   end
   function ctrl:item() return normalized[self:cursor()] end
@@ -495,9 +509,7 @@ function smelt.dialog.menu(items, opts)
   -- `dialog.open`'s `on_submit(ctx)` argument).
   local function submit_at(i)
     if i < 1 or i > item_count or not enabled(i) then return end
-    selected = i
-    place_cursor(i)
-    sync_highlight()
+    select(i)
     local dlg = smelt.dialog.current() or {}
     local ctx = {
       win          = dlg.win,
@@ -513,7 +525,12 @@ function smelt.dialog.menu(items, opts)
     if not ok then report_callback_error("menu submit", err) end
   end
 
-  function ctrl:submit() submit_at(self:cursor()) end
+  function ctrl:submit()
+    -- Reject disabled cursor targets before normalizing an external write.
+    if not enabled(index_of_row(leaf:cursor() or 0)) then return end
+    sync_selection()
+    submit_at(selected)
+  end
 
   local function move(units)
     return function()
@@ -521,9 +538,7 @@ function smelt.dialog.menu(items, opts)
       local target = cur + units
       if target < 1 then target = 1 end
       if target > item_count then target = item_count end
-      selected = selectable_index(target, units < 0 and -1 or 1)
-      place_cursor(selected)
-      sync_highlight()
+      select(target, units < 0 and -1 or 1)
     end
   end
   leaf:key("up",   move(-1))
@@ -538,10 +553,10 @@ function smelt.dialog.menu(items, opts)
   leaf:key("pgdn", move(10))
   leaf:key("c-u",  move(-5))
   leaf:key("c-d",  move(5))
+  leaf:key("home", function() ctrl:cursor(1) end)
+  leaf:key("end",  function() ctrl:cursor(item_count) end)
 
-  -- Enter submits the raw cursor row. If another event path leaves the cursor
-  -- on a disabled row, submit stays inert instead of redirecting to a neighbor.
-  leaf:key("enter", function() submit_at(index_of_row(leaf:cursor() or 0)) end)
+  leaf:key("enter", function() ctrl:submit() end)
 
   -- Digit shortcuts. `key = "X"` on an item overrides its digit binding;
   -- without an override items 1..9 use their 1-based index. Bindings live
@@ -571,7 +586,8 @@ end
 -- Wrap an existing `buf` as a selectable list leaf. Use when the buffer
 -- contents need to be mutated live (vs. the snapshot supplied to
 -- `smelt.dialog.menu`). `opts.surface` defaults to `"list"`; `opts.selected`
--- (0-based) sets the initial cursor row.
+-- (0-based) sets the initial cursor row. Long lines clip instead of wrapping
+-- so each buffer line remains one selectable row.
 ---@type fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win
 function smelt.dialog.list(buf, opts)
   opts = opts or {}
@@ -579,7 +595,7 @@ function smelt.dialog.list(buf, opts)
   local leaf = smelt.win.new(buf, {
     region = REGION, surface = surface,
     pad_left = GUTTER, pad_right = GUTTER, scrollbar = false,
-    kind = "list",
+    kind = "list", wrap = false,
     initial_cursor = opts.selected or 0,
   })
   return leaf

@@ -61,7 +61,8 @@ Types: [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.win.Win`](types.md#smelt
 Wrap an existing `buf` as a selectable list leaf. Use when the buffer
 contents need to be mutated live (vs. the snapshot supplied to
 `smelt.dialog.menu`). `opts.surface` defaults to `"list"`; `opts.selected`
-(0-based) sets the initial cursor row.
+(0-based) sets the initial cursor row. Long lines clip instead of wrapping
+so each buffer line remains one selectable row.
 
 ## `smelt.dialog.markdown`
 

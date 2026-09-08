@@ -86,6 +86,8 @@ pub struct RegisteredKeymap {
 pub struct RegisteredWinRenderer {
     pub handle: LuaHandle,
     pub dirty: bool,
+    /// Resolved content width and window height used by the last render.
+    pub rendered_size: Option<(u16, u16)>,
 }
 
 pub struct ToolHandles {
@@ -174,8 +176,8 @@ pub struct LuaShared {
     /// callback signature is `fun(state) -> Layout`.
     pub main_layout_composer: Mutex<Option<LuaHandle>>,
     /// Retained per-window render callbacks keyed by raw `WinId.0`. A callback
-    /// runs after registration and after explicit invalidation, then its backing
-    /// buffer remains authoritative until the next invalidation.
+    /// runs after registration, explicit invalidation, or a resolved size change;
+    /// its backing buffer remains authoritative between runs.
     pub win_renderers: Mutex<HashMap<u64, RegisteredWinRenderer>>,
     pub tools: Mutex<HashMap<String, ToolHandles>>,
     pub transcript_renderer: Mutex<Option<LuaHandle>>,

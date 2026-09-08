@@ -122,7 +122,7 @@
 ---@field selected? integer 1-based starting cursor (default 1).
 ---@field shortcuts? "submit"|"select"|false Digit-key behavior. Default `"submit"`.
 ---@field numbered? boolean Show the dim ` N. ` prefix (default true).
----@field wrap? boolean Hard-wrap long labels/descriptions to the menu width so fit-height dialogs grow vertically instead of clipping or panning.
+---@field wrap? boolean Wrap long labels/descriptions to the menu width (default true). Set false to clip long rows.
 ---@field wrap_width? integer Optional pre-layout width hint. Mounted menus use their resolved content width.
 ---@field on_submit? fun(ctx: any): any Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`.
 
@@ -1128,7 +1128,7 @@
 ---@field row_highlights fun(specs: table?): smelt.win.Win Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text.
 ---@field link_scroll fun(others: smelt.win.Win): smelt.win.Win Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.
 ---@field scroll fun(arg: any): any Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `"tail"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.
----@field set_renderer fun(renderer: fun(value: smelt.win.Win)?): smelt.win.Win Register a retained renderer for this window, or clear it with nil. While the window is mounted, the renderer runs once after registration and again only after `invalidate_renderer`; its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it.
+---@field set_renderer fun(renderer: fun(value: smelt.win.Win)?): smelt.win.Win Register a retained renderer for this window, or clear it with nil. While mounted, it runs before paint after registration, `invalidate_renderer`, or a change in resolved content width or window height. Its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it.
 ---@field invalidate_renderer fun(): smelt.win.Win Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining.
 
 --- Where a virtual-text chunk is rendered relative to the line.

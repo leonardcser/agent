@@ -643,10 +643,12 @@ fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: RowIndex) {
     let abs = win.cursor_abs_row();
     let scroll_top = scroll_to_show(win.scroll_top(), target, viewport);
     win.pin_scroll(scroll_top);
+    // Re-anchor even on the same row: retained renderers may have replaced
+    // earlier text, making the cursor's byte position stale.
+    win.jump_to_row(buf, target, viewport.unwrap_or(0));
     if abs == target {
         return;
     }
-    win.jump_to_row(buf, target, viewport.unwrap_or(0));
     let lua = &app.lua;
     let mut lua_invoke =
         |handle: crate::smelt_edit::LuaHandle, win: WinId, payload: &crate::smelt_edit::Payload| {

@@ -367,6 +367,34 @@ app_story!(ask_user_question_dialog, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(ask_user_question_wrapped_options, |ctx| {
+    ctx.set_viewport(46, 26);
+    ctx.engine(EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(1),
+        request_id: 1,
+        call_id: "aq-wrapped".into(),
+        tool_name: "ask_user_question".into(),
+        args: args([("questions", json!([{
+            "header": "Auth method",
+            "question": "Which authentication method should we use for browser sign-in and automated clients?",
+            "options": [
+                {"label": "Browser sign-in", "description": "Redirect to the provider and preserve the original destination when the user returns to the application."},
+                {"label": "API key automation fallback", "description": "Use a token for automated clients and support scripts, including 界 and e\u{301} in account names."},
+                {"label": "Anonymous", "description": "Skip authentication entirely."}
+            ],
+            "multiSelect": false
+        }]))]),
+    });
+    ctx.assert_snapshot();
+    ctx.press_key(
+        crossterm::event::KeyCode::Down,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    ctx.assert_snapshot_named("selected");
+    ctx.set_viewport(32, 18);
+    ctx.assert_snapshot_named("narrow");
+});
+
 app_story!(ask_user_question_dialog_expanded_max_height, |ctx| {
     ctx.set_viewport(80, 22);
     open_ask_user_question_dialog(ctx);

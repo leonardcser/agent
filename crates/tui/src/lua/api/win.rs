@@ -242,14 +242,14 @@ impl mlua::UserData for LuaWin {
         );
 
         // ── rect - current layout-resolved bounds ──────────────────
-        // Prefer `split_rect` from the current layout tree so renderers and
+        // Prefer `paint_rect` from the current layout tree so renderers and
         // resize handlers don't observe the previous painted viewport for one
         // frame after a layout change.
         methods.add_method("rect", |lua, this, ()| -> LuaResult<mlua::Value> {
             let rect = crate::lua::try_with_ui_host(|host| {
                 host.with_ui(|ui| {
                     let window = ui.win(this.id)?;
-                    ui.split_rect(this.id)
+                    ui.paint_rect(this.id.into())
                         .or_else(|| window.viewport.map(|viewport| viewport.rect))
                 })
             })
@@ -608,6 +608,7 @@ impl mlua::UserData for LuaWin {
                                 smelt_core::lua::RegisteredWinRenderer {
                                     handle,
                                     dirty: true,
+                                    rendered_size: None,
                                 },
                             );
                         }
@@ -829,7 +830,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "row_highlights" => fn(specs: Option<mlua::Table>) -> LuaWin, "Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
             "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.",
-            "set_renderer" => fn(renderer: Option<LuaCallback<(LuaWin,), ()>>) -> LuaWin, "Register a retained renderer for this window, or clear it with nil. While the window is mounted, the renderer runs once after registration and again only after `invalidate_renderer`; its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it.",
+            "set_renderer" => fn(renderer: Option<LuaCallback<(LuaWin,), ()>>) -> LuaWin, "Register a retained renderer for this window, or clear it with nil. While mounted, it runs before paint after registration, `invalidate_renderer`, or a change in resolved content width or window height. Its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it.",
             "invalidate_renderer" => fn() -> LuaWin, "Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining.",
         },
     });
