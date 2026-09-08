@@ -363,6 +363,8 @@ async fn interactive_quota_pause(background: bool, recovery: QuotaRecovery) {
         format!(
             r#"
 smelt.settings.autoupgrade = "off"
+-- Runtime edits must not reset the quota fixture's in-flight callback state.
+smelt.settings.auto_reload = false
 smelt.settings.auto_continue = "always"
 local function record_busy_state()
   local file = assert(io.open("foreground-busy", "w"))
