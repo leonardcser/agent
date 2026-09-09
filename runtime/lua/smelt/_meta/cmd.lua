@@ -8,11 +8,11 @@
 ---@class smelt.cmd
 local cmd = {}
 
---- Return every registered slash command as a Lua array of `{ name, desc, args, args_fn, busy, startup_ok, hidden }` rows. Sorted by name. Argument callbacks are returned without being invoked.
+--- Return every registered slash command as a Lua array of `{ name, desc, args, args_fn, busy, busy_fn, startup_ok, hidden }` rows. Sorted by name. Argument and busy-policy callbacks are returned without being invoked.
 ---@type fun(): table
 cmd.list = nil
 
---- Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `args_fn` (live argument labels), `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
+--- Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `args_fn` (live argument labels), `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `busy_fn` (synchronous argument-aware busy policy; nil uses `busy`, errors reject), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
 ---@type fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
 cmd.register = nil
 

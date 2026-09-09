@@ -2620,6 +2620,35 @@ mod tests {
     }
 
     #[test]
+    fn invalid_busy_callback_rejects_prompt_submission_without_running_or_queueing() {
+        for body in ["error('policy failed')", "return 'invalid'", "return {}"] {
+            for modifiers in [KeyModifiers::NONE, KeyModifiers::CONTROL] {
+                let mut app = TestApp::builder().build();
+                assert!(app.run_lua(&format!(
+                    r#"
+                    smelt.cmd.register("probe", function() _G.probe_ran = 1 end, {{
+                        busy = "run",
+                        busy_fn = function(arg)
+                            assert(smelt.engine.has_active_turn())
+                            assert(arg == "some arguments")
+                            {body}
+                        end,
+                    }})
+                "#
+                )));
+                app.start_turn(1);
+                app.type_text("/probe some arguments");
+                app.press_mod(KeyCode::Enter, modifiers);
+                assert!(app.state().queued_inputs.is_empty());
+                assert_eq!(app.lua_int_global("probe_ran"), None);
+                assert!(app.lua_messages_contain("cannot resolve /probe busy behavior"));
+                assert_eq!(app.current_turn_id(), Some(1));
+                assert!(app.agent_running());
+            }
+        }
+    }
+
+    #[test]
     fn blocked_slash_command_does_not_enqueue_while_running() {
         let mut app = TestApp::builder().build();
         assert!(app.run_lua(

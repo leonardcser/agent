@@ -23,6 +23,9 @@ pub struct LuaCmdRegisterOpts {
     pub args_fn: Option<LuaCallback<(), Vec<String>>>,
     /// Busy behavior while an agent turn is running: `run` (default), `reject`, `queue_request`, or `queue_command`.
     pub busy: Option<String>,
+    /// Synchronously choose busy behavior from the trailing command arguments.
+    /// Returning nil uses `busy`; errors or invalid results reject the command.
+    pub busy_fn: Option<LuaCallback<Option<String>, Option<String>>>,
     /// If true, the command may run before the runtime has finished bootstrapping. Defaults to `false`.
     pub startup_ok: Option<bool>,
     /// If true, the command is hidden from `/help` and the picker (still callable). Defaults to `false`.
@@ -30,18 +33,6 @@ pub struct LuaCmdRegisterOpts {
     /// If true, replace an existing command with the same name. Defaults to `false`.
     #[lua(rename = "override", default)]
     pub override_existing: bool,
-}
-
-fn parse_busy_behavior(value: Option<String>) -> Result<CommandBusyBehavior, String> {
-    match value.as_deref().unwrap_or("run") {
-        "run" => Ok(CommandBusyBehavior::Run),
-        "reject" => Ok(CommandBusyBehavior::Reject),
-        "queue_request" => Ok(CommandBusyBehavior::QueueRequest),
-        "queue_command" => Ok(CommandBusyBehavior::QueueCommand),
-        other => Err(format!(
-            "invalid busy behavior {other:?}; expected run, reject, queue_request, or queue_command"
-        )),
-    }
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
@@ -56,7 +47,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "register",
-            "Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `args_fn` (live argument labels), `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.",
+            "Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `args_fn` (live argument labels), `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `busy_fn` (synchronous argument-aware busy policy; nil uses `busy`, errors reject), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.",
             &["name", "handler", "opts"],
             move |lua,
                   (name, handler, opts): (
@@ -66,7 +57,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             )|
                   -> LuaResult<LuaReg> {
                 let opts = opts.unwrap_or_default();
-                let busy = parse_busy_behavior(opts.busy).map_err(LuaError::RuntimeError)?;
+                let busy = CommandBusyBehavior::parse(opts.busy.as_deref().unwrap_or("run"))
+                    .map_err(LuaError::RuntimeError)?;
                 let handle = LuaHandle::from_func(lua, handler.into_inner())?;
                 let token = s
                     .register_command(
@@ -80,6 +72,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                                 .map(|callback| LuaHandle::from_func(lua, callback.into_inner()))
                                 .transpose()?,
                             busy,
+                            busy_fn: opts.busy_fn
+                                .map(|callback| LuaHandle::from_func(lua, callback.into_inner()))
+                                .transpose()?,
                             startup_ok: opts.startup_ok.unwrap_or(false),
                             hidden: opts.hidden.unwrap_or(false),
                         },
@@ -97,7 +92,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "list",
-            "Return every registered slash command as a Lua array of `{ name, desc, args, args_fn, busy, startup_ok, hidden }` rows. Sorted by name. Argument callbacks are returned without being invoked.",
+            "Return every registered slash command as a Lua array of `{ name, desc, args, args_fn, busy, busy_fn, startup_ok, hidden }` rows. Sorted by name. Argument and busy-policy callbacks are returned without being invoked.",
             &[],
             move |lua, ()| -> LuaResult<mlua::Table> {
                 struct Row {
@@ -106,6 +101,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     args: Vec<String>,
                     args_fn: Option<mlua::Function>,
                     busy: &'static str,
+                    busy_fn: Option<mlua::Function>,
                     startup_ok: bool,
                     hidden: bool,
                 }
@@ -124,6 +120,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                                         .map(|handle| lua.registry_value(&handle.key))
                                         .transpose()?,
                                     busy: cmd.busy.as_str(),
+                                    busy_fn: cmd.busy_fn.as_ref()
+                                        .map(|handle| lua.registry_value(&handle.key))
+                                        .transpose()?,
                                     startup_ok: cmd.startup_ok,
                                     hidden: cmd.hidden,
                                 })
@@ -142,6 +141,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         args,
                         args_fn,
                         busy,
+                        busy_fn,
                         startup_ok,
                         hidden,
                     },
@@ -159,6 +159,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     }
                     row.set("args", args_tbl)?;
                     row.set("busy", busy)?;
+                    row.set("busy_fn", busy_fn)?;
                     row.set("startup_ok", startup_ok)?;
                     row.set("hidden", hidden)?;
                     table.set(i + 1, row)?;

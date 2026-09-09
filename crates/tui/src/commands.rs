@@ -369,17 +369,23 @@ impl TuiApp {
         }
 
         let parsed = parse_command_line(input);
-        let (name, normalized) = match parsed {
-            ParsedCommand::Slash { name, .. } if self.has_command_name(name) => {
-                (name.to_string(), input.to_string())
+        let (name, arg) = match parsed {
+            ParsedCommand::Slash { name, arg } if self.has_command_name(name) => {
+                (name.to_string(), arg)
             }
             _ => return None,
         };
-        match self
-            .lua
-            .command_busy_behavior(&name)
-            .unwrap_or(smelt_core::lua::CommandBusyBehavior::Run)
-        {
+        let lua = self.lua.execution();
+        let busy = crate::lua::scope_app(self, || lua.command_busy_behavior(&name, arg));
+        let busy = match busy {
+            Ok(busy) => busy.unwrap_or(smelt_core::lua::CommandBusyBehavior::Run),
+            Err(error) => {
+                self.notify_error(format!("cannot resolve /{name} busy behavior: {error}"));
+                return Some(EventOutcome::Noop);
+            }
+        };
+        let normalized = input.to_string();
+        match busy {
             smelt_core::lua::CommandBusyBehavior::QueueCommand => {
                 let queued = QueuedInput::command(normalized, sent_at_ms);
                 match queue_target {

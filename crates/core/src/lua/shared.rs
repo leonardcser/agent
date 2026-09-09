@@ -56,6 +56,18 @@ pub enum CommandBusyBehavior {
 }
 
 impl CommandBusyBehavior {
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "run" => Ok(Self::Run),
+            "reject" => Ok(Self::Reject),
+            "queue_request" => Ok(Self::QueueRequest),
+            "queue_command" => Ok(Self::QueueCommand),
+            other => Err(format!(
+                "invalid busy behavior {other:?}; expected run, reject, queue_request, or queue_command"
+            )),
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             CommandBusyBehavior::Run => "run",
@@ -73,6 +85,7 @@ pub struct RegisteredCommand {
     pub args: Vec<String>,
     pub args_fn: Option<LuaHandle>,
     pub busy: CommandBusyBehavior,
+    pub busy_fn: Option<LuaHandle>,
     pub startup_ok: bool,
     /// If true, hidden from the completer but still dispatchable by name.
     pub hidden: bool,

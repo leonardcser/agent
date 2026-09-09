@@ -130,6 +130,7 @@ Options accepted by `smelt.cmd.register`.
 | `args` | `string[]` |  | Positional argument labels used for help text and completion hints. |
 | `args_fn` | `fun(): string[]` |  | Return live argument labels for this command's hint. Overrides `args`; errors or invalid results fall back to `args`. |
 | `busy` | `string` |  | Busy behavior while an agent turn is running: `run` (default), `reject`, `queue_request`, or `queue_command`. |
+| `busy_fn` | `fun(value: string?): string?` |  | Synchronously choose busy behavior from the trailing command arguments. Returning nil uses `busy`; errors or invalid results reject the command. |
 | `startup_ok` | `boolean` |  | If true, the command may run before the runtime has finished bootstrapping. Defaults to `false`. |
 | `hidden` | `boolean` |  | If true, the command is hidden from `/help` and the picker (still callable). Defaults to `false`. |
 | `override` | `boolean` |  | If true, replace an existing command with the same name. Defaults to `false`. |

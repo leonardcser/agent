@@ -1,63 +1,164 @@
 use super::*;
 
-#[test]
-fn queued_goal_command_waits_until_transcript_activation() {
-    let mut app = TestApp::builder().build();
-    app.start_turn(1);
-
-    app.type_text("/goal finish queued activation");
-    app.press(KeyCode::Enter);
-
-    assert_eq!(
-        app.state().queued_inputs,
-        vec!["/goal finish queued activation".to_string()]
-    );
-    assert!(app.run_lua(r#"assert(require("smelt.goal").current() == nil)"#));
-
-    app.discard_turn(crate::app::TurnEnd::Complete);
-    let history = app.conversation_probe().transcript().history();
-    assert!(history.order.iter().any(|id| matches!(
-        history.block(*id),
-        Some(smelt_core::transcript_model::Block::User { text, .. })
-            if text == "/goal finish queued activation"
-    )));
-
-    assert!(app.run_lua(
-        r#"
-            local current = assert(require("smelt.goal").current())
-            assert(current.objective == "finish queued activation")
-            assert(current.state == "active")
-        "#,
-    ));
+fn assert_only_history_updates(app: &TestApp) {
+    for action in app.actions() {
+        if let Action::EngineSend(cmd) = action {
+            assert!(
+                matches!(cmd.as_ref(), protocol::UiCommand::AppendHistoryItem { .. }),
+                "goal control sent an unexpected engine command: {cmd:?}"
+            );
+        }
+    }
 }
 
 #[test]
-fn request_queued_goal_command_waits_for_steered_transcript_ack() {
+fn goal_auto_off_applies_while_agent_is_running() {
     let mut app = TestApp::builder().build();
-    app.start_turn(1);
+    app.type_text("/goal finish the current work");
+    app.press(KeyCode::Enter);
+    let turn_id = app.current_turn_id().expect("goal starts a turn");
+    app.clear_actions();
 
-    app.type_text("/goal finish steered activation");
-    app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+    app.type_text("/goal auto off");
+    app.press(KeyCode::Enter);
 
-    assert_eq!(
-        app.state().queued_inputs,
-        vec!["/goal finish steered activation".to_string()]
+    assert!(
+        app.state().queued_inputs.is_empty(),
+        "goal controls must not enter the message queue: {:?}",
+        app.state().queued_inputs
     );
-    assert!(app.run_lua(r#"assert(require("smelt.goal").current() == nil)"#));
-
-    app.feed_one(SourceEvent::engine(EngineEvent::Steered {
-        text: "/goal finish steered activation".into(),
-        count: 1,
-        sent_at_ms: 1_742_567_823_000,
-    }));
-
     assert!(app.run_lua(
         r#"
             local current = assert(require("smelt.goal").current())
-            assert(current.objective == "finish steered activation")
-            assert(current.state == "active")
+            assert(current.state == "paused")
+            assert(current.auto_continue == false)
         "#,
     ));
+    assert_eq!(app.current_turn_id(), Some(turn_id));
+    assert!(app.agent_running());
+    assert_only_history_updates(&app);
+    let frame = app.render_to_frame();
+    assert!(frame.rows[0].contains(" PAUSED "), "{}", frame.text());
+}
+
+#[test]
+fn goal_controls_apply_while_agent_is_running_without_changing_queued_messages() {
+    let cases = [
+        ("", "current.state == 'active'", "auto-continue: on"),
+        ("status", "current.state == 'active'", "auto-continue: on"),
+        ("progress validating", "current.progress.label == 'validating'", "goal progress updated"),
+        ("summary Short goal", "current.summary == 'Short goal'", "goal summary updated"),
+        ("pause", "current.state == 'paused' and not current.auto_continue", "goal paused"),
+        ("resume", "current.state == 'active' and current.auto_continue", "goal resumed"),
+        ("block waiting", "current.state == 'blocked' and current.reason == 'waiting' and not current.auto_continue", "goal marked blocked"),
+        ("blocked waiting", "current.state == 'blocked' and current.reason == 'waiting' and not current.auto_continue", "goal marked blocked"),
+        ("done", "current.state == 'done' and not current.auto_continue", "goal marked done"),
+        ("clear", "current == nil", "goal cleared"),
+        ("stop", "current == nil", "goal cleared"),
+        ("auto on", "current.state == 'active' and current.auto_continue", "goal auto-continue on"),
+        ("auto off", "current.state == 'paused' and not current.auto_continue", "goal auto-continue off"),
+        ("auto false", "current.state == 'paused' and not current.auto_continue", "goal auto-continue off"),
+        ("auto 0", "current.state == 'paused' and not current.auto_continue", "goal auto-continue off"),
+    ];
+    for modifiers in [KeyModifiers::NONE, KeyModifiers::CONTROL] {
+        for (arg, check, notice) in cases {
+            let mut app = TestApp::builder().build();
+            app.type_text("/goal finish the current work");
+            app.press(KeyCode::Enter);
+            if matches!(arg, "resume" | "auto on") {
+                assert!(app.run_lua(r#"require("smelt.goal").pause()"#));
+            }
+            let turn_id = app.current_turn_id().expect("goal starts a turn");
+            app.type_text("follow-up request");
+            app.press(KeyCode::Enter);
+            app.clear_actions();
+
+            app.type_text(&format!("/goal {arg}"));
+            app.press_mod(KeyCode::Enter, modifiers);
+
+            assert_eq!(
+                app.state().queued_inputs,
+                vec!["follow-up request".to_string()],
+                "/goal {arg} ({modifiers:?}) must leave existing queued messages alone"
+            );
+            assert!(
+                app.run_lua(&format!(
+                    r#"local current = require("smelt.goal").current(); assert({check})"#
+                )),
+                "/goal {arg} ({modifiers:?})"
+            );
+            assert!(
+                app.lua_messages_contain(notice),
+                "/goal {arg} ({modifiers:?})"
+            );
+            assert_eq!(app.current_turn_id(), Some(turn_id));
+            assert!(app.agent_running());
+            assert_only_history_updates(&app);
+        }
+    }
+}
+
+#[test]
+fn goal_creation_while_running_waits_until_its_queued_request_is_consumed() {
+    for prefix in ["/goal", "/goal set"] {
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::CONTROL] {
+            let mut app = TestApp::builder().build();
+            app.type_text("initial request");
+            app.press(KeyCode::Enter);
+            let turn_id = app.current_turn_id().expect("initial turn");
+            app.clear_actions();
+
+            let command = format!("{prefix} finish queued work");
+            app.type_text(&command);
+            app.press_mod(KeyCode::Enter, modifiers);
+
+            assert!(app.run_lua(r#"assert(require("smelt.goal").current() == nil)"#));
+            assert_eq!(app.current_turn_id(), Some(turn_id));
+            assert!(app.agent_running());
+            assert_eq!(app.state().queued_inputs, vec![command.clone()]);
+
+            if modifiers == KeyModifiers::CONTROL {
+                assert!(app.actions().iter().any(|action| matches!(
+                    action,
+                    Action::EngineSend(cmd) if matches!(
+                        cmd.as_ref(),
+                        protocol::UiCommand::Steer { input }
+                            if input.provider_content().text_content() == command
+                    )
+                )));
+                app.feed_one(SourceEvent::engine(EngineEvent::Steered {
+                    text: command.clone(),
+                    count: 1,
+                    sent_at_ms: 1_742_567_823_000,
+                }));
+                assert_eq!(app.current_turn_id(), Some(turn_id));
+            } else {
+                assert_only_history_updates(&app);
+                app.discard_turn(crate::app::TurnEnd::Complete);
+                assert_ne!(app.current_turn_id(), Some(turn_id));
+                assert!(app.drain_engine_sends().iter().any(|cmd| matches!(
+                    cmd,
+                    protocol::UiCommand::StartTurn(payload)
+                        if payload.input.provider_content().text_content().contains("finish queued work")
+                )));
+                assert!(app.state().queued_inputs.is_empty());
+            }
+            assert!(app.agent_running());
+            assert!(app.run_lua(
+                r#"
+                    local current = assert(require("smelt.goal").current())
+                    assert(current.objective == "finish queued work")
+                    assert(current.state == "active" and current.auto_continue)
+                "#,
+            ));
+            let frame = app.render_to_frame();
+            assert!(
+                frame.rows[0].contains(" GOAL finish queued work"),
+                "{}",
+                frame.text()
+            );
+        }
+    }
 }
 
 #[test]

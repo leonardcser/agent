@@ -991,14 +991,134 @@ fn quota_pause_status_redraws_on_deadline_and_cancellation() {
 }
 
 #[test]
+fn withdrawing_queued_goal_creation_does_not_activate_or_replace_a_goal() {
+    for existing_goal in [false, true] {
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::CONTROL] {
+            let mut app = isolated_app();
+            if existing_goal {
+                assert!(app.run_lua(
+                    r#"
+                        local goal = require("smelt.goal")
+                        assert(goal.create("original objective", { auto_continue = false }))
+                        assert(goal.pause())
+                    "#,
+                ));
+            }
+            let turn_id = start_canonical_turn(&mut app);
+            app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
+                delta: "Working on the original request".into(),
+            }));
+            app.type_text("/goal withdrawn objective");
+            app.press_mod(KeyCode::Enter, modifiers);
+            app.press(KeyCode::Esc);
+            app.press(KeyCode::Esc);
+            assert_eq!(app.state().prompt_text, "/goal withdrawn objective");
+            app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
+            assert!(app.state().prompt_text.is_empty());
+            assert!(app.state().queued_inputs.is_empty());
+            assert_eq!(app.current_turn_id(), Some(turn_id));
+            assert!(app.agent_running());
+            assert!(app.run_lua(if existing_goal {
+                r#"
+                    local current = assert(require("smelt.goal").current())
+                    assert(current.objective == "original objective")
+                    assert(current.state == "paused" and not current.auto_continue)
+                "#
+            } else {
+                r#"assert(require("smelt.goal").current() == nil)"#
+            }));
+            app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+                turn_id,
+                history: None,
+                meta: None,
+            }));
+            assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
+            assert!(!app.agent_running());
+        }
+    }
+}
+
+#[test]
+fn goal_stop_controls_while_running_prevent_auto_continuation_after_turn_end() {
+    for command in [
+        "auto off",
+        "pause",
+        "block waiting",
+        "done",
+        "clear",
+        "stop",
+    ] {
+        for quota in [false, true] {
+            let mut app = isolated_app();
+            app.type_text("/goal finish the current work");
+            app.press(KeyCode::Enter);
+            let turn_id = app.current_turn_id().expect("goal starts a turn");
+            let _ = app.drain_engine_sends();
+
+            app.type_text(&format!("/goal {command}"));
+            app.press(KeyCode::Enter);
+            assert!(app.state().queued_inputs.is_empty(), "{command}");
+            assert_eq!(app.current_turn_id(), Some(turn_id));
+            assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
+
+            if quota {
+                quota_error(&mut app, Some(0));
+            } else {
+                app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+                    turn_id,
+                    history: None,
+                    meta: None,
+                }));
+            }
+            assert!(
+                !has_started_turn(&run_due_timers(&mut app, 1300)),
+                "/goal {command} must prevent auto-continuation (quota={quota})"
+            );
+            assert!(!app.agent_running());
+        }
+    }
+}
+
+#[test]
+fn goal_resume_controls_while_running_continue_only_after_turn_end() {
+    for command in ["resume", "auto on"] {
+        let mut app = isolated_app();
+        app.type_text("/goal finish the current work");
+        app.press(KeyCode::Enter);
+        let turn_id = app.current_turn_id().expect("goal starts a turn");
+        app.type_text("/goal pause");
+        app.press(KeyCode::Enter);
+        let _ = app.drain_engine_sends();
+
+        app.type_text(&format!("/goal {command}"));
+        app.press(KeyCode::Enter);
+        assert!(app.state().queued_inputs.is_empty());
+        assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
+        assert_eq!(app.current_turn_id(), Some(turn_id));
+
+        app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+            turn_id,
+            history: None,
+            meta: None,
+        }));
+        assert!(
+            has_started_turn(&run_due_timers(&mut app, 1300)),
+            "{command}"
+        );
+    }
+}
+
+#[test]
 fn goal_auto_setting_changes_update_a_paused_continuation() {
     let mut app = isolated_app();
     create_auto_goal(&mut app, "change goal policy");
     start_canonical_turn(&mut app);
     quota_error(&mut app, Some(0));
-    assert!(app.run_lua(r#"require("smelt.goal").set_auto(false)"#));
+    app.type_text("/goal auto off");
+    app.press(KeyCode::Enter);
     assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
-    assert!(app.run_lua(r#"require("smelt.goal").set_auto(true)"#));
+    app.type_text("/goal auto on");
+    app.press(KeyCode::Enter);
     assert!(has_started_turn(&run_due_timers(&mut app, 1300)));
 }
 

@@ -521,66 +521,73 @@ function M.describe(goal)
   return table.concat(lines, "\n")
 end
 
-function M.command(arg)
-  arg = trim(arg or "")
-  if arg == "" or arg == "status" then
-    notify_status(session_goal())
-    return
-  end
-
-  local sub, rest = arg:match("^(%S+)%s*(.*)$")
-  sub = sub or arg
-  rest = trim(rest or "")
-
-  if sub == "clear" or sub == "stop" then
+local command_handlers = {
+  clear = function()
     M.clear()
     smelt.notify.info("goal cleared", "goal")
-    return
-  end
-  if sub == "done" then
+  end,
+  done = function()
     local goal, err = M.complete()
     if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal marked done", "goal") end
-    return
-  end
-  if sub == "pause" then
+  end,
+  pause = function()
     local goal, err = M.pause()
     if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal paused", "goal") end
-    return
-  end
-  if sub == "block" or sub == "blocked" then
+  end,
+  block = function(rest)
     local goal, err = M.block(rest)
     if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal marked blocked", "goal") end
-    return
-  end
-  if sub == "resume" then
+  end,
+  resume = function()
     local goal, err = M.resume()
     if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal resumed", "goal") end
     M.schedule_auto_continue()
-    return
-  end
-  if sub == "progress" then
+  end,
+  progress = function(rest)
     local goal, err = M.update_status({ progress = rest })
     if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal progress updated", "goal") end
-    return
-  end
-  if sub == "summary" then
+  end,
+  summary = function(rest)
     local goal, err = M.update_status({ summary = rest })
     if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal summary updated", "goal") end
-    return
-  end
-  if sub == "auto" then
+  end,
+  auto = function(rest)
     local on = rest ~= "off" and rest ~= "false" and rest ~= "0"
     local goal, err = M.set_auto(on)
     if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal auto-continue " .. (on and "on" or "off"), "goal") end
     if on then M.schedule_auto_continue() end
-    return
-  end
-  if sub == "set" and rest ~= "" then
-    arg = rest
-  end
+  end,
+}
+command_handlers.stop = command_handlers.clear
+command_handlers.blocked = command_handlers.block
 
-  local goal, err = M.start(arg)
-  if not goal then smelt.notify.warn(err, "goal") end
+local function show_status()
+  notify_status(session_goal())
+end
+
+local function parse_command(arg)
+  arg = trim(arg or "")
+  if arg == "" or arg == "status" then return show_status end
+  local sub, rest = arg:match("^(%S+)%s*(.*)$")
+  rest = trim(rest or "")
+  local handler = command_handlers[sub]
+  if handler then return handler, rest end
+  return nil, sub == "set" and rest ~= "" and rest or arg
+end
+
+function M.command_busy_behavior(arg)
+  local handler = parse_command(arg)
+  return handler and "run" or "queue_command"
+end
+
+function M.command(arg)
+  local handler, rest = parse_command(arg)
+  if handler then
+    handler(rest)
+  else
+    local goal, err = M.start(rest)
+    if not goal then smelt.notify.warn(err, "goal") end
+  end
 end
 
 local function register_tools()

@@ -1793,8 +1793,35 @@ impl LuaRuntime {
         })
     }
 
-    pub fn command_busy_behavior(&self, name: &str) -> Option<crate::lua::CommandBusyBehavior> {
-        self.shared.commands.lock().ok()?.get(name).map(|c| c.busy)
+    pub fn command_busy_behavior(
+        &self,
+        name: &str,
+        arg: Option<&str>,
+    ) -> mlua::Result<Option<crate::lua::CommandBusyBehavior>> {
+        let (busy, callback) = {
+            let commands =
+                self.shared.commands.lock().map_err(|_| {
+                    mlua::Error::RuntimeError("command registry lock poisoned".into())
+                })?;
+            let Some(command) = commands.get(name) else {
+                return Ok(None);
+            };
+            let callback = command
+                .busy_fn
+                .as_ref()
+                .map(|handle| self.lua.registry_value::<mlua::Function>(&handle.key))
+                .transpose()?;
+            (command.busy, callback)
+        };
+        let behavior = match callback {
+            Some(callback) => match callback.call::<Option<String>>(arg)? {
+                Some(value) => crate::lua::CommandBusyBehavior::parse(&value)
+                    .map_err(mlua::Error::RuntimeError)?,
+                None => busy,
+            },
+            None => busy,
+        };
+        Ok(Some(behavior))
     }
 
     pub fn command_startup_ok(&self, name: &str) -> Option<bool> {
@@ -4334,6 +4361,85 @@ mod tests {
     fn autoload_defers_custom_markdown_commands() {
         let modules = autoload_modules();
         assert!(!modules.contains(&CUSTOM_COMMANDS_MODULE.to_string()));
+    }
+
+    #[test]
+    fn command_busy_callback_resolves_arguments_and_is_not_called_by_listing() {
+        use crate::lua::CommandBusyBehavior;
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+            local calls = 0
+            local busy_fn = function(arg)
+                calls = calls + 1
+                -- Registry access from the callback must not deadlock.
+                assert(#smelt.cmd.list() == 1)
+                if arg == "status" then return "run" end
+                if arg == "reject" then return "reject" end
+                if arg == "request" then return "queue_request" end
+                if arg ~= nil then return "queue_command" end
+            end
+            smelt.cmd.register("probe", function() end, {
+                busy = "reject", busy_fn = busy_fn,
+            })
+            local row = smelt.cmd.list()[1]
+            assert(row.busy == "reject" and row.busy_fn == busy_fn)
+            assert(calls == 0)
+        "#,
+            )
+            .exec()
+            .unwrap();
+        for (arg, expected) in [
+            (None, CommandBusyBehavior::Reject),
+            (Some("status"), CommandBusyBehavior::Run),
+            (Some("reject"), CommandBusyBehavior::Reject),
+            (Some("request"), CommandBusyBehavior::QueueRequest),
+            (Some("create objective"), CommandBusyBehavior::QueueCommand),
+        ] {
+            assert_eq!(
+                rt.command_busy_behavior("probe", arg).unwrap(),
+                Some(expected)
+            );
+        }
+        assert_eq!(rt.command_busy_behavior("unknown", None).unwrap(), None);
+    }
+
+    #[test]
+    fn command_busy_callback_errors_do_not_fall_back_to_running() {
+        let rt = LuaRuntime::new();
+        for body in [
+            "error('policy failed')",
+            "return 'invalid'",
+            "return {}",
+            "coroutine.yield()",
+        ] {
+            rt.lua
+                .load(format!(
+                    r#"
+                smelt.cmd.register("probe", function() end, {{
+                    override = true,
+                    busy = "run",
+                    busy_fn = function() {body} end,
+                }})
+            "#
+                ))
+                .exec()
+                .unwrap();
+            assert!(rt.command_busy_behavior("probe", None).is_err(), "{body}");
+        }
+        rt.lua
+            .load(
+                r#"
+            smelt.cmd.register("probe", function() end, { override = true, busy = "queue_command" })
+        "#,
+            )
+            .exec()
+            .unwrap();
+        assert_eq!(
+            rt.command_busy_behavior("probe", None).unwrap(),
+            Some(crate::lua::CommandBusyBehavior::QueueCommand)
+        );
     }
 
     #[test]

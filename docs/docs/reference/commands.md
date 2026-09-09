@@ -52,9 +52,14 @@ Type `/` to open the command picker with fuzzy search.
 
 ### Goals and auto-continue
 
-`/goal <objective>` creates an auto-continuing goal and immediately asks the
-agent to pursue it. `/goal set <objective>` is equivalent. An unfinished goal
-must be completed or cleared before another can be created.
+`/goal <objective>` creates an auto-continuing goal and asks the agent to pursue
+it. `/goal set <objective>` is equivalent. While the agent is working, creation
+stays queued: Enter waits for the next turn; Ctrl+Enter waits for acknowledgment
+at the next request in the current turn. The goal is not created or replaced
+until that queued command is consumed. Withdrawing the command back into the
+prompt and discarding it leaves the existing goal unchanged.
+The agent's `create_goal` tool requires an unfinished goal to be completed or
+cleared before another can be created.
 
 | Form | Effect |
 | ---- | ------ |
@@ -63,10 +68,16 @@ must be completed or cleared before another can be created.
 | `/goal summary <label>` | Set a shorter stable goal-bar summary |
 | `/goal pause` | Pause the goal and disable its auto-continue |
 | `/goal resume` | Reactivate the goal, enable auto-continue, and schedule continuation |
-| `/goal block [reason]` | Mark the goal blocked and disable auto-continue |
+| `/goal block [reason]`, `/goal blocked [reason]` | Mark the goal blocked and disable auto-continue |
 | `/goal done` | Mark the goal complete and disable auto-continue |
-| `/goal clear` | Remove the goal from the session |
+| `/goal clear`, `/goal stop` | Remove the goal from the session |
 | `/goal auto on`, `/goal auto off` | Enable or disable auto-continue; this also activates or pauses the goal |
+
+All goal controls above run immediately, including with Enter or Ctrl+Enter
+while the agent is working. They neither enter the message queue nor cancel
+the current turn. For example, `/goal auto off` disables future goal
+continuations while letting the current turn finish; `/goal resume` enables
+continuation once idle. Existing queued user requests are left unchanged.
 
 Auto-continue runs only while idle. Queued user messages run first. By default,
 `smelt.settings.auto_continue = "goal"`, so only active auto goals continue; if

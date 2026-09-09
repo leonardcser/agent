@@ -58,7 +58,10 @@ a defined objective across turns:
 The goal bar shows its short summary and durable progress. Use `/goal status`,
 `/goal pause`, `/goal resume`, `/goal block [reason]`, `/goal done`, and
 `/goal clear` to control it. `/goal auto on|off` changes whether it continues
-while idle. Queued user messages always run before auto-continue.
+while idle. These controls take effect immediately, even while the agent is
+working, without interrupting the current turn. For example, `/goal auto off`
+stops future goal auto-continuation while letting the current turn finish.
+Queued user messages always run before auto-continue.
 
 The default `smelt.settings.auto_continue = "goal"` continues active auto goals
 only. Set it to `"off"` to disable automatic continuation, or `"always"` to
