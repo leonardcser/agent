@@ -167,6 +167,23 @@ impl LineageSearchProjector {
         lineage: LineageId,
         branch: BranchId,
     ) -> Result<Self> {
+        Self::spawn_inner(
+            canonical_path,
+            search_path,
+            lineage,
+            branch,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    fn spawn_inner(
+        canonical_path: PathBuf,
+        search_path: PathBuf,
+        lineage: LineageId,
+        branch: BranchId,
+        #[cfg(test)] mut before_wait: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<Self> {
         let requested = Arc::new(AtomicU64::new(0));
         let completed = Arc::new(AtomicU64::new(0));
         let stopping = Arc::new(AtomicBool::new(false));
@@ -185,21 +202,27 @@ impl LineageSearchProjector {
             .spawn(move || {
                 let mut handled = 0_u64;
                 loop {
+                    // Check the predicate under the same lock used by notifications.
+                    let guard = worker_wake
+                        .0
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
                     let target = worker_requested.load(Ordering::Acquire);
                     if worker_stopping.load(Ordering::Acquire) {
                         return;
                     }
                     if target == handled {
-                        let guard = worker_wake
-                            .0
-                            .lock()
-                            .unwrap_or_else(|poison| poison.into_inner());
+                        #[cfg(test)]
+                        if let Some(before_wait) = before_wait.take() {
+                            before_wait();
+                        }
                         let _ = worker_wake
                             .1
                             .wait_timeout(guard, Duration::from_secs(30))
                             .unwrap_or_else(|poison| poison.into_inner());
                         continue;
                     }
+                    drop(guard);
                     let cancelled = || {
                         worker_stopping.load(Ordering::Acquire)
                             || worker_requested.load(Ordering::Acquire) != target
@@ -240,6 +263,11 @@ impl LineageSearchProjector {
     }
 
     pub fn request(&self) {
+        let _guard = self
+            .wake
+            .0
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         self.requested.fetch_add(1, Ordering::AcqRel);
         self.wake.1.notify_one();
     }
@@ -260,8 +288,15 @@ impl LineageSearchProjector {
     }
 
     fn stop_inner(&mut self) {
-        self.stopping.store(true, Ordering::Release);
-        self.wake.1.notify_one();
+        {
+            let _guard = self
+                .wake
+                .0
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            self.stopping.store(true, Ordering::Release);
+            self.wake.1.notify_one();
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -2654,6 +2689,104 @@ fn row_nonnegative_usize(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_idle_boundary_notification_is_not_lost(stop: bool) {
+        use std::sync::mpsc;
+
+        let root = tempfile::tempdir().unwrap();
+        let (at_wait, waiting) = mpsc::sync_channel(0);
+        let (release_wait, resume) = mpsc::sync_channel(0);
+        let projector = LineageSearchProjector::spawn_inner(
+            root.path().join("missing-canonical.db"),
+            root.path().join("search.db"),
+            LineageId::from_hex("1".repeat(32)).unwrap(),
+            BranchId::new("2".repeat(64)).unwrap(),
+            Some(Box::new(move || {
+                at_wait.send(()).unwrap();
+                resume.recv().unwrap();
+            })),
+        )
+        .unwrap();
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Freeze the real worker after checking its predicate, before waiting.
+        let predicate_is_locked = matches!(
+            projector.wake.0.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        );
+        let wake = Arc::clone(&projector.wake);
+        let stopping = Arc::clone(&projector.stopping);
+        let requested = Arc::clone(&projector.requested);
+        let (attempt, attempted) = mpsc::sync_channel(0);
+        let (finished, notified) = mpsc::channel();
+        let notifier = thread::spawn(move || {
+            attempt.send(()).unwrap();
+            let projector = if stop {
+                projector.stop();
+                None
+            } else {
+                projector.request();
+                Some(projector)
+            };
+            assert!(finished.send(projector).is_ok());
+        });
+        attempted.recv_timeout(Duration::from_secs(5)).unwrap();
+        let early = notified.recv_timeout(Duration::from_millis(100));
+        let notified_before_wait = early.is_ok();
+        let predicate_unchanged =
+            !stopping.load(Ordering::Acquire) && requested.load(Ordering::Acquire) == 0;
+        release_wait.send(()).unwrap();
+        let result = match early {
+            Ok(result) => Ok(result),
+            Err(mpsc::RecvTimeoutError::Timeout) => notified.recv_timeout(Duration::from_secs(5)),
+            Err(error) => Err(error),
+        };
+        if result.is_err() {
+            // Wake a regressed worker before joining, rather than leaking the test thread.
+            let _guard = wake.0.lock().unwrap();
+            stopping.store(true, Ordering::Release);
+            wake.1.notify_one();
+        }
+        notifier.join().unwrap();
+        if let Some(projector) =
+            result.expect("notification must not wait for the 30-second fallback")
+        {
+            // A failed projection still must acknowledge the request promptly.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !projector.is_idle() && std::time::Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(1));
+            }
+            let completed = projector.is_idle();
+            if !completed {
+                let _guard = wake.0.lock().unwrap();
+                stopping.store(true, Ordering::Release);
+                wake.1.notify_one();
+            }
+            projector.stop();
+            assert!(completed, "request was lost at the idle boundary");
+        }
+        assert!(
+            predicate_is_locked,
+            "idle predicate must hold the wake mutex"
+        );
+        assert!(
+            predicate_unchanged,
+            "notification mutated the predicate without its mutex"
+        );
+        assert!(
+            !notified_before_wait,
+            "notification bypassed the idle predicate mutex"
+        );
+    }
+
+    #[test]
+    fn projector_request_at_idle_boundary_is_not_lost() {
+        assert_idle_boundary_notification_is_not_lost(false);
+    }
+
+    #[test]
+    fn projector_stop_at_idle_boundary_is_not_lost() {
+        assert_idle_boundary_notification_is_not_lost(true);
+    }
 
     #[test]
     fn postings_roundtrip_and_reject_duplicates() {
