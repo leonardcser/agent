@@ -9,6 +9,8 @@ pub const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/resp
 pub const FAST_SERVICE_TIER: &str = "priority";
 pub const REFRESH_INTERVAL_SECS: u64 = 8 * 24 * 3600;
 pub const OAUTH_PORT: u16 = 1455;
+// Known working client version for model discovery when GitHub is unavailable.
+const FALLBACK_CLIENT_VERSION: &str = "0.153.4";
 
 pub struct CodexLoginProgress<'a> {
     pub on_prompt: &'a (dyn Fn(&str, &str) + Send + Sync),
@@ -521,7 +523,7 @@ pub async fn fetch_models(
 ) -> Result<Vec<CodexModel>, String> {
     let version = fetch_latest_release_version(client)
         .await
-        .unwrap_or_else(|_| "0.1.0".into());
+        .unwrap_or_else(|_| FALLBACK_CLIENT_VERSION.into());
     let url = format!("{CHATGPT_BACKEND_API_BASE}/codex/models?client_version={version}");
 
     let mut req = client
@@ -550,24 +552,36 @@ pub async fn fetch_models(
 
 async fn fetch_latest_release_version(client: &reqwest::Client) -> Result<String, String> {
     let resp = client
-        .get("https://api.github.com/repos/openai/codex/releases/latest")
-        .header("Accept", "application/vnd.github+json")
+        .head("https://github.com/openai/codex/releases/latest")
         .header("User-Agent", "smelt")
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(3))
         .send()
         .await
         .map_err(|e| format!("github request failed: {e}"))?;
     if !resp.status().is_success() {
-        return Err("github API error".into());
+        return Err(format!("github release lookup returned {}", resp.status()));
     }
-    let data: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("bad github response: {e}"))?;
-    data["name"]
-        .as_str()
+    release_version(resp.url())
         .map(str::to_string)
-        .ok_or("missing release name".into())
+        .ok_or("invalid github release URL".into())
+}
+
+fn release_version(url: &url::Url) -> Option<&str> {
+    if url.scheme() != "https" || url.host_str() != Some("github.com") {
+        return None;
+    }
+    let version = url
+        .path()
+        .strip_prefix("/openai/codex/releases/tag/rust-v")?;
+    let parts: Vec<_> = version.split('.').collect();
+    (parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (part.len() == 1 || !part.starts_with('0'))
+                && part.parse::<u64>().is_ok()
+        }))
+    .then_some(version)
 }
 
 pub async fn refresh_tokens(
@@ -698,6 +712,38 @@ pub fn parse_jwt_expiration(token: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_redirect_extracts_stable_version() {
+        let url =
+            url::Url::parse("https://github.com/openai/codex/releases/tag/rust-v0.153.4").unwrap();
+        assert_eq!(release_version(&url), Some("0.153.4"));
+    }
+
+    #[test]
+    fn release_redirect_rejects_unexpected_destinations_and_versions() {
+        for destination in [
+            "https://github.com/openai/codex/releases/latest",
+            "https://github.com/login",
+            "https://example.com/openai/codex/releases/tag/rust-v0.153.4",
+            "http://github.com/openai/codex/releases/tag/rust-v0.153.4",
+            "https://github.com/other/codex/releases/tag/rust-v0.153.4",
+            "https://github.com/openai/codex/releases/tag/v0.153.4",
+            "https://github.com/openai/codex/releases/tag/rust-v0.153.4-alpha.1",
+            "https://github.com/openai/codex/releases/tag/rust-v0.153",
+            "https://github.com/openai/codex/releases/tag/rust-v0.153.4.1",
+            "https://github.com/openai/codex/releases/tag/rust-v0.153.4/extra",
+            "https://github.com/openai/codex/releases/tag/rust-v0.153.x",
+            "https://github.com/openai/codex/releases/tag/rust-v0.153.",
+            "https://github.com/openai/codex/releases/tag/rust-v0.0153.4",
+        ] {
+            assert_eq!(
+                release_version(&url::Url::parse(destination).unwrap()),
+                None,
+                "{destination}",
+            );
+        }
+    }
 
     fn tokens(expires_at: u64, last_refresh: u64) -> CodexTokens {
         CodexTokens {
