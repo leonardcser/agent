@@ -1261,7 +1261,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .shutdown = true;
-        handle.signal().unwrap();
+        // The worker may observe shutdown and disconnect before the wake is sent.
+        let _ = handle.signal();
         worker.join().unwrap();
     }
 
@@ -1682,8 +1683,7 @@ mod tests {
 
         assert!(handle.enqueue_barrier().is_err());
 
-        handle.signal().unwrap();
-        worker.join().unwrap();
+        stop_test_worker(&handle, worker);
     }
 
     #[test]
